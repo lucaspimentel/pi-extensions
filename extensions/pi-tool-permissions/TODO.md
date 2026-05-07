@@ -17,7 +17,7 @@
   - Detect Git Bash via env (`MSYSTEM` is `MINGW64`/`MINGW32`/`MSYS`, or `OSTYPE=msys`). Since the extension runs in Node, prefer a pure-JS normalizer (handle `/c/...` → `C:/...`, `~` → home, forward/back slashes, drive-letter casing) rather than shelling out to `cygpath` on every check; fall back to `cygpath` only if needed.
   - Add tests covering: `/c/Users/...` style args, `~`-prefixed paths, mixed slash directions, and drive-letter case differences. Extend `test-bash.mjs` and `test-rules-and-decide.mjs`.
 
-- [ ] Handle backslash line-continuation (`\` at end of line) in bash command splitting
+- [x] Handle backslash line-continuation (`\` at end of line) in bash command splitting
   - Example: `foo && \\\n bar` — currently the `\` escape handler in `splitTopLevelShell` (`index.ts` ~449–453) consumes `\` + the following `\n` as a literal escape pair, so the newline is *not* treated as a separator. For `foo \\\n bar` (no `&&`) the result is a single subcommand string containing an embedded `\\\n`, which can confuse downstream tokenization (arg extraction, path matching, `isNoopCd`, etc.).
   - Decide the correct semantics: a backslash immediately followed by a newline (outside single quotes) is shell line-continuation and should be *removed* (joining the two lines into one logical command), not preserved as a literal escape. The current code treats it the same as any other `\X` escape.
   - Fix likely lives in the backslash branch around `index.ts:449`: if `cmd[i+1] === "\n"` (or `\r\n`), drop both characters instead of appending them. Make sure this only applies outside single quotes (already gated) and consider double-quote context (POSIX: inside double quotes, `\<newline>` is also a line continuation).

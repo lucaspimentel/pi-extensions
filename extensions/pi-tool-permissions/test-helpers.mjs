@@ -170,7 +170,12 @@ export function splitTopLevelShell(cmd) {
 
 	while (i < cmd.length) {
 		const ch = cmd[i];
-		if (ch === "\\" && !inSingle) { current += ch + (cmd[i + 1] ?? ""); i += 2; continue; }
+		if (ch === "\\" && !inSingle) {
+			const next = cmd[i + 1];
+			if (next === "\n") { i += 2; continue; }
+			if (next === "\r" && cmd[i + 2] === "\n") { i += 3; continue; }
+			current += ch + (next ?? ""); i += 2; continue;
+		}
 		if (ch === "'" && !inDouble && !inBacktick) { inSingle = !inSingle; current += ch; i++; continue; }
 		if (ch === '"' && !inSingle && !inBacktick) { inDouble = !inDouble; current += ch; i++; continue; }
 		if (ch === "`" && !inSingle && !inDouble) { inBacktick = !inBacktick; current += ch; i++; continue; }

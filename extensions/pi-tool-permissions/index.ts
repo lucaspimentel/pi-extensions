@@ -447,8 +447,13 @@ function splitTopLevelShell(cmd: string): SplitResult {
 		const ch = cmd[i];
 
 		// Backslash escape — skip next char (not inside single quotes)
+		// POSIX: \<newline> outside single quotes is a line continuation —
+		// both characters are removed, joining the two lines into one logical line.
 		if (ch === "\\" && !inSingle) {
-			current += ch + (cmd[i + 1] ?? "");
+			const next = cmd[i + 1];
+			if (next === "\n") { i += 2; continue; }
+			if (next === "\r" && cmd[i + 2] === "\n") { i += 3; continue; }
+			current += ch + (next ?? "");
 			i += 2;
 			continue;
 		}

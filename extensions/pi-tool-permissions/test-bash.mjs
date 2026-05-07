@@ -54,6 +54,36 @@ test("escaped & not operator",          splitTopLevelShell("echo \\&\\&").kind, 
 test("double-quoted ; not operator",    splitTopLevelShell('echo "a ; b"').kind, "single");
 test("single-quoted | not operator",    splitTopLevelShell("echo 'a | b'").kind, "single");
 
+section("splitTopLevelShell — line continuation (\\<newline>)");
+
+// Continuation joins two lines into one logical command
+const cont1 = splitTopLevelShell("foo \\\nbar");
+test("\\<LF> joins lines → single",                   cont1.kind, "single");
+
+// Continuation after a compound operator — second part must be clean
+const cont2 = splitTopLevelShell("foo && \\\nbar");
+test("&& with \\<LF> → compound",                     cont2.kind, "compound");
+test("&& with \\<LF> → 2 parts",                      cont2.parts?.length, 2);
+test("&& with \\<LF> → first part is 'foo'",          cont2.parts?.[0], "foo");
+test("&& with \\<LF> → second part is 'bar' (not \\\\nbar)", cont2.parts?.[1], "bar");
+
+// CRLF continuation
+const cont3 = splitTopLevelShell("foo \\\r\nbar");
+test("\\<CRLF> joins lines → single",                  cont3.kind, "single");
+
+// Inside double quotes POSIX also strips \<newline>
+const cont4 = splitTopLevelShell('echo "foo \\\nbar"');
+test("\\<LF> inside double quotes → single",           cont4.kind, "single");
+
+// Inside single quotes \<newline> is literal — must stay single (pinned regression guard)
+test("\\<LF> inside single quotes preserved → single", splitTopLevelShell("echo 'a\\\nb'").kind, "single");
+
+// Plain backslash before a non-newline char must still act as an escape
+test("\\& still escapes (not a continuation)",         splitTopLevelShell("echo \\&\\&").kind, "single");
+
+// Bare trailing backslash at EOF — no crash, treated as escape of nothing
+test("trailing \\ at EOF → single",                    splitTopLevelShell("foo \\\\").kind, "single");
+
 section("splitTopLevelShell — parentheses");
 
 const parenGroup = splitTopLevelShell("(cmd1 && cmd2) || cmd3");
