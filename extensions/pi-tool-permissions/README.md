@@ -30,8 +30,10 @@ pi -e ./pi-tool-permissions/index.ts
 
 Rules are loaded from two files, merged together (project overrides user for `defaultAction`; allow/deny/ask lists are concatenated):
 
-- `~/.pi/tool-permissions.json` — user-global
+- `~/.pi/agent/pi-tool-permissions.json` — user-global
 - `<cwd>/.pi/tool-permissions.json` — project-local (recommended for team-shared rules)
+
+For backwards compatibility, if the user-global file above does not exist or cannot be read, the extension falls back to the legacy path `~/.pi/tool-permissions.json`.
 
 See [`tool-permissions.example.json`](./tool-permissions.example.json) for a starter config.
 

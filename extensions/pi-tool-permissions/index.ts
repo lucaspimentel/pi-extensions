@@ -23,7 +23,8 @@
  * If a rule's pattern starts with `/` and ends with `/`, it is treated as a regex.
  *
  * Config files (merged, project overrides user):
- *   ~/.pi/tool-permissions.json
+ *   ~/.pi/agent/pi-tool-permissions.json
+ *   ~/.pi/tool-permissions.json (legacy fallback when the new user config is absent)
  *   <cwd>/.pi/tool-permissions.json
  *
  * Schema:
@@ -142,7 +143,8 @@ interface ResolvedConfig {
 	};
 }
 
-const USER_CONFIG = join(homedir(), ".pi", "tool-permissions.json");
+const USER_CONFIG = join(homedir(), ".pi", "agent", "pi-tool-permissions.json");
+const LEGACY_USER_CONFIG = join(homedir(), ".pi", "tool-permissions.json");
 const PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
 const STATUS_KEY = "tool-permissions";
 
@@ -162,8 +164,12 @@ function writeJson(path: string, data: PermissionsConfig): void {
 	writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, "utf8");
 }
 
+function loadUserConfig(): PermissionsConfig {
+	return readJsonSafe(USER_CONFIG) ?? readJsonSafe(LEGACY_USER_CONFIG) ?? {};
+}
+
 function loadConfig(cwd: string): ResolvedConfig {
-	const user = readJsonSafe(USER_CONFIG) ?? {};
+	const user = loadUserConfig();
 	const project = readJsonSafe(join(cwd, PROJECT_CONFIG_REL)) ?? {};
 
 	const allow = dedupe([...(user.allow ?? []), ...(project.allow ?? [])]);
