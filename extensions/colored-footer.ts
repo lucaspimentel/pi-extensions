@@ -3,7 +3,7 @@
  *
  * Line 1 (colored):   cwd
  * Line 2 (colored):   branch [PR icon + number]
- * Line 3 (stats):     model • thinking   ↑10 ↓5.4k $0.285   ctx-icon X% ctx
+ * Line 3 (stats):     model • thinking   ↑10 ↓5.4k $0.285   ctx-icon X% ctx        
  * Line 4+:            extension statuses (if any)
  *
  * Colors use the Campbell scheme, matching ~/.claude/statusline-command.sh.
@@ -12,7 +12,7 @@
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { SessionEntry } from "@mariozechner/pi-coding-agent/dist/core/session-manager.js";
-import { truncateToWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { execFile } from "child_process";
 import * as os from "os";
 
@@ -44,6 +44,17 @@ function formatTokens(n: number): string {
 
 function sanitize(text: string): string {
 	return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+}
+
+function renderLineWithRightItem(left: string, right: string, width: number, edgePadding = 2): string {
+	const contentWidth = Math.max(0, width - edgePadding);
+	const rightWidth = visibleWidth(right);
+	const minPadding = left ? 2 : 0;
+	const availableForLeft = Math.max(0, contentWidth - rightWidth - minPadding);
+	const truncatedLeft = truncateToWidth(left, availableForLeft);
+	const padding = " ".repeat(Math.max(0, contentWidth - visibleWidth(truncatedLeft) - rightWidth));
+
+	return truncatedLeft + padding + right;
 }
 
 // ── PR info cache (branch → PrInfo | null) ──────────────────────────────────────
@@ -183,7 +194,7 @@ export default function (pi: ExtensionAPI) {
 					const lines = [
 						truncateToWidth(line1Parts.join("  "), width),
 						truncateToWidth(line2Parts.join("  "), width),
-						truncateToWidth(line3Parts.join("  "), width),
+						renderLineWithRightItem(line3Parts.join("  "), "", width),
 					];
 
 					// LINE 3+ — extension statuses (same as default)
