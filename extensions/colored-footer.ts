@@ -191,11 +191,11 @@ export default function (pi: ExtensionAPI) {
 						line3Parts.push(`${ctxColor}${ctxIcon} ${Math.round(ctxPercentNum)}% ctx${C_RESET}`);
 					}
 
-					const lines = [
-						truncateToWidth(line1Parts.join("  "), width),
-						truncateToWidth(line2Parts.join("  "), width),
-						renderLineWithRightItem(line3Parts.join("  "), "", width),
-					];
+					const lines = [truncateToWidth(line1Parts.join("  "), width)];
+					if (line2Parts.length > 0) {
+						lines.push(truncateToWidth(line2Parts.join("  "), width));
+					}
+					lines.push(renderLineWithRightItem(line3Parts.join("  "), "", width));
 
 					// LINE 3+ — extension statuses (same as default)
 					const statuses = footerData.getExtensionStatuses();
