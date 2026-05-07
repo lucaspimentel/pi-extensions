@@ -1,0 +1,1040 @@
+/**
+ * Tool Permissions Extension
+ *
+ * Adds Claude Code-style configurable allow/deny/ask permissions for tool calls.
+ *
+ * Rule format:
+ *   "ToolName"             - matches any invocation of that tool
+ *   "ToolName(pattern)"    - matches when the tool's "match field" matches the glob pattern
+ *
+ * Match field per tool:
+ *   bash             -> command
+ *   read/write/edit  -> path
+ *   grep/glob        -> path (directory being searched; defaults to cwd when the call omits it)
+ *   web_fetch        -> url
+ *   web_search       -> (bare rule only — no pattern support)
+ *   others           -> JSON.stringify(input)
+ *
+ * Tool name matching is case-insensitive and underscore-agnostic:
+ *   WebSearch, websearch, web_search  →  all equivalent
+ *   WebFetch,  webfetch,  web_fetch   →  all equivalent
+ *
+ * Pattern syntax: simple glob (`*` = any chars, `?` = single char). Case-insensitive.
+ * If a rule's pattern starts with `/` and ends with `/`, it is treated as a regex.
+ *
+ * Config files (merged, project overrides user):
+ *   ~/.pi/tool-permissions.json
+ *   <cwd>/.pi/tool-permissions.json
+ *
+ * Schema:
+ *   {
+ *     "defaultAction": "allow" | "deny" | "ask",
+ *     "allow": ["Bash(npm test)", "Read"],
+ *     "deny":  ["Bash(rm -rf*)", "Write(.env*)"],
+ *     "ask":   ["Bash(git push*)"],
+ *     "toolDefaults": { "write": "ask", "web_fetch": "allow" },
+ *     "readAllowCwd": true
+ *   }
+ *
+ * Precedence (first match wins): deny > ask > allow > toolDefaults > defaultAction.
+ *
+ * Implicit defaults (session-only, never persisted to disk):
+ *   readAllowCwd (default: true)
+ *     Injects Read(<cwd>/**) into the allow list so every read within the working
+ *     directory is silently permitted. Disable with "readAllowCwd": false.
+ *   write → ask (automatic)
+ *     Unless toolDefaults.write is explicitly set, Write always prompts regardless
+ *     of defaultAction. Override with "toolDefaults": { "write": "allow" }.
+ *     Explicit Write(<path>) allow rules still win because allow > toolDefaults.
+ *
+ * Compound bash commands (&&, ||, |, ;):
+ *   When a Bash command contains top-level shell operators, each subcommand is
+ *   evaluated independently against the rules, then aggregated:
+ *     - any subcommand → deny  ⟹  whole command denied (notification names culprit)
+ *     - no deny, any → ask    ⟹  each ask subcommand is confirmed separately
+ *     - all → allow           ⟹  whole command allowed
+ *   If the command cannot be parsed unambiguously (e.g. unmatched quotes), the
+ *   whole command falls back to ask.
+ *
+ * Allow-all-edits mode:
+ *   A session-only toggle that auto-allows all Write and Edit tool calls without
+ *   prompting. Never persisted to disk. Always starts disabled. Explicit deny rules
+ *   still take priority even when this mode is on.
+ *
+ *   Toggle via:
+ *     - Ctrl+Shift+E hotkey
+ *     - "Allow all edits this session" option in the Write/Edit permission dialog
+ *     - /permissions allowalledits [on|off|toggle]
+ *
+ * Slash commands:
+ *   /permissions                       - show current rules + allow-all-edits state
+ *   /permissions allow <rule>          - add an allow rule (project)
+ *   /permissions deny  <rule>          - add a deny rule (project)
+ *   /permissions ask   <rule>          - add an ask rule (project)
+ *   /permissions remove <rule>         - remove a rule from any list
+ *   /permissions default <allow|deny|ask>
+ *   /permissions reload                - reload config from disk
+ *   /permissions allowalledits [on|off|toggle]
+ */
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+
+type Action = "allow" | "deny" | "ask";
+
+interface PermissionsConfig {
+	defaultAction?: Action;
+	allow?: string[];
+	deny?: string[];
+	ask?: string[];
+	/** Per-tool fallback actions, evaluated between allow and defaultAction. */
+	toolDefaults?: Record<string, string>;
+	/** When false, disables the implicit Read(<cwd>/**) allow rule. Default: true. */
+	readAllowCwd?: boolean;
+	/** When false, disables the implicit allow for no-op `cd` commands. Default: true. */
+	allowNoopCd?: boolean;
+}
+
+interface ResolvedConfig {
+	defaultAction: Action;
+	allow: string[];
+	deny: string[];
+	ask: string[];
+	/** Per-tool fallback actions, checked after allow and before defaultAction. */
+	toolDefaults: Record<string, Action>;
+	/** The working directory this config was loaded for. */
+	cwd: string;
+	/** When true, no-op `cd` commands (cd to cwd) are silently allowed. */
+	allowNoopCd: boolean;
+	/** Tracks synthetically injected rules/defaults (never written to disk). */
+	implicit: {
+		allow: string[];
+		toolDefaults: Record<string, Action>;
+		readAllowCwd: boolean;
+		allowNoopCd: boolean;
+	};
+}
+
+const USER_CONFIG = join(homedir(), ".pi", "tool-permissions.json");
+const PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
+const STATUS_KEY = "tool-permissions";
+
+function readJsonSafe(path: string): PermissionsConfig | null {
+	try {
+		if (!existsSync(path)) return null;
+		const raw = readFileSync(path, "utf8");
+		return JSON.parse(raw) as PermissionsConfig;
+	} catch (err) {
+		console.warn(`[tool-permissions] Failed to read ${path}: ${(err as Error).message}`);
+		return null;
+	}
+}
+
+function writeJson(path: string, data: PermissionsConfig): void {
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+}
+
+function loadConfig(cwd: string): ResolvedConfig {
+	const user = readJsonSafe(USER_CONFIG) ?? {};
+	const project = readJsonSafe(join(cwd, PROJECT_CONFIG_REL)) ?? {};
+
+	const allow = dedupe([...(user.allow ?? []), ...(project.allow ?? [])]);
+	const deny  = dedupe([...(user.deny  ?? []), ...(project.deny  ?? [])]);
+	const ask   = dedupe([...(user.ask   ?? []), ...(project.ask   ?? [])]);
+
+	// Merge explicit toolDefaults — project overrides user, keys normalized
+	const explicitToolDefaults: Record<string, Action> = {
+		...normalizeToolDefaultsKeys(user.toolDefaults ?? {}),
+		...normalizeToolDefaultsKeys(project.toolDefaults ?? {}),
+	};
+
+	// ── Implicit defaults (session-only, never persisted) ──────────────────
+	const readAllowCwd = project.readAllowCwd ?? user.readAllowCwd ?? true;
+	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
+	const implicitAllow: string[] = [];
+	if (readAllowCwd) {
+		implicitAllow.push(`Read(${cwdGlobPattern(cwd)})`);
+	}
+
+	// Inject write→ask unless the user has explicitly set toolDefaults.write
+	const implicitToolDefaults: Record<string, Action> = {};
+	if (explicitToolDefaults["write"] === undefined) {
+		implicitToolDefaults["write"] = "ask";
+	}
+
+	return {
+		defaultAction: (project.defaultAction ?? user.defaultAction ?? "ask") as Action,
+		allow: [...implicitAllow, ...allow],
+		deny,
+		ask,
+		toolDefaults: { ...implicitToolDefaults, ...explicitToolDefaults },
+		cwd,
+		allowNoopCd,
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, allowNoopCd },
+	};
+}
+
+function dedupe(items: string[]): string[] {
+	return Array.from(new Set(items));
+}
+
+function projectConfigPath(cwd: string): string {
+	return join(cwd, PROJECT_CONFIG_REL);
+}
+
+function loadProjectConfigRaw(cwd: string): PermissionsConfig {
+	return readJsonSafe(projectConfigPath(cwd)) ?? {};
+}
+
+function saveProjectConfig(cwd: string, cfg: PermissionsConfig): void {
+	writeJson(projectConfigPath(cwd), cfg);
+}
+
+// ── Path helpers ──────────────────────────────────────────────────────────────
+
+/** Replace all backslashes with forward slashes. */
+function normalizePathSep(p: string): string {
+	return p.replace(/\\/g, "/");
+}
+
+/**
+ * Normalize a path for permission matching only — never used for actual tool execution.
+ * Replaces backslashes with forward slashes, and resolves relative paths against cwd
+ * so they can be compared against absolute patterns like the injected cwd glob.
+ */
+function normalizeMatchPath(p: string, cwd: string): string {
+	if (!p) return p;
+	const sep = normalizePathSep(p);
+	// Relative: doesn't start with / or a Windows drive letter (e.g. C:)
+	if (!sep.startsWith("/") && !/^[A-Za-z]:/.test(sep)) {
+		return normalizePathSep(resolve(cwd, p));
+	}
+	return sep;
+}
+
+/** Returns the glob pattern that matches cwd and all its descendants. */
+function cwdGlobPattern(cwd: string): string {
+	return normalizePathSep(cwd) + "/**";
+}
+
+/**
+ * Returns true when `cmd` is a `cd` invocation whose destination resolves to
+ * the current working directory — i.e. the command is a no-op in terms of
+ * changing directory.  Explicit deny rules in decide() are checked before this
+ * function is consulted, so deny rules always win.
+ *
+ * Recognised no-op forms:
+ *   cd .          cd ./         cd $PWD        cd ${PWD}
+ *   cd ~+         cd <absolute-or-relative path that equals cwd>
+ *
+ * Bare `cd` (no argument) navigates to $HOME, not cwd, so it is NOT matched.
+ * Arguments containing unrecognised shell metacharacters are rejected for safety.
+ */
+function isNoopCd(cmd: string, cwd: string): boolean {
+	const trimmed = cmd.trim();
+	if (!/^cd(\s|$)/.test(trimmed)) return false;
+
+	let arg = trimmed.slice(2).trim();
+
+	// Strip a single pair of surrounding single or double quotes
+	if (
+		arg.length >= 2 &&
+		((arg[0] === "'" && arg[arg.length - 1] === "'") ||
+			(arg[0] === '"' && arg[arg.length - 1] === '"'))
+	) {
+		arg = arg.slice(1, -1).trim();
+	}
+
+	// Bare `cd` → goes to HOME, not cwd
+	if (!arg) return false;
+
+	// Well-known symbolic references to cwd (checked before metachar rejection)
+	if (arg === "." || arg === "./" || arg === "$PWD" || arg === "${PWD}" || arg === "~+") return true;
+
+	// Reject if the argument contains shell metacharacters not already handled above
+	if (/[`$(){}|&;<>]/.test(arg)) return false;
+
+	// Check whether the path (absolute or relative) resolves to cwd.
+	// For absolute paths we compare directly to avoid OS-specific resolve() quirks
+	// (e.g. on Windows, resolve('/unix/path') prepends the current drive).
+	try {
+		const stripped = arg.replace(/\/+$/, "");
+		const argNorm = normalizePathSep(stripped);
+		const isAbsolute = argNorm.startsWith("/") || /^[A-Za-z]:/.test(argNorm);
+		const resolved = isAbsolute ? argNorm : normalizePathSep(resolve(cwd, stripped));
+		return resolved.toLowerCase() === normalizePathSep(cwd).toLowerCase();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Normalize a tool name for comparison: lowercase and strip underscores.
+ * Makes WebSearch, websearch, and web_search all equivalent.
+ */
+function normalizeTool(name: string): string {
+	return name.toLowerCase().replace(/_/g, "");
+}
+
+// ── toolDefaults helpers ──────────────────────────────────────────────────────
+
+/**
+ * Normalize toolDefaults keys (tool names) and validate values.
+ * Invalid action strings are silently dropped.
+ */
+function normalizeToolDefaultsKeys(td: Record<string, string>): Record<string, Action> {
+	const out: Record<string, Action> = {};
+	for (const [k, v] of Object.entries(td)) {
+		if (v === "allow" || v === "deny" || v === "ask") {
+			out[normalizeTool(k)] = v;
+		}
+	}
+	return out;
+}
+
+/**
+ * Compile a glob (or `/regex/`) into a RegExp matching the whole string, case-insensitive.
+ *
+ * Special glob rule: a space-asterisk pair `" *"` is treated as *optional* — it compiles
+ * to `( .*)?` so that `Bash(git status *)` matches both `"git status"` and `"git status -s"`.
+ * This mirrors the format produced by suggestRule (which always appends `" *"` to the
+ * first token), ensuring every auto-suggested rule also covers the bare command form.
+ * A bare `*` without a leading space is unaffected (e.g. `npm*` still requires the
+ * matched string to start with `npm`).
+ */
+function compilePattern(pattern: string): RegExp {
+	if (pattern.length >= 2 && pattern.startsWith("/") && pattern.endsWith("/")) {
+		return new RegExp(pattern.slice(1, -1), "i");
+	}
+	// Use a placeholder (U+0000) to protect " *" sequences before other transforms.
+	const PLACEHOLDER = "\u0000";
+	const escaped = pattern
+		.replace(/ \*/g, PLACEHOLDER)              // 1. mark " *" pairs
+		.replace(/[.+^${}()|[\]\\]/g, "\\$&")     // 2. escape regex specials (placeholder is safe)
+		.replace(/\*/g, ".*")                      // 3. remaining * → .*
+		.replace(/\?/g, ".")                       // 4. ? → .
+		.replace(/\u0000/g, "( .*)?");             // 5. placeholder → optional space+anything
+	return new RegExp(`^${escaped}$`, "i");
+}
+
+interface ParsedRule {
+	tool: string;
+	pattern?: string;
+	regex?: RegExp;
+	raw: string;
+}
+
+function parseRule(raw: string): ParsedRule | null {
+	const trimmed = raw.trim();
+	if (!trimmed) return null;
+	const m = trimmed.match(/^([A-Za-z0-9_]+)(?:\((.*)\))?$/);
+	if (!m) return null;
+	const tool = normalizeTool(m[1]);
+	const pattern = m[2];
+	return {
+		tool,
+		pattern,
+		regex: pattern ? compilePattern(pattern) : undefined,
+		raw: trimmed,
+	};
+}
+
+function getMatchField(toolName: string, input: Record<string, unknown>): string {
+	const t = normalizeTool(toolName);
+	if (t === "bash") return String(input.command ?? "");
+	if (t === "read" || t === "write" || t === "edit") return String(input.path ?? "");
+	if (t === "grep" || t === "glob") return String(input.path ?? "");
+	if (t === "webfetch") return String(input.url ?? "");
+	try {
+		return JSON.stringify(input);
+	} catch {
+		return "";
+	}
+}
+
+function ruleMatches(rule: ParsedRule, toolName: string, input: Record<string, unknown>): boolean {
+	if (rule.tool !== normalizeTool(toolName)) return false;
+	if (!rule.regex) return true;
+	const field = getMatchField(toolName, input);
+	return rule.regex.test(field);
+}
+
+// ── Compound command splitting ─────────────────────────────────────────────
+
+type SplitResult =
+	| { kind: "single" }
+	| { kind: "compound"; parts: string[] }
+	| { kind: "ambiguous" };
+
+/**
+ * When a heredoc operator `<<` (or `<<-`) is found at position `pos` in `cmd`,
+ * scans forward past the entire heredoc body and returns the index after the
+ * closing delimiter line.  Returns null if the heredoc cannot be parsed.
+ */
+function consumeHeredoc(cmd: string, pos: number): number | null {
+	const stripTabs = cmd[pos + 2] === "-";
+	let j = pos + (stripTabs ? 3 : 2);
+
+	// Skip horizontal whitespace between << and the delimiter
+	while (j < cmd.length && (cmd[j] === " " || cmd[j] === "\t")) j++;
+
+	// Parse the delimiter token — may be quoted ('EOF', "EOF") or bare (EOF)
+	let delimiter = "";
+	if (cmd[j] === "'" || cmd[j] === '"') {
+		const q = cmd[j++];
+		while (j < cmd.length && cmd[j] !== q) delimiter += cmd[j++];
+		if (j < cmd.length) j++; // skip closing quote
+	} else {
+		while (j < cmd.length && /[A-Za-z0-9_]/.test(cmd[j])) delimiter += cmd[j++];
+	}
+
+	if (!delimiter) return null; // cannot determine delimiter → caller treats as normal
+
+	// Advance past the rest of the opening line (up to and including its newline)
+	while (j < cmd.length && cmd[j] !== "\n") j++;
+	if (j < cmd.length) j++; // consume the newline
+
+	// Scan body lines until we find a line that is exactly the delimiter
+	while (j < cmd.length) {
+		const lineStart = j;
+		if (stripTabs) {
+			while (j < cmd.length && cmd[j] === "\t") j++; // skip leading tabs
+		}
+		// Check whether this line is exactly the delimiter
+		if (cmd.startsWith(delimiter, j)) {
+			const after = j + delimiter.length;
+			if (after >= cmd.length || cmd[after] === "\n" || cmd[after] === "\r" || cmd[after] === ";" || cmd[after] === " " || cmd[after] === "\t") {
+				// Return the index right after the delimiter token but do NOT consume
+				// the trailing newline (or ';' etc.).  Leaving it in the main loop
+				// lets splitTopLevelShell treat it as a normal separator, so any
+				// command that follows the heredoc is detected as a separate part.
+				return after;
+			}
+		}
+		// Skip to end of this line
+		j = lineStart; // reset in case stripTabs moved j
+		while (j < cmd.length && cmd[j] !== "\n") j++;
+		if (j < cmd.length) j++;
+	}
+
+	// Heredoc body ran to EOF without finding the closing delimiter — ambiguous
+	return null;
+}
+
+/**
+ * Splits a shell command on top-level &&, ||, |, ; operators.
+ * Respects single quotes, double quotes, backticks, parentheses, and heredocs.
+ *
+ * Returns:
+ *   { kind: "ambiguous" }          – unmatched quote/paren; caller should fall back to ask
+ *   { kind: "single" }             – no top-level operator found
+ *   { kind: "compound", parts }    – trimmed, non-empty subcommands
+ */
+function splitTopLevelShell(cmd: string): SplitResult {
+	const parts: string[] = [];
+	let current = "";
+	let inSingle = false;
+	let inDouble = false;
+	let inBacktick = false;
+	let parenDepth = 0;
+	let foundOperator = false;
+	let i = 0;
+
+	while (i < cmd.length) {
+		const ch = cmd[i];
+
+		// Backslash escape — skip next char (not inside single quotes)
+		if (ch === "\\" && !inSingle) {
+			current += ch + (cmd[i + 1] ?? "");
+			i += 2;
+			continue;
+		}
+
+		// Single-quote toggle (not inside double quotes or backticks)
+		if (ch === "'" && !inDouble && !inBacktick) {
+			inSingle = !inSingle;
+			current += ch;
+			i++;
+			continue;
+		}
+
+		// Double-quote toggle (not inside single quotes or backticks)
+		if (ch === '"' && !inSingle && !inBacktick) {
+			inDouble = !inDouble;
+			current += ch;
+			i++;
+			continue;
+		}
+
+		// Backtick toggle (not inside single or double quotes)
+		if (ch === "`" && !inSingle && !inDouble) {
+			inBacktick = !inBacktick;
+			current += ch;
+			i++;
+			continue;
+		}
+
+		// Parenthesis depth tracking (outside all quotes)
+		if (!inSingle && !inDouble && !inBacktick) {
+			if (ch === "(") {
+				parenDepth++;
+				current += ch;
+				i++;
+				continue;
+			}
+			if (ch === ")") {
+				if (parenDepth <= 0) return { kind: "ambiguous" }; // unmatched )
+				parenDepth--;
+				current += ch;
+				i++;
+				continue;
+			}
+		}
+
+		// Operator detection — only at the top level
+		if (!inSingle && !inDouble && !inBacktick && parenDepth === 0) {
+			// Heredoc: << or <<-  — consume the entire body so its newlines are not split points
+			if (ch === "<" && cmd[i + 1] === "<") {
+				const end = consumeHeredoc(cmd, i);
+				if (end !== null) {
+					current += cmd.slice(i, end);
+					i = end;
+					continue;
+				}
+				// If we can't parse the heredoc, fall through to the normal newline handler
+				// which will mark it ambiguous when the newline is reached.
+			}
+
+			if (ch === "&" && cmd[i + 1] === "&") {
+				parts.push(current.trim());
+				current = "";
+				i += 2;
+				foundOperator = true;
+				continue;
+			}
+			if (ch === "|" && cmd[i + 1] === "|") {
+				parts.push(current.trim());
+				current = "";
+				i += 2;
+				foundOperator = true;
+				continue;
+			}
+			if (ch === "|" && cmd[i + 1] !== "|") {
+				parts.push(current.trim());
+				current = "";
+				i++;
+				foundOperator = true;
+				continue;
+			}
+			if (ch === ";") {
+				parts.push(current.trim());
+				current = "";
+				i++;
+				foundOperator = true;
+				continue;
+			}
+			if (ch === "\n" || (ch === "\r" && cmd[i + 1] === "\n")) {
+				parts.push(current.trim());
+				current = "";
+				i += ch === "\r" ? 2 : 1;
+				foundOperator = true;
+				continue;
+			}
+		}
+
+		current += ch;
+		i++;
+	}
+
+	// Unmatched quote or paren → ambiguous
+	if (inSingle || inDouble || inBacktick || parenDepth !== 0) {
+		return { kind: "ambiguous" };
+	}
+
+	if (!foundOperator) return { kind: "single" };
+
+	const last = current.trim();
+	if (last) parts.push(last);
+
+	const nonEmpty = parts.filter((p) => p.length > 0 && !p.trimStart().startsWith("#"));
+	return nonEmpty.length > 1 ? { kind: "compound", parts: nonEmpty } : { kind: "single" };
+}
+
+// ── Compound decision ────────────────────────────────────────────────────────
+
+interface SubcommandDecision {
+	sub: string;
+	action: Action;
+}
+
+interface CompoundDecision {
+	action: Action;
+	/** True when the command was split into multiple subcommands. */
+	isCompound: boolean;
+	/** True when the command could not be parsed unambiguously; fell back to ask. */
+	ambiguous: boolean;
+	/** Per-subcommand results. Empty for single/ambiguous commands. */
+	breakdown: SubcommandDecision[];
+}
+
+function decideCompound(
+	cfg: ResolvedConfig,
+	toolName: string,
+	input: Record<string, unknown>,
+): CompoundDecision {
+	if (normalizeTool(toolName) !== "bash") {
+		return { action: decide(cfg, toolName, input), isCompound: false, ambiguous: false, breakdown: [] };
+	}
+
+	const cmd = String(input.command ?? "");
+	const split = splitTopLevelShell(cmd);
+
+	if (split.kind === "ambiguous") {
+		return { action: "ask", isCompound: false, ambiguous: true, breakdown: [] };
+	}
+
+	if (split.kind === "single") {
+		return { action: decide(cfg, "bash", input), isCompound: false, ambiguous: false, breakdown: [] };
+	}
+
+	// compound
+	const breakdown: SubcommandDecision[] = split.parts.map((sub) => ({
+		sub,
+		action: decide(cfg, "bash", { command: sub }),
+	}));
+
+	let action: Action = "allow";
+	for (const { action: a } of breakdown) {
+		if (a === "deny") { action = "deny"; break; }
+		if (a === "ask") action = "ask";
+	}
+
+	return { action, isCompound: true, ambiguous: false, breakdown };
+}
+
+function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>): Action {
+	const check = (list: string[]): boolean => {
+		for (const raw of list) {
+			const rule = parseRule(raw);
+			if (rule && ruleMatches(rule, toolName, input)) return true;
+		}
+		return false;
+	};
+	if (check(cfg.deny)) return "deny";
+	// Silently allow no-op `cd` (changing to the current directory) — harmless bookkeeping
+	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
+	if (check(cfg.ask)) return "ask";
+	if (check(cfg.allow)) return "allow";
+	const td = cfg.toolDefaults[normalizeTool(toolName)];
+	if (td !== undefined) return td;
+	return cfg.defaultAction;
+}
+
+/** Suggest a rule string that matches the current call exactly enough to be useful. */
+function suggestRule(toolName: string, input: Record<string, unknown>): string {
+	const t = normalizeTool(toolName);
+	if (t === "bash") {
+		const cmd = String(input.command ?? "").trim();
+		// Use first token plus * so similar variations match
+		const head = cmd.split(/\s+/)[0] ?? "";
+		return head ? `${toolName}(${head} *)` : toolName;
+	}
+	if (t === "read" || t === "write" || t === "edit") {
+		const p = String(input.path ?? "");
+		// Normalize path separators so saved rules work on Windows
+		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
+	}
+	if (t === "grep" || t === "glob") {
+		const p = String(input.path ?? "");
+		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
+	}
+	if (t === "websearch") return "WebSearch";
+	if (t === "webfetch") {
+		const url = String(input.url ?? "");
+		if (url) {
+			try {
+				const { origin } = new URL(url);
+				return `WebFetch(${origin}/*)` ;
+			} catch {
+				// malformed URL — fall back to bare rule
+			}
+		}
+		return "WebFetch";
+	}
+	return toolName;
+}
+
+/**
+ * Return a copy of the tool input with the path field normalized for permission matching.
+ * The original event.input is never mutated — only this copy enters decide/ruleMatches.
+ */
+function inputForMatching(
+	toolName: string,
+	input: Record<string, unknown>,
+	cwd: string,
+): Record<string, unknown> {
+	const t = normalizeTool(toolName);
+	if (t === "read" || t === "write" || t === "edit") {
+		// Only normalise separators — do NOT resolve relative paths to absolute.
+		// Resolving would break user rules like Write(.env*) for relative-path calls.
+		// The synthetic cwd rule works for the common case where pi provides absolute paths.
+		const p = String(input.path ?? "");
+		return p ? { ...input, path: normalizePathSep(p) } : input;
+	}
+	if (t === "grep" || t === "glob") {
+		// Default missing path to cwd so rules like Grep(<cwd>/**) match implicit-cwd calls.
+		// Append a trailing "/" so directory paths match patterns like /etc/* (regex ^/etc/.*$
+		// requires something after the slash; "" satisfies .* so /etc/ matches correctly).
+		const p = input.path ? String(input.path) : cwd;
+		const normalized = normalizeMatchPath(p, cwd);
+		return { ...input, path: normalized.endsWith("/") ? normalized : normalized + "/" };
+	}
+	return input;
+}
+
+export default function (pi: ExtensionAPI) {
+	let cfg: ResolvedConfig = loadConfig(process.cwd());
+	let allowAllEdits = false;
+
+	// ── Deny-with-message helper ─────────────────────────────────────────────
+
+	/**
+	 * After a tool is denied, optionally prompt the user to send a steering
+	 * message to the AI (e.g. "please use a different approach").
+	 * If the user leaves the field empty, nothing is sent.
+	 */
+	async function promptSteerMessage(ctx: ExtensionContext): Promise<void> {
+		if (!ctx.hasUI) return;
+		const text = await ctx.ui.input(
+			"Send a message to the AI? (leave empty to skip)",
+			"e.g. please do this differently...",
+		);
+		if (text && text.trim()) {
+			pi.sendUserMessage(text.trim(), { deliverAs: "steer" });
+		}
+	}
+
+	// ── Allow-all-edits helpers ──────────────────────────────────────────────
+
+	function applyAllowAllEdits(value: boolean, ctx: ExtensionContext, notify = true): void {
+		allowAllEdits = value;
+		if (value) {
+			ctx.ui.setStatus(STATUS_KEY, "✏️ all edits allowed");
+			if (notify) ctx.ui.notify("Allow all edits: ON (this session only)", "info");
+		} else {
+			ctx.ui.setStatus(STATUS_KEY, "");
+			if (notify) ctx.ui.notify("Allow all edits: OFF", "info");
+		}
+	}
+
+	// ── Session lifecycle ────────────────────────────────────────────────────
+
+	const reload = (cwd: string, ctx?: ExtensionContext) => {
+		cfg = loadConfig(cwd);
+		ctx?.ui.notify(
+			`Tool permissions reloaded (default=${cfg.defaultAction}, allow=${cfg.allow.length}, deny=${cfg.deny.length}, ask=${cfg.ask.length}, toolDefaults=${Object.keys(cfg.toolDefaults).length})`,  
+			"info",
+		);
+	};
+
+	pi.on("session_start", async (_event, ctx) => {
+		cfg = loadConfig(ctx.cwd);
+		// Always reset allow-all-edits at session start — never persisted
+		allowAllEdits = false;
+		ctx.ui.setStatus(STATUS_KEY, "");
+	});
+
+	// ── Tool call gating ─────────────────────────────────────────────────────
+
+	pi.on("tool_call", async (event, ctx) => {
+		const matchInput = inputForMatching(event.toolName, event.input as Record<string, unknown>, ctx.cwd);
+		const compound = decideCompound(cfg, event.toolName, matchInput);
+		const { action, isCompound, ambiguous, breakdown } = compound;
+
+		if (action === "allow") return undefined;
+
+		// Explicit deny rules always win, even over allow-all-edits
+		if (action === "deny") {
+			const culprit = isCompound ? breakdown.find((b) => b.action === "deny") : null;
+			const message = culprit
+				? `Blocked ${event.toolName}: '${culprit.sub}' matched a deny rule`
+				: `Blocked ${event.toolName} by tool-permissions deny rule`;
+			if (ctx.hasUI) {
+				ctx.ui.notify(message, "warning");
+			}
+			return { block: true, reason: message };
+		}
+
+		// action === "ask" from here on
+
+		const toolNorm = normalizeTool(event.toolName);
+		const isWriteOrEdit = toolNorm === "write" || toolNorm === "edit";
+
+		// Allow-all-edits short-circuits the ask for write/edit tools only
+		if (allowAllEdits && isWriteOrEdit) {
+			return undefined;
+		}
+
+		if (!ctx.hasUI) {
+			return {
+				block: true,
+				reason: `tool-permissions: '${event.toolName}' requires confirmation but no UI is available`,
+			};
+		}
+
+		// ── Compound bash command: confirm each ask subcommand separately ──────
+		if (isCompound) {
+			const fullCmd = String((event.input as Record<string, unknown>).command ?? "");
+			const truncated = fullCmd.length > 200 ? `${fullCmd.slice(0, 197)}...` : fullCmd;
+
+			for (const item of breakdown.filter((b) => b.action === "ask")) {
+				const suggested = suggestRule("Bash", { command: item.sub });
+
+				const breakdownLines = breakdown
+					.map((b) => {
+						const icon = b.action === "allow" ? "✓" : b.action === "deny" ? "✗" : "?";
+						const marker = b.sub === item.sub ? " ◄" : "";
+						return `  [${icon}] ${b.sub}${marker}`;
+					})
+					.join("\n");
+
+				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}\n\nSuggested rule: ${suggested}`;
+				const choices = ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)"];
+				const choice = await ctx.ui.select(title, choices);
+
+				if (choice === "Allow once") continue;
+
+				if (choice === "Deny once" || !choice) {
+					if (choice === "Deny once") await promptSteerMessage(ctx);
+					return { block: true, reason: `Denied by user (subcommand: ${item.sub})` };
+				}
+				if (choice === "Allow always (save rule)") {
+					const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+					if (!edited) continue;
+					addRule(ctx.cwd, "allow", edited.trim());
+					cfg = loadConfig(ctx.cwd);
+					ctx.ui.notify(`Saved allow rule: ${edited.trim()}`, "success");
+					continue;
+				}
+				if (choice === "Deny always (save rule)") {
+					const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+					if (!edited) {
+						await promptSteerMessage(ctx);
+						return { block: true, reason: `Denied by user (subcommand: ${item.sub})` };
+					}
+					addRule(ctx.cwd, "deny", edited.trim());
+					cfg = loadConfig(ctx.cwd);
+					ctx.ui.notify(`Saved deny rule: ${edited.trim()}`, "success");
+					await promptSteerMessage(ctx);
+					return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
+				}
+			}
+			return undefined;
+		}
+
+		// ── Single or ambiguous command ask ────────────────────────────────────
+		const suggested = suggestRule(event.toolName, event.input as Record<string, unknown>);
+		const matchField = getMatchField(event.toolName, event.input as Record<string, unknown>);
+		const preview = matchField.length > 200 ? `${matchField.slice(0, 197)}...` : matchField;
+		const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
+		const title = `Allow ${event.toolName}?\n\n  ${preview}${ambiguousNote}\n\nSuggested rule: ${suggested}`;
+
+		// Extra "allow all edits" option only for write/edit dialogs
+		const choices = isWriteOrEdit
+			? [
+					"Allow once",
+					"Allow all edits this session",
+					"Allow always (save rule)",
+					"Deny once",
+					"Deny always (save rule)",
+			  ]
+			: ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)"];
+
+		const choice = await ctx.ui.select(title, choices);
+
+		if (choice === "Allow once") return undefined;
+
+		if (choice === "Allow all edits this session") {
+			applyAllowAllEdits(true, ctx);
+			return undefined;
+		}
+
+		if (choice === "Deny once" || !choice) {
+			if (choice === "Deny once") await promptSteerMessage(ctx);
+			return { block: true, reason: "Denied by user" };
+		}
+		if (choice === "Allow always (save rule)") {
+			const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+			if (!edited) return undefined;
+			addRule(ctx.cwd, "allow", edited.trim());
+			cfg = loadConfig(ctx.cwd);
+			ctx.ui.notify(`Saved allow rule: ${edited.trim()}`, "success");
+			return undefined;
+		}
+		if (choice === "Deny always (save rule)") {
+			const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+			if (!edited) {
+				await promptSteerMessage(ctx);
+				return { block: true, reason: "Denied by user" };
+			}
+			addRule(ctx.cwd, "deny", edited.trim());
+			cfg = loadConfig(ctx.cwd);
+			ctx.ui.notify(`Saved deny rule: ${edited.trim()}`, "success");
+			await promptSteerMessage(ctx);
+			return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
+		}
+		return { block: true, reason: "Denied by user" };
+	});
+
+	// ── Hotkey ───────────────────────────────────────────────────────────────
+
+	pi.registerShortcut("ctrl+shift+e", {
+		description: "Toggle allow-all-edits mode (this session only)",
+		handler: async (ctx) => {
+			applyAllowAllEdits(!allowAllEdits, ctx);
+		},
+	});
+
+	// ── Rule helpers ─────────────────────────────────────────────────────────
+
+	function addRule(cwd: string, action: Action, rule: string): void {
+		const project = loadProjectConfigRaw(cwd);
+		const list = project[action] ?? [];
+		if (!list.includes(rule)) list.push(rule);
+		project[action] = dedupe(list);
+		saveProjectConfig(cwd, project);
+	}
+
+	function removeRule(cwd: string, rule: string): boolean {
+		const project = loadProjectConfigRaw(cwd);
+		let removed = false;
+		for (const key of ["allow", "deny", "ask"] as const) {
+			const list = project[key];
+			if (!list) continue;
+			const idx = list.indexOf(rule);
+			if (idx >= 0) {
+				list.splice(idx, 1);
+				removed = true;
+			}
+		}
+		if (removed) saveProjectConfig(cwd, project);
+		return removed;
+	}
+
+	function setDefault(cwd: string, action: Action): void {
+		const project = loadProjectConfigRaw(cwd);
+		project.defaultAction = action;
+		saveProjectConfig(cwd, project);
+	}
+
+	// ── Slash command ────────────────────────────────────────────────────────
+
+	pi.registerCommand("permissions", {
+		description: "Manage tool permissions (allow/deny/ask) and allow-all-edits mode",
+		getArgumentCompletions: (prefix: string) => {
+			const subs = ["allow", "deny", "ask", "remove", "default", "reload", "list", "allowalledits"];
+			const items = subs.map((s) => ({ value: s, label: s }));
+			const filtered = items.filter((i) => i.value.startsWith(prefix));
+			return filtered.length > 0 ? filtered : null;
+		},
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			const trimmed = (args ?? "").trim();
+			if (!trimmed || trimmed === "list") {
+				const implicitAllowSet = new Set(cfg.implicit.allow);
+				const implicitTDKeys = new Set(Object.keys(cfg.implicit.toolDefaults));
+				const tdEntries = Object.entries(cfg.toolDefaults);
+				const lines = [
+					`default: ${cfg.defaultAction}`,
+					`readAllowCwd: ${cfg.implicit.readAllowCwd}`,
+				`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
+					`allow all edits (this session): ${allowAllEdits ? "ON" : "OFF"}`,
+					`allow (${cfg.allow.length}):`,
+					...cfg.allow.map((r) => implicitAllowSet.has(r) ? `  [implicit] ${r}` : `  - ${r}`),
+					`deny (${cfg.deny.length}):`,
+					...cfg.deny.map((r) => `  - ${r}`),
+					`ask (${cfg.ask.length}):`,
+					...cfg.ask.map((r) => `  - ${r}`),
+					`toolDefaults (${tdEntries.length}):`,
+					...tdEntries.map(([k, v]) =>
+						implicitTDKeys.has(k) ? `  [implicit] ${k} -> ${v}` : `  - ${k} -> ${v}`
+					),
+				];
+				ctx.ui.notify(lines.join("\n"), "info");
+				return;
+			}
+
+			const [sub, ...rest] = trimmed.split(/\s+/);
+			const value = rest.join(" ").trim();
+
+			switch (sub) {
+				case "reload":
+					reload(ctx.cwd, ctx);
+					return;
+				case "default": {
+					if (!isAction(value)) {
+						ctx.ui.notify(`Usage: /permissions default <allow|deny|ask>`, "warning");
+						return;
+					}
+					setDefault(ctx.cwd, value);
+					reload(ctx.cwd, ctx);
+					return;
+				}
+				case "allowalledits": {
+					const normalized = value.toLowerCase();
+					if (!normalized || normalized === "toggle") {
+						applyAllowAllEdits(!allowAllEdits, ctx);
+					} else if (normalized === "on") {
+						applyAllowAllEdits(true, ctx);
+					} else if (normalized === "off") {
+						applyAllowAllEdits(false, ctx);
+					} else {
+						ctx.ui.notify(`Usage: /permissions allowalledits [on|off|toggle]`, "warning");
+					}
+					return;
+				}
+				case "allow":
+				case "deny":
+				case "ask": {
+					if (!value) {
+						ctx.ui.notify(`Usage: /permissions ${sub} <rule>`, "warning");
+						return;
+					}
+					if (!parseRule(value)) {
+						ctx.ui.notify(`Invalid rule: ${value}. Expected ToolName or ToolName(pattern).`, "warning");
+						return;
+					}
+					addRule(ctx.cwd, sub, value);
+					reload(ctx.cwd, ctx);
+					ctx.ui.notify(`Added ${sub} rule: ${value}`, "success");
+					return;
+				}
+				case "remove": {
+					if (!value) {
+						ctx.ui.notify(`Usage: /permissions remove <rule>`, "warning");
+						return;
+					}
+					const removed = removeRule(ctx.cwd, value);
+					if (removed) {
+						reload(ctx.cwd, ctx);
+						ctx.ui.notify(`Removed rule: ${value}`, "success");
+					} else {
+						ctx.ui.notify(`Rule not found: ${value}`, "warning");
+					}
+					return;
+				}
+				default:
+					ctx.ui.notify(
+						`Unknown subcommand: ${sub}. Use: list | allow | deny | ask | remove | default | reload | allowalledits`,
+						"warning",
+					);
+			}
+		},
+	});
+}
+
+function isAction(s: string): s is Action {
+	return s === "allow" || s === "deny" || s === "ask";
+}

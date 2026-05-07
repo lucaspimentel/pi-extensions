@@ -1,0 +1,9 @@
+{
+  "name": "pi-tool-permissions",
+  "version": "0.1.0",
+  "description": "Claude Code-style configurable allow/deny/ask tool permissions for pi",
+  "private": true,
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

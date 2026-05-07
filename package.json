@@ -1,0 +1,30 @@
+{
+  "name": "pi-extensions",
+  "version": "0.1.0",
+  "description": "Personal pi-coding-agent extensions and skills",
+  "private": true,
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": [
+      "./extensions/colored-footer.ts",
+      "./extensions/plan-with-opus.ts",
+      "./extensions/questionnaire.ts",
+      "./extensions/web",
+      "./extensions/pi-tool-permissions"
+    ],
+    "skills": ["./skills"]
+  },
+  "dependencies": {
+    "html-to-text": "^9.0.5"
+  },
+  "devDependencies": {
+    "@types/html-to-text": "^9.0.4"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@mariozechner/pi-ai": "*",
+    "typebox": "*"
+  }
+}

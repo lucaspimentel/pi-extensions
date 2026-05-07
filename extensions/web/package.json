@@ -1,0 +1,15 @@
+{
+  "name": "pi-extension-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "html-to-text": "^9.0.5"
+  },
+  "devDependencies": {
+    "@types/html-to-text": "^9.0.4"
+  }
+}

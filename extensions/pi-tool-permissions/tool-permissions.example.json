@@ -1,0 +1,32 @@
+{
+  "defaultAction": "ask",
+  "readAllowCwd": true,
+  "toolDefaults": {
+    "write": "ask"
+  },
+  "allow": [
+    "Glob",
+    "Grep",
+    "WebSearch",
+    "WebFetch(https://github.com/*)",
+    "WebFetch(https://docs.*)",
+    "Bash(npm test*)",
+    "Bash(npm run *)",
+    "Bash(git status*)",
+    "Bash(git diff*)",
+    "Bash(git log*)"
+  ],
+  "deny": [
+    "Bash(rm -rf*)",
+    "Bash(sudo*)",
+    "Bash(/.*\\b(chmod|chown)\\b.*777.*/)",
+    "Write(.env*)",
+    "Write(*/.git/*)",
+    "Edit(.env*)"
+  ],
+  "ask": [
+    "Bash(git push*)",
+    "Bash(npm publish*)",
+    "WebFetch(*)"
+  ]
+}

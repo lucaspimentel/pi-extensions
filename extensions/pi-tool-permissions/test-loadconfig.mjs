@@ -1,0 +1,97 @@
+// run: node test-loadconfig.mjs
+
+import {
+	makeTestRunner, normalizePathSep, cwdGlobPattern, loadConfigFromObjects, decide,
+} from "./test-helpers.mjs";
+
+const { test, section, summary } = makeTestRunner();
+
+const CWD = "C:/Users/Lucas.Pimentel/.pi";
+const NORM_CWD = normalizePathSep(CWD);
+const CWD_GLOB = cwdGlobPattern(CWD);
+const IMPLICIT_READ = `Read(${CWD_GLOB})`;
+
+section("implicit defaults (empty config)");
+
+const empty = loadConfigFromObjects({}, {}, CWD);
+test("defaultAction is ask",                    empty.defaultAction, "ask");
+test("implicit Read(<cwd>/**) prepended",       empty.allow[0], IMPLICIT_READ);
+test("implicit write→ask in toolDefaults",      empty.toolDefaults["write"], "ask");
+test("implicit.readAllowCwd is true",           empty.implicit.readAllowCwd, true);
+test("implicit.allow has exactly 1 entry",      empty.implicit.allow.length, 1);
+test("implicit.allow[0] matches allow[0]",      empty.implicit.allow[0] === empty.allow[0], true);
+test("implicit.toolDefaults has write key",     "write" in empty.implicit.toolDefaults, true);
+test("no other implicit toolDefaults",          Object.keys(empty.implicit.toolDefaults).length, 1);
+
+section("readAllowCwd: false");
+
+const noAutoRead = loadConfigFromObjects({}, { readAllowCwd: false }, CWD);
+test("no implicit Read injected",               noAutoRead.allow.length, 0);
+test("implicit.readAllowCwd is false",          noAutoRead.implicit.readAllowCwd, false);
+test("implicit.allow is empty",                 noAutoRead.implicit.allow.length, 0);
+test("write default still injected",            noAutoRead.toolDefaults["write"], "ask");
+
+section("explicit toolDefaults.write suppresses implicit");
+
+const explicitWrite = loadConfigFromObjects({}, { toolDefaults: { write: "allow" } }, CWD);
+test("explicit write:allow wins",               explicitWrite.toolDefaults["write"], "allow");
+test("implicit.toolDefaults is empty",          Object.keys(explicitWrite.implicit.toolDefaults).length, 0);
+
+const explicitAsk = loadConfigFromObjects({}, { toolDefaults: { write: "ask" } }, CWD);
+test("explicit write:ask still counts as explicit", Object.keys(explicitAsk.implicit.toolDefaults).length, 0);
+test("explicit write:ask value",                explicitAsk.toolDefaults["write"], "ask");
+
+section("project overrides user");
+
+const merged = loadConfigFromObjects(
+	{ defaultAction: "allow", toolDefaults: { write: "ask",   read: "allow" } },
+	{ defaultAction: "deny",  toolDefaults: { write: "allow", read: "deny"  } },
+	CWD,
+);
+test("project defaultAction overrides user",    merged.defaultAction, "deny");
+test("project toolDefaults.write overrides",    merged.toolDefaults["write"], "allow");
+test("project toolDefaults.read overrides",     merged.toolDefaults["read"], "deny");
+
+section("allow/deny/ask lists concatenated");
+
+const withRules = loadConfigFromObjects(
+	{ allow: ["Bash(npm*)"],  deny: ["Bash(rm*)"] },
+	{ allow: ["Read"],        ask:  ["Bash(git push*)"] },
+	CWD,
+);
+test("implicit Read prepended first",           withRules.allow[0], IMPLICIT_READ);
+test("user allow rule present",                 withRules.allow.includes("Bash(npm*)"), true);
+test("project allow rule present",              withRules.allow.includes("Read"), true);
+test("user deny rule present",                  withRules.deny.includes("Bash(rm*)"), true);
+test("project ask rule present",                withRules.ask.includes("Bash(git push*)"), true);
+
+section("invalid toolDefaults values silently dropped");
+
+const invalid = loadConfigFromObjects({}, { toolDefaults: { write: "lol", read: "allow" } }, CWD);
+test("invalid value dropped → falls back to implicit", invalid.toolDefaults["write"], "ask");
+test("valid value alongside invalid preserved",         invalid.toolDefaults["read"], "allow");
+
+section("deduplication");
+
+const dupes = loadConfigFromObjects(
+	{ allow: ["Read", "Bash(npm*)"] },
+	{ allow: ["Read", "Bash(npm*)"] },
+	CWD,
+);
+test("duplicate allow rules deduplicated", dupes.allow.filter((r) => r === "Read").length, 1);
+test("duplicate Bash rule deduplicated",   dupes.allow.filter((r) => r === "Bash(npm*)").length, 1);
+
+section("end-to-end: decide uses loaded config");
+
+const cfg = loadConfigFromObjects(
+	{},
+	{ deny: ["Write(.env*)"], allow: ["Bash(npm*)"], defaultAction: "ask" },
+	CWD,
+);
+test("Read inside cwd → allow (implicit rule)", decide(cfg, "read", { path: NORM_CWD + "/src/foo.ts" }), "allow");
+test("Write .env → deny (explicit rule)",       decide(cfg, "write", { path: ".env" }), "deny");
+test("Bash npm test → allow (explicit rule)",   decide(cfg, "bash", { command: "npm test" }), "allow");
+test("Write normal path → toolDefaults ask",    decide(cfg, "write", { path: "./src/foo.ts" }), "ask");
+test("Read outside cwd → defaultAction ask",    decide(cfg, "read", { path: "/etc/passwd" }), "ask");
+
+process.exit(summary() > 0 ? 1 : 0);
