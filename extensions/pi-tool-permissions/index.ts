@@ -33,7 +33,10 @@
  *     "deny":  ["Bash(rm -rf*)", "Write(.env*)"],
  *     "ask":   ["Bash(git push*)"],
  *     "toolDefaults": { "write": "ask", "web_fetch": "allow" },
- *     "readAllowCwd": true
+ *     "readAllowCwd": true,
+ *     "grepAllowCwd": true,
+ *     "globAllowCwd": true,
+ *     "bashReadOnlyAllowCwd": true
  *   }
  *
  * Precedence (first match wins): deny > ask > allow > toolDefaults > defaultAction.
@@ -42,6 +45,17 @@
  *   readAllowCwd (default: true)
  *     Injects Read(<cwd>/**) into the allow list so every read within the working
  *     directory is silently permitted. Disable with "readAllowCwd": false.
+ *   grepAllowCwd (default: true)
+ *     Injects Grep(<cwd>/**) so every grep inside the working directory is silently
+ *     permitted. Disable with "grepAllowCwd": false.
+ *   globAllowCwd (default: true)
+ *     Injects Glob(<cwd>/**) so every glob inside the working directory is silently
+ *     permitted. Disable with "globAllowCwd": false.
+ *   bashReadOnlyAllowCwd (default: true)
+ *     Silently allows a curated set of read-only bash subcommands (pwd, echo, ls,
+ *     cat, head, tail, wc, stat, …) when their path arguments resolve inside cwd.
+ *     Commands with output redirections (>) are never auto-allowed.
+ *     Disable with "bashReadOnlyAllowCwd": false.
  *   write → ask (automatic)
  *     Unless toolDefaults.write is explicitly set, Write always prompts regardless
  *     of defaultAction. Override with "toolDefaults": { "write": "allow" }.
@@ -93,6 +107,12 @@ interface PermissionsConfig {
 	toolDefaults?: Record<string, string>;
 	/** When false, disables the implicit Read(<cwd>/**) allow rule. Default: true. */
 	readAllowCwd?: boolean;
+	/** When false, disables the implicit Grep(<cwd>/**) allow rule. Default: true. */
+	grepAllowCwd?: boolean;
+	/** When false, disables the implicit Glob(<cwd>/**) allow rule. Default: true. */
+	globAllowCwd?: boolean;
+	/** When false, disables the implicit allow for read-only bash commands in cwd. Default: true. */
+	bashReadOnlyAllowCwd?: boolean;
 	/** When false, disables the implicit allow for no-op `cd` commands. Default: true. */
 	allowNoopCd?: boolean;
 }
@@ -108,11 +128,16 @@ interface ResolvedConfig {
 	cwd: string;
 	/** When true, no-op `cd` commands (cd to cwd) are silently allowed. */
 	allowNoopCd: boolean;
+	/** When true, read-only bash subcommands with paths inside cwd are silently allowed. */
+	bashReadOnlyAllowCwd: boolean;
 	/** Tracks synthetically injected rules/defaults (never written to disk). */
 	implicit: {
 		allow: string[];
 		toolDefaults: Record<string, Action>;
 		readAllowCwd: boolean;
+		grepAllowCwd: boolean;
+		globAllowCwd: boolean;
+		bashReadOnlyAllowCwd: boolean;
 		allowNoopCd: boolean;
 	};
 }
@@ -153,10 +178,19 @@ function loadConfig(cwd: string): ResolvedConfig {
 
 	// ── Implicit defaults (session-only, never persisted) ──────────────────
 	const readAllowCwd = project.readAllowCwd ?? user.readAllowCwd ?? true;
+	const grepAllowCwd = project.grepAllowCwd ?? user.grepAllowCwd ?? true;
+	const globAllowCwd = project.globAllowCwd ?? user.globAllowCwd ?? true;
+	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
 	const implicitAllow: string[] = [];
 	if (readAllowCwd) {
 		implicitAllow.push(`Read(${cwdGlobPattern(cwd)})`);
+	}
+	if (grepAllowCwd) {
+		implicitAllow.push(`Grep(${cwdGlobPattern(cwd)})`);
+	}
+	if (globAllowCwd) {
+		implicitAllow.push(`Glob(${cwdGlobPattern(cwd)})`);
 	}
 
 	// Inject write→ask unless the user has explicitly set toolDefaults.write
@@ -173,7 +207,8 @@ function loadConfig(cwd: string): ResolvedConfig {
 		toolDefaults: { ...implicitToolDefaults, ...explicitToolDefaults },
 		cwd,
 		allowNoopCd,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, allowNoopCd },
+		bashReadOnlyAllowCwd,
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, bashReadOnlyAllowCwd, allowNoopCd },
 	};
 }
 
@@ -269,6 +304,104 @@ function isNoopCd(cmd: string, cwd: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * Bash subcommand names that are read-only and never touch the filesystem
+ * meaningfully — safe to auto-allow regardless of arguments.
+ */
+const READONLY_BASH_SAFE_ALWAYS = new Set([
+	"pwd", "echo", "printf", "date", "whoami", "id", "hostname",
+	"uname", "env", "printenv", "true", "false", "which", "type", "command",
+]);
+
+/**
+ * Bash subcommand names that are read-only but access filesystem paths.
+ * Auto-allowed only when every non-flag argument resolves inside cwd.
+ */
+const READONLY_BASH_WITH_PATHS = new Set([
+	"ls", "cat", "head", "tail", "wc", "file", "stat", "tree",
+	"du", "realpath", "readlink", "dirname", "basename",
+]);
+
+/**
+ * Returns true when `cmd` contains a top-level output redirection operator
+ * (`>`, `>>`, `2>`, `&>`, etc.) outside of single or double quotes.
+ * Used to reject otherwise-safe commands that write to files via redirection.
+ */
+function hasTopLevelOutputRedirect(cmd: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < cmd.length; i++) {
+		const ch = cmd[i];
+		if (ch === "\\" && !inSingle) { i++; continue; }
+		if (ch === "'" && !inDouble) { inSingle = !inSingle; continue; }
+		if (ch === '"' && !inSingle) { inDouble = !inDouble; continue; }
+		if (!inSingle && !inDouble && ch === ">") return true;
+	}
+	return false;
+}
+
+/**
+ * Simple quote-aware tokenizer for a single shell command (no top-level operators).
+ * Strips surrounding single/double quotes from each token; respects backslash escapes.
+ */
+function tokenizeSimple(cmd: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let inSingle = false;
+	let inDouble = false;
+	let i = 0;
+	while (i < cmd.length) {
+		const ch = cmd[i];
+		if (ch === "\\" && !inSingle) {
+			if (i + 1 < cmd.length) { current += cmd[i + 1]; i += 2; } else i++;
+			continue;
+		}
+		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
+		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
+		if ((ch === " " || ch === "\t") && !inSingle && !inDouble) {
+			if (current) { tokens.push(current); current = ""; }
+			i++;
+			continue;
+		}
+		current += ch;
+		i++;
+	}
+	if (current) tokens.push(current);
+	return tokens;
+}
+
+/**
+ * Returns true when `cmd` is a read-only bash subcommand that is safe to
+ * auto-allow when `bashReadOnlyAllowCwd` is enabled.
+ *
+ * Rules:
+ *  1. Reject if cmd contains a top-level output redirection (>).
+ *  2. If the first token is in READONLY_BASH_SAFE_ALWAYS → allow.
+ *  3. If the first token is in READONLY_BASH_WITH_PATHS → allow only when
+ *     every non-flag argument resolves to a path inside (or equal to) cwd.
+ *  4. Anything else → false.
+ */
+function isReadOnlyBashSubcommand(cmd: string, cwd: string): boolean {
+	const trimmed = cmd.trim();
+	if (!trimmed) return false;
+	if (hasTopLevelOutputRedirect(trimmed)) return false;
+	const tokens = tokenizeSimple(trimmed);
+	if (tokens.length === 0) return false;
+	const cmdName = tokens[0].toLowerCase();
+	if (READONLY_BASH_SAFE_ALWAYS.has(cmdName)) return true;
+	if (READONLY_BASH_WITH_PATHS.has(cmdName)) {
+		const pathArgs = tokens.slice(1).filter((t) => t.length > 0 && !t.startsWith("-"));
+		// No path args — command implicitly uses cwd, safe
+		if (pathArgs.length === 0) return true;
+		const cwdNorm = normalizePathSep(cwd).toLowerCase();
+		return pathArgs.every((arg) => {
+			const norm = normalizeMatchPath(arg, cwd).toLowerCase();
+			return norm === cwdNorm || norm.startsWith(cwdNorm + "/");
+		});
+	}
+	return false;
 }
 
 /**
@@ -629,6 +762,8 @@ function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unk
 		return false;
 	};
 	if (check(cfg.deny)) return "deny";
+	// Silently allow read-only bash subcommands with paths inside cwd
+	if (cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd)) return "allow";
 	// Silently allow no-op `cd` (changing to the current directory) — harmless bookkeeping
 	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
 	if (check(cfg.ask)) return "ask";
@@ -954,7 +1089,10 @@ export default function (pi: ExtensionAPI) {
 				const lines = [
 					`default: ${cfg.defaultAction}`,
 					`readAllowCwd: ${cfg.implicit.readAllowCwd}`,
-				`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
+					`grepAllowCwd: ${cfg.implicit.grepAllowCwd}`,
+					`globAllowCwd: ${cfg.implicit.globAllowCwd}`,
+					`bashReadOnlyAllowCwd: ${cfg.implicit.bashReadOnlyAllowCwd}`,
+					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
 					`allow all edits (this session): ${allowAllEdits ? "ON" : "OFF"}`,
 					`allow (${cfg.allow.length}):`,
 					...cfg.allow.map((r) => implicitAllowSet.has(r) ? `  [implicit] ${r}` : `  - ${r}`),

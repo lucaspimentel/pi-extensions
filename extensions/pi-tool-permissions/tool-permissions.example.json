@@ -1,6 +1,9 @@
 {
   "defaultAction": "ask",
   "readAllowCwd": true,
+  "grepAllowCwd": true,
+  "globAllowCwd": true,
+  "bashReadOnlyAllowCwd": true,
   "toolDefaults": {
     "write": "ask"
   },

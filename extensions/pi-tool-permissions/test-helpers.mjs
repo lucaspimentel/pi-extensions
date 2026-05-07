@@ -66,6 +66,71 @@ export function isNoopCd(cmd, cwd) {
 	}
 }
 
+// ── Read-only bash helpers ────────────────────────────────────────
+
+export const READONLY_BASH_SAFE_ALWAYS = new Set([
+	"pwd", "echo", "printf", "date", "whoami", "id", "hostname",
+	"uname", "env", "printenv", "true", "false", "which", "type", "command",
+]);
+
+export const READONLY_BASH_WITH_PATHS = new Set([
+	"ls", "cat", "head", "tail", "wc", "file", "stat", "tree",
+	"du", "realpath", "readlink", "dirname", "basename",
+]);
+
+export function hasTopLevelOutputRedirect(cmd) {
+	let inSingle = false, inDouble = false;
+	for (let i = 0; i < cmd.length; i++) {
+		const ch = cmd[i];
+		if (ch === "\\" && !inSingle) { i++; continue; }
+		if (ch === "'" && !inDouble) { inSingle = !inSingle; continue; }
+		if (ch === '"' && !inSingle) { inDouble = !inDouble; continue; }
+		if (!inSingle && !inDouble && ch === ">") return true;
+	}
+	return false;
+}
+
+export function tokenizeSimple(cmd) {
+	const tokens = [];
+	let current = "", inSingle = false, inDouble = false, i = 0;
+	while (i < cmd.length) {
+		const ch = cmd[i];
+		if (ch === "\\" && !inSingle) {
+			if (i + 1 < cmd.length) { current += cmd[i + 1]; i += 2; } else i++;
+			continue;
+		}
+		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
+		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
+		if ((ch === " " || ch === "\t") && !inSingle && !inDouble) {
+			if (current) { tokens.push(current); current = ""; }
+			i++; continue;
+		}
+		current += ch; i++;
+	}
+	if (current) tokens.push(current);
+	return tokens;
+}
+
+export function isReadOnlyBashSubcommand(cmd, cwd) {
+	const trimmed = cmd.trim();
+	if (!trimmed) return false;
+	if (hasTopLevelOutputRedirect(trimmed)) return false;
+	const tokens = tokenizeSimple(trimmed);
+	if (tokens.length === 0) return false;
+	const cmdName = tokens[0].toLowerCase();
+	if (READONLY_BASH_SAFE_ALWAYS.has(cmdName)) return true;
+	if (READONLY_BASH_WITH_PATHS.has(cmdName)) {
+		const pathArgs = tokens.slice(1).filter((t) => t.length > 0 && !t.startsWith("-"));
+		if (pathArgs.length === 0) return true;
+		const cwdNorm = normalizePathSep(cwd).toLowerCase();
+		return pathArgs.every((arg) => {
+			const norm = normalizeMatchPath(arg, cwd).toLowerCase();
+			return norm === cwdNorm || norm.startsWith(cwdNorm + "/");
+		});
+	}
+	return false;
+}
+
 // ── toolDefaults helpers ──────────────────────────────────────────────────
 
 export function normalizeToolDefaultsKeys(td) {
@@ -211,6 +276,7 @@ export function splitTopLevelShell(cmd) {
 export function decide(cfg, toolName, input) {
 	const check = (list) => list.some((raw) => { const r = parseRule(raw); return r && ruleMatches(r, toolName, input); });
 	if (check(cfg.deny)) return "deny";
+	if (cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
 	if ((cfg.allowNoopCd !== false) && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
 	if (check(cfg.ask)) return "ask";
 	if (check(cfg.allow)) return "allow";
@@ -257,8 +323,15 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd) {
 	};
 
 	const readAllowCwd = project.readAllowCwd ?? user.readAllowCwd ?? true;
+	const grepAllowCwd = project.grepAllowCwd ?? user.grepAllowCwd ?? true;
+	const globAllowCwd = project.globAllowCwd ?? user.globAllowCwd ?? true;
+	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
-	const implicitAllow = readAllowCwd ? [`Read(${cwdGlobPattern(cwd)})`] : [];
+	const implicitAllow = [
+		...(readAllowCwd ? [`Read(${cwdGlobPattern(cwd)})`] : []),
+		...(grepAllowCwd ? [`Grep(${cwdGlobPattern(cwd)})`] : []),
+		...(globAllowCwd ? [`Glob(${cwdGlobPattern(cwd)})`] : []),
+	];
 
 	const implicitToolDefaults = {};
 	if (explicitToolDefaults["write"] === undefined) implicitToolDefaults["write"] = "ask";
@@ -270,14 +343,18 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd) {
 		toolDefaults: { ...implicitToolDefaults, ...explicitToolDefaults },
 		cwd,
 		allowNoopCd,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, allowNoopCd },
+		bashReadOnlyAllowCwd,
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, bashReadOnlyAllowCwd, allowNoopCd },
 	};
 }
 
-/** Build a minimal ResolvedConfig for decide/decideCompound tests. */
-export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, cwd = process.cwd() } = {}) {
+/** Build a minimal ResolvedConfig for decide/decideCompound tests.
+ * Note: bashReadOnlyAllowCwd defaults to false here to preserve existing test
+ * semantics. Pass bashReadOnlyAllowCwd: true explicitly when testing that feature.
+ */
+export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, cwd = process.cwd() } = {}) {
 	// Normalize toolDefault keys so decide() can look them up via normalizeTool()
-	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, cwd, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, allowNoopCd } };
+	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, bashReadOnlyAllowCwd, cwd, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, bashReadOnlyAllowCwd, allowNoopCd } };
 }
 
 // ── Test runner ───────────────────────────────────────────────────────────

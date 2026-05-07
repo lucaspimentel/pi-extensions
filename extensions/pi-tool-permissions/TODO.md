@@ -1,6 +1,6 @@
 # TODO
 
-- [ ] Auto-allow read-only tools (grep, ls, glob, etc.) in pwd and subdirectories recursively
+- [x] Auto-allow read-only tools (grep, ls, glob, etc.) in pwd and subdirectories recursively
   - Today only `Read` gets the implicit `Read(<cwd>/**)` allow rule via `readAllowCwd` (see `index.ts` lines ~95, 115, 155–176, and `cwdRecursiveGlob` at ~218–220).
   - Extend the same pattern to other read-only tools: `grep`, `glob`, and bash read-only commands (`ls`, `cat`, `head`, `tail`, `pwd`, `find` without `-delete/-exec`, `wc`, `file`, `stat`, etc.).
   - For `grep`/`glob` the match field is already `path` (defaults to cwd) — see `getMatchField` near line 333 and `pathRuleString` near line 634, so injecting `Grep(<cwd>/**)` / `Glob(<cwd>/**)` mirrors the existing Read injection.

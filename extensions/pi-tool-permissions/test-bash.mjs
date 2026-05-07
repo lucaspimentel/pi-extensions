@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import {
 	makeTestRunner, getMatchField, suggestRule,
 	splitTopLevelShell, decideCompound, decide, makeCfg, isNoopCd,
+	isReadOnlyBashSubcommand,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -262,5 +263,89 @@ const cdAndRm = decideCompound(compCfg, "bash", { command: "cd . && rm -rf /" })
 test("cd . && rm -rf / → deny",          cdAndRm.action, "deny");
 test("cd . is allowed individually",     cdAndRm.breakdown[0].action, "allow");
 test("rm is denied",                     cdAndRm.breakdown[1].action, "deny");
+
+section("isReadOnlyBashSubcommand — SAFE_ALWAYS commands");
+
+test("pwd → safe always",          isReadOnlyBashSubcommand("pwd", CWD), true);
+test("echo hi → safe always",      isReadOnlyBashSubcommand("echo hi", CWD), true);
+test("whoami → safe always",       isReadOnlyBashSubcommand("whoami", CWD), true);
+test("date -u → safe always",      isReadOnlyBashSubcommand("date -u", CWD), true);
+test("uname -a → safe always",     isReadOnlyBashSubcommand("uname -a", CWD), true);
+test("which node → safe always",   isReadOnlyBashSubcommand("which node", CWD), true);
+test("env → safe always",          isReadOnlyBashSubcommand("env", CWD), true);
+test("printf hi → safe always",    isReadOnlyBashSubcommand("printf hi", CWD), true);
+test("true → safe always",          isReadOnlyBashSubcommand("true", CWD), true);
+
+// Use WIN_CWD (C:/...) for WITH_PATHS tests: resolve() on Windows prepends a
+// drive letter to Unix-style paths (/home/...) which breaks cwd-prefix comparisons.
+section("isReadOnlyBashSubcommand — WITH_PATHS (paths inside cwd)");
+
+test("ls (bare) → true",                     isReadOnlyBashSubcommand("ls", WIN_CWD), true);
+test("ls -la → true (flag only)",            isReadOnlyBashSubcommand("ls -la", WIN_CWD), true);
+test("ls -la . → true (cwd itself)",         isReadOnlyBashSubcommand("ls -la .", WIN_CWD), true);
+test("ls ./src → true (child of cwd)",       isReadOnlyBashSubcommand("ls ./src", WIN_CWD), true);
+test("cat ./README.md → true",               isReadOnlyBashSubcommand("cat ./README.md", WIN_CWD), true);
+test("head -n 20 ./file.ts → true",          isReadOnlyBashSubcommand("head -n 20 ./file.ts", WIN_CWD), true);
+test("wc -l ./src/index.ts → true",          isReadOnlyBashSubcommand("wc -l ./src/index.ts", WIN_CWD), true);
+test("stat ./package.json → true",           isReadOnlyBashSubcommand("stat ./package.json", WIN_CWD), true);
+test("quoted path inside cwd → true",        isReadOnlyBashSubcommand(`cat "./has space.md"`, WIN_CWD), true);
+test("tail -f ./app.log → true",             isReadOnlyBashSubcommand("tail -f ./app.log", WIN_CWD), true);
+
+section("isReadOnlyBashSubcommand — rejected cases");
+
+test("rm → not in safe lists",               isReadOnlyBashSubcommand("rm -rf .", WIN_CWD), false);
+test("git → not in safe lists",              isReadOnlyBashSubcommand("git status", WIN_CWD), false);
+test("curl → not in safe lists",             isReadOnlyBashSubcommand("curl http://x.com", WIN_CWD), false);
+test("cat /etc/passwd → path outside cwd",   isReadOnlyBashSubcommand("cat /etc/passwd", WIN_CWD), false);
+test("ls .. → parent dir not inside cwd",    isReadOnlyBashSubcommand("ls ..", WIN_CWD), false);
+test("ls C:/Windows → path outside cwd",     isReadOnlyBashSubcommand("ls C:/Windows", WIN_CWD), false);
+test("echo foo > /tmp/out → redirect",       isReadOnlyBashSubcommand("echo foo > /tmp/out", WIN_CWD), false);
+test("cat secrets >> log → redirect",        isReadOnlyBashSubcommand("cat secrets >> log", WIN_CWD), false);
+test("empty string → false",                 isReadOnlyBashSubcommand("", WIN_CWD), false);
+test("unknown command → false",              isReadOnlyBashSubcommand("make build", WIN_CWD), false);
+
+section("decide — bashReadOnlyAllowCwd auto-allow");
+
+// Use WIN_CWD so relative path resolution works correctly on Windows
+const roStrictCfg = makeCfg({ defaultAction: "deny", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });
+test("pwd → allow (deny default)",                    decide(roStrictCfg, "bash", { command: "pwd" }), "allow");
+test("ls → allow (deny default)",                     decide(roStrictCfg, "bash", { command: "ls" }), "allow");
+test("echo hello → allow (safe always)",              decide(roStrictCfg, "bash", { command: "echo hello" }), "allow");
+test("cat ./README.md → allow",                       decide(roStrictCfg, "bash", { command: "cat ./README.md" }), "allow");
+test("cat /etc/passwd → deny (path outside cwd)",    decide(roStrictCfg, "bash", { command: "cat /etc/passwd" }), "deny");
+test("rm -rf . → deny (not in safe lists)",           decide(roStrictCfg, "bash", { command: "rm -rf ." }), "deny");
+
+const roOffCfg = makeCfg({ defaultAction: "deny", bashReadOnlyAllowCwd: false, cwd: WIN_CWD });
+test("pwd → deny when bashReadOnlyAllowCwd:false",    decide(roOffCfg, "bash", { command: "pwd" }), "deny");
+test("ls → deny when bashReadOnlyAllowCwd:false",     decide(roOffCfg, "bash", { command: "ls" }), "deny");
+
+const roDenyLsCfg = makeCfg({ deny: ["Bash(ls*)"], defaultAction: "allow", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });
+test("explicit deny wins over read-only allow",        decide(roDenyLsCfg, "bash", { command: "ls" }), "deny");
+test("explicit deny on pwd wins over read-only allow", decide(
+	makeCfg({ deny: ["Bash(pwd*)"], defaultAction: "allow", bashReadOnlyAllowCwd: true, cwd: WIN_CWD }),
+	"bash", { command: "pwd" }
+), "deny");
+
+// non-bash tool not affected
+test("read tool not affected by bashReadOnlyAllowCwd",  decide(roStrictCfg, "read", { path: "/etc/passwd" }), "deny");
+
+section("decideCompound — read-only bash subcommands");
+
+const roCompCfg = makeCfg({ defaultAction: "deny", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });
+
+const lsAndPwd = decideCompound(roCompCfg, "bash", { command: "ls && pwd" });
+test("ls && pwd → allow",              lsAndPwd.action, "allow");
+test("ls && pwd → isCompound true",   lsAndPwd.isCompound, true);
+test("ls && pwd → 2 parts",           lsAndPwd.breakdown.length, 2);
+test("ls part → allow",               lsAndPwd.breakdown[0].action, "allow");
+test("pwd part → allow",              lsAndPwd.breakdown[1].action, "allow");
+
+const lsAndRm = decideCompound(roCompCfg, "bash", { command: "ls && rm -rf ." });
+test("ls && rm -rf . → deny",         lsAndRm.action, "deny");
+test("ls subpart → allow",            lsAndRm.breakdown[0].action, "allow");
+test("rm subpart → deny (falls to defaultAction)", lsAndRm.breakdown[1].action, "deny");
+
+const lsAndGit = decideCompound(roCompCfg, "bash", { command: "ls && git status" });
+test("ls && git status → deny (git not in safe list)", lsAndGit.action, "deny");
 
 process.exit(summary() > 0 ? 1 : 0);

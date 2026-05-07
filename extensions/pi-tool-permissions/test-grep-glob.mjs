@@ -3,7 +3,7 @@
 import {
 	makeTestRunner, normalizeTool, normalizePathSep, normalizeMatchPath,
 	getMatchField, inputForMatching, suggestRule, compilePattern,
-	decide, makeCfg, cwdGlobPattern,
+	decide, makeCfg, cwdGlobPattern, loadConfigFromObjects,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -57,5 +57,46 @@ const cfg = makeCfg({ allow: [`Grep(${NORM_CWD}/**)`], deny: ["Grep(/etc/*)"], d
 test("decide: cwd grep → allow",      decide(cfg, "grep", noPath), "allow");
 test("decide: /etc grep → deny",      decide(cfg, "grep", etcPath), "deny");
 test("decide: outside grep → ask",    decide(cfg, "grep", outside), "ask");
+
+section("grepAllowCwd / globAllowCwd — implicit rules");
+
+const defaultCfg = loadConfigFromObjects({}, {}, CWD);
+test("default: Grep(<cwd>/**) in implicit allow",  defaultCfg.implicit.allow.includes(`Grep(${NORM_CWD}/**)`), true);
+test("default: Glob(<cwd>/**) in implicit allow",  defaultCfg.implicit.allow.includes(`Glob(${NORM_CWD}/**)`), true);
+test("default: Read(<cwd>/**) still present",      defaultCfg.implicit.allow.includes(`Read(${NORM_CWD}/**)`), true);
+test("default: implicit.grepAllowCwd is true",     defaultCfg.implicit.grepAllowCwd, true);
+test("default: implicit.globAllowCwd is true",     defaultCfg.implicit.globAllowCwd, true);
+
+const noGrepCfg = loadConfigFromObjects({}, { grepAllowCwd: false }, CWD);
+test("grepAllowCwd:false removes Grep from implicit",  noGrepCfg.implicit.allow.includes(`Grep(${NORM_CWD}/**)`), false);
+test("grepAllowCwd:false does not remove Glob",        noGrepCfg.implicit.allow.includes(`Glob(${NORM_CWD}/**)`), true);
+test("implicit.grepAllowCwd flag is false",            noGrepCfg.implicit.grepAllowCwd, false);
+
+const noGlobCfg = loadConfigFromObjects({}, { globAllowCwd: false }, CWD);
+test("globAllowCwd:false removes Glob from implicit",  noGlobCfg.implicit.allow.includes(`Glob(${NORM_CWD}/**)`), false);
+test("globAllowCwd:false does not remove Grep",        noGlobCfg.implicit.allow.includes(`Grep(${NORM_CWD}/**)`), true);
+test("implicit.globAllowCwd flag is false",            noGlobCfg.implicit.globAllowCwd, false);
+
+// user-level flag can also disable it
+const userNoGrepCfg = loadConfigFromObjects({ grepAllowCwd: false }, {}, CWD);
+test("user grepAllowCwd:false also disables Grep",     userNoGrepCfg.implicit.allow.includes(`Grep(${NORM_CWD}/**)`), false);
+
+// project overrides user
+const projRestoreGrepCfg = loadConfigFromObjects({ grepAllowCwd: false }, { grepAllowCwd: true }, CWD);
+test("project grepAllowCwd:true overrides user false",  projRestoreGrepCfg.implicit.allow.includes(`Grep(${NORM_CWD}/**)`), true);
+
+// end-to-end: decide uses the injected Grep rule
+const grepInput  = inputForMatching("grep", { pattern: "TODO" }, CWD);
+const globInput  = inputForMatching("glob", { pattern: "**/*.ts" }, CWD);
+
+test("grepAllowCwd:true + cwd grep → allow",          decide(defaultCfg, "grep", grepInput), "allow");
+test("globAllowCwd:true + cwd glob → allow",           decide(defaultCfg, "glob", globInput), "allow");
+
+test("grepAllowCwd:false + deny default → deny",       decide({ ...noGrepCfg, defaultAction: "deny" }, "grep", grepInput), "deny");
+test("globAllowCwd:false + deny default → deny",       decide({ ...noGlobCfg, defaultAction: "deny" }, "glob", globInput), "deny");
+
+// explicit deny still wins even when grepAllowCwd:true
+const grepDenyCfg = loadConfigFromObjects({}, { deny: [`Grep(${NORM_CWD}/**)`] }, CWD);
+test("explicit Grep deny wins over grepAllowCwd:true", decide(grepDenyCfg, "grep", grepInput), "deny");
 
 process.exit(summary() > 0 ? 1 : 0);

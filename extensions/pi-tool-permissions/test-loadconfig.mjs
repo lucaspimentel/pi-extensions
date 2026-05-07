@@ -10,6 +10,8 @@ const CWD = "C:/Users/Lucas.Pimentel/.pi";
 const NORM_CWD = normalizePathSep(CWD);
 const CWD_GLOB = cwdGlobPattern(CWD);
 const IMPLICIT_READ = `Read(${CWD_GLOB})`;
+const IMPLICIT_GREP = `Grep(${CWD_GLOB})`;
+const IMPLICIT_GLOB = `Glob(${CWD_GLOB})`;
 
 section("implicit defaults (empty config)");
 
@@ -18,7 +20,13 @@ test("defaultAction is ask",                    empty.defaultAction, "ask");
 test("implicit Read(<cwd>/**) prepended",       empty.allow[0], IMPLICIT_READ);
 test("implicit write→ask in toolDefaults",      empty.toolDefaults["write"], "ask");
 test("implicit.readAllowCwd is true",           empty.implicit.readAllowCwd, true);
-test("implicit.allow has exactly 1 entry",      empty.implicit.allow.length, 1);
+test("implicit.grepAllowCwd is true",           empty.implicit.grepAllowCwd, true);
+test("implicit.globAllowCwd is true",           empty.implicit.globAllowCwd, true);
+test("implicit.bashReadOnlyAllowCwd is true",   empty.implicit.bashReadOnlyAllowCwd, true);
+test("implicit.allow has 3 entries (Read+Grep+Glob)", empty.implicit.allow.length, 3);
+test("implicit.allow[0] is Read(<cwd>/**)",     empty.implicit.allow[0], IMPLICIT_READ);
+test("implicit.allow[1] is Grep(<cwd>/**)",     empty.implicit.allow[1], IMPLICIT_GREP);
+test("implicit.allow[2] is Glob(<cwd>/**)",     empty.implicit.allow[2], IMPLICIT_GLOB);
 test("implicit.allow[0] matches allow[0]",      empty.implicit.allow[0] === empty.allow[0], true);
 test("implicit.toolDefaults has write key",     "write" in empty.implicit.toolDefaults, true);
 test("no other implicit toolDefaults",          Object.keys(empty.implicit.toolDefaults).length, 1);
@@ -26,9 +34,11 @@ test("no other implicit toolDefaults",          Object.keys(empty.implicit.toolD
 section("readAllowCwd: false");
 
 const noAutoRead = loadConfigFromObjects({}, { readAllowCwd: false }, CWD);
-test("no implicit Read injected",               noAutoRead.allow.length, 0);
+test("no Read in allow when readAllowCwd:false", noAutoRead.implicit.allow.some(r => r.startsWith("Read(")), false);
+test("Grep still in allow when readAllowCwd:false", noAutoRead.implicit.allow.includes(IMPLICIT_GREP), true);
+test("Glob still in allow when readAllowCwd:false", noAutoRead.implicit.allow.includes(IMPLICIT_GLOB), true);
 test("implicit.readAllowCwd is false",          noAutoRead.implicit.readAllowCwd, false);
-test("implicit.allow is empty",                 noAutoRead.implicit.allow.length, 0);
+test("implicit.allow has 2 entries (Grep+Glob)", noAutoRead.implicit.allow.length, 2);
 test("write default still injected",            noAutoRead.toolDefaults["write"], "ask");
 
 section("explicit toolDefaults.write suppresses implicit");

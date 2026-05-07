@@ -42,7 +42,10 @@ See [`tool-permissions.example.json`](./tool-permissions.example.json) for a sta
   "deny":  ["Bash(rm -rf*)", "Write(.env*)"],
   "ask":   ["Bash(git push*)"],
   "toolDefaults": { "write": "ask" },
-  "readAllowCwd": true
+  "readAllowCwd": true,
+  "grepAllowCwd": true,
+  "globAllowCwd": true,
+  "bashReadOnlyAllowCwd": true
 }
 ```
 
@@ -177,6 +180,46 @@ Disable it per-project:
 Add extra allowed read roots with explicit rules:
 ```json
 { "allow": ["Read(/home/shared/docs/*)"] }
+```
+
+#### `grepAllowCwd` (default: `true`)
+
+Silently allows any `Grep` call whose search directory is inside the current working directory (recursively). This mirrors `readAllowCwd` for the `grep` tool.
+
+Disable it per-project:
+```json
+{ "grepAllowCwd": false }
+```
+
+#### `globAllowCwd` (default: `true`)
+
+Silently allows any `Glob` call whose search directory is inside the current working directory (recursively). This mirrors `readAllowCwd` for the `glob` tool.
+
+Disable it per-project:
+```json
+{ "globAllowCwd": false }
+```
+
+#### `bashReadOnlyAllowCwd` (default: `true`)
+
+Silently allows a curated set of read-only Bash subcommands when every filesystem argument they receive resolves inside the current working directory.
+
+Two tiers of safe commands:
+
+| Tier | Commands | Condition |
+| ---- | -------- | --------- |
+| **Safe always** — no filesystem access | `pwd`, `echo`, `printf`, `date`, `whoami`, `id`, `hostname`, `uname`, `env`, `printenv`, `true`, `false`, `which`, `type`, `command` | Always allowed |
+| **Safe with paths** — read-only filesystem access | `ls`, `cat`, `head`, `tail`, `wc`, `file`, `stat`, `tree`, `du`, `realpath`, `readlink`, `dirname`, `basename` | Allowed when all non-flag arguments resolve inside cwd |
+
+Commands containing output redirections (`>`, `>>`, `2>`, etc.) are **never** auto-allowed, even if the base command is in the safe list — e.g. `echo foo > /tmp/out` is denied.
+
+The compound-command splitter applies first, so each subcommand in a `&&` / `||` / `;` chain is evaluated independently. A chain like `ls && pwd` is fully auto-allowed; `ls && rm -rf .` is denied because `rm` is not on the safe list.
+
+Notably excluded from the safe list: `find` (has `-delete` / `-exec` flags), `grep`/`rg` (covered as dedicated tools), `git` (mixed read/write). Add explicit allow rules for these if needed.
+
+Disable per-project:
+```json
+{ "bashReadOnlyAllowCwd": false }
 ```
 
 #### `allowNoopCd` (default: `true`)
