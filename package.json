@@ -11,7 +11,8 @@
       "./extensions/plan-with-opus.ts",
       "./extensions/questionnaire.ts",
       "./extensions/web",
-      "./extensions/pi-tool-permissions"
+      "./extensions/pi-tool-permissions",
+      "./extensions/wt-tab-status"
     ],
     "skills": ["./skills"]
   },

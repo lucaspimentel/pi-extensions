@@ -1,0 +1,214 @@
+/**
+ * Windows Terminal Tab Status Extension
+ *
+ * Updates the Windows Terminal tab title (with a status glyph prefix) and
+ * taskbar progress indicator (via OSC 9;4) based on agent lifecycle state.
+ *
+ * States:
+ *   idle     →  "π - <session> - <cwd>"        OSC 9;4 state=0 (hide)
+ *   working  →  "⚙ π - <session> - <cwd>"      OSC 9;4 state=3 (indeterminate)
+ *   waiting  →  "❓ π - <session> - <cwd>"     OSC 9;4 state=4 (warning, yellow)
+ *   error    →  "✗ π - <session> - <cwd>"     OSC 9;4 state=2 (error, red)
+ *
+ * Detection:
+ *   working   – between agent_start and agent_end
+ *   waiting   – any time ctx.ui.confirm/select/input/editor has an open dialog
+ *               (covers permission prompts from pi-tool-permissions, /commands, etc.)
+ *   error     – tool_result with isError/error this turn; sticky until next agent_start
+ *   idle      – otherwise (and on session_shutdown)
+ *
+ * No-op when:
+ *   - WT_SESSION env var is not set (i.e. not running in Windows Terminal)
+ *   - ctx.hasUI is false (e.g. -p / JSON mode)
+ *
+ * Conflict note:
+ *   Don't use alongside examples/extensions/titlebar-spinner.ts — both write
+ *   to ctx.ui.setTitle on the same lifecycle events, last-writer-wins. This
+ *   extension is intended as a superset (the ⚙ glyph already conveys "working").
+ *
+ * Config: none. Glyphs and OSC codes are constants — edit this file to taste.
+ */
+
+import path from "node:path";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+
+// ── State model ─────────────────────────────────────────────────────────────
+
+export type State = "idle" | "working" | "waiting" | "error";
+
+export const STATE_GLYPHS: Record<State, string> = {
+	idle: "",
+	working: "⚙",
+	waiting: "❓",
+	error: "✗",
+};
+
+// OSC 9;4 progress states (Windows Terminal / ConEmu):
+//   0 = hide, 1 = normal, 2 = error (red), 3 = indeterminate (green pulse), 4 = warning (yellow)
+export const STATE_PROGRESS: Record<State, number> = {
+	idle: 0,
+	working: 3,
+	waiting: 4,
+	error: 2,
+};
+
+// ── Pure helpers (mirrored in test-helpers.mjs) ─────────────────────────────
+
+export function isWindowsTerminal(env: NodeJS.ProcessEnv = process.env): boolean {
+	return Boolean(env.WT_SESSION);
+}
+
+export function formatTitle(state: State, sessionName: string | null, cwdBase: string): string {
+	const glyph = STATE_GLYPHS[state];
+	const base = sessionName ? `π - ${sessionName} - ${cwdBase}` : `π - ${cwdBase}`;
+	return glyph ? `${glyph} ${base}` : base;
+}
+
+export function formatProgressSequence(state: State): string {
+	return `\x1b]9;4;${STATE_PROGRESS[state]};0\x07`;
+}
+
+/**
+ * Pure state reducer. Used by both the runtime and the state-machine test.
+ *
+ *   ctx contains:
+ *     state           – current visible state
+ *     dialogDepth     – number of nested dialogs open (>0 forces "waiting")
+ *     errorThisTurn   – set true by tool errors, cleared on agent_start
+ *     agentRunning    – between agent_start and agent_end
+ */
+export interface ReducerState {
+	state: State;
+	dialogDepth: number;
+	errorThisTurn: boolean;
+	agentRunning: boolean;
+}
+
+export type ReducerEvent =
+	| { type: "agent_start" }
+	| { type: "agent_end" }
+	| { type: "tool_error" }
+	| { type: "dialog_open" }
+	| { type: "dialog_close" }
+	| { type: "session_shutdown" };
+
+export function initialState(): ReducerState {
+	return { state: "idle", dialogDepth: 0, errorThisTurn: false, agentRunning: false };
+}
+
+export function reduce(s: ReducerState, ev: ReducerEvent): ReducerState {
+	const next: ReducerState = { ...s };
+	switch (ev.type) {
+		case "agent_start":
+			next.agentRunning = true;
+			next.errorThisTurn = false;
+			break;
+		case "agent_end":
+			next.agentRunning = false;
+			break;
+		case "tool_error":
+			next.errorThisTurn = true;
+			break;
+		case "dialog_open":
+			next.dialogDepth = s.dialogDepth + 1;
+			break;
+		case "dialog_close":
+			next.dialogDepth = Math.max(0, s.dialogDepth - 1);
+			break;
+		case "session_shutdown":
+			next.agentRunning = false;
+			next.errorThisTurn = false;
+			next.dialogDepth = 0;
+			break;
+	}
+	next.state = resolveState(next);
+	return next;
+}
+
+export function resolveState(s: Pick<ReducerState, "dialogDepth" | "errorThisTurn" | "agentRunning">): State {
+	if (s.dialogDepth > 0) return "waiting";
+	if (s.errorThisTurn) return "error";
+	if (s.agentRunning) return "working";
+	return "idle";
+}
+
+// ── Runtime: event handlers + ctx.ui wrapping ───────────────────────────────
+
+function getCwdBase(): string {
+	return path.basename(process.cwd());
+}
+
+export default function (pi: ExtensionAPI) {
+	if (!isWindowsTerminal()) return;
+
+	let s = initialState();
+	let lastApplied: State | null = null;
+	let uiWrapped = false;
+
+	function apply(ctx: ExtensionContext) {
+		if (!ctx.hasUI) return;
+		if (s.state === lastApplied) return;
+		lastApplied = s.state;
+
+		ctx.ui.setTitle(formatTitle(s.state, pi.getSessionName(), getCwdBase()));
+		process.stdout.write(formatProgressSequence(s.state));
+	}
+
+	function dispatch(ctx: ExtensionContext, ev: ReducerEvent) {
+		s = reduce(s, ev);
+		apply(ctx);
+	}
+
+	function wrapUiDialogs(ctx: ExtensionContext) {
+		if (uiWrapped || !ctx.hasUI) return;
+		uiWrapped = true;
+
+		const ui = ctx.ui as unknown as Record<string, unknown>;
+		for (const method of ["confirm", "select", "input", "editor"]) {
+			const orig = ui[method];
+			if (typeof orig !== "function") continue;
+			const fn = orig as (...args: unknown[]) => unknown;
+			ui[method] = (...args: unknown[]) => {
+				dispatch(ctx, { type: "dialog_open" });
+				let result: unknown;
+				try {
+					result = fn.apply(ctx.ui, args);
+				} catch (err) {
+					dispatch(ctx, { type: "dialog_close" });
+					throw err;
+				}
+				if (result && typeof (result as Promise<unknown>).then === "function") {
+					return (result as Promise<unknown>).finally(() => {
+						dispatch(ctx, { type: "dialog_close" });
+					});
+				}
+				dispatch(ctx, { type: "dialog_close" });
+				return result;
+			};
+		}
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		wrapUiDialogs(ctx);
+		apply(ctx);
+	});
+
+	pi.on("agent_start", async (_event, ctx) => {
+		wrapUiDialogs(ctx);
+		dispatch(ctx, { type: "agent_start" });
+	});
+
+	pi.on("agent_end", async (_event, ctx) => {
+		dispatch(ctx, { type: "agent_end" });
+	});
+
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.isError) {
+			dispatch(ctx, { type: "tool_error" });
+		}
+	});
+
+	pi.on("session_shutdown", async (_event, ctx) => {
+		dispatch(ctx, { type: "session_shutdown" });
+	});
+}
