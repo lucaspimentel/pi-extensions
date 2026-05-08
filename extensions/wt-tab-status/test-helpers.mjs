@@ -35,12 +35,12 @@ export function formatProgressSequence(state) {
 }
 
 export function initialState() {
-	return { state: "idle", dialogDepth: 0, errorThisTurn: false, agentRunning: false };
+	return { state: "idle", dialogDepth: 0, lastToolErrored: false, agentRunning: false };
 }
 
 export function resolveState(s) {
 	if (s.dialogDepth > 0) return "waiting";
-	if (s.errorThisTurn) return "error";
+	if (s.lastToolErrored) return "error";
 	if (s.agentRunning) return "working";
 	return "idle";
 }
@@ -50,13 +50,18 @@ export function reduce(s, ev) {
 	switch (ev.type) {
 		case "agent_start":
 			next.agentRunning = true;
-			next.errorThisTurn = false;
+			next.lastToolErrored = false;
 			break;
 		case "agent_end":
+			// Leave lastToolErrored alone — if the turn ended on a failing
+			// tool, we want ❌ to persist into idle until next turn.
 			next.agentRunning = false;
 			break;
 		case "tool_error":
-			next.errorThisTurn = true;
+			next.lastToolErrored = true;
+			break;
+		case "tool_success":
+			next.lastToolErrored = false;
 			break;
 		case "dialog_open":
 			next.dialogDepth = s.dialogDepth + 1;
@@ -66,7 +71,7 @@ export function reduce(s, ev) {
 			break;
 		case "session_shutdown":
 			next.agentRunning = false;
-			next.errorThisTurn = false;
+			next.lastToolErrored = false;
 			next.dialogDepth = 0;
 			break;
 		default:

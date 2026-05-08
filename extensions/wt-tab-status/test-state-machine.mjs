@@ -28,7 +28,7 @@ section("initialState");
 
 test("starts idle", initialState().state, "idle");
 test("dialogDepth = 0", initialState().dialogDepth, 0);
-test("errorThisTurn = false", initialState().errorThisTurn, false);
+test("lastToolErrored = false", initialState().lastToolErrored, false);
 test("agentRunning = false", initialState().agentRunning, false);
 
 // ── Basic transitions ──────────────────────────────────────────────────────
@@ -79,19 +79,40 @@ test("dialog over idle agent → waiting then idle",
 
 // ── Error state ────────────────────────────────────────────────────────────
 
-section("tool_error (sticky)");
+section("tool_error / tool_success");
 
 test("tool_error during working → error",
 	run([{ type: "agent_start" }, { type: "tool_error" }]).state,
 	"error");
-test("error sticks through agent_end (turn ended in error)",
+test("error sticks through agent_end (turn ended on failing tool)",
 	run([
 		{ type: "agent_start" },
 		{ type: "tool_error" },
 		{ type: "agent_end" },
 	]).state,
 	"error");
-test("agent_start clears prior error",
+test("tool_success clears error mid-turn (agent recovered)",
+	run([
+		{ type: "agent_start" },
+		{ type: "tool_error" },
+		{ type: "tool_success" },
+	]).state,
+	"working");
+test("recovered turn ends idle (no ❌ stuck after agent_end)",
+	run([
+		{ type: "agent_start" },
+		{ type: "tool_error" },
+		{ type: "tool_success" },
+		{ type: "agent_end" },
+	]).state,
+	"idle");
+test("tool_success when no error is a no-op (stays working)",
+	run([
+		{ type: "agent_start" },
+		{ type: "tool_success" },
+	]).state,
+	"working");
+test("agent_start clears prior error from last turn",
 	run([
 		{ type: "agent_start" },
 		{ type: "tool_error" },
@@ -106,7 +127,7 @@ test("dialog over error → waiting",
 		{ type: "dialog_open" },
 	]).state,
 	"waiting");
-test("closing dialog after error returns to error (still working)",
+test("closing dialog after error returns to error (no tool_success yet)",
 	run([
 		{ type: "agent_start" },
 		{ type: "tool_error" },
@@ -171,14 +192,23 @@ test("idle → working → waiting (permission) → working → idle",
 	]).join(","),
 	"working,waiting,working,idle");
 
-test("idle → working → error → cleared on next turn",
+test("turn ends on failing tool: ❌ persists until next agent_start",
 	trace([
 		{ type: "agent_start" },     // working
 		{ type: "tool_error" },      // error
-		{ type: "agent_end" },       // error (sticky)
+		{ type: "agent_end" },       // error (still ❌ on idle tab)
 		{ type: "agent_start" },     // working (cleared)
 		{ type: "agent_end" },       // idle
 	]).join(","),
 	"working,error,error,working,idle");
+
+test("agent recovers mid-turn: error → working → idle (no ❌ sticks)",
+	trace([
+		{ type: "agent_start" },     // working
+		{ type: "tool_error" },      // error  (failing tool)
+		{ type: "tool_success" },    // working (next tool worked)
+		{ type: "agent_end" },       // idle
+	]).join(","),
+	"working,error,working,idle");
 
 process.exit(summary() === 0 ? 0 : 1);

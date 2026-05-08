@@ -22,7 +22,12 @@
  *               (confirm / select / input / editor / custom — covers permission
  *               prompts from pi-tool-permissions, /commands, custom wizards
  *               like the questionnaire tool, etc.)
- *   error     – tool_result with isError/error this turn; sticky until next agent_start
+ *   error     – last tool_result was an error and we haven't recovered.
+ *               Cleared by the next successful tool_result (agent worked
+ *               around the failure), agent_start (new turn), or
+ *               session_shutdown. Persists through agent_end — so if a
+ *               turn ends on a failing tool, the ❌ stays visible on the
+ *               idle tab until you send the next message.
  *   idle      – otherwise (and on session_shutdown)
  *
  * No-op when:
@@ -89,15 +94,20 @@ export function formatProgressSequence(state: State): string {
  * Pure state reducer. Used by both the runtime and the state-machine test.
  *
  *   ctx contains:
- *     state           – current visible state
- *     dialogDepth     – number of nested dialogs open (>0 forces "waiting")
- *     errorThisTurn   – set true by tool errors, cleared on agent_start
- *     agentRunning    – between agent_start and agent_end
+ *     state            – current visible state
+ *     dialogDepth      – number of nested dialogs open (>0 forces "waiting")
+ *     lastToolErrored  – set by tool_error; cleared by tool_success,
+ *                        agent_start, session_shutdown (NOT agent_end)
+ *     agentRunning     – between agent_start and agent_end
  */
 export interface ReducerState {
 	state: State;
 	dialogDepth: number;
-	errorThisTurn: boolean;
+	/** True iff the *most recent* tool_result was an error and we haven't
+	 *  recovered. Cleared by tool_success, agent_start, or session_shutdown.
+	 *  Deliberately NOT cleared by agent_end — a turn that ends on a failing
+	 *  tool leaves ❌ visible until the next agent_start. */
+	lastToolErrored: boolean;
 	agentRunning: boolean;
 }
 
@@ -105,12 +115,13 @@ export type ReducerEvent =
 	| { type: "agent_start" }
 	| { type: "agent_end" }
 	| { type: "tool_error" }
+	| { type: "tool_success" }
 	| { type: "dialog_open" }
 	| { type: "dialog_close" }
 	| { type: "session_shutdown" };
 
 export function initialState(): ReducerState {
-	return { state: "idle", dialogDepth: 0, errorThisTurn: false, agentRunning: false };
+	return { state: "idle", dialogDepth: 0, lastToolErrored: false, agentRunning: false };
 }
 
 export function reduce(s: ReducerState, ev: ReducerEvent): ReducerState {
@@ -118,13 +129,18 @@ export function reduce(s: ReducerState, ev: ReducerEvent): ReducerState {
 	switch (ev.type) {
 		case "agent_start":
 			next.agentRunning = true;
-			next.errorThisTurn = false;
+			next.lastToolErrored = false;
 			break;
 		case "agent_end":
+			// Note: leave lastToolErrored alone — if the turn ended on a
+			// failing tool, we want ❌ to persist into idle until next turn.
 			next.agentRunning = false;
 			break;
 		case "tool_error":
-			next.errorThisTurn = true;
+			next.lastToolErrored = true;
+			break;
+		case "tool_success":
+			next.lastToolErrored = false;
 			break;
 		case "dialog_open":
 			next.dialogDepth = s.dialogDepth + 1;
@@ -134,7 +150,7 @@ export function reduce(s: ReducerState, ev: ReducerEvent): ReducerState {
 			break;
 		case "session_shutdown":
 			next.agentRunning = false;
-			next.errorThisTurn = false;
+			next.lastToolErrored = false;
 			next.dialogDepth = 0;
 			break;
 	}
@@ -142,9 +158,9 @@ export function reduce(s: ReducerState, ev: ReducerEvent): ReducerState {
 	return next;
 }
 
-export function resolveState(s: Pick<ReducerState, "dialogDepth" | "errorThisTurn" | "agentRunning">): State {
+export function resolveState(s: Pick<ReducerState, "dialogDepth" | "lastToolErrored" | "agentRunning">): State {
 	if (s.dialogDepth > 0) return "waiting";
-	if (s.errorThisTurn) return "error";
+	if (s.lastToolErrored) return "error";
 	if (s.agentRunning) return "working";
 	return "idle";
 }
@@ -220,9 +236,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
-		if (event.isError) {
-			dispatch(ctx, { type: "tool_error" });
-		}
+		dispatch(ctx, { type: event.isError ? "tool_error" : "tool_success" });
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
