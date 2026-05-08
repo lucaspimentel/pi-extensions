@@ -11,6 +11,8 @@ export const STATE_GLYPHS = {
 	error: "❌",
 };
 
+export const WRAPPED_UI_METHODS = ["confirm", "select", "input", "editor", "custom"];
+
 export const STATE_PROGRESS = {
 	idle: 0,
 	working: 3,

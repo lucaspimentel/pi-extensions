@@ -1,7 +1,7 @@
 // run: node test-format.mjs
 
 import {
-	formatTitle, formatProgressSequence, isWindowsTerminal, makeTestRunner,
+	formatTitle, formatProgressSequence, isWindowsTerminal, WRAPPED_UI_METHODS, makeTestRunner,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -80,5 +80,20 @@ test("false when WT_SESSION is empty string",
 test("ignores other env vars",
 	isWindowsTerminal({ TERM_PROGRAM: "WindowsTerminal" }),
 	false);
+
+// ── WRAPPED_UI_METHODS ─ dialog-detection coverage ───────────────────────
+// These are the ctx.ui.* methods wrapUiDialogs() intercepts to drive the
+// "waiting" state. Forgetting one means the user-blocking dialog silently
+// keeps the spinner going instead of switching to ❓.
+
+section("WRAPPED_UI_METHODS — dialog detection list");
+
+const wrapped = new Set(WRAPPED_UI_METHODS);
+test("includes confirm", wrapped.has("confirm"), true);
+test("includes select",  wrapped.has("select"),  true);
+test("includes input",   wrapped.has("input"),   true);
+test("includes editor",  wrapped.has("editor"),  true);
+test("includes custom (e.g. questionnaire)", wrapped.has("custom"), true);
+test("no duplicates", wrapped.size, WRAPPED_UI_METHODS.length);
 
 process.exit(summary() === 0 ? 0 : 1);

@@ -18,8 +18,10 @@
  *
  * Detection:
  *   working   – between agent_start and agent_end
- *   waiting   – any time ctx.ui.confirm/select/input/editor has an open dialog
- *               (covers permission prompts from pi-tool-permissions, /commands, etc.)
+ *   waiting   – any time a blocking ctx.ui.* call is open
+ *               (confirm / select / input / editor / custom — covers permission
+ *               prompts from pi-tool-permissions, /commands, custom wizards
+ *               like the questionnaire tool, etc.)
  *   error     – tool_result with isError/error this turn; sticky until next agent_start
  *   idle      – otherwise (and on session_shutdown)
  *
@@ -59,6 +61,13 @@ export const STATE_PROGRESS: Record<State, number> = {
 	waiting: 0,
 	error: 0,
 };
+
+// ── Wrapped UI methods (mirrored in test-helpers.mjs) ───────────────────────
+//
+// Any blocking dialog-shaped method on ctx.ui that we want to count as the
+// agent "waiting on the user" must be listed here. wrapUiDialogs() intercepts
+// each one to dispatch dialog_open / dialog_close around the call.
+export const WRAPPED_UI_METHODS = ["confirm", "select", "input", "editor", "custom"] as const;
 
 // ── Pure helpers (mirrored in test-helpers.mjs) ─────────────────────────────
 
@@ -172,7 +181,7 @@ export default function (pi: ExtensionAPI) {
 		uiWrapped = true;
 
 		const ui = ctx.ui as unknown as Record<string, unknown>;
-		for (const method of ["confirm", "select", "input", "editor"]) {
+		for (const method of WRAPPED_UI_METHODS) {
 			const orig = ui[method];
 			if (typeof orig !== "function") continue;
 			const fn = orig as (...args: unknown[]) => unknown;
