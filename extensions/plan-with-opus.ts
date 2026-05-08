@@ -8,7 +8,7 @@
  * Tweak PLANNER_PROVIDER / PLANNER_MODEL_ID below if Anthropic renames the model.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // Adjust to whatever Opus id is registered in your pi build.
 // Run `pi --list-models | grep opus` to see what's available.

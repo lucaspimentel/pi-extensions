@@ -18,8 +18,8 @@
  *   cd ~/.pi/agent/extensions/web && npm install
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { StringEnum } from "@mariozechner/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { convert as htmlToText } from "html-to-text";
 import { Type } from "typebox";
 

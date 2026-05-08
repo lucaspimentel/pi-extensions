@@ -9,10 +9,10 @@
  * Colors use the Campbell scheme, matching ~/.claude/statusline-command.sh.
  */
 
-import type { AssistantMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { SessionEntry } from "@mariozechner/pi-coding-agent/dist/core/session-manager.js";
-import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent/dist/core/session-manager.js";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { execFile } from "child_process";
 import * as os from "os";
 
