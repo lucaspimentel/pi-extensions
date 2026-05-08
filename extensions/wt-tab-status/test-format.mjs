@@ -10,33 +10,33 @@ const { test, section, summary } = makeTestRunner();
 
 section("formatTitle — with session name");
 
-test("idle has no glyph",
+test("idle has ✅ prefix",
 	formatTitle("idle", "my-session", "myrepo"),
-	"π - my-session - myrepo");
-test("working has ⚙ prefix",
+	"✅ π - my-session - myrepo");
+test("working has no glyph (spinner conveys it)",
 	formatTitle("working", "my-session", "myrepo"),
-	"⚙ π - my-session - myrepo");
+	"π - my-session - myrepo");
 test("waiting has ❓ prefix",
 	formatTitle("waiting", "my-session", "myrepo"),
 	"❓ π - my-session - myrepo");
-test("error has ✗ prefix",
+test("error has ❌ prefix",
 	formatTitle("error", "my-session", "myrepo"),
-	"✗ π - my-session - myrepo");
+	"❌ π - my-session - myrepo");
 
 section("formatTitle — without session name");
 
 test("idle (null session)",
 	formatTitle("idle", null, "myrepo"),
-	"π - myrepo");
+	"✅ π - myrepo");
 test("working (null session)",
 	formatTitle("working", null, "myrepo"),
-	"⚙ π - myrepo");
+	"π - myrepo");
 test("waiting (null session)",
 	formatTitle("waiting", null, "myrepo"),
 	"❓ π - myrepo");
 test("error (null session)",
 	formatTitle("error", null, "myrepo"),
-	"✗ π - myrepo");
+	"❌ π - myrepo");
 
 // ── formatProgressSequence ─────────────────────────────────────────────────
 
@@ -45,24 +45,24 @@ section("formatProgressSequence — OSC 9;4");
 test("idle → state=0 (hide)",
 	formatProgressSequence("idle"),
 	"\x1b]9;4;0;0\x07");
-test("working → state=3 (indeterminate)",
+test("working → state=3 (indeterminate spinner)",
 	formatProgressSequence("working"),
 	"\x1b]9;4;3;0\x07");
-test("waiting → state=4 (warning)",
+test("waiting → state=0 (hide)",
 	formatProgressSequence("waiting"),
-	"\x1b]9;4;4;0\x07");
-test("error → state=2 (error)",
+	"\x1b]9;4;0;0\x07");
+test("error → state=0 (hide)",
 	formatProgressSequence("error"),
-	"\x1b]9;4;2;0\x07");
+	"\x1b]9;4;0;0\x07");
 
-// Sanity: each state produces a distinct sequence
+// Only "working" gets a non-hide progress sequence; the other three all hide.
 const seqs = new Set([
 	formatProgressSequence("idle"),
 	formatProgressSequence("working"),
 	formatProgressSequence("waiting"),
 	formatProgressSequence("error"),
 ]);
-test("all four states produce distinct sequences", seqs.size, 4);
+test("only working differs from hide (2 distinct sequences)", seqs.size, 2);
 
 // ── isWindowsTerminal ──────────────────────────────────────────────────────
 

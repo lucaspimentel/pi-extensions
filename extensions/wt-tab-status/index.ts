@@ -2,13 +2,19 @@
  * Windows Terminal Tab Status Extension
  *
  * Updates the Windows Terminal tab title (with a status glyph prefix) and
- * taskbar progress indicator (via OSC 9;4) based on agent lifecycle state.
+ * taskbar/tab spinner (via OSC 9;4) based on agent lifecycle state.
  *
  * States:
- *   idle     →  "π - <session> - <cwd>"        OSC 9;4 state=0 (hide)
- *   working  →  "⚙ π - <session> - <cwd>"      OSC 9;4 state=3 (indeterminate)
- *   waiting  →  "❓ π - <session> - <cwd>"     OSC 9;4 state=4 (warning, yellow)
- *   error    →  "✗ π - <session> - <cwd>"     OSC 9;4 state=2 (error, red)
+ *   idle     →  "✅ π - <session> - <cwd>"     OSC 9;4 state=0 (hide)
+ *   working  →  "π - <session> - <cwd>"        OSC 9;4 state=3 (indeterminate spinner)
+ *   waiting  →  "❓ π - <session> - <cwd>"     OSC 9;4 state=0 (hide)
+ *   error    →  "❌ π - <session> - <cwd>"    OSC 9;4 state=0 (hide)
+ *
+ * Note: Windows Terminal effectively only renders "Indeterminate" (spinner) and
+ * "Hide" usefully for our purposes — "Normal" shows no indicator and "Error" /
+ * "Warning" weren't visually distinct in testing — so we only spin while working.
+ * That spinner is enough to signal "working", so the working tab title carries
+ * no extra glyph; idle/waiting/error are still distinguished by glyph.
  *
  * Detection:
  *   working   – between agent_start and agent_end
@@ -37,19 +43,21 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 export type State = "idle" | "working" | "waiting" | "error";
 
 export const STATE_GLYPHS: Record<State, string> = {
-	idle: "",
-	working: "⚙",
+	idle: "✅",
+	working: "",
 	waiting: "❓",
-	error: "✗",
+	error: "❌",
 };
 
 // OSC 9;4 progress states (Windows Terminal / ConEmu):
-//   0 = hide, 1 = normal, 2 = error (red), 3 = indeterminate (green pulse), 4 = warning (yellow)
+//   0 = hide, 1 = normal, 2 = error, 3 = indeterminate (spinner), 4 = warning
+// In practice WT only renders Hide vs. Indeterminate distinctly, so we use the
+// spinner only for "working" and hide otherwise.
 export const STATE_PROGRESS: Record<State, number> = {
 	idle: 0,
 	working: 3,
-	waiting: 4,
-	error: 2,
+	waiting: 0,
+	error: 0,
 };
 
 // ── Pure helpers (mirrored in test-helpers.mjs) ─────────────────────────────

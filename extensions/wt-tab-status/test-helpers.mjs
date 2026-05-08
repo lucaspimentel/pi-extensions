@@ -5,17 +5,17 @@
 // ── State model (mirror of index.ts) ─────────────────────────────────────────
 
 export const STATE_GLYPHS = {
-	idle: "",
-	working: "⚙",
+	idle: "✅",
+	working: "",
 	waiting: "❓",
-	error: "✗",
+	error: "❌",
 };
 
 export const STATE_PROGRESS = {
 	idle: 0,
 	working: 3,
-	waiting: 4,
-	error: 2,
+	waiting: 0,
+	error: 0,
 };
 
 export function isWindowsTerminal(env = process.env) {
