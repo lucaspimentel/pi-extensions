@@ -59,6 +59,15 @@
   - Consider whether this should be implemented as implicit exact `Read(...)` rules discovered from registered skill metadata, a constrained glob such as `~/.pi/agent/**/skills/**/SKILL.md`, or both Windows/Unix-normalized variants.
   - Document the behavior and add tests in `test-loadconfig.mjs` / `test-read-write-edit.mjs` (and sync `test-helpers.mjs`) covering skill files allowed while unrelated files in the same tree remain subject to normal permissions.
 
+- [ ] Auto-allow the built-in `Ls` tool in pwd and subdirectories recursively
+  - Gap in the previously-completed first item: that task said "grep, ls, glob, etc." but only `Read`/`Grep`/`Glob` got an implicit `<Tool>(<cwd>/**)` injection. The pi built-in `Ls` tool (distinct from the Bash `ls` subcommand handled via `READONLY_BASH_WITH_PATHS` in `index.ts` ~329) currently falls through to the default `ask` action.
+  - Reference: `loadConfig()` in `index.ts` ~191–200 pushes `Read(${cwdGlobPattern(cwd)})`, `Grep(...)`, `Glob(...)` into `implicitAllow` — add `Ls(${cwdGlobPattern(cwd)})` the same way.
+  - Add a `lsAllowCwd?: boolean` config key (default `true`) on `Config` (~107–119) and `LoadedConfig` (~133–142); resolve it in `loadConfig()` (~186–190) and surface it on `cfg.implicit` (~217). Mirror the `grepAllowCwd`/`globAllowCwd` shape exactly.
+  - Update the `/permissions list` output (~1097–1100) to include `lsAllowCwd: ${cfg.implicit.lsAllowCwd}`.
+  - Verify `Ls` uses a `path` match field (or whatever field `getMatchField`/`pathRuleString` already returns for it near lines 333 / 634) so `Ls(<cwd>/**)` actually matches built-in `ls` calls; if not, extend those helpers.
+  - Document in the header block (`index.ts` ~37–54), `README.md`, and `tool-permissions.example.json`.
+  - Add tests in `test-loadconfig.mjs` (implicit rule presence + opt-out) and a small case in `test-rules-and-decide.mjs` or a new `test-readonly-cwd.mjs` confirming an `Ls` call inside cwd is auto-allowed and one outside still asks/denies. Sync `test-helpers.mjs` and wire into `run-all.mjs`.
+
 - [ ] Improve multi-step Bash breakdown indicators and current-step marker placement
   - In `index.ts`, the compound Bash permission dialog builds `breakdownLines` in the `isCompound` prompt loop and currently renders status icons like `[✓]`, `[?]`, `[✗]` plus a trailing current-step marker (`◄`) after the command text.
   - Move the current-step marker to the left side of the line so the active step is visible before long command text, e.g. `▶ [?] git commit ...` or `👉 [?] git commit ...`.
