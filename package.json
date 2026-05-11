@@ -12,7 +12,8 @@
       "./extensions/questionnaire.ts",
       "./extensions/web",
       "./extensions/pi-tool-permissions",
-      "./extensions/wt-tab-status"
+      "./extensions/wt-tab-status",
+      "./extensions/external-editor-fix"
     ],
     "skills": ["./skills"]
   },

@@ -37,6 +37,7 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 - **questionnaire** – interactive questionnaire tool
 - **web** – fetch & convert web pages (depends on `html-to-text`)
 - **pi-tool-permissions** – Claude Code-style allow/deny/ask permissions
+- **external-editor-fix** – fix Ctrl+G external editor on Windows / Git Bash by adding wait flags for GUI editors
 
 ### Skills
 
