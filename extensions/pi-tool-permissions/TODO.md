@@ -68,6 +68,12 @@
   - Document in the header block (`index.ts` ~37–54), `README.md`, and `tool-permissions.example.json`.
   - Add tests in `test-loadconfig.mjs` (implicit rule presence + opt-out) and a small case in `test-rules-and-decide.mjs` or a new `test-readonly-cwd.mjs` confirming an `Ls` call inside cwd is auto-allowed and one outside still asks/denies. Sync `test-helpers.mjs` and wire into `run-all.mjs`.
 
+- [ ] When saving an "always allow/deny" rule, let the user choose project-level or user-level
+  - In `index.ts`, `addRule()` (~1061–1066) always writes to the project config via `saveProjectConfig(cwd, ...)`. When the user picks `Allow always (save rule)` or `Deny always (save rule)` (~963–986, ~1008–1041), add a follow-up prompt asking where to save: `Project (.pi-tool-permissions.json in cwd)` or `User (~/.pi/agent/pi-tool-permissions.json)`.
+  - Add a `saveUserRule(action, rule)` helper mirroring `addRule` but reading/writing `USER_CONFIG` (`~146`), alongside the existing `loadProjectConfigRaw` / `saveProjectConfig` helpers.
+  - All four "always" call-sites invoke `addRule(ctx.cwd, ...)` — update each to branch on the user's scope choice; keep the project path as the default so existing behavior is unchanged if the prompt is skipped somehow.
+  - Add tests in `test-rules-and-decide.mjs` covering: rule saved to project config (existing behavior), rule saved to user config, and subsequent `loadConfig()` merging both.
+
 - [ ] Improve multi-step Bash breakdown indicators and current-step marker placement
   - In `index.ts`, the compound Bash permission dialog builds `breakdownLines` in the `isCompound` prompt loop and currently renders status icons like `[✓]`, `[?]`, `[✗]` plus a trailing current-step marker (`◄`) after the command text.
   - Move the current-step marker to the left side of the line so the active step is visible before long command text, e.g. `▶ [?] git commit ...` or `👉 [?] git commit ...`.
