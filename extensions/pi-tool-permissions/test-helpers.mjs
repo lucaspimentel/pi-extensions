@@ -177,10 +177,19 @@ export function getMatchField(toolName, input) {
 	try { return JSON.stringify(input); } catch { return ""; }
 }
 
-export function ruleMatches(rule, toolName, input) {
+const PATH_TOOLS = new Set(["read", "write", "edit", "grep", "glob"]);
+
+export function ruleMatches(rule, toolName, input, cwd) {
 	if (rule.tool !== normalizeTool(toolName)) return false;
 	if (!rule.regex) return true;
-	return rule.regex.test(getMatchField(toolName, input));
+	const field = getMatchField(toolName, input);
+	// For path-based tools, also test the cwd-resolved absolute path so that the
+	// implicit Read(<cwd>/**) rule matches relative calls like Read(./TODO.md).
+	if (cwd && field && PATH_TOOLS.has(normalizeTool(toolName))) {
+		const resolved = normalizeMatchPath(field, cwd);
+		if (resolved !== field && rule.regex.test(resolved)) return true;
+	}
+	return rule.regex.test(field);
 }
 
 export function inputForMatching(toolName, input, cwd) {
@@ -274,7 +283,8 @@ export function splitTopLevelShell(cmd) {
 // ── Decision engine ───────────────────────────────────────────────────────
 
 export function decide(cfg, toolName, input) {
-	const check = (list) => list.some((raw) => { const r = parseRule(raw); return r && ruleMatches(r, toolName, input); });
+	const cwd = cfg.cwd;
+	const check = (list) => list.some((raw) => { const r = parseRule(raw); return r && ruleMatches(r, toolName, input, cwd); });
 	if (check(cfg.deny)) return "deny";
 	if (cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
 	if ((cfg.allowNoopCd !== false) && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";

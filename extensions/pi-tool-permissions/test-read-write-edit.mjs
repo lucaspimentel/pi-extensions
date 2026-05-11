@@ -95,4 +95,33 @@ const allowOutputCfg = makeCfg({
 const outputWrite = inputForMatching("write", { path: "./output/result.json" }, CWD);
 test("Write(./output/*) allow beats toolDefaults ask", decide(allowOutputCfg, "write", { path: "./output/result.json" }), "allow");
 
+section("decide — implicit Read(<cwd>/**) matches relative paths (regression)");
+
+// makeCfg doesn't inject implicit rules; supply the cwd glob explicitly to mirror what loadConfig does.
+const implicitReadCfg = makeCfg({
+	allow:         [`Read(${CWD_PATTERN})`],
+	defaultAction: "ask",
+	cwd:           CWD,
+});
+
+test("Read(./TODO.md) → allow (dot-slash relative)",
+	decide(implicitReadCfg, "read", { path: "./TODO.md" }), "allow");
+test("Read(TODO.md) → allow (bare relative)",
+	decide(implicitReadCfg, "read", { path: "TODO.md" }), "allow");
+test("Read(src/foo.ts) → allow (nested relative)",
+	decide(implicitReadCfg, "read", { path: "src/foo.ts" }), "allow");
+test("Read(/etc/passwd) → ask (outside cwd, not allowed)",
+	decide(implicitReadCfg, "read", { path: "/etc/passwd" }), "ask");
+
+// Relative deny rules must still work even with the dual-candidate matching
+const relDenyCfg = makeCfg({
+	deny:          ["Write(.env*)"],
+	defaultAction: "allow",
+	cwd:           CWD,
+});
+test("Write(.env.local) → deny (relative deny rule still works)",
+	decide(relDenyCfg, "write", { path: ".env.local" }), "deny");
+test("Write(./src/index.ts) → allow (relative deny rule doesn't over-match)",
+	decide(relDenyCfg, "write", { path: "./src/index.ts" }), "allow");
+
 process.exit(summary() > 0 ? 1 : 0);

@@ -1,7 +1,8 @@
 // run: node test-rules-and-decide.mjs
 
 import {
-	makeTestRunner, compilePattern, parseRule, decide, decideCompound, makeCfg,
+	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideCompound, makeCfg,
+	cwdGlobPattern, normalizePathSep,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -161,5 +162,23 @@ test("non-bash: empty breakdown",        dcRead.breakdown.length, 0);
 
 const dcWrite = decideCompound(makeCfg({ toolDefaults: { write: "ask" } }), "write", { path: "./f.ts" });
 test("non-bash write: uses toolDefaults", dcWrite.action, "ask");
+
+section("ruleMatches — cwd-resolved candidate");
+
+const RM_CWD = "C:/Users/Lucas/project";
+const rmRule = parseRule(`Read(${cwdGlobPattern(RM_CWD)})`);
+
+test("ruleMatches: absolute path inside cwd matches with cwd",
+	ruleMatches(rmRule, "read", { path: RM_CWD + "/foo.ts" }, RM_CWD), true);
+test("ruleMatches: dot-slash relative inside cwd matches with cwd",
+	ruleMatches(rmRule, "read", { path: "./foo.ts" }, RM_CWD), true);
+test("ruleMatches: bare relative inside cwd matches with cwd",
+	ruleMatches(rmRule, "read", { path: "foo.ts" }, RM_CWD), true);
+test("ruleMatches: relative outside cwd does NOT match",
+	ruleMatches(rmRule, "read", { path: "../other/foo.ts" }, RM_CWD), false);
+test("ruleMatches: absolute outside cwd does NOT match",
+	ruleMatches(rmRule, "read", { path: "/etc/passwd" }, RM_CWD), false);
+test("ruleMatches: no cwd — relative path does not match absolute rule",
+	ruleMatches(rmRule, "read", { path: "./foo.ts" }), false);
 
 process.exit(summary() > 0 ? 1 : 0);

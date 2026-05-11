@@ -494,10 +494,22 @@ function getMatchField(toolName: string, input: Record<string, unknown>): string
 	}
 }
 
-function ruleMatches(rule: ParsedRule, toolName: string, input: Record<string, unknown>): boolean {
+function isPathTool(toolName: string): boolean {
+	const t = normalizeTool(toolName);
+	return t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob";
+}
+
+function ruleMatches(rule: ParsedRule, toolName: string, input: Record<string, unknown>, cwd?: string): boolean {
 	if (rule.tool !== normalizeTool(toolName)) return false;
 	if (!rule.regex) return true;
 	const field = getMatchField(toolName, input);
+	// For path-based tools, also test the cwd-resolved absolute path so that the
+	// implicit Read(<cwd>/**) rule matches relative calls like Read(./TODO.md).
+	// The original field is tested first to preserve relative user rules like Write(.env*).
+	if (cwd && field && isPathTool(toolName)) {
+		const resolved = normalizeMatchPath(field, cwd);
+		if (resolved !== field && rule.regex.test(resolved)) return true;
+	}
 	return rule.regex.test(field);
 }
 
@@ -763,7 +775,7 @@ function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unk
 	const check = (list: string[]): boolean => {
 		for (const raw of list) {
 			const rule = parseRule(raw);
-			if (rule && ruleMatches(rule, toolName, input)) return true;
+			if (rule && ruleMatches(rule, toolName, input, cfg.cwd)) return true;
 		}
 		return false;
 	};
