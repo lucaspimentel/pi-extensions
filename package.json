@@ -13,7 +13,8 @@
       "./extensions/web",
       "./extensions/pi-tool-permissions",
       "./extensions/wt-tab-status",
-      "./extensions/external-editor-fix"
+      "./extensions/external-editor-fix",
+      "./extensions/idle-summary.ts"
     ],
     "skills": ["./skills"]
   },
