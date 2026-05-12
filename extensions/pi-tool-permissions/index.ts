@@ -62,7 +62,7 @@
  *     Injects Read rules covering pi's known skill roots so reading SKILL.md and
  *     related files outside cwd doesn't prompt. Covered roots:
  *       Read(<home>/.pi/agent/skills/**)
- *       Read(<home>/.pi/agent/git/**/skills/**)
+ *       Read(<home>/.pi/agent/git/**\/skills/**)
  *       Read(<home>/.agents/skills/**)
  *     Only affects Read; Write/Edit to these paths are unaffected. Disable with
  *     "readAllowSkills": false.
