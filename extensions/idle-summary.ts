@@ -10,8 +10,7 @@
 
 import { complete, getModel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Box, Markdown, Text } from "@earendil-works/pi-tui";
+import { Box, Text } from "@earendil-works/pi-tui";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -99,9 +98,9 @@ const buildConversationText = (entries: SessionEntry[]): string => {
 
 const buildSummaryPrompt = (conversationText: string): string =>
 	[
-		"Summarize this coding session so I can resume it later.",
-		"Include goals, key decisions, progress, open questions, and next steps.",
-		"Keep it concise and structured with headings.",
+		"Summarize this coding session in at most 2 short lines of plain text.",
+		"Line 1: what was worked on. Line 2: current status or next step.",
+		"No headings, no bullet points, no markdown. Be terse — aim for under 200 characters total.",
 		"",
 		"<conversation>",
 		conversationText,
@@ -175,10 +174,9 @@ export default function (pi: ExtensionAPI) {
 
 	// Render summary inline in chat history
 	pi.registerMessageRenderer(CUSTOM_TYPE, (message, _options, theme) => {
-		const mdTheme = getMarkdownTheme();
-		const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
-		box.addChild(new Text(theme.fg("accent", theme.bold("📋 Session Summary")), 0, 0));
-		box.addChild(new Markdown(message.content as string, 0, 1, mdTheme));
+		const summary = (message.content as string).trim();
+		const box = new Box(1, 0, (t: string) => theme.bg("customMessageBg", t));
+		box.addChild(new Text(`${theme.fg("accent", "📋")} ${theme.fg("muted", summary)}`, 0, 0));
 		return box;
 	});
 
