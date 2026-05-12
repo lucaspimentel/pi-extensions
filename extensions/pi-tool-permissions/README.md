@@ -35,7 +35,7 @@ Rules are loaded from two files, merged together (project overrides user for `de
 
 For backwards compatibility, if the user-global file above does not exist or cannot be read, the extension falls back to the legacy path `~/.pi/tool-permissions.json`.
 
-See [`tool-permissions.example.json`](./tool-permissions.example.json) for a starter config.
+See [`pi-tool-permissions.example.json`](./pi-tool-permissions.example.json) for a starter config.
 
 ```json
 {

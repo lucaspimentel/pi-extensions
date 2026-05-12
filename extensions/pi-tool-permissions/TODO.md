@@ -5,7 +5,7 @@
   - Extend the same pattern to other read-only tools: `grep`, `glob`, and bash read-only commands (`ls`, `cat`, `head`, `tail`, `pwd`, `find` without `-delete/-exec`, `wc`, `file`, `stat`, etc.).
   - For `grep`/`glob` the match field is already `path` (defaults to cwd) — see `getMatchField` near line 333 and `pathRuleString` near line 634, so injecting `Grep(<cwd>/**)` / `Glob(<cwd>/**)` mirrors the existing Read injection.
   - For Bash, decide whether to add a curated allow-list of read-only commands evaluated per subcommand (the compound-bash splitter already exists — see header docs and `decide`/`bash` handling near line 572 / 612), or expose a config flag like `bashReadOnlyAllowCwd`.
-  - Make it opt-out via config keys (e.g. `grepAllowCwd`, `globAllowCwd`, `bashReadOnlyAllowCwd`), defaulting to `true` like `readAllowCwd`, and document in the header block + `tool-permissions.example.json` + `README.md`.
+  - Make it opt-out via config keys (e.g. `grepAllowCwd`, `globAllowCwd`, `bashReadOnlyAllowCwd`), defaulting to `true` like `readAllowCwd`, and document in the header block + `pi-tool-permissions.example.json` + `README.md`.
   - Add tests in `test-grep-glob.mjs` and `test-bash.mjs` (and possibly a new `test-readonly-cwd.mjs`); wire into `run-all.mjs`.
 
 - [ ] Normalize Windows paths when running Bash under Git Bash / MSYS / Cygwin
@@ -38,7 +38,7 @@
 - [ ] Auto-allow reading `AGENTS.md` / `CLAUDE.md` in parent directories by default
   - Allow `Read` calls for `AGENTS.md` and `CLAUDE.md` in the current working directory and every ancestor directory up to the filesystem root, even when the file is outside the recursive `Read(<cwd>/**)` implicit allow.
   - Likely implement in `loadConfig()` in `index.ts` alongside the existing implicit `Read(${cwdGlobPattern(cwd)})` injection; add exact-path implicit allow rules for each ancestor's `AGENTS.md` and `CLAUDE.md` rather than broad parent-directory globs.
-  - Consider an opt-out config flag if needed, and document the behavior in the header docs, `README.md`, and `tool-permissions.example.json`.
+  - Consider an opt-out config flag if needed, and document the behavior in the header docs, `README.md`, and `pi-tool-permissions.example.json`.
   - Add tests in `test-loadconfig.mjs` / `test-read-write-edit.mjs` (and sync `test-helpers.mjs`) covering parent `AGENTS.md` / `CLAUDE.md` allowed, unrelated parent files still denied/asked, and behavior at drive/root boundaries.
 
 - [ ] Add an “Allow ALL steps once” option for multi-step Bash permission prompts
@@ -65,11 +65,11 @@
   - Add a `lsAllowCwd?: boolean` config key (default `true`) on `Config` (~107–119) and `LoadedConfig` (~133–142); resolve it in `loadConfig()` (~186–190) and surface it on `cfg.implicit` (~217). Mirror the `grepAllowCwd`/`globAllowCwd` shape exactly.
   - Update the `/permissions list` output (~1097–1100) to include `lsAllowCwd: ${cfg.implicit.lsAllowCwd}`.
   - Verify `Ls` uses a `path` match field (or whatever field `getMatchField`/`pathRuleString` already returns for it near lines 333 / 634) so `Ls(<cwd>/**)` actually matches built-in `ls` calls; if not, extend those helpers.
-  - Document in the header block (`index.ts` ~37–54), `README.md`, and `tool-permissions.example.json`.
+  - Document in the header block (`index.ts` ~37–54), `README.md`, and `pi-tool-permissions.example.json`.
   - Add tests in `test-loadconfig.mjs` (implicit rule presence + opt-out) and a small case in `test-rules-and-decide.mjs` or a new `test-readonly-cwd.mjs` confirming an `Ls` call inside cwd is auto-allowed and one outside still asks/denies. Sync `test-helpers.mjs` and wire into `run-all.mjs`.
 
 - [ ] When saving an "always allow/deny" rule, let the user choose project-level or user-level
-  - In `index.ts`, `addRule()` (~1061–1066) always writes to the project config via `saveProjectConfig(cwd, ...)`. When the user picks `Allow always (save rule)` or `Deny always (save rule)` (~963–986, ~1008–1041), add a follow-up prompt asking where to save: `Project (.pi-tool-permissions.json in cwd)` or `User (~/.pi/agent/pi-tool-permissions.json)`.
+  - In `index.ts`, `addRule()` (~1061–1066) always writes to the project config via `saveProjectConfig(cwd, ...)`. When the user picks `Allow always (save rule)` or `Deny always (save rule)` (~963–986, ~1008–1041), add a follow-up prompt asking where to save: `Project (<cwd>/.pi/tool-permissions.json)` or `User (~/.pi/agent/pi-tool-permissions.json)`.
   - Add a `saveUserRule(action, rule)` helper mirroring `addRule` but reading/writing `USER_CONFIG` (`~146`), alongside the existing `loadProjectConfigRaw` / `saveProjectConfig` helpers.
   - All four "always" call-sites invoke `addRule(ctx.cwd, ...)` — update each to branch on the user's scope choice; keep the project path as the default so existing behavior is unchanged if the prompt is skipped somehow.
   - Add tests in `test-rules-and-decide.mjs` covering: rule saved to project config (existing behavior), rule saved to user config, and subsequent `loadConfig()` merging both.
@@ -84,4 +84,21 @@
   - Consider replacing the glyphs with emoji for readability: e.g. `✅` (allow), `❌` or `🚫` (deny), `❓` (ask), `👉` (current step). The `actionIcon` indirection was added specifically so this swap is local to that helper.
   - Investigate terminal/TUI compatibility first: emoji width is often reported as 1 cell but renders as 2, which can break the column-alignment invariant exercised by the `icon column aligned across current/non-current` test in `test-bash.mjs`. Check how pi’s TUI (`ctx.ui.select` title block) handles wide characters and whether other extensions already emit emoji.
   - Decide whether the current marker (`»`) should also become an emoji (`👉`) — if so, the gutter width logic in `formatBreakdownLine` will need to account for emoji display width, not just code-point count. Either keep the gutter in cells (using a width helper) or use a leading emoji + space and accept that the icon column shifts when the marker is present (drop the alignment test).
-  - If proceeding: update `actionIcon` and the gutter logic in both `index.ts` and `test-helpers.mjs`, refresh the `formatBreakdown — rendering` tests in `test-bash.mjs` (icon assertions, alignment invariant), and consider a config flag (e.g. `breakdownEmoji?: boolean`) so users on emoji-hostile terminals can opt out. Document the flag in the header block, `README.md`, and `tool-permissions.example.json`.
+  - If proceeding: update `actionIcon` and the gutter logic in both `index.ts` and `test-helpers.mjs`, refresh the `formatBreakdown — rendering` tests in `test-bash.mjs` (icon assertions, alignment invariant), and consider a config flag (e.g. `breakdownEmoji?: boolean`) so users on emoji-hostile terminals can opt out. Document the flag in the header block, `README.md`, and `pi-tool-permissions.example.json`.
+
+- [ ] Add an interactive settings UI via `SettingsList` for the implicit-allow toggles
+  - Pi doesn't expose a first-class "extension settings" API (see `docs/settings.md`, `docs/sdk.md`, `docs/extensions.md`) — each extension owns its own JSON config. pi-tool-permissions already does this via `~/.pi/agent/pi-tool-permissions.json` (user, with a legacy fallback at `~/.pi/tool-permissions.json`) and `<cwd>/.pi/tool-permissions.json` (project). What's missing is an in-TUI editor; users currently have to hand-edit JSON or rely on `/permissions list`.
+  - Add a new subcommand (e.g. `/permissions settings`) that opens `SettingsList` from `@earendil-works/pi-tui` with `getSettingsListTheme()` (see `docs/tui.md` Pattern 3 and `examples/extensions/tools.ts`). Expose the existing boolean knobs as toggleable rows:
+    - `readAllowCwd`, `grepAllowCwd`, `globAllowCwd`, `lsAllowCwd`
+    - `readAllowSkills`, `bashReadOnlyAllowCwd`, `allowNoopCd`
+    - Any future flags (e.g. `breakdownEmoji?` from the emoji-indicator TODO).
+  - On each change: persist via the existing `saveProjectConfig` helper (or a new `saveUserConfig` helper — see the "project-level vs user-level" TODO) and reload via `loadConfig(ctx.cwd)`. Ask the user once at open time which scope to edit (project vs user) so the chosen target is unambiguous.
+  - Keep the existing `/permissions list` read-only output — `settings` is for editing, `list` is for inspecting. Make sure both stay in sync after a settings change (re-render or notify on save).
+  - Document the new subcommand in the header block of `index.ts` and `README.md`. Tests: cover the persistence side (round-trip toggle through `saveProjectConfig` / `loadConfig`) in `test-loadconfig.mjs` or `test-rules-and-decide.mjs`; the TUI side is hard to unit-test — a manual smoke test is acceptable.
+
+- [ ] Rename project config file to `pi-tool-permissions.json` (with legacy fallback)
+  - Today the project config lives at `<cwd>/.pi/tool-permissions.json` (constant `PROJECT_CONFIG_REL` in `index.ts` ~168). The user config has already been renamed to the pi-prefixed form (`USER_CONFIG = ~/.pi/agent/pi-tool-permissions.json`) with a legacy fallback (`LEGACY_USER_CONFIG = ~/.pi/tool-permissions.json`). The project file should follow the same convention for naming consistency across both scopes.
+  - Add a new constant `PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.json")` and a `LEGACY_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json")`. Update the reader (`loadProjectConfigRaw` and any other readers — grep for `PROJECT_CONFIG_REL` and the literal string `tool-permissions.json`) to mirror the user-config pattern: prefer the new file; fall back to the legacy file only when the new one is absent.
+  - Update the writer / `saveProjectConfig` to always write to the new path. Decide whether to auto-migrate (rename old → new on first write) or leave the legacy file in place; auto-migrate is simpler for users.
+  - Update the header-block docs in `index.ts` (~26–28 currently list `<cwd>/.pi/tool-permissions.json`), `README.md`, and `pi-tool-permissions.example.json`. Also update the related TODO entries that reference the project path (the "project-level vs user-level" TODO and the SettingsList TODO above).
+  - Tests: extend `test-loadconfig.mjs` (and sync `test-helpers.mjs` if it duplicates the project-loader) covering: only-new-file present, only-legacy-file present (fallback works), both present (new wins), neither present, and round-trip via `saveProjectConfig` writing to the new name.
