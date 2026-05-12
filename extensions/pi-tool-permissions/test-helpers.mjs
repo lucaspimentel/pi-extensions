@@ -293,6 +293,25 @@ export function splitTopLevelShell(cmd) {
 	return nonEmpty.length > 1 ? { kind: "compound", parts: nonEmpty } : { kind: "single" };
 }
 
+// ── Breakdown rendering ──────────────────────────────────────────────────────
+
+export function actionIcon(action) {
+	if (action === "allow") return "✓";
+	if (action === "deny") return "✗";
+	return "?";
+}
+
+export function formatBreakdownLine(sub, action, isCurrent) {
+	const gutter = isCurrent ? " » " : "   ";
+	return `${gutter}[${actionIcon(action)}] ${sub}`;
+}
+
+export function formatBreakdown(breakdown, currentSub) {
+	return breakdown
+		.map((b) => formatBreakdownLine(b.sub, b.action, currentSub !== null && b.sub === currentSub))
+		.join("\n");
+}
+
 // ── Decision engine ───────────────────────────────────────────────────────
 
 export function decide(cfg, toolName, input) {

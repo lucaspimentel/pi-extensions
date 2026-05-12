@@ -5,6 +5,7 @@ import {
 	makeTestRunner, getMatchField, suggestRule,
 	splitTopLevelShell, decideCompound, decide, makeCfg, isNoopCd,
 	isReadOnlyBashSubcommand,
+	actionIcon, formatBreakdownLine, formatBreakdown,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -347,5 +348,48 @@ test("rm subpart → deny (falls to defaultAction)", lsAndRm.breakdown[1].action
 
 const lsAndGit = decideCompound(roCompCfg, "bash", { command: "ls && git status" });
 test("ls && git status → deny (git not in safe list)", lsAndGit.action, "deny");
+
+section("formatBreakdown — rendering");
+
+// actionIcon mapping
+test("actionIcon(allow) → ✓",                actionIcon("allow"), "✓");
+test("actionIcon(deny) → ✗",                 actionIcon("deny"),  "✗");
+test("actionIcon(ask) → ?",                  actionIcon("ask"),   "?");
+
+// formatBreakdownLine: non-current rows use a 3-space gutter
+test("non-current allow line",              formatBreakdownLine("git status", "allow", false), "   [✓] git status");
+test("non-current deny line",               formatBreakdownLine("rm -rf /",   "deny",  false), "   [✗] rm -rf /");
+test("non-current ask line",                formatBreakdownLine("git commit", "ask",   false), "   [?] git commit");
+
+// formatBreakdownLine: current rows use " » " gutter (same width)
+test("current ask line has » marker",       formatBreakdownLine("git commit", "ask",   true),  " » [?] git commit");
+test("current allow line has » marker",     formatBreakdownLine("git status", "allow", true),  " » [✓] git status");
+
+// Column alignment: the `[` index must match between current and non-current rows
+const currentLine = formatBreakdownLine("x", "ask", true);
+const plainLine   = formatBreakdownLine("x", "ask", false);
+test("icon column aligned across current/non-current", currentLine.indexOf("["), plainLine.indexOf("["));
+
+// formatBreakdown: joins with newlines and marks exactly the current sub
+const sampleBreakdown = [
+	{ sub: "git status",  action: "allow" },
+	{ sub: "git commit",  action: "ask"   },
+	{ sub: "rm -rf /",    action: "deny"  },
+];
+const rendered = formatBreakdown(sampleBreakdown, "git commit");
+const lines = rendered.split("\n");
+test("formatBreakdown → 3 lines",            lines.length, 3);
+test("first line is non-current allow",     lines[0], "   [✓] git status");
+test("second line is current ask",          lines[1], " » [?] git commit");
+test("third line is non-current deny",      lines[2], "   [✗] rm -rf /");
+test("exactly one » marker in output",      (rendered.match(/» /g) || []).length, 1);
+
+// formatBreakdown with null currentSub: no row is marked current
+const renderedNoCurrent = formatBreakdown(sampleBreakdown, null);
+test("null currentSub → no » markers",       (renderedNoCurrent.match(/» /g) || []).length, 0);
+test("null currentSub → still 3 lines",      renderedNoCurrent.split("\n").length, 3);
+
+// Edge case: empty breakdown
+test("empty breakdown → empty string",       formatBreakdown([], null), "");
 
 process.exit(summary() > 0 ? 1 : 0);

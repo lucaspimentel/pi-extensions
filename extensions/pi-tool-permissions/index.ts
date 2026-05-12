@@ -820,6 +820,38 @@ function decideCompound(
 	return { action, isCompound: true, ambiguous: false, breakdown };
 }
 
+// ── Breakdown rendering ──────────────────────────────────────────────────────
+
+/** Single-character status icon for a per-subcommand action. */
+function actionIcon(action: Action): string {
+	if (action === "allow") return "✓";
+	if (action === "deny") return "✗";
+	return "?";
+}
+
+/**
+ * Format one row of the compound-Bash breakdown.
+ *
+ * The current step gets a left-side `>` marker; non-current rows get an
+ * equal-width blank gutter so the action-icon column stays aligned regardless
+ * of which row is current. Keep gutter widths in sync — see the
+ * column-alignment test in test-bash.mjs.
+ */
+function formatBreakdownLine(sub: string, action: Action, isCurrent: boolean): string {
+	const gutter = isCurrent ? " » " : "   ";
+	return `${gutter}[${actionIcon(action)}] ${sub}`;
+}
+
+/**
+ * Render the full breakdown block (newline-joined). When `currentSub` is null,
+ * no row is marked current (all rows use the blank gutter).
+ */
+function formatBreakdown(breakdown: SubcommandDecision[], currentSub: string | null): string {
+	return breakdown
+		.map((b) => formatBreakdownLine(b.sub, b.action, currentSub !== null && b.sub === currentSub))
+		.join("\n");
+}
+
 function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>): Action {
 	const check = (list: string[]): boolean => {
 		for (const raw of list) {
@@ -1000,14 +1032,7 @@ export default function (pi: ExtensionAPI) {
 
 			for (const item of breakdown.filter((b) => b.action === "ask")) {
 				const suggested = suggestRule("Bash", { command: item.sub });
-
-				const breakdownLines = breakdown
-					.map((b) => {
-						const icon = b.action === "allow" ? "✓" : b.action === "deny" ? "✗" : "?";
-						const marker = b.sub === item.sub ? " ◄" : "";
-						return `  [${icon}] ${b.sub}${marker}`;
-					})
-					.join("\n");
+				const breakdownLines = formatBreakdown(breakdown, item.sub);
 
 				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}\n\nSuggested rule: ${suggested}`;
 				const choices = ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)"];
