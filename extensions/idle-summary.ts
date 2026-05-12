@@ -31,7 +31,7 @@ type SessionEntry = {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const IDLE_DELAY_MS = 30_000;
+const IDLE_DELAY_MS = 60_000;
 const CUSTOM_TYPE = "idle-summary";
 
 const MODEL_CANDIDATES = [
