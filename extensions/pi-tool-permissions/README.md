@@ -47,6 +47,7 @@ See [`tool-permissions.example.json`](./tool-permissions.example.json) for a sta
   "readAllowCwd": true,
   "grepAllowCwd": true,
   "globAllowCwd": true,
+  "lsAllowCwd": true,
   "bashReadOnlyAllowCwd": true
 }
 ```
@@ -117,6 +118,7 @@ path, the permission system treats it as if `path` were the current working dire
 | `read`/`write`/`edit` | `path`                                             |
 | `grep`                | `path` (directory searched; defaults to cwd)       |
 | `glob`                | `path` (directory searched; defaults to cwd)       |
+| `ls`                  | `path` (directory listed; defaults to cwd)         |
 | `web_fetch`           | `url`                                              |
 | `web_search`          | bare rule only — `WebSearch` matches any search    |
 | anything else         | `JSON.stringify(input)`                            |
@@ -200,6 +202,15 @@ Silently allows any `Glob` call whose search directory is inside the current wor
 Disable it per-project:
 ```json
 { "globAllowCwd": false }
+```
+
+#### `lsAllowCwd` (default: `true`)
+
+Silently allows any `Ls` call whose listed directory is inside the current working directory (recursively). When the model calls `ls` without a `path`, the permission system treats it as if `path` were the current working directory, so bare `Ls` calls are also auto-allowed.
+
+Disable it per-project:
+```json
+{ "lsAllowCwd": false }
 ```
 
 #### `bashReadOnlyAllowCwd` (default: `true`)

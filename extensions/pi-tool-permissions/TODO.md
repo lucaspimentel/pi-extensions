@@ -59,7 +59,7 @@
   - Consider whether this should be implemented as implicit exact `Read(...)` rules discovered from registered skill metadata, a constrained glob such as `~/.pi/agent/**/skills/**/SKILL.md`, or both Windows/Unix-normalized variants.
   - Document the behavior and add tests in `test-loadconfig.mjs` / `test-read-write-edit.mjs` (and sync `test-helpers.mjs`) covering skill files allowed while unrelated files in the same tree remain subject to normal permissions.
 
-- [ ] Auto-allow the built-in `Ls` tool in pwd and subdirectories recursively
+- [x] Auto-allow the built-in `Ls` tool in pwd and subdirectories recursively
   - Gap in the previously-completed first item: that task said "grep, ls, glob, etc." but only `Read`/`Grep`/`Glob` got an implicit `<Tool>(<cwd>/**)` injection. The pi built-in `Ls` tool (distinct from the Bash `ls` subcommand handled via `READONLY_BASH_WITH_PATHS` in `index.ts` ~329) currently falls through to the default `ask` action.
   - Reference: `loadConfig()` in `index.ts` ~191–200 pushes `Read(${cwdGlobPattern(cwd)})`, `Grep(...)`, `Glob(...)` into `implicitAllow` — add `Ls(${cwdGlobPattern(cwd)})` the same way.
   - Add a `lsAllowCwd?: boolean` config key (default `true`) on `Config` (~107–119) and `LoadedConfig` (~133–142); resolve it in `loadConfig()` (~186–190) and surface it on `cfg.implicit` (~217). Mirror the `grepAllowCwd`/`globAllowCwd` shape exactly.

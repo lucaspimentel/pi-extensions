@@ -10,7 +10,7 @@
  * Match field per tool:
  *   bash             -> command
  *   read/write/edit  -> path
- *   grep/glob        -> path (directory being searched; defaults to cwd when the call omits it)
+ *   grep/glob/ls     -> path (directory being searched/listed; defaults to cwd when the call omits it)
  *   web_fetch        -> url
  *   web_search       -> (bare rule only — no pattern support)
  *   others           -> JSON.stringify(input)
@@ -37,6 +37,7 @@
  *     "readAllowCwd": true,
  *     "grepAllowCwd": true,
  *     "globAllowCwd": true,
+ *     "lsAllowCwd": true,
  *     "bashReadOnlyAllowCwd": true
  *   }
  *
@@ -52,6 +53,10 @@
  *   globAllowCwd (default: true)
  *     Injects Glob(<cwd>/**) so every glob inside the working directory is silently
  *     permitted. Disable with "globAllowCwd": false.
+ *   lsAllowCwd (default: true)
+ *     Injects Ls(<cwd>/**) so every ls inside the working directory (and ls calls
+ *     that omit `path`, which default to cwd) are silently permitted. Disable with
+ *     "lsAllowCwd": false.
  *   bashReadOnlyAllowCwd (default: true)
  *     Silently allows a curated set of read-only bash subcommands (pwd, echo, ls,
  *     cat, head, tail, wc, stat, …) when their path arguments resolve inside cwd.
@@ -112,6 +117,8 @@ interface PermissionsConfig {
 	grepAllowCwd?: boolean;
 	/** When false, disables the implicit Glob(<cwd>/**) allow rule. Default: true. */
 	globAllowCwd?: boolean;
+	/** When false, disables the implicit Ls(<cwd>/**) allow rule. Default: true. */
+	lsAllowCwd?: boolean;
 	/** When false, disables the implicit allow for read-only bash commands in cwd. Default: true. */
 	bashReadOnlyAllowCwd?: boolean;
 	/** When false, disables the implicit allow for no-op `cd` commands. Default: true. */
@@ -138,6 +145,7 @@ interface ResolvedConfig {
 		readAllowCwd: boolean;
 		grepAllowCwd: boolean;
 		globAllowCwd: boolean;
+		lsAllowCwd: boolean;
 		bashReadOnlyAllowCwd: boolean;
 		allowNoopCd: boolean;
 	};
@@ -186,6 +194,7 @@ function loadConfig(cwd: string): ResolvedConfig {
 	const readAllowCwd = project.readAllowCwd ?? user.readAllowCwd ?? true;
 	const grepAllowCwd = project.grepAllowCwd ?? user.grepAllowCwd ?? true;
 	const globAllowCwd = project.globAllowCwd ?? user.globAllowCwd ?? true;
+	const lsAllowCwd = project.lsAllowCwd ?? user.lsAllowCwd ?? true;
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
 	const implicitAllow: string[] = [];
@@ -197,6 +206,9 @@ function loadConfig(cwd: string): ResolvedConfig {
 	}
 	if (globAllowCwd) {
 		implicitAllow.push(`Glob(${cwdGlobPattern(cwd)})`);
+	}
+	if (lsAllowCwd) {
+		implicitAllow.push(`Ls(${cwdGlobPattern(cwd)})`);
 	}
 
 	// Inject write→ask unless the user has explicitly set toolDefaults.write
@@ -214,7 +226,7 @@ function loadConfig(cwd: string): ResolvedConfig {
 		cwd,
 		allowNoopCd,
 		bashReadOnlyAllowCwd,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, bashReadOnlyAllowCwd, allowNoopCd },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, bashReadOnlyAllowCwd, allowNoopCd },
 	};
 }
 
@@ -485,7 +497,7 @@ function getMatchField(toolName: string, input: Record<string, unknown>): string
 	const t = normalizeTool(toolName);
 	if (t === "bash") return String(input.command ?? "");
 	if (t === "read" || t === "write" || t === "edit") return String(input.path ?? "");
-	if (t === "grep" || t === "glob") return String(input.path ?? "");
+	if (t === "grep" || t === "glob" || t === "ls") return String(input.path ?? "");
 	if (t === "webfetch") return String(input.url ?? "");
 	try {
 		return JSON.stringify(input);
@@ -496,7 +508,7 @@ function getMatchField(toolName: string, input: Record<string, unknown>): string
 
 function isPathTool(toolName: string): boolean {
 	const t = normalizeTool(toolName);
-	return t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob";
+	return t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls";
 }
 
 function ruleMatches(rule: ParsedRule, toolName: string, input: Record<string, unknown>, cwd?: string): boolean {
@@ -805,7 +817,7 @@ function suggestRule(toolName: string, input: Record<string, unknown>): string {
 		// Normalize path separators so saved rules work on Windows
 		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
 	}
-	if (t === "grep" || t === "glob") {
+	if (t === "grep" || t === "glob" || t === "ls") {
 		const p = String(input.path ?? "");
 		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
 	}
@@ -842,10 +854,11 @@ function inputForMatching(
 		const p = String(input.path ?? "");
 		return p ? { ...input, path: normalizePathSep(p) } : input;
 	}
-	if (t === "grep" || t === "glob") {
-		// Default missing path to cwd so rules like Grep(<cwd>/**) match implicit-cwd calls.
-		// Append a trailing "/" so directory paths match patterns like /etc/* (regex ^/etc/.*$
-		// requires something after the slash; "" satisfies .* so /etc/ matches correctly).
+	if (t === "grep" || t === "glob" || t === "ls") {
+		// Default missing path to cwd so rules like Grep(<cwd>/**) / Ls(<cwd>/**) match
+		// implicit-cwd calls. Append a trailing "/" so directory paths match patterns
+		// like /etc/* (regex ^/etc/.*$ requires something after the slash; "" satisfies
+		// .* so /etc/ matches correctly).
 		const p = input.path ? String(input.path) : cwd;
 		const normalized = normalizeMatchPath(p, cwd);
 		return { ...input, path: normalized.endsWith("/") ? normalized : normalized + "/" };
@@ -1109,6 +1122,7 @@ export default function (pi: ExtensionAPI) {
 					`readAllowCwd: ${cfg.implicit.readAllowCwd}`,
 					`grepAllowCwd: ${cfg.implicit.grepAllowCwd}`,
 					`globAllowCwd: ${cfg.implicit.globAllowCwd}`,
+					`lsAllowCwd: ${cfg.implicit.lsAllowCwd}`,
 					`bashReadOnlyAllowCwd: ${cfg.implicit.bashReadOnlyAllowCwd}`,
 					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
 					`allow all edits (this session): ${allowAllEdits ? "ON" : "OFF"}`,

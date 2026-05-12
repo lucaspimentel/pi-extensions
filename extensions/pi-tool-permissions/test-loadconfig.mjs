@@ -12,6 +12,7 @@ const CWD_GLOB = cwdGlobPattern(CWD);
 const IMPLICIT_READ = `Read(${CWD_GLOB})`;
 const IMPLICIT_GREP = `Grep(${CWD_GLOB})`;
 const IMPLICIT_GLOB = `Glob(${CWD_GLOB})`;
+const IMPLICIT_LS   = `Ls(${CWD_GLOB})`;
 
 section("implicit defaults (empty config)");
 
@@ -22,11 +23,13 @@ test("implicit write→ask in toolDefaults",      empty.toolDefaults["write"], "
 test("implicit.readAllowCwd is true",           empty.implicit.readAllowCwd, true);
 test("implicit.grepAllowCwd is true",           empty.implicit.grepAllowCwd, true);
 test("implicit.globAllowCwd is true",           empty.implicit.globAllowCwd, true);
+test("implicit.lsAllowCwd is true",             empty.implicit.lsAllowCwd, true);
 test("implicit.bashReadOnlyAllowCwd is true",   empty.implicit.bashReadOnlyAllowCwd, true);
-test("implicit.allow has 3 entries (Read+Grep+Glob)", empty.implicit.allow.length, 3);
+test("implicit.allow has 4 entries (Read+Grep+Glob+Ls)", empty.implicit.allow.length, 4);
 test("implicit.allow[0] is Read(<cwd>/**)",     empty.implicit.allow[0], IMPLICIT_READ);
 test("implicit.allow[1] is Grep(<cwd>/**)",     empty.implicit.allow[1], IMPLICIT_GREP);
 test("implicit.allow[2] is Glob(<cwd>/**)",     empty.implicit.allow[2], IMPLICIT_GLOB);
+test("implicit.allow[3] is Ls(<cwd>/**)",       empty.implicit.allow[3], IMPLICIT_LS);
 test("implicit.allow[0] matches allow[0]",      empty.implicit.allow[0] === empty.allow[0], true);
 test("implicit.toolDefaults has write key",     "write" in empty.implicit.toolDefaults, true);
 test("no other implicit toolDefaults",          Object.keys(empty.implicit.toolDefaults).length, 1);
@@ -37,9 +40,20 @@ const noAutoRead = loadConfigFromObjects({}, { readAllowCwd: false }, CWD);
 test("no Read in allow when readAllowCwd:false", noAutoRead.implicit.allow.some(r => r.startsWith("Read(")), false);
 test("Grep still in allow when readAllowCwd:false", noAutoRead.implicit.allow.includes(IMPLICIT_GREP), true);
 test("Glob still in allow when readAllowCwd:false", noAutoRead.implicit.allow.includes(IMPLICIT_GLOB), true);
+test("Ls still in allow when readAllowCwd:false",   noAutoRead.implicit.allow.includes(IMPLICIT_LS), true);
 test("implicit.readAllowCwd is false",          noAutoRead.implicit.readAllowCwd, false);
-test("implicit.allow has 2 entries (Grep+Glob)", noAutoRead.implicit.allow.length, 2);
+test("implicit.allow has 3 entries (Grep+Glob+Ls)", noAutoRead.implicit.allow.length, 3);
 test("write default still injected",            noAutoRead.toolDefaults["write"], "ask");
+
+section("lsAllowCwd: false");
+
+const noAutoLs = loadConfigFromObjects({}, { lsAllowCwd: false }, CWD);
+test("no Ls in allow when lsAllowCwd:false",    noAutoLs.implicit.allow.some(r => r.startsWith("Ls(")), false);
+test("Read still in allow when lsAllowCwd:false", noAutoLs.implicit.allow.includes(IMPLICIT_READ), true);
+test("Grep still in allow when lsAllowCwd:false", noAutoLs.implicit.allow.includes(IMPLICIT_GREP), true);
+test("Glob still in allow when lsAllowCwd:false", noAutoLs.implicit.allow.includes(IMPLICIT_GLOB), true);
+test("implicit.lsAllowCwd is false",            noAutoLs.implicit.lsAllowCwd, false);
+test("implicit.allow has 3 entries (Read+Grep+Glob)", noAutoLs.implicit.allow.length, 3);
 
 section("explicit toolDefaults.write suppresses implicit");
 
@@ -103,5 +117,11 @@ test("Write .env → deny (explicit rule)",       decide(cfg, "write", { path: "
 test("Bash npm test → allow (explicit rule)",   decide(cfg, "bash", { command: "npm test" }), "allow");
 test("Write normal path → toolDefaults ask",    decide(cfg, "write", { path: "./src/foo.ts" }), "ask");
 test("Read outside cwd → defaultAction ask",    decide(cfg, "read", { path: "/etc/passwd" }), "ask");
+test("Ls inside cwd → allow (implicit rule)",   decide(cfg, "ls", { path: NORM_CWD + "/src/" }), "allow");
+test("Ls outside cwd → defaultAction ask",      decide(cfg, "ls", { path: "/etc/" }), "ask");
+
+// Ls with lsAllowCwd disabled: in-cwd Ls falls through to defaultAction
+const noLsCfg = loadConfigFromObjects({}, { lsAllowCwd: false, defaultAction: "ask" }, CWD);
+test("Ls inside cwd → ask when lsAllowCwd:false", decide(noLsCfg, "ls", { path: NORM_CWD + "/src/" }), "ask");
 
 process.exit(summary() > 0 ? 1 : 0);

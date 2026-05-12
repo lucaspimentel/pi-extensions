@@ -3,6 +3,7 @@
   "readAllowCwd": true,
   "grepAllowCwd": true,
   "globAllowCwd": true,
+  "lsAllowCwd": true,
   "bashReadOnlyAllowCwd": true,
   "toolDefaults": {
     "write": "ask"

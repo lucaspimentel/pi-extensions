@@ -2,7 +2,7 @@
 
 import {
 	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideCompound, makeCfg,
-	cwdGlobPattern, normalizePathSep,
+	cwdGlobPattern, normalizePathSep, inputForMatching,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -180,5 +180,39 @@ test("ruleMatches: absolute outside cwd does NOT match",
 	ruleMatches(rmRule, "read", { path: "/etc/passwd" }, RM_CWD), false);
 test("ruleMatches: no cwd — relative path does not match absolute rule",
 	ruleMatches(rmRule, "read", { path: "./foo.ts" }), false);
+
+section("decide — implicit Ls(<cwd>/**)");
+
+const LS_CWD = "C:/Users/Lucas/project";
+const lsImplicit = `Ls(${cwdGlobPattern(LS_CWD)})`;
+const lsCfg = makeCfg({ allow: [lsImplicit], defaultAction: "ask", cwd: LS_CWD });
+
+test("Ls with absolute path inside cwd → allow",
+	decide(lsCfg, "ls", { path: LS_CWD + "/src" }), "allow");
+test("Ls with relative path inside cwd → allow (cwd-resolved)",
+	decide(lsCfg, "ls", { path: "./src" }, ), "allow");
+test("Ls with absolute path outside cwd → ask (defaultAction)",
+	decide(lsCfg, "ls", { path: "/etc" }), "ask");
+
+// Bare Ls (no path) should default to cwd via inputForMatching, then match implicit rule.
+const bareLsMatchInput = inputForMatching("ls", {}, LS_CWD);
+test("inputForMatching: bare Ls defaults path to cwd (with trailing slash)",
+	bareLsMatchInput.path, LS_CWD + "/");
+test("Ls with no path → allow (defaults to cwd)",
+	decide(lsCfg, "ls", bareLsMatchInput), "allow");
+
+// Explicit deny still wins over the implicit allow.
+const lsDenyCfg = makeCfg({ allow: [lsImplicit], deny: ["Ls(*node_modules*)"], defaultAction: "ask", cwd: LS_CWD });
+test("Ls deny rule wins over implicit cwd allow",
+	decide(lsDenyCfg, "ls", { path: LS_CWD + "/node_modules/foo" }), "deny");
+
+// Ls is treated as a path-tool by suggestRule / getMatchField — sanity check via ruleMatches.
+const lsRule = parseRule(lsImplicit);
+test("ruleMatches: Ls absolute path inside cwd matches",
+	ruleMatches(lsRule, "ls", { path: LS_CWD + "/foo" }, LS_CWD), true);
+test("ruleMatches: Ls relative path inside cwd matches (cwd-resolved)",
+	ruleMatches(lsRule, "ls", { path: "./foo" }, LS_CWD), true);
+test("ruleMatches: Ls absolute path outside cwd does NOT match",
+	ruleMatches(lsRule, "ls", { path: "/etc/passwd" }, LS_CWD), false);
 
 process.exit(summary() > 0 ? 1 : 0);

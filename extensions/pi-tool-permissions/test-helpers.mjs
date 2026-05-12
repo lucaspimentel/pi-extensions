@@ -172,12 +172,12 @@ export function getMatchField(toolName, input) {
 	const t = normalizeTool(toolName);
 	if (t === "bash") return String(input.command ?? "");
 	if (t === "read" || t === "write" || t === "edit") return String(input.path ?? "");
-	if (t === "grep" || t === "glob") return String(input.path ?? "");
+	if (t === "grep" || t === "glob" || t === "ls") return String(input.path ?? "");
 	if (t === "webfetch") return String(input.url ?? "");
 	try { return JSON.stringify(input); } catch { return ""; }
 }
 
-const PATH_TOOLS = new Set(["read", "write", "edit", "grep", "glob"]);
+const PATH_TOOLS = new Set(["read", "write", "edit", "grep", "glob", "ls"]);
 
 export function ruleMatches(rule, toolName, input, cwd) {
 	if (rule.tool !== normalizeTool(toolName)) return false;
@@ -201,7 +201,7 @@ export function inputForMatching(toolName, input, cwd) {
 		const p = String(input.path ?? "");
 		return p ? { ...input, path: normalizePathSep(p) } : input;
 	}
-	if (t === "grep" || t === "glob") {
+	if (t === "grep" || t === "glob" || t === "ls") {
 		const p = input.path ? String(input.path) : cwd;
 		const normalized = normalizeMatchPath(p, cwd);
 		return { ...input, path: normalized.endsWith("/") ? normalized : normalized + "/" };
@@ -220,7 +220,7 @@ export function suggestRule(toolName, input) {
 		const p = String(input.path ?? "");
 		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
 	}
-	if (t === "grep" || t === "glob") {
+	if (t === "grep" || t === "glob" || t === "ls") {
 		const p = String(input.path ?? "");
 		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
 	}
@@ -335,12 +335,14 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd) {
 	const readAllowCwd = project.readAllowCwd ?? user.readAllowCwd ?? true;
 	const grepAllowCwd = project.grepAllowCwd ?? user.grepAllowCwd ?? true;
 	const globAllowCwd = project.globAllowCwd ?? user.globAllowCwd ?? true;
+	const lsAllowCwd = project.lsAllowCwd ?? user.lsAllowCwd ?? true;
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
 	const implicitAllow = [
 		...(readAllowCwd ? [`Read(${cwdGlobPattern(cwd)})`] : []),
 		...(grepAllowCwd ? [`Grep(${cwdGlobPattern(cwd)})`] : []),
 		...(globAllowCwd ? [`Glob(${cwdGlobPattern(cwd)})`] : []),
+		...(lsAllowCwd  ? [`Ls(${cwdGlobPattern(cwd)})`]   : []),
 	];
 
 	const implicitToolDefaults = {};
@@ -354,7 +356,7 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd) {
 		cwd,
 		allowNoopCd,
 		bashReadOnlyAllowCwd,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, bashReadOnlyAllowCwd, allowNoopCd },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, bashReadOnlyAllowCwd, allowNoopCd },
 	};
 }
 
@@ -364,7 +366,7 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd) {
  */
 export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, cwd = process.cwd() } = {}) {
 	// Normalize toolDefault keys so decide() can look them up via normalizeTool()
-	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, bashReadOnlyAllowCwd, cwd, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, bashReadOnlyAllowCwd, allowNoopCd } };
+	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, bashReadOnlyAllowCwd, cwd, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, bashReadOnlyAllowCwd, allowNoopCd } };
 }
 
 // ── Test runner ───────────────────────────────────────────────────────────
