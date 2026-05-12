@@ -48,6 +48,7 @@ See [`tool-permissions.example.json`](./tool-permissions.example.json) for a sta
   "grepAllowCwd": true,
   "globAllowCwd": true,
   "lsAllowCwd": true,
+  "readAllowSkills": true,
   "bashReadOnlyAllowCwd": true
 }
 ```
@@ -211,6 +212,25 @@ Silently allows any `Ls` call whose listed directory is inside the current worki
 Disable it per-project:
 ```json
 { "lsAllowCwd": false }
+```
+
+#### `readAllowSkills` (default: `true`)
+
+Silently allows `Read` calls targeting pi's known skill roots, so the agent can load `SKILL.md` and related files (helper scripts, references) without prompting. Skill files commonly live outside the project's cwd, where `readAllowCwd` doesn't reach.
+
+Covered roots (relative to your home directory):
+
+| Path | Purpose |
+| ---- | ------- |
+| `~/.pi/agent/skills/**` | user-global pi skills |
+| `~/.pi/agent/git/**/skills/**` | skills inside cloned skill repos |
+| `~/.agents/skills/**` | alternate user-global skill location |
+
+Only `Read` is affected — `Write` and `Edit` to these paths still go through the normal permission flow (and the implicit `write → ask` default).
+
+Disable it per-project:
+```json
+{ "readAllowSkills": false }
 ```
 
 #### `bashReadOnlyAllowCwd` (default: `true`)

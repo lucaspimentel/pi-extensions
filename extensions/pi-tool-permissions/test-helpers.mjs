@@ -25,6 +25,19 @@ export function cwdGlobPattern(cwd) {
 }
 
 /**
+ * Mirrors skillReadGlobs() in index.ts: canonical list of glob patterns covering
+ * pi's known skill roots relative to the given home directory.
+ */
+export function skillReadGlobs(home) {
+	const h = normalizePathSep(home);
+	return [
+		`${h}/.pi/agent/skills/**`,
+		`${h}/.pi/agent/git/**/skills/**`,
+		`${h}/.agents/skills/**`,
+	];
+}
+
+/**
  * Returns true when `cmd` is a `cd` invocation whose destination resolves to
  * the current working directory.  Mirrors isNoopCd() in index.ts.
  */
@@ -321,8 +334,11 @@ const dedupe = (items) => [...new Set(items)];
 /**
  * Drives loadConfig without touching the filesystem.
  * Pass raw config objects (as they would appear in tool-permissions.json).
+ * When `home` is provided, also injects the readAllowSkills globs as the
+ * production loadConfig() does. When omitted, skill globs are not injected
+ * (so existing tests that don't care about skills stay deterministic).
  */
-export function loadConfigFromObjects(user = {}, project = {}, cwd) {
+export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
 	const allow = dedupe([...(user.allow ?? []), ...(project.allow ?? [])]);
 	const deny  = dedupe([...(user.deny  ?? []), ...(project.deny  ?? [])]);
 	const ask   = dedupe([...(user.ask   ?? []), ...(project.ask   ?? [])]);
@@ -336,13 +352,16 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd) {
 	const grepAllowCwd = project.grepAllowCwd ?? user.grepAllowCwd ?? true;
 	const globAllowCwd = project.globAllowCwd ?? user.globAllowCwd ?? true;
 	const lsAllowCwd = project.lsAllowCwd ?? user.lsAllowCwd ?? true;
+	const readAllowSkills = project.readAllowSkills ?? user.readAllowSkills ?? true;
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
+	const skillRules = (home && readAllowSkills) ? skillReadGlobs(home).map((g) => `Read(${g})`) : [];
 	const implicitAllow = [
 		...(readAllowCwd ? [`Read(${cwdGlobPattern(cwd)})`] : []),
 		...(grepAllowCwd ? [`Grep(${cwdGlobPattern(cwd)})`] : []),
 		...(globAllowCwd ? [`Glob(${cwdGlobPattern(cwd)})`] : []),
 		...(lsAllowCwd  ? [`Ls(${cwdGlobPattern(cwd)})`]   : []),
+		...skillRules,
 	];
 
 	const implicitToolDefaults = {};
@@ -356,7 +375,7 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd) {
 		cwd,
 		allowNoopCd,
 		bashReadOnlyAllowCwd,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, bashReadOnlyAllowCwd, allowNoopCd },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, bashReadOnlyAllowCwd, allowNoopCd },
 	};
 }
 
@@ -366,7 +385,7 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd) {
  */
 export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, cwd = process.cwd() } = {}) {
 	// Normalize toolDefault keys so decide() can look them up via normalizeTool()
-	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, bashReadOnlyAllowCwd, cwd, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, bashReadOnlyAllowCwd, allowNoopCd } };
+	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, bashReadOnlyAllowCwd, cwd, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, bashReadOnlyAllowCwd, allowNoopCd } };
 }
 
 // ── Test runner ───────────────────────────────────────────────────────────

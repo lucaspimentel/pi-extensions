@@ -53,7 +53,7 @@
   - Preserve the current behavior for the step that was just approved/denied, and handle interactions with the planned “Allow ALL steps once” option.
   - Add tests or UI harness coverage for commands with repeated similar steps (e.g. two `git status`/`npm`-style subcommands) where saving a rule on the first prompt affects the later prompts.
 
-- [ ] Auto-allow pi to read its own skill files by default
+- [x] Auto-allow pi to read its own skill files by default
   - Skill files are commonly outside the project cwd (e.g. under `~/.pi/agent/git/.../skills/<skill>/SKILL.md`), so they are not covered by the existing implicit `Read(<cwd>/**)` allow in `loadConfig()`.
   - Add a safe default that permits `Read` calls for pi-managed skill files needed by the agent, ideally scoped to known skill directories / `SKILL.md` files rather than broad access to all of `~/.pi`.
   - Consider whether this should be implemented as implicit exact `Read(...)` rules discovered from registered skill metadata, a constrained glob such as `~/.pi/agent/**/skills/**/SKILL.md`, or both Windows/Unix-normalized variants.

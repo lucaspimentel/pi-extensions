@@ -38,6 +38,7 @@
  *     "grepAllowCwd": true,
  *     "globAllowCwd": true,
  *     "lsAllowCwd": true,
+ *     "readAllowSkills": true,
  *     "bashReadOnlyAllowCwd": true
  *   }
  *
@@ -57,6 +58,14 @@
  *     Injects Ls(<cwd>/**) so every ls inside the working directory (and ls calls
  *     that omit `path`, which default to cwd) are silently permitted. Disable with
  *     "lsAllowCwd": false.
+ *   readAllowSkills (default: true)
+ *     Injects Read rules covering pi's known skill roots so reading SKILL.md and
+ *     related files outside cwd doesn't prompt. Covered roots:
+ *       Read(<home>/.pi/agent/skills/**)
+ *       Read(<home>/.pi/agent/git/**/skills/**)
+ *       Read(<home>/.agents/skills/**)
+ *     Only affects Read; Write/Edit to these paths are unaffected. Disable with
+ *     "readAllowSkills": false.
  *   bashReadOnlyAllowCwd (default: true)
  *     Silently allows a curated set of read-only bash subcommands (pwd, echo, ls,
  *     cat, head, tail, wc, stat, …) when their path arguments resolve inside cwd.
@@ -119,6 +128,8 @@ interface PermissionsConfig {
 	globAllowCwd?: boolean;
 	/** When false, disables the implicit Ls(<cwd>/**) allow rule. Default: true. */
 	lsAllowCwd?: boolean;
+	/** When false, disables the implicit Read rules covering pi's skill roots. Default: true. */
+	readAllowSkills?: boolean;
 	/** When false, disables the implicit allow for read-only bash commands in cwd. Default: true. */
 	bashReadOnlyAllowCwd?: boolean;
 	/** When false, disables the implicit allow for no-op `cd` commands. Default: true. */
@@ -146,6 +157,7 @@ interface ResolvedConfig {
 		grepAllowCwd: boolean;
 		globAllowCwd: boolean;
 		lsAllowCwd: boolean;
+		readAllowSkills: boolean;
 		bashReadOnlyAllowCwd: boolean;
 		allowNoopCd: boolean;
 	};
@@ -195,6 +207,7 @@ function loadConfig(cwd: string): ResolvedConfig {
 	const grepAllowCwd = project.grepAllowCwd ?? user.grepAllowCwd ?? true;
 	const globAllowCwd = project.globAllowCwd ?? user.globAllowCwd ?? true;
 	const lsAllowCwd = project.lsAllowCwd ?? user.lsAllowCwd ?? true;
+	const readAllowSkills = project.readAllowSkills ?? user.readAllowSkills ?? true;
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
 	const implicitAllow: string[] = [];
@@ -209,6 +222,11 @@ function loadConfig(cwd: string): ResolvedConfig {
 	}
 	if (lsAllowCwd) {
 		implicitAllow.push(`Ls(${cwdGlobPattern(cwd)})`);
+	}
+	if (readAllowSkills) {
+		for (const glob of skillReadGlobs(homedir())) {
+			implicitAllow.push(`Read(${glob})`);
+		}
 	}
 
 	// Inject write→ask unless the user has explicitly set toolDefaults.write
@@ -226,7 +244,7 @@ function loadConfig(cwd: string): ResolvedConfig {
 		cwd,
 		allowNoopCd,
 		bashReadOnlyAllowCwd,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, bashReadOnlyAllowCwd, allowNoopCd },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, bashReadOnlyAllowCwd, allowNoopCd },
 	};
 }
 
@@ -271,6 +289,25 @@ function normalizeMatchPath(p: string, cwd: string): string {
 /** Returns the glob pattern that matches cwd and all its descendants. */
 function cwdGlobPattern(cwd: string): string {
 	return normalizePathSep(cwd) + "/**";
+}
+
+/**
+ * Returns the canonical list of glob patterns covering pi's known skill roots,
+ * relative to the given home directory. Used by the readAllowSkills implicit
+ * default to silently permit reading SKILL.md and related files outside cwd.
+ *
+ * Roots covered (per pi docs/skills.md):
+ *   ~/.pi/agent/skills/**           — user-global pi skills
+ *   ~/.pi/agent/git/**\/skills/**   — skills inside cloned skill repos
+ *   ~/.agents/skills/**             — alternate user-global skill location
+ */
+function skillReadGlobs(home: string): string[] {
+	const h = normalizePathSep(home);
+	return [
+		`${h}/.pi/agent/skills/**`,
+		`${h}/.pi/agent/git/**/skills/**`,
+		`${h}/.agents/skills/**`,
+	];
 }
 
 /**
@@ -1123,6 +1160,7 @@ export default function (pi: ExtensionAPI) {
 					`grepAllowCwd: ${cfg.implicit.grepAllowCwd}`,
 					`globAllowCwd: ${cfg.implicit.globAllowCwd}`,
 					`lsAllowCwd: ${cfg.implicit.lsAllowCwd}`,
+					`readAllowSkills: ${cfg.implicit.readAllowSkills}`,
 					`bashReadOnlyAllowCwd: ${cfg.implicit.bashReadOnlyAllowCwd}`,
 					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
 					`allow all edits (this session): ${allowAllEdits ? "ON" : "OFF"}`,

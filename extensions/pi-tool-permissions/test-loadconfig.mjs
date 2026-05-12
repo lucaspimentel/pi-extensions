@@ -1,7 +1,7 @@
 // run: node test-loadconfig.mjs
 
 import {
-	makeTestRunner, normalizePathSep, cwdGlobPattern, loadConfigFromObjects, decide,
+	makeTestRunner, normalizePathSep, cwdGlobPattern, skillReadGlobs, loadConfigFromObjects, decide,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -123,5 +123,52 @@ test("Ls outside cwd → defaultAction ask",      decide(cfg, "ls", { path: "/et
 // Ls with lsAllowCwd disabled: in-cwd Ls falls through to defaultAction
 const noLsCfg = loadConfigFromObjects({}, { lsAllowCwd: false, defaultAction: "ask" }, CWD);
 test("Ls inside cwd → ask when lsAllowCwd:false", decide(noLsCfg, "ls", { path: NORM_CWD + "/src/" }), "ask");
+
+section("readAllowSkills");
+
+const HOME = "C:/Users/Test";
+const SKILL_GLOBS = skillReadGlobs(HOME);
+const SKILL_RULES = SKILL_GLOBS.map((g) => `Read(${g})`);
+
+const withSkills = loadConfigFromObjects({}, {}, CWD, HOME);
+test("implicit.readAllowSkills is true by default", withSkills.implicit.readAllowSkills, true);
+test("implicit.allow includes ~/.pi/agent/skills/** rule",          withSkills.implicit.allow.includes(SKILL_RULES[0]), true);
+test("implicit.allow includes ~/.pi/agent/git/**/skills/** rule",   withSkills.implicit.allow.includes(SKILL_RULES[1]), true);
+test("implicit.allow includes ~/.agents/skills/** rule",            withSkills.implicit.allow.includes(SKILL_RULES[2]), true);
+test("implicit.allow has 4 cwd rules + 3 skill rules",              withSkills.implicit.allow.length, 7);
+
+// Opt-out: readAllowSkills: false removes all three skill rules
+const noSkills = loadConfigFromObjects({}, { readAllowSkills: false }, CWD, HOME);
+test("implicit.readAllowSkills is false when disabled", noSkills.implicit.readAllowSkills, false);
+test("no skill rules when disabled",                    noSkills.implicit.allow.some((r) => SKILL_RULES.includes(r)), false);
+test("cwd rules still present when readAllowSkills:false", noSkills.implicit.allow.length, 4);
+
+// End-to-end decide(): in-scope skill paths → allow
+const skillCfg = loadConfigFromObjects({}, { defaultAction: "ask" }, CWD, HOME);
+test("Read ~/.pi/agent/skills/foo/SKILL.md → allow",
+	decide(skillCfg, "read", { path: HOME + "/.pi/agent/skills/foo/SKILL.md" }), "allow");
+test("Read ~/.pi/agent/git/github.com/u/r/skills/bar/SKILL.md → allow",
+	decide(skillCfg, "read", { path: HOME + "/.pi/agent/git/github.com/u/r/skills/bar/SKILL.md" }), "allow");
+test("Read ~/.agents/skills/baz/SKILL.md → allow",
+	decide(skillCfg, "read", { path: HOME + "/.agents/skills/baz/SKILL.md" }), "allow");
+test("Read helper script inside skill dir → allow",
+	decide(skillCfg, "read", { path: HOME + "/.pi/agent/skills/foo/scripts/helper.sh" }), "allow");
+
+// Constrained scope: paths outside the skill roots must NOT be auto-allowed
+test("Read ~/.pi/agent/sessions/abc.json → ask (NOT in skills scope)",
+	decide(skillCfg, "read", { path: HOME + "/.pi/agent/sessions/abc.json" }), "ask");
+test("Read ~/.pi/agent/git/github.com/u/r/README.md → ask (outside skills/ subdir)",
+	decide(skillCfg, "read", { path: HOME + "/.pi/agent/git/github.com/u/r/README.md" }), "ask");
+test("Read ~/.pi/agent/pi-tool-permissions.json → ask (NOT in skills scope)",
+	decide(skillCfg, "read", { path: HOME + "/.pi/agent/pi-tool-permissions.json" }), "ask");
+
+// readAllowSkills:false makes in-scope paths fall through too
+const skillsOffCfg = loadConfigFromObjects({}, { readAllowSkills: false, defaultAction: "ask" }, CWD, HOME);
+test("Read skill SKILL.md → ask when readAllowSkills:false",
+	decide(skillsOffCfg, "read", { path: HOME + "/.pi/agent/skills/foo/SKILL.md" }), "ask");
+
+// Sanity: Write to a skill path is NOT auto-allowed (write→ask still applies)
+test("Write skill SKILL.md → ask (write toolDefault unaffected by readAllowSkills)",
+	decide(skillCfg, "write", { path: HOME + "/.pi/agent/skills/foo/SKILL.md" }), "ask");
 
 process.exit(summary() > 0 ? 1 : 0);

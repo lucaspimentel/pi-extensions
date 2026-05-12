@@ -4,6 +4,7 @@
   "grepAllowCwd": true,
   "globAllowCwd": true,
   "lsAllowCwd": true,
+  "readAllowSkills": true,
   "bashReadOnlyAllowCwd": true,
   "toolDefaults": {
     "write": "ask"
