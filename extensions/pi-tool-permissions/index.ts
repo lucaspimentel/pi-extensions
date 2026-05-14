@@ -73,8 +73,8 @@
  *     read pi documentation without prompting. Covered roots (relative to home):
  *       Read(<home>/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/**)  (Windows)
  *       Read(<home>/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/**)
- *       Read(<home>/.nvm/versions/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**)
- *       Read(<home>/.volta/tools/image/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *       Read(<home>/.nvm/versions/node/{*}/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *       Read(<home>/.volta/tools/image/node/{*}/lib/node_modules/@earendil-works/pi-coding-agent/**)
  *       Read(<home>/.local/share/npm/lib/node_modules/@earendil-works/pi-coding-agent/**)
  *       Read(<home>/Library/Application Support/npm/lib/node_modules/@earendil-works/pi-coding-agent/**)
  *     Only affects Read; Write/Edit to these paths are unaffected. System-wide
