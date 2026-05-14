@@ -69,7 +69,7 @@
   - Add tests in `test-loadconfig.mjs` (implicit rule presence + opt-out) and a small case in `test-rules-and-decide.mjs` or a new `test-readonly-cwd.mjs` confirming an `Ls` call inside cwd is auto-allowed and one outside still asks/denies. Sync `test-helpers.mjs` and wire into `run-all.mjs`.
 
 - [ ] When saving an "always allow/deny" rule, let the user choose project-level or user-level
-  - In `index.ts`, `addRule()` (~1061–1066) always writes to the project config via `saveProjectConfig(cwd, ...)`. When the user picks `Allow always (save rule)` or `Deny always (save rule)` (~963–986, ~1008–1041), add a follow-up prompt asking where to save: `Project (<cwd>/.pi/tool-permissions.json)` or `User (~/.pi/agent/pi-tool-permissions.json)`.
+  - In `index.ts`, `addRule()` (~1061–1066) always writes to the project config via `saveProjectConfig(cwd, ...)`. When the user picks `Allow always (save rule)` or `Deny always (save rule)` (~963–986, ~1008–1041), add a follow-up prompt asking where to save: `Project (<cwd>/.pi/pi-tool-permissions.json)` or `User (~/.pi/agent/pi-tool-permissions.json)`.
   - Add a `saveUserRule(action, rule)` helper mirroring `addRule` but reading/writing `USER_CONFIG` (`~146`), alongside the existing `loadProjectConfigRaw` / `saveProjectConfig` helpers.
   - All four "always" call-sites invoke `addRule(ctx.cwd, ...)` — update each to branch on the user's scope choice; keep the project path as the default so existing behavior is unchanged if the prompt is skipped somehow.
   - Add tests in `test-rules-and-decide.mjs` covering: rule saved to project config (existing behavior), rule saved to user config, and subsequent `loadConfig()` merging both.
@@ -87,7 +87,7 @@
   - If proceeding: update `actionIcon` and the gutter logic in both `index.ts` and `test-helpers.mjs`, refresh the `formatBreakdown — rendering` tests in `test-bash.mjs` (icon assertions, alignment invariant), and consider a config flag (e.g. `breakdownEmoji?: boolean`) so users on emoji-hostile terminals can opt out. Document the flag in the header block, `README.md`, and `pi-tool-permissions.example.json`.
 
 - [ ] Add an interactive settings UI via `SettingsList` for the implicit-allow toggles
-  - Pi doesn't expose a first-class "extension settings" API (see `docs/settings.md`, `docs/sdk.md`, `docs/extensions.md`) — each extension owns its own JSON config. pi-tool-permissions already does this via `~/.pi/agent/pi-tool-permissions.json` (user, with a legacy fallback at `~/.pi/tool-permissions.json`) and `<cwd>/.pi/tool-permissions.json` (project). What's missing is an in-TUI editor; users currently have to hand-edit JSON or rely on `/permissions list`.
+  - Pi doesn't expose a first-class "extension settings" API (see `docs/settings.md`, `docs/sdk.md`, `docs/extensions.md`) — each extension owns its own JSON config. pi-tool-permissions already does this via `~/.pi/agent/pi-tool-permissions.json` (user, with a legacy fallback at `~/.pi/tool-permissions.json`) and `<cwd>/.pi/pi-tool-permissions.json` (project, with a legacy fallback at `<cwd>/.pi/tool-permissions.json`). What's missing is an in-TUI editor; users currently have to hand-edit JSON or rely on `/permissions list`.
   - Add a new subcommand (e.g. `/permissions settings`) that opens `SettingsList` from `@earendil-works/pi-tui` with `getSettingsListTheme()` (see `docs/tui.md` Pattern 3 and `examples/extensions/tools.ts`). Expose the existing boolean knobs as toggleable rows:
     - `readAllowCwd`, `grepAllowCwd`, `globAllowCwd`, `lsAllowCwd`
     - `readAllowSkills`, `bashReadOnlyAllowCwd`, `allowNoopCd`
@@ -114,7 +114,7 @@
   - Document in the header block of `index.ts` (~37–68, near the existing `readAllowSkills` docs), `README.md`, and `pi-tool-permissions.example.json`.
   - Tests: extend `test-loadconfig.mjs` (and sync `test-helpers.mjs` if it duplicates the loader) covering the implicit globs being present when the flag is on, absent when off, and a `Read` decision inside the pi-coding-agent docs path being auto-allowed while unrelated files in `node_modules` still ask/deny. Wire any new test file into `run-all.mjs`.
 
-- [ ] Rename project config file to `pi-tool-permissions.json` (with legacy fallback)
+- [x] Rename project config file to `pi-tool-permissions.json` (with legacy fallback)
   - Today the project config lives at `<cwd>/.pi/tool-permissions.json` (constant `PROJECT_CONFIG_REL` in `index.ts` ~168). The user config has already been renamed to the pi-prefixed form (`USER_CONFIG = ~/.pi/agent/pi-tool-permissions.json`) with a legacy fallback (`LEGACY_USER_CONFIG = ~/.pi/tool-permissions.json`). The project file should follow the same convention for naming consistency across both scopes.
   - Add a new constant `PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.json")` and a `LEGACY_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json")`. Update the reader (`loadProjectConfigRaw` and any other readers — grep for `PROJECT_CONFIG_REL` and the literal string `tool-permissions.json`) to mirror the user-config pattern: prefer the new file; fall back to the legacy file only when the new one is absent.
   - Update the writer / `saveProjectConfig` to always write to the new path. Decide whether to auto-migrate (rename old → new on first write) or leave the legacy file in place; auto-migrate is simpler for users.

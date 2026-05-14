@@ -31,9 +31,11 @@ pi -e ./pi-tool-permissions/index.ts
 Rules are loaded from two files, merged together (project overrides user for `defaultAction`; allow/deny/ask lists are concatenated):
 
 - `~/.pi/agent/pi-tool-permissions.json` — user-global
-- `<cwd>/.pi/tool-permissions.json` — project-local (recommended for team-shared rules)
+- `<cwd>/.pi/pi-tool-permissions.json` — project-local (recommended for team-shared rules)
 
-For backwards compatibility, if the user-global file above does not exist or cannot be read, the extension falls back to the legacy path `~/.pi/tool-permissions.json`.
+For backwards compatibility:
+- If the user-global file above does not exist or cannot be read, the extension falls back to the legacy path `~/.pi/tool-permissions.json`.
+- If the project-local `pi-tool-permissions.json` does not exist, the extension falls back to the legacy path `<cwd>/.pi/tool-permissions.json`. The first time a rule is saved, the legacy file is automatically renamed to the new filename.
 
 See [`pi-tool-permissions.example.json`](./pi-tool-permissions.example.json) for a starter config.
 
@@ -366,7 +368,7 @@ Suggested rule: Bash(rm*)
     Deny always (save rule)
 ```
 
-Choosing **always** saves the suggested rule into the project-local config (`.pi/tool-permissions.json`).
+Choosing **always** saves the suggested rule into the project-local config (`.pi/pi-tool-permissions.json`).
 
 In non-interactive modes (`-p`, JSON mode), `ask` falls back to **deny** so nothing dangerous slips through automation.
 
@@ -385,12 +387,13 @@ Explicit `deny` rules still win even when the mode is on.
 | `/permissions allowalledits` | Toggle |
 | `/permissions allowalledits on\|off` | Set explicitly |
 
-When active, a `edits: all allowed` indicator appears in the footer status bar.
+When active, a `✏️ all edits allowed` indicator appears in the footer status bar.
 
 ## Slash command
 
 ```
 /permissions                            # show current rules + allow-all-edits state
+/permissions list                       # alias for bare /permissions
 /permissions allow <rule>               # add an allow rule (project-local)
 /permissions deny  <rule>               # add a deny rule
 /permissions ask   <rule>               # add an ask rule

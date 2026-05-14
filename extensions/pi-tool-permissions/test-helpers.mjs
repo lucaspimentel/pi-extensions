@@ -2,7 +2,8 @@
 // These are plain-JS mirrors of the pure functions in index.ts.
 // When index.ts changes, update this file to match.
 
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 // ── Tool name helpers ─────────────────────────────────────────────────────
 
@@ -368,7 +369,7 @@ const dedupe = (items) => [...new Set(items)];
 
 /**
  * Drives loadConfig without touching the filesystem.
- * Pass raw config objects (as they would appear in tool-permissions.json).
+ * Pass raw config objects (as they would appear in pi-tool-permissions.json).
  * When `home` is provided, also injects the readAllowSkills globs as the
  * production loadConfig() does. When omitted, skill globs are not injected
  * (so existing tests that don't care about skills stay deterministic).
@@ -415,6 +416,34 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
 		bashReadOnlyAllowCwd,
 		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, readAllowPiDocs, bashReadOnlyAllowCwd, allowNoopCd },
 	};
+}
+
+// ── Project config file names (mirrors index.ts constants) ──────────────────
+export const PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.json");
+export const LEGACY_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
+
+/**
+ * Mirrors loadProjectConfigRaw() + saveProjectConfig() in index.ts for
+ * filesystem-based tests. These touch the real filesystem; use a temp directory.
+ */
+export function loadProjectConfigFromDisk(cwd) {
+	const read = (p) => {
+		try {
+			if (!existsSync(p)) return null;
+			return JSON.parse(readFileSync(p, "utf8"));
+		} catch { return null; }
+	};
+	return read(join(cwd, PROJECT_CONFIG_REL)) ?? read(join(cwd, LEGACY_PROJECT_CONFIG_REL)) ?? {};
+}
+
+export function saveProjectConfigToDisk(cwd, cfg) {
+	const newPath    = join(cwd, PROJECT_CONFIG_REL);
+	const legacyPath = join(cwd, LEGACY_PROJECT_CONFIG_REL);
+	mkdirSync(dirname(newPath), { recursive: true });
+	writeFileSync(newPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+	if (existsSync(legacyPath)) {
+		try { rmSync(legacyPath); } catch { /* ignore */ }
+	}
 }
 
 /** Build a minimal ResolvedConfig for decide/decideCompound tests.

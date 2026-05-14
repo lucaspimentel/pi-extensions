@@ -1,7 +1,13 @@
 // run: node test-loadconfig.mjs
 
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-	makeTestRunner, normalizePathSep, cwdGlobPattern, skillReadGlobs, piDocsReadGlobs, loadConfigFromObjects, decide,
+	makeTestRunner, normalizePathSep, cwdGlobPattern, skillReadGlobs, piDocsReadGlobs,
+	loadConfigFromObjects, decide,
+	PROJECT_CONFIG_REL, LEGACY_PROJECT_CONFIG_REL,
+	loadProjectConfigFromDisk, saveProjectConfigToDisk,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -229,5 +235,95 @@ const userOffProjectOn = loadConfigFromObjects({ readAllowPiDocs: false }, { rea
 test("user:false, project:true → readAllowPiDocs is true",  userOffProjectOn.implicit.readAllowPiDocs, true);
 const userOnProjectOff = loadConfigFromObjects({ readAllowPiDocs: true }, { readAllowPiDocs: false }, CWD, HOME);
 test("user:true, project:false → readAllowPiDocs is false", userOnProjectOff.implicit.readAllowPiDocs, false);
+
+// ── Filesystem: project config file naming ───────────────────────────────
+
+section("project config file naming (filesystem)");
+
+function makeTempDir() {
+	const dir = join(tmpdir(), `pi-perms-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	mkdirSync(dir, { recursive: true });
+	return dir;
+}
+function writeJson(dir, rel, obj) {
+	const path = join(dir, rel);
+	mkdirSync(join(dir, ".pi"), { recursive: true });
+	writeFileSync(path, JSON.stringify(obj), "utf8");
+}
+function cleanup(dir) {
+	try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+// 1. Only new file present
+{
+	const cwd = makeTempDir();
+	try {
+		writeJson(cwd, PROJECT_CONFIG_REL, { allow: ["Read(foo)"] });
+		const cfg = loadProjectConfigFromDisk(cwd);
+		test("new file only: allow rule loaded", cfg.allow?.[0], "Read(foo)");
+	} finally { cleanup(cwd); }
+}
+
+// 2. Only legacy file present (fallback)
+{
+	const cwd = makeTempDir();
+	try {
+		writeJson(cwd, LEGACY_PROJECT_CONFIG_REL, { allow: ["Read(legacy)"] });
+		const cfg = loadProjectConfigFromDisk(cwd);
+		test("legacy file only: allow rule loaded via fallback", cfg.allow?.[0], "Read(legacy)");
+	} finally { cleanup(cwd); }
+}
+
+// 3. Both present: new file wins
+{
+	const cwd = makeTempDir();
+	try {
+		writeJson(cwd, PROJECT_CONFIG_REL,        { allow: ["Read(new)"]    });
+		writeJson(cwd, LEGACY_PROJECT_CONFIG_REL, { allow: ["Read(legacy)"] });
+		const cfg = loadProjectConfigFromDisk(cwd);
+		test("both files present: new file wins",          cfg.allow?.[0], "Read(new)");
+		test("both files present: legacy rule not loaded", cfg.allow?.includes("Read(legacy)"), false);
+	} finally { cleanup(cwd); }
+}
+
+// 4. Neither present: empty config
+{
+	const cwd = makeTempDir();
+	try {
+		const cfg = loadProjectConfigFromDisk(cwd);
+		test("neither file present: config is empty object", Object.keys(cfg).length, 0);
+	} finally { cleanup(cwd); }
+}
+
+// 5. Migration: legacy file → save → new file written, legacy deleted
+{
+	const { existsSync } = await import("node:fs");
+	const cwd = makeTempDir();
+	try {
+		writeJson(cwd, LEGACY_PROJECT_CONFIG_REL, { allow: ["Bash(npm test)"] });
+		saveProjectConfigToDisk(cwd, { allow: ["Bash(npm test)", "Read"] });
+		const newPath    = join(cwd, PROJECT_CONFIG_REL);
+		const legacyPath = join(cwd, LEGACY_PROJECT_CONFIG_REL);
+		test("migration: new file created after save",    existsSync(newPath),    true);
+		test("migration: legacy file removed after save", existsSync(legacyPath), false);
+		const saved = loadProjectConfigFromDisk(cwd);
+		test("migration: saved rules round-trip correctly", saved.allow?.[1], "Read");
+	} finally { cleanup(cwd); }
+}
+
+// 6. Round-trip: new file only → save → still at new path, no legacy created
+{
+	const { existsSync } = await import("node:fs");
+	const cwd = makeTempDir();
+	try {
+		saveProjectConfigToDisk(cwd, { allow: ["Write"] });
+		const newPath    = join(cwd, PROJECT_CONFIG_REL);
+		const legacyPath = join(cwd, LEGACY_PROJECT_CONFIG_REL);
+		test("round-trip: new file exists after save",      existsSync(newPath),    true);
+		test("round-trip: no legacy file created",          existsSync(legacyPath), false);
+		const saved = loadProjectConfigFromDisk(cwd);
+		test("round-trip: allow rule preserved",            saved.allow?.[0],       "Write");
+	} finally { cleanup(cwd); }
+}
 
 process.exit(summary() > 0 ? 1 : 0);

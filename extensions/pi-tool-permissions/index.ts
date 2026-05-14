@@ -25,7 +25,8 @@
  * Config files (merged, project overrides user):
  *   ~/.pi/agent/pi-tool-permissions.json
  *   ~/.pi/tool-permissions.json (legacy fallback when the new user config is absent)
- *   <cwd>/.pi/tool-permissions.json
+ *   <cwd>/.pi/pi-tool-permissions.json
+ *   <cwd>/.pi/tool-permissions.json (legacy fallback when the new project config is absent)
  *
  * Schema:
  *   {
@@ -110,6 +111,7 @@
  *
  * Slash commands:
  *   /permissions                       - show current rules + allow-all-edits state
+ *   /permissions list                  - alias for bare /permissions
  *   /permissions allow <rule>          - add an allow rule (project)
  *   /permissions deny  <rule>          - add a deny rule (project)
  *   /permissions ask   <rule>          - add an ask rule (project)
@@ -119,7 +121,7 @@
  *   /permissions allowalledits [on|off|toggle]
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -181,7 +183,8 @@ interface ResolvedConfig {
 
 const USER_CONFIG = join(homedir(), ".pi", "agent", "pi-tool-permissions.json");
 const LEGACY_USER_CONFIG = join(homedir(), ".pi", "tool-permissions.json");
-const PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
+const PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.json");
+const LEGACY_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
 const STATUS_KEY = "tool-permissions";
 
 function readJsonSafe(path: string): PermissionsConfig | null {
@@ -206,7 +209,7 @@ function loadUserConfig(): PermissionsConfig {
 
 function loadConfig(cwd: string): ResolvedConfig {
 	const user = loadUserConfig();
-	const project = readJsonSafe(join(cwd, PROJECT_CONFIG_REL)) ?? {};
+	const project = loadProjectConfigRaw(cwd);
 
 	const allow = dedupe([...(user.allow ?? []), ...(project.allow ?? [])]);
 	const deny  = dedupe([...(user.deny  ?? []), ...(project.deny  ?? [])]);
@@ -278,12 +281,25 @@ function projectConfigPath(cwd: string): string {
 	return join(cwd, PROJECT_CONFIG_REL);
 }
 
+function legacyProjectConfigPath(cwd: string): string {
+	return join(cwd, LEGACY_PROJECT_CONFIG_REL);
+}
+
 function loadProjectConfigRaw(cwd: string): PermissionsConfig {
-	return readJsonSafe(projectConfigPath(cwd)) ?? {};
+	return readJsonSafe(projectConfigPath(cwd)) ?? readJsonSafe(legacyProjectConfigPath(cwd)) ?? {};
 }
 
 function saveProjectConfig(cwd: string, cfg: PermissionsConfig): void {
+	const legacyPath = legacyProjectConfigPath(cwd);
 	writeJson(projectConfigPath(cwd), cfg);
+	// Auto-migrate: remove the legacy file now that the new file is written.
+	if (existsSync(legacyPath)) {
+		try {
+			rmSync(legacyPath);
+		} catch (err) {
+			console.warn(`[tool-permissions] Could not remove legacy project config ${legacyPath}: ${(err as Error).message}`);
+		}
+	}
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
