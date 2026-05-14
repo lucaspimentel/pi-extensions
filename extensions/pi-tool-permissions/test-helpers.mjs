@@ -38,6 +38,22 @@ export function skillReadGlobs(home) {
 }
 
 /**
+ * Mirrors piDocsReadGlobs() in index.ts: canonical list of glob patterns covering
+ * pi's bundled documentation package relative to the given home directory.
+ */
+export function piDocsReadGlobs(home) {
+	const h = normalizePathSep(home);
+	return [
+		`${h}/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/**`,
+		`${h}/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/**`,
+		`${h}/.nvm/versions/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**`,
+		`${h}/.volta/tools/image/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**`,
+		`${h}/.local/share/npm/lib/node_modules/@earendil-works/pi-coding-agent/**`,
+		`${h}/Library/Application Support/npm/lib/node_modules/@earendil-works/pi-coding-agent/**`,
+	];
+}
+
+/**
  * Returns true when `cmd` is a `cd` invocation whose destination resolves to
  * the current working directory.  Mirrors isNoopCd() in index.ts.
  */
@@ -372,15 +388,18 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
 	const globAllowCwd = project.globAllowCwd ?? user.globAllowCwd ?? true;
 	const lsAllowCwd = project.lsAllowCwd ?? user.lsAllowCwd ?? true;
 	const readAllowSkills = project.readAllowSkills ?? user.readAllowSkills ?? true;
+	const readAllowPiDocs = project.readAllowPiDocs ?? user.readAllowPiDocs ?? true;
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
 	const skillRules = (home && readAllowSkills) ? skillReadGlobs(home).map((g) => `Read(${g})`) : [];
+	const piDocsRules = (home && readAllowPiDocs) ? piDocsReadGlobs(home).map((g) => `Read(${g})`) : [];
 	const implicitAllow = [
 		...(readAllowCwd ? [`Read(${cwdGlobPattern(cwd)})`] : []),
 		...(grepAllowCwd ? [`Grep(${cwdGlobPattern(cwd)})`] : []),
 		...(globAllowCwd ? [`Glob(${cwdGlobPattern(cwd)})`] : []),
 		...(lsAllowCwd  ? [`Ls(${cwdGlobPattern(cwd)})`]   : []),
 		...skillRules,
+		...piDocsRules,
 	];
 
 	const implicitToolDefaults = {};
@@ -394,7 +413,7 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
 		cwd,
 		allowNoopCd,
 		bashReadOnlyAllowCwd,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, bashReadOnlyAllowCwd, allowNoopCd },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, readAllowPiDocs, bashReadOnlyAllowCwd, allowNoopCd },
 	};
 }
 
@@ -404,7 +423,7 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
  */
 export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, cwd = process.cwd() } = {}) {
 	// Normalize toolDefault keys so decide() can look them up via normalizeTool()
-	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, bashReadOnlyAllowCwd, cwd, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, bashReadOnlyAllowCwd, allowNoopCd } };
+	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, bashReadOnlyAllowCwd, cwd, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, allowNoopCd } };
 }
 
 // ── Test runner ───────────────────────────────────────────────────────────

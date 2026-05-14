@@ -49,6 +49,7 @@ See [`pi-tool-permissions.example.json`](./pi-tool-permissions.example.json) for
   "globAllowCwd": true,
   "lsAllowCwd": true,
   "readAllowSkills": true,
+  "readAllowPiDocs": true,
   "bashReadOnlyAllowCwd": true
 }
 ```
@@ -231,6 +232,28 @@ Only `Read` is affected — `Write` and `Edit` to these paths still go through t
 Disable it per-project:
 ```json
 { "readAllowSkills": false }
+```
+
+#### `readAllowPiDocs` (default: `true`)
+
+Silently allows `Read` calls targeting pi's bundled README and docs package, so the agent can answer questions about pi itself without prompting. These files live inside the globally-installed npm package, outside any project cwd.
+
+Covered roots (relative to your home directory):
+
+| Path | Purpose |
+| ---- | ------- |
+| `~/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/**` | Windows global npm |
+| `~/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/**` | `npm config set prefix ~/.npm-global` |
+| `~/.nvm/versions/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**` | nvm |
+| `~/.volta/tools/image/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**` | volta |
+| `~/.local/share/npm/lib/node_modules/@earendil-works/pi-coding-agent/**` | XDG-style npm |
+| `~/Library/Application Support/npm/lib/node_modules/@earendil-works/pi-coding-agent/**` | macOS |
+
+System-wide install paths (`/usr/local/lib/...`, `/usr/lib/...`) are not covered. Only `Read` is affected — `Write` and `Edit` still go through the normal permission flow.
+
+Disable it per-project:
+```json
+{ "readAllowPiDocs": false }
 ```
 
 #### `bashReadOnlyAllowCwd` (default: `true`)

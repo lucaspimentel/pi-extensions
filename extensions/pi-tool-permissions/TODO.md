@@ -103,7 +103,7 @@
   - Wire into the existing `readAllowSkills` flag rather than adding a new flag — it's the same conceptual feature, just a more complete implementation. Update the header docstring in `index.ts` (~61–68) and `README.md` to describe the broadened coverage.
   - Tests: extend `test-loadconfig.mjs` (and sync `test-helpers.mjs` — see `loadConfigFromObjects`'s optional `home` param) covering: a skill registered outside the canonical roots is auto-allowed, unrelated siblings in the same parent dir remain `ask`, and the existing canonical-root assertions still pass.
 
-- [ ] Auto-allow reading pi's own bundled docs by default
+- [x] Auto-allow reading pi's own bundled docs by default
   - Pi ships its README + docs inside its globally-installed npm package, e.g. `~/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/README.md` and `~/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/docs/**`. These are outside any project cwd and outside the existing skill roots, so `Read` calls against them currently fall through to `ask` and create friction whenever the user asks pi about itself.
   - Mirror the existing `readAllowSkills` pattern in `index.ts`: the `skillReadGlobs(home)` helper (~304) returns a list of normalized glob patterns and `loadConfig()` (~226) pushes them into `implicitAllow` when the flag is on. Add a parallel `piDocsReadGlobs(home)` helper and a `readAllowPiDocs?: boolean` config key (default `true`).
   - Globs to cover (Windows + cross-platform npm layouts):

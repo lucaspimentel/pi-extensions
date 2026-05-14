@@ -5,6 +5,7 @@
   "globAllowCwd": true,
   "lsAllowCwd": true,
   "readAllowSkills": true,
+  "readAllowPiDocs": true,
   "bashReadOnlyAllowCwd": true,
   "toolDefaults": {
     "write": "ask"

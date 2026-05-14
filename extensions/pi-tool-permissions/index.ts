@@ -39,6 +39,7 @@
  *     "globAllowCwd": true,
  *     "lsAllowCwd": true,
  *     "readAllowSkills": true,
+ *     "readAllowPiDocs": true,
  *     "bashReadOnlyAllowCwd": true
  *   }
  *
@@ -66,6 +67,18 @@
  *       Read(<home>/.agents/skills/**)
  *     Only affects Read; Write/Edit to these paths are unaffected. Disable with
  *     "readAllowSkills": false.
+ *   readAllowPiDocs (default: true)
+ *     Injects Read rules covering pi's bundled docs and README so the agent can
+ *     read pi documentation without prompting. Covered roots (relative to home):
+ *       Read(<home>/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/**)  (Windows)
+ *       Read(<home>/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *       Read(<home>/.nvm/versions/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *       Read(<home>/.volta/tools/image/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *       Read(<home>/.local/share/npm/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *       Read(<home>/Library/Application Support/npm/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *     Only affects Read; Write/Edit to these paths are unaffected. System-wide
+ *     installs (/usr/local/lib/...) are not covered. Disable with
+ *     "readAllowPiDocs": false.
  *   bashReadOnlyAllowCwd (default: true)
  *     Silently allows a curated set of read-only bash subcommands (pwd, echo, ls,
  *     cat, head, tail, wc, stat, …) when their path arguments resolve inside cwd.
@@ -130,6 +143,8 @@ interface PermissionsConfig {
 	lsAllowCwd?: boolean;
 	/** When false, disables the implicit Read rules covering pi's skill roots. Default: true. */
 	readAllowSkills?: boolean;
+	/** When false, disables the implicit Read rules covering pi's bundled docs package. Default: true. */
+	readAllowPiDocs?: boolean;
 	/** When false, disables the implicit allow for read-only bash commands in cwd. Default: true. */
 	bashReadOnlyAllowCwd?: boolean;
 	/** When false, disables the implicit allow for no-op `cd` commands. Default: true. */
@@ -158,6 +173,7 @@ interface ResolvedConfig {
 		globAllowCwd: boolean;
 		lsAllowCwd: boolean;
 		readAllowSkills: boolean;
+		readAllowPiDocs: boolean;
 		bashReadOnlyAllowCwd: boolean;
 		allowNoopCd: boolean;
 	};
@@ -208,6 +224,7 @@ function loadConfig(cwd: string): ResolvedConfig {
 	const globAllowCwd = project.globAllowCwd ?? user.globAllowCwd ?? true;
 	const lsAllowCwd = project.lsAllowCwd ?? user.lsAllowCwd ?? true;
 	const readAllowSkills = project.readAllowSkills ?? user.readAllowSkills ?? true;
+	const readAllowPiDocs = project.readAllowPiDocs ?? user.readAllowPiDocs ?? true;
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
 	const implicitAllow: string[] = [];
@@ -228,6 +245,11 @@ function loadConfig(cwd: string): ResolvedConfig {
 			implicitAllow.push(`Read(${glob})`);
 		}
 	}
+	if (readAllowPiDocs) {
+		for (const glob of piDocsReadGlobs(homedir())) {
+			implicitAllow.push(`Read(${glob})`);
+		}
+	}
 
 	// Inject write→ask unless the user has explicitly set toolDefaults.write
 	const implicitToolDefaults: Record<string, Action> = {};
@@ -244,7 +266,7 @@ function loadConfig(cwd: string): ResolvedConfig {
 		cwd,
 		allowNoopCd,
 		bashReadOnlyAllowCwd,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, bashReadOnlyAllowCwd, allowNoopCd },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, readAllowPiDocs, bashReadOnlyAllowCwd, allowNoopCd },
 	};
 }
 
@@ -307,6 +329,34 @@ function skillReadGlobs(home: string): string[] {
 		`${h}/.pi/agent/skills/**`,
 		`${h}/.pi/agent/git/**/skills/**`,
 		`${h}/.agents/skills/**`,
+	];
+}
+
+/**
+ * Returns the canonical list of glob patterns covering pi's bundled documentation
+ * package, relative to the given home directory. Used by the readAllowPiDocs implicit
+ * default to silently permit reading pi's README and docs files outside cwd.
+ *
+ * Roots covered (common npm install layouts):
+ *   <home>/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/**  — Windows global npm
+ *   <home>/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/**      — npm prefix ~/.npm-global
+ *   <home>/.nvm/versions/node/*\/lib/node_modules/@earendil-works/pi-coding-agent/**  — nvm
+ *   <home>/.volta/tools/image/node/*\/lib/node_modules/@earendil-works/pi-coding-agent/**  — volta
+ *   <home>/.local/share/npm/lib/node_modules/@earendil-works/pi-coding-agent/**  — XDG-style npm
+ *   <home>/Library/Application Support/npm/lib/node_modules/@earendil-works/pi-coding-agent/**  — macOS
+ *
+ * Note: system-wide install paths (/usr/local/lib/..., /usr/lib/...) are not
+ * covered here as they are not relative to the home directory.
+ */
+function piDocsReadGlobs(home: string): string[] {
+	const h = normalizePathSep(home);
+	return [
+		`${h}/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/**`,
+		`${h}/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/**`,
+		`${h}/.nvm/versions/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**`,
+		`${h}/.volta/tools/image/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**`,
+		`${h}/.local/share/npm/lib/node_modules/@earendil-works/pi-coding-agent/**`,
+		`${h}/Library/Application Support/npm/lib/node_modules/@earendil-works/pi-coding-agent/**`,
 	];
 }
 
@@ -1186,6 +1236,7 @@ export default function (pi: ExtensionAPI) {
 					`globAllowCwd: ${cfg.implicit.globAllowCwd}`,
 					`lsAllowCwd: ${cfg.implicit.lsAllowCwd}`,
 					`readAllowSkills: ${cfg.implicit.readAllowSkills}`,
+					`readAllowPiDocs: ${cfg.implicit.readAllowPiDocs}`,
 					`bashReadOnlyAllowCwd: ${cfg.implicit.bashReadOnlyAllowCwd}`,
 					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
 					`allow all edits (this session): ${allowAllEdits ? "ON" : "OFF"}`,
