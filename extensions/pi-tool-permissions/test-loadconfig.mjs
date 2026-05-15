@@ -135,19 +135,27 @@ section("readAllowSkills");
 const HOME = "C:/Users/Test";
 const SKILL_GLOBS = skillReadGlobs(HOME);
 const SKILL_RULES = SKILL_GLOBS.map((g) => `Read(${g})`);
+const SKILL_LS_RULES   = SKILL_GLOBS.map((g) => `Ls(${g})`);
+const SKILL_GLOB_RULES = SKILL_GLOBS.map((g) => `Glob(${g})`);
+const SKILL_GREP_RULES = SKILL_GLOBS.map((g) => `Grep(${g})`);
+const ALL_SKILL_RULES  = [...SKILL_RULES, ...SKILL_LS_RULES, ...SKILL_GLOB_RULES, ...SKILL_GREP_RULES];
 
 const withSkills = loadConfigFromObjects({}, {}, CWD, HOME);
 test("implicit.readAllowSkills is true by default", withSkills.implicit.readAllowSkills, true);
-test("implicit.allow includes ~/.pi/agent/skills/** rule",          withSkills.implicit.allow.includes(SKILL_RULES[0]), true);
-test("implicit.allow includes ~/.pi/agent/git/**/skills/** rule",   withSkills.implicit.allow.includes(SKILL_RULES[1]), true);
-test("implicit.allow includes ~/.agents/skills/** rule",            withSkills.implicit.allow.includes(SKILL_RULES[2]), true);
-test("implicit.allow has 4 cwd + 3 skill + 6 pi-docs rules",         withSkills.implicit.allow.length, 13);
+test("implicit.allow includes Read(~/.pi/agent/skills/**) rule",        withSkills.implicit.allow.includes(SKILL_RULES[0]), true);
+test("implicit.allow includes Read(~/.pi/agent/git/**/skills/**) rule", withSkills.implicit.allow.includes(SKILL_RULES[1]), true);
+test("implicit.allow includes Read(~/.agents/skills/**) rule",          withSkills.implicit.allow.includes(SKILL_RULES[2]), true);
+test("implicit.allow includes Ls(~/.pi/agent/skills/**) rule",          withSkills.implicit.allow.includes(SKILL_LS_RULES[0]), true);
+test("implicit.allow includes Glob(~/.pi/agent/skills/**) rule",        withSkills.implicit.allow.includes(SKILL_GLOB_RULES[0]), true);
+test("implicit.allow includes Grep(~/.pi/agent/skills/**) rule",        withSkills.implicit.allow.includes(SKILL_GREP_RULES[0]), true);
+// 4 cwd + 3 skill globs × 4 read-only tools (12) + 6 pi-docs globs × 4 tools (24) = 40
+test("implicit.allow has 4 cwd + 12 skill + 24 pi-docs rules",          withSkills.implicit.allow.length, 40);
 
-// Opt-out: readAllowSkills: false removes all three skill rules
+// Opt-out: readAllowSkills: false removes all skill rules (Read/Ls/Glob/Grep)
 const noSkills = loadConfigFromObjects({}, { readAllowSkills: false }, CWD, HOME);
 test("implicit.readAllowSkills is false when disabled", noSkills.implicit.readAllowSkills, false);
-test("no skill rules when disabled",                    noSkills.implicit.allow.some((r) => SKILL_RULES.includes(r)), false);
-test("cwd + pi-docs rules still present when readAllowSkills:false",  noSkills.implicit.allow.length, 10);
+test("no skill rules when disabled",                    noSkills.implicit.allow.some((r) => ALL_SKILL_RULES.includes(r)), false);
+test("cwd + pi-docs rules still present when readAllowSkills:false",  noSkills.implicit.allow.length, 28);
 
 // End-to-end decide(): in-scope skill paths → allow
 const skillCfg = loadConfigFromObjects({}, { defaultAction: "ask" }, CWD, HOME);
@@ -159,6 +167,14 @@ test("Read ~/.agents/skills/baz/SKILL.md → allow",
 	decide(skillCfg, "read", { path: HOME + "/.agents/skills/baz/SKILL.md" }), "allow");
 test("Read helper script inside skill dir → allow",
 	decide(skillCfg, "read", { path: HOME + "/.pi/agent/skills/foo/scripts/helper.sh" }), "allow");
+
+// End-to-end decide(): Ls/Glob/Grep on skill paths → allow
+test("Ls ~/.pi/agent/skills/foo/ → allow",
+	decide(skillCfg, "ls", { path: HOME + "/.pi/agent/skills/foo/" }), "allow");
+test("Glob ~/.agents/skills/baz/**/*.md → allow",
+	decide(skillCfg, "glob", { path: HOME + "/.agents/skills/baz/" }), "allow");
+test("Grep ~/.pi/agent/skills/foo → allow",
+	decide(skillCfg, "grep", { path: HOME + "/.pi/agent/skills/foo/" }), "allow");
 
 // Constrained scope: paths outside the skill roots must NOT be auto-allowed
 test("Read ~/.pi/agent/sessions/abc.json → ask (NOT in skills scope)",
@@ -180,27 +196,35 @@ test("Write skill SKILL.md → ask (write toolDefault unaffected by readAllowSki
 section("readAllowPiDocs");
 
 const PI_DOCS_GLOBS = piDocsReadGlobs(HOME);
-const PI_DOCS_RULES = PI_DOCS_GLOBS.map((g) => `Read(${g})`);
+const PI_DOCS_RULES     = PI_DOCS_GLOBS.map((g) => `Read(${g})`);
+const PI_DOCS_LS_RULES   = PI_DOCS_GLOBS.map((g) => `Ls(${g})`);
+const PI_DOCS_GLOB_RULES = PI_DOCS_GLOBS.map((g) => `Glob(${g})`);
+const PI_DOCS_GREP_RULES = PI_DOCS_GLOBS.map((g) => `Grep(${g})`);
+const ALL_PI_DOCS_RULES  = [...PI_DOCS_RULES, ...PI_DOCS_LS_RULES, ...PI_DOCS_GLOB_RULES, ...PI_DOCS_GREP_RULES];
 
 const withPiDocs = loadConfigFromObjects({}, {}, CWD, HOME);
 test("implicit.readAllowPiDocs is true by default",                       withPiDocs.implicit.readAllowPiDocs, true);
-test("implicit.allow includes Windows AppData npm rule",                  withPiDocs.implicit.allow.includes(PI_DOCS_RULES[0]), true);
-test("implicit.allow includes .npm-global rule",                         withPiDocs.implicit.allow.includes(PI_DOCS_RULES[1]), true);
-test("implicit.allow includes .nvm rule",                                withPiDocs.implicit.allow.includes(PI_DOCS_RULES[2]), true);
-test("implicit.allow includes .volta rule",                              withPiDocs.implicit.allow.includes(PI_DOCS_RULES[3]), true);
-test("implicit.allow includes .local/share/npm rule",                    withPiDocs.implicit.allow.includes(PI_DOCS_RULES[4]), true);
-test("implicit.allow includes Library/Application Support rule",         withPiDocs.implicit.allow.includes(PI_DOCS_RULES[5]), true);
-test("implicit.allow has 4 cwd + 3 skill + 6 pi-docs rules",             withPiDocs.implicit.allow.length, 13);
+test("implicit.allow includes Read(Windows AppData npm) rule",            withPiDocs.implicit.allow.includes(PI_DOCS_RULES[0]), true);
+test("implicit.allow includes Read(.npm-global) rule",                    withPiDocs.implicit.allow.includes(PI_DOCS_RULES[1]), true);
+test("implicit.allow includes Read(.nvm) rule",                           withPiDocs.implicit.allow.includes(PI_DOCS_RULES[2]), true);
+test("implicit.allow includes Read(.volta) rule",                         withPiDocs.implicit.allow.includes(PI_DOCS_RULES[3]), true);
+test("implicit.allow includes Read(.local/share/npm) rule",               withPiDocs.implicit.allow.includes(PI_DOCS_RULES[4]), true);
+test("implicit.allow includes Read(Library/Application Support) rule",    withPiDocs.implicit.allow.includes(PI_DOCS_RULES[5]), true);
+test("implicit.allow includes Ls(Windows AppData npm) rule",              withPiDocs.implicit.allow.includes(PI_DOCS_LS_RULES[0]), true);
+test("implicit.allow includes Glob(Windows AppData npm) rule",            withPiDocs.implicit.allow.includes(PI_DOCS_GLOB_RULES[0]), true);
+test("implicit.allow includes Grep(Windows AppData npm) rule",            withPiDocs.implicit.allow.includes(PI_DOCS_GREP_RULES[0]), true);
+// 4 cwd + 3 skill globs × 4 read-only tools (12) + 6 pi-docs globs × 4 tools (24) = 40
+test("implicit.allow has 4 cwd + 12 skill + 24 pi-docs rules",            withPiDocs.implicit.allow.length, 40);
 
-// Opt-out: readAllowPiDocs: false removes all pi-docs rules
+// Opt-out: readAllowPiDocs: false removes all pi-docs rules (Read/Ls/Glob/Grep)
 const noPiDocs = loadConfigFromObjects({}, { readAllowPiDocs: false }, CWD, HOME);
 test("implicit.readAllowPiDocs is false when disabled",  noPiDocs.implicit.readAllowPiDocs, false);
-test("no pi-docs rules when disabled",                   noPiDocs.implicit.allow.some((r) => PI_DOCS_RULES.includes(r)), false);
-test("cwd + skill rules still present when readAllowPiDocs:false", noPiDocs.implicit.allow.length, 7);
+test("no pi-docs rules when disabled",                   noPiDocs.implicit.allow.some((r) => ALL_PI_DOCS_RULES.includes(r)), false);
+test("cwd + skill rules still present when readAllowPiDocs:false", noPiDocs.implicit.allow.length, 16);
 
 // Independence: toggling one flag does not affect the other
 const skillsOffPiDocsOn = loadConfigFromObjects({}, { readAllowSkills: false }, CWD, HOME);
-test("readAllowSkills:false still leaves pi-docs rules",    skillsOffPiDocsOn.implicit.allow.some((r) => PI_DOCS_RULES.includes(r)), true);
+test("readAllowSkills:false still leaves pi-docs rules",    skillsOffPiDocsOn.implicit.allow.some((r) => ALL_PI_DOCS_RULES.includes(r)), true);
 test("readAllowSkills:false still has readAllowPiDocs:true", skillsOffPiDocsOn.implicit.readAllowPiDocs, true);
 const piDocsOffSkillsOn = loadConfigFromObjects({}, { readAllowPiDocs: false }, CWD, HOME);
 test("readAllowPiDocs:false still leaves skill rules",      piDocsOffSkillsOn.implicit.allow.includes(SKILL_RULES[0]), true);
@@ -215,11 +239,25 @@ test("Read pi docs/sdk.md (Windows AppData) → allow",
 test("Read pi README.md (.nvm layout) → allow",
 	decide(piDocsCfg, "read", { path: HOME + "/.nvm/versions/node/v20.0.0/lib/node_modules/@earendil-works/pi-coding-agent/README.md" }), "allow");
 
+// End-to-end decide(): Ls/Glob/Grep on pi-docs paths → allow (the original motivation)
+test("Ls pi-coding-agent/examples/ (Windows AppData) → allow",
+	decide(piDocsCfg, "ls", { path: HOME + "/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/examples/" }), "allow");
+test("Glob pi-coding-agent/examples/ (Windows AppData) → allow",
+	decide(piDocsCfg, "glob", { path: HOME + "/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/examples/" }), "allow");
+test("Grep pi-coding-agent/docs/ (Windows AppData) → allow",
+	decide(piDocsCfg, "grep", { path: HOME + "/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/docs/" }), "allow");
+test("Ls pi-coding-agent (.nvm layout) → allow",
+	decide(piDocsCfg, "ls", { path: HOME + "/.nvm/versions/node/v20.0.0/lib/node_modules/@earendil-works/pi-coding-agent/examples/" }), "allow");
+
 // End-to-end decide(): out-of-scope paths must NOT be auto-allowed
 test("Read sibling npm package → ask (out of scope)",
 	decide(piDocsCfg, "read", { path: HOME + "/AppData/Roaming/npm/node_modules/other-pkg/README.md" }), "ask");
 test("Read npm root file → ask (out of scope)",
 	decide(piDocsCfg, "read", { path: HOME + "/AppData/Roaming/npm/other.json" }), "ask");
+test("Ls sibling npm package → ask (out of scope)",
+	decide(piDocsCfg, "ls", { path: HOME + "/AppData/Roaming/npm/node_modules/other-pkg/" }), "ask");
+test("Grep sibling npm package → ask (out of scope)",
+	decide(piDocsCfg, "grep", { path: HOME + "/AppData/Roaming/npm/node_modules/other-pkg/" }), "ask");
 
 // Opt-out flow-through
 const piDocsOffCfg = loadConfigFromObjects({}, { readAllowPiDocs: false, defaultAction: "ask" }, CWD, HOME);

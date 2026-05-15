@@ -392,8 +392,10 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
 	const readAllowPiDocs = project.readAllowPiDocs ?? user.readAllowPiDocs ?? true;
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
-	const skillRules = (home && readAllowSkills) ? skillReadGlobs(home).map((g) => `Read(${g})`) : [];
-	const piDocsRules = (home && readAllowPiDocs) ? piDocsReadGlobs(home).map((g) => `Read(${g})`) : [];
+	const READONLY_PATH_TOOLS = ["Read", "Ls", "Glob", "Grep"];
+	const expandReadonly = (globs) => globs.flatMap((g) => READONLY_PATH_TOOLS.map((t) => `${t}(${g})`));
+	const skillRules = (home && readAllowSkills) ? expandReadonly(skillReadGlobs(home)) : [];
+	const piDocsRules = (home && readAllowPiDocs) ? expandReadonly(piDocsReadGlobs(home)) : [];
 	const implicitAllow = [
 		...(readAllowCwd ? [`Read(${cwdGlobPattern(cwd)})`] : []),
 		...(grepAllowCwd ? [`Grep(${cwdGlobPattern(cwd)})`] : []),

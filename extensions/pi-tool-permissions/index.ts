@@ -61,24 +61,26 @@
  *     that omit `path`, which default to cwd) are silently permitted. Disable with
  *     "lsAllowCwd": false.
  *   readAllowSkills (default: true)
- *     Injects Read rules covering pi's known skill roots so reading SKILL.md and
- *     related files outside cwd doesn't prompt. Covered roots:
- *       Read(<home>/.pi/agent/skills/**)
- *       Read(<home>/.pi/agent/git/**\/skills/**)
- *       Read(<home>/.agents/skills/**)
- *     Only affects Read; Write/Edit to these paths are unaffected. Disable with
- *     "readAllowSkills": false.
+ *     Injects Read/Ls/Glob/Grep rules covering pi's known skill roots so reading,
+ *     listing, globbing, or grepping SKILL.md and related files outside cwd doesn't
+ *     prompt. Covered roots:
+ *       <Read|Ls|Glob|Grep>(<home>/.pi/agent/skills/**)
+ *       <Read|Ls|Glob|Grep>(<home>/.pi/agent/git/**\/skills/**)
+ *       <Read|Ls|Glob|Grep>(<home>/.agents/skills/**)
+ *     Only affects read-only tools; Write/Edit to these paths are unaffected.
+ *     Disable with "readAllowSkills": false.
  *   readAllowPiDocs (default: true)
- *     Injects Read rules covering pi's bundled docs and README so the agent can
- *     read pi documentation without prompting. Covered roots (relative to home):
- *       Read(<home>/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/**)  (Windows)
- *       Read(<home>/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/**)
- *       Read(<home>/.nvm/versions/node/{*}/lib/node_modules/@earendil-works/pi-coding-agent/**)
- *       Read(<home>/.volta/tools/image/node/{*}/lib/node_modules/@earendil-works/pi-coding-agent/**)
- *       Read(<home>/.local/share/npm/lib/node_modules/@earendil-works/pi-coding-agent/**)
- *       Read(<home>/Library/Application Support/npm/lib/node_modules/@earendil-works/pi-coding-agent/**)
- *     Only affects Read; Write/Edit to these paths are unaffected. System-wide
- *     installs (/usr/local/lib/...) are not covered. Disable with
+ *     Injects Read/Ls/Glob/Grep rules covering pi's bundled docs and README so the
+ *     agent can read, list, glob, and grep pi documentation without prompting.
+ *     Covered roots (relative to home):
+ *       <Read|Ls|Glob|Grep>(<home>/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/**)  (Windows)
+ *       <Read|Ls|Glob|Grep>(<home>/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *       <Read|Ls|Glob|Grep>(<home>/.nvm/versions/node/{*}/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *       <Read|Ls|Glob|Grep>(<home>/.volta/tools/image/node/{*}/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *       <Read|Ls|Glob|Grep>(<home>/.local/share/npm/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *       <Read|Ls|Glob|Grep>(<home>/Library/Application Support/npm/lib/node_modules/@earendil-works/pi-coding-agent/**)
+ *     Only affects read-only tools; Write/Edit to these paths are unaffected.
+ *     System-wide installs (/usr/local/lib/...) are not covered. Disable with
  *     "readAllowPiDocs": false.
  *   bashReadOnlyAllowCwd (default: true)
  *     Silently allows a curated set of read-only bash subcommands (pwd, echo, ls,
@@ -143,9 +145,9 @@ interface PermissionsConfig {
 	globAllowCwd?: boolean;
 	/** When false, disables the implicit Ls(<cwd>/**) allow rule. Default: true. */
 	lsAllowCwd?: boolean;
-	/** When false, disables the implicit Read rules covering pi's skill roots. Default: true. */
+	/** When false, disables the implicit Read/Ls/Glob/Grep rules covering pi's skill roots. Default: true. */
 	readAllowSkills?: boolean;
-	/** When false, disables the implicit Read rules covering pi's bundled docs package. Default: true. */
+	/** When false, disables the implicit Read/Ls/Glob/Grep rules covering pi's bundled docs package. Default: true. */
 	readAllowPiDocs?: boolean;
 	/** When false, disables the implicit allow for read-only bash commands in cwd. Default: true. */
 	bashReadOnlyAllowCwd?: boolean;
@@ -245,12 +247,16 @@ function loadConfig(cwd: string): ResolvedConfig {
 	}
 	if (readAllowSkills) {
 		for (const glob of skillReadGlobs(homedir())) {
-			implicitAllow.push(`Read(${glob})`);
+			for (const tool of READONLY_PATH_TOOLS) {
+				implicitAllow.push(`${tool}(${glob})`);
+			}
 		}
 	}
 	if (readAllowPiDocs) {
 		for (const glob of piDocsReadGlobs(homedir())) {
-			implicitAllow.push(`Read(${glob})`);
+			for (const tool of READONLY_PATH_TOOLS) {
+				implicitAllow.push(`${tool}(${glob})`);
+			}
 		}
 	}
 
@@ -301,6 +307,16 @@ function saveProjectConfig(cwd: string, cfg: PermissionsConfig): void {
 		}
 	}
 }
+
+// ── Tool name groupings ──────────────────────────────────────────────────────
+
+/**
+ * Read-only path-based tools that benefit from the readAllowSkills / readAllowPiDocs
+ * implicit allow rules. When the agent has read-only access to a docs/skills tree
+ * it also needs to list, glob, and grep that tree to navigate it, so all four tools
+ * receive matching implicit rules. Write/Edit are deliberately excluded.
+ */
+const READONLY_PATH_TOOLS = ["Read", "Ls", "Glob", "Grep"] as const;
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 

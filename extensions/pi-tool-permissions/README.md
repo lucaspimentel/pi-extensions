@@ -219,7 +219,7 @@ Disable it per-project:
 
 #### `readAllowSkills` (default: `true`)
 
-Silently allows `Read` calls targeting pi's known skill roots, so the agent can load `SKILL.md` and related files (helper scripts, references) without prompting. Skill files commonly live outside the project's cwd, where `readAllowCwd` doesn't reach.
+Silently allows `Read`, `Ls`, `Glob`, and `Grep` calls targeting pi's known skill roots, so the agent can load `SKILL.md` and related files (helper scripts, references) and explore the skills tree without prompting. Skill files commonly live outside the project's cwd, where the cwd-based implicit rules don't reach.
 
 Covered roots (relative to your home directory):
 
@@ -229,7 +229,7 @@ Covered roots (relative to your home directory):
 | `~/.pi/agent/git/**/skills/**` | skills inside cloned skill repos |
 | `~/.agents/skills/**` | alternate user-global skill location |
 
-Only `Read` is affected — `Write` and `Edit` to these paths still go through the normal permission flow (and the implicit `write → ask` default).
+Only read-only tools (`Read`/`Ls`/`Glob`/`Grep`) are affected — `Write` and `Edit` to these paths still go through the normal permission flow (and the implicit `write → ask` default).
 
 Disable it per-project:
 ```json
@@ -238,7 +238,7 @@ Disable it per-project:
 
 #### `readAllowPiDocs` (default: `true`)
 
-Silently allows `Read` calls targeting pi's bundled README and docs package, so the agent can answer questions about pi itself without prompting. These files live inside the globally-installed npm package, outside any project cwd.
+Silently allows `Read`, `Ls`, `Glob`, and `Grep` calls targeting pi's bundled README, docs, and examples package, so the agent can answer questions about pi itself and discover example code without prompting. These files live inside the globally-installed npm package, outside any project cwd.
 
 Covered roots (relative to your home directory):
 
@@ -251,7 +251,7 @@ Covered roots (relative to your home directory):
 | `~/.local/share/npm/lib/node_modules/@earendil-works/pi-coding-agent/**` | XDG-style npm |
 | `~/Library/Application Support/npm/lib/node_modules/@earendil-works/pi-coding-agent/**` | macOS |
 
-System-wide install paths (`/usr/local/lib/...`, `/usr/lib/...`) are not covered. Only `Read` is affected — `Write` and `Edit` still go through the normal permission flow.
+System-wide install paths (`/usr/local/lib/...`, `/usr/lib/...`) are not covered. Only read-only tools (`Read`/`Ls`/`Glob`/`Grep`) are affected — `Write` and `Edit` still go through the normal permission flow.
 
 Disable it per-project:
 ```json
