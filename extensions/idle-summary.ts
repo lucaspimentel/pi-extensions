@@ -8,7 +8,7 @@
  * Falls back gracefully if no model or API key is available.
  */
 
-import { complete, getModel } from "@earendil-works/pi-ai";
+import { complete, getModel, type Api, type KnownProvider, type Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 
@@ -124,12 +124,16 @@ export default function (pi: ExtensionAPI) {
 		const conversationText = buildConversationText(branch as SessionEntry[]);
 		if (!conversationText.trim()) return;
 
-		// Find first model with a working API key
-		let selectedModel: ReturnType<typeof getModel> = undefined;
+		// Find first model with a working API key.
+		// Use Model<Api> as a broad type since MODEL_CANDIDATES spans multiple providers,
+		// and getModel's generics can't be inferred across the union of candidate shapes.
+		let selectedModel: Model<Api> | undefined = undefined;
 		let selectedAuth: { apiKey: string; headers?: Record<string, string> } | undefined;
 
 		for (const candidate of MODEL_CANDIDATES) {
-			const model = getModel(candidate.provider, candidate.id);
+			// Cast: each candidate is a known-good (provider, id) pair, but TS widens to a
+			// union across the loop body which collapses getModel's TModelId param to `never`.
+			const model = getModel(candidate.provider as KnownProvider, candidate.id as never);
 			if (!model) continue;
 
 			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);

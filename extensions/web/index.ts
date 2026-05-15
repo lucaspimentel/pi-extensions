@@ -268,10 +268,33 @@ function pickBackend(): "tavily" | "brave" | "serper" | "duckduckgo" {
 	return "duckduckgo";
 }
 
+// --------------------------- tool result detail types ------------------
+
+/** Structured details returned by the web_fetch tool. */
+type WebFetchDetails = {
+	url: string;
+	source: "tavily" | "raw";
+	credits?: number;
+	status?: number;
+	contentType?: string;
+	bytes: number;
+	truncated: boolean;
+	format: "markdown" | "text" | "raw";
+};
+
+/** Structured details returned by the web_search tool. */
+type WebSearchDetails = {
+	backend: "tavily" | "brave" | "serper" | "duckduckgo";
+	query?: string;
+	results?: SearchResult[];
+	answer?: string;
+	error?: string;
+};
+
 // --------------------------- extension --------------------------------
 
 export default function webExtension(pi: ExtensionAPI) {
-	pi.registerTool({
+	pi.registerTool<typeof fetchParams, WebFetchDetails>({
 		name: "web_fetch",
 		label: "Fetch URL",
 		description:
@@ -357,7 +380,7 @@ export default function webExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
+	pi.registerTool<typeof searchParams, WebSearchDetails>({
 		name: "web_search",
 		label: "Web Search",
 		description:
