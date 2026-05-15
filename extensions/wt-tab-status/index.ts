@@ -183,7 +183,7 @@ export default function (pi: ExtensionAPI) {
 		if (s.state === lastApplied) return;
 		lastApplied = s.state;
 
-		ctx.ui.setTitle(formatTitle(s.state, pi.getSessionName(), getCwdBase()));
+		ctx.ui.setTitle(formatTitle(s.state, pi.getSessionName() ?? null, getCwdBase()));
 		process.stdout.write(formatProgressSequence(s.state));
 	}
 

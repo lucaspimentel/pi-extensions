@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Claude Code-style configurable allow/deny/ask tool permissions for pi",
   "private": true,
+  "type": "module",
   "pi": {
     "extensions": ["./index.ts"]
   }

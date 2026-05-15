@@ -1,0 +1,27 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"lib": ["ES2022"],
+		"types": ["node"],
+		"strict": true,
+		"noImplicitAny": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"allowJs": false,
+		"resolveJsonModule": true,
+		"isolatedModules": true,
+		"noEmit": true,
+		"verbatimModuleSyntax": false
+	},
+	"include": [
+		"extensions/**/*.ts"
+	],
+	"exclude": [
+		"node_modules",
+		"**/*.mjs",
+		"**/*.js"
+	]
+}

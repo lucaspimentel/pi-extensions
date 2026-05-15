@@ -1131,7 +1131,7 @@ export default function (pi: ExtensionAPI) {
 					if (!edited) continue;
 					addRule(ctx.cwd, "allow", edited.trim());
 					cfg = loadConfig(ctx.cwd);
-					ctx.ui.notify(`Saved allow rule: ${edited.trim()}`, "success");
+					ctx.ui.notify(`Saved allow rule: ${edited.trim()}`, "info");
 					continue;
 				}
 				if (choice === "Deny always (save rule)") {
@@ -1142,7 +1142,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					addRule(ctx.cwd, "deny", edited.trim());
 					cfg = loadConfig(ctx.cwd);
-					ctx.ui.notify(`Saved deny rule: ${edited.trim()}`, "success");
+					ctx.ui.notify(`Saved deny rule: ${edited.trim()}`, "info");
 					await promptSteerMessage(ctx);
 					return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
 				}
@@ -1186,7 +1186,7 @@ export default function (pi: ExtensionAPI) {
 			if (!edited) return undefined;
 			addRule(ctx.cwd, "allow", edited.trim());
 			cfg = loadConfig(ctx.cwd);
-			ctx.ui.notify(`Saved allow rule: ${edited.trim()}`, "success");
+			ctx.ui.notify(`Saved allow rule: ${edited.trim()}`, "info");
 			return undefined;
 		}
 		if (choice === "Deny always (save rule)") {
@@ -1197,7 +1197,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			addRule(ctx.cwd, "deny", edited.trim());
 			cfg = loadConfig(ctx.cwd);
-			ctx.ui.notify(`Saved deny rule: ${edited.trim()}`, "success");
+			ctx.ui.notify(`Saved deny rule: ${edited.trim()}`, "info");
 			await promptSteerMessage(ctx);
 			return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
 		}
@@ -1329,7 +1329,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					addRule(ctx.cwd, sub, value);
 					reload(ctx.cwd, ctx);
-					ctx.ui.notify(`Added ${sub} rule: ${value}`, "success");
+					ctx.ui.notify(`Added ${sub} rule: ${value}`, "info");
 					return;
 				}
 				case "remove": {
@@ -1340,7 +1340,7 @@ export default function (pi: ExtensionAPI) {
 					const removed = removeRule(ctx.cwd, value);
 					if (removed) {
 						reload(ctx.cwd, ctx);
-						ctx.ui.notify(`Removed rule: ${value}`, "success");
+						ctx.ui.notify(`Removed rule: ${value}`, "info");
 					} else {
 						ctx.ui.notify(`Rule not found: ${value}`, "warning");
 					}

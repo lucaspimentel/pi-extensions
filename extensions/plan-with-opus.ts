@@ -141,7 +141,7 @@ export default function planWithOpus(pi: ExtensionAPI) {
 			pi.setActiveTools(snapshot.tools);
 			ctx.ui.notify(
 				`Plan ready. Restored ${snapshot.provider}/${snapshot.id} (thinking:${snapshot.thinkingLevel}).`,
-				"success",
+				"info",
 			);
 		}
 		snapshot = undefined;
