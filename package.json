@@ -14,7 +14,8 @@
       "./extensions/pi-tool-permissions",
       "./extensions/wt-tab-status",
       "./extensions/external-editor-fix",
-      "./extensions/idle-summary.ts"
+      "./extensions/idle-summary.ts",
+      "./extensions/pwsh.ts"
     ],
     "skills": ["./skills"]
   },
