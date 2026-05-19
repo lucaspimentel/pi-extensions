@@ -267,6 +267,30 @@ export function suggestRule(toolName, input) {
 
 // ── Compound bash splitting ───────────────────────────────────────────────
 
+/**
+ * Mirrors stripLineContinuations() in index.ts. Strips POSIX `\<LF>` and
+ * `\<CRLF>` line-continuations outside single quotes; preserves them inside
+ * single quotes; leaves other backslash-escapes (`\&`, `\$`, ...) untouched.
+ */
+export function stripLineContinuations(cmd) {
+	let out = "";
+	let inSingle = false;
+	let i = 0;
+	while (i < cmd.length) {
+		const ch = cmd[i];
+		if (ch === "'") { inSingle = !inSingle; out += ch; i++; continue; }
+		if (ch === "\\" && !inSingle) {
+			const next = cmd[i + 1];
+			if (next === "\n") { i += 2; continue; }
+			if (next === "\r" && cmd[i + 2] === "\n") { i += 3; continue; }
+			if (next !== undefined) { out += ch + next; i += 2; continue; }
+			out += ch; i++; continue;
+		}
+		out += ch; i++;
+	}
+	return out;
+}
+
 export function splitTopLevelShell(cmd) {
 	const parts = [];
 	let current = "", inSingle = false, inDouble = false, inBacktick = false;
@@ -348,11 +372,13 @@ export function decideCompound(cfg, toolName, input) {
 	if (normalizeTool(toolName) !== "bash")
 		return { action: decide(cfg, toolName, input), isCompound: false, ambiguous: false, breakdown: [] };
 
-	const cmd = String(input.command ?? "");
+	const rawCmd = String(input.command ?? "");
+	const cmd = stripLineContinuations(rawCmd);
+	const normalizedInput = cmd === rawCmd ? input : { ...input, command: cmd };
 	const split = splitTopLevelShell(cmd);
 
 	if (split.kind === "ambiguous") return { action: "ask", isCompound: false, ambiguous: true, breakdown: [] };
-	if (split.kind === "single") return { action: decide(cfg, "bash", input), isCompound: false, ambiguous: false, breakdown: [] };
+	if (split.kind === "single") return { action: decide(cfg, "bash", normalizedInput), isCompound: false, ambiguous: false, breakdown: [] };
 
 	const breakdown = split.parts.map((sub) => ({ sub, action: decide(cfg, "bash", { command: sub }) }));
 	let action = "allow";

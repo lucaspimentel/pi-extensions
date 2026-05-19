@@ -6,6 +6,7 @@ import {
 	splitTopLevelShell, decideCompound, decide, makeCfg, isNoopCd,
 	isReadOnlyBashSubcommand,
 	actionIcon, formatBreakdownLine, formatBreakdown,
+	stripLineContinuations,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -85,6 +86,47 @@ test("\\& still escapes (not a continuation)",         splitTopLevelShell("echo 
 
 // Bare trailing backslash at EOF — no crash, treated as escape of nothing
 test("trailing \\ at EOF → single",                    splitTopLevelShell("foo \\\\").kind, "single");
+
+section("stripLineContinuations");
+
+test("\\<LF> joined",                                   stripLineContinuations("foo \\\nbar"), "foo bar");
+test("\\<CRLF> joined",                                 stripLineContinuations("foo \\\r\nbar"), "foo bar");
+test("\\<LF> inside double quotes stripped",            stripLineContinuations('echo "a \\\nb"'), 'echo "a b"');
+test("\\<LF> inside single quotes preserved",           stripLineContinuations("echo 'a \\\nb'"), "echo 'a \\\nb'");
+test("non-newline escape preserved (\\&)",              stripLineContinuations("foo \\&"), "foo \\&");
+test("non-newline escape preserved (\\$)",              stripLineContinuations("echo \\$HOME"), "echo \\$HOME");
+test("trailing backslash at EOF preserved",             stripLineContinuations("foo \\"), "foo \\");
+test("empty string unchanged",                          stripLineContinuations(""), "");
+test("no continuations — returned as-is",                stripLineContinuations("npm test --watch"), "npm test --watch");
+test("multiple continuations joined",                   stripLineContinuations("a \\\nb \\\nc"), "a b c");
+test("continuation immediately after && (compound)",    stripLineContinuations("foo && \\\nbar"), "foo && bar");
+
+section("decideCompound — line continuation in single commands");
+
+// A non-compound command containing \<LF> must still match plain rules after normalization.
+const contAllowCfg = makeCfg({ allow: ["Bash(foo bar)"], defaultAction: "deny" });
+const contSingle = decideCompound(contAllowCfg, "bash", { command: "foo \\\nbar" });
+test("\\<LF> single → action allow (rule matches normalized form)", contSingle.action, "allow");
+test("\\<LF> single → isCompound false",                            contSingle.isCompound, false);
+test("\\<LF> single → ambiguous false",                             contSingle.ambiguous, false);
+
+const contSingleCRLF = decideCompound(contAllowCfg, "bash", { command: "foo \\\r\nbar" });
+test("\\<CRLF> single → action allow",                              contSingleCRLF.action, "allow");
+
+// Inside single quotes \<NL> is literal — the command is NOT normalized and the rule should NOT match.
+const contSingleQuoted = decideCompound(contAllowCfg, "bash", { command: "echo 'foo \\\nbar'" });
+test("\\<LF> inside '...' not normalized → falls through to deny",   contSingleQuoted.action, "deny");
+
+// no-op cd survives line-continuation normalization (was previously missed in single-cmd path)
+const noopCwd = "/home/user/proj";
+const noopContCfg = makeCfg({ defaultAction: "deny", cwd: noopCwd });
+const noopCont = decideCompound(noopContCfg, "bash", { command: "cd \\\n." });
+test("cd \\<LF>. → recognized as no-op (allow)",                     noopCont.action, "allow");
+
+// read-only bash subcommand detection survives line-continuation normalization
+const readonlyContCfg = makeCfg({ defaultAction: "deny", bashReadOnlyAllowCwd: true, cwd: process.cwd() });
+const readonlyCont = decideCompound(readonlyContCfg, "bash", { command: "pwd \\\n" });
+test("pwd with trailing \\<LF> → allow via readonly auto-allow",      readonlyCont.action, "allow");
 
 section("splitTopLevelShell — parentheses");
 

@@ -100,6 +100,9 @@
  *     - all → allow           ⟹  whole command allowed
  *   If the command cannot be parsed unambiguously (e.g. unmatched quotes), the
  *   whole command falls back to ask.
+ *   POSIX shell line-continuations (`\<LF>` and `\<CRLF>` outside single
+ *   quotes) are stripped before parsing, so commands split across multiple
+ *   lines are matched against rules as their canonical single-line form.
  *
  * Allow-all-edits mode:
  *   A session-only toggle that auto-allows all Write and Edit tool calls without
@@ -460,6 +463,46 @@ const READONLY_BASH_WITH_PATHS = new Set([
 	"ls", "cat", "head", "tail", "wc", "file", "stat", "tree",
 	"du", "realpath", "readlink", "dirname", "basename",
 ]);
+
+/**
+ * Strip POSIX shell line-continuations (`\<LF>` and `\<CRLF>`) from a bash
+ * command, returning the canonical single-line form.
+ *
+ * Semantics:
+ *   - Outside single quotes, a backslash immediately followed by a newline
+ *     (or `\r\n`) is removed entirely, joining the two lines into one.
+ *   - Inside single quotes, backslashes are literal — `\<newline>` is preserved.
+ *   - Other escape sequences (e.g. `\&`, `\$`) are left untouched.
+ *
+ * Called once at the bash entry point in `decideCompound` so downstream
+ * consumers — rule pattern matching, `tokenizeSimple`, `hasTopLevelOutputRedirect`,
+ * `isNoopCd` — all see the canonical form even when the command is non-compound.
+ */
+function stripLineContinuations(cmd: string): string {
+	let out = "";
+	let inSingle = false;
+	let i = 0;
+	while (i < cmd.length) {
+		const ch = cmd[i];
+		if (ch === "'") {
+			inSingle = !inSingle;
+			out += ch;
+			i++;
+			continue;
+		}
+		if (ch === "\\" && !inSingle) {
+			const next = cmd[i + 1];
+			if (next === "\n") { i += 2; continue; }
+			if (next === "\r" && cmd[i + 2] === "\n") { i += 3; continue; }
+			// Non-continuation escape — preserve as-is
+			if (next !== undefined) { out += ch + next; i += 2; continue; }
+			out += ch; i++; continue;
+		}
+		out += ch;
+		i++;
+	}
+	return out;
+}
 
 /**
  * Returns true when `cmd` contains a top-level output redirection operator
@@ -876,7 +919,11 @@ function decideCompound(
 		return { action: decide(cfg, toolName, input), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
-	const cmd = String(input.command ?? "");
+	const rawCmd = String(input.command ?? "");
+	// Strip POSIX line-continuations once up front so the single-command path
+	// and per-subcommand decisions all see the canonical single-line form.
+	const cmd = stripLineContinuations(rawCmd);
+	const normalizedInput = cmd === rawCmd ? input : { ...input, command: cmd };
 	const split = splitTopLevelShell(cmd);
 
 	if (split.kind === "ambiguous") {
@@ -884,7 +931,7 @@ function decideCompound(
 	}
 
 	if (split.kind === "single") {
-		return { action: decide(cfg, "bash", input), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: decide(cfg, "bash", normalizedInput), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	// compound
