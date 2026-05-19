@@ -42,11 +42,12 @@
   - Consider an opt-out config flag if needed, and document the behavior in the header docs, `README.md`, and `pi-tool-permissions.example.json`.
   - Add tests in `test-loadconfig.mjs` / `test-read-write-edit.mjs` (and sync `test-helpers.mjs`) covering parent `AGENTS.md` / `CLAUDE.md` allowed, unrelated parent files still denied/asked, and behavior at drive/root boundaries.
 
-- [ ] Add an “Allow ALL steps once” option for multi-step Bash permission prompts
-  - In `index.ts`, compound Bash handling currently prompts each `ask` subcommand one-by-one inside the `isCompound` branch around the `ctx.ui.select()` dialog; choices are `Allow once`, `Allow always (save rule)`, `Deny once`, and `Deny always (save rule)`.
-  - Add a one-time option that permits every remaining `ask` step in the current multi-step Bash command without saving rules, while preserving explicit `deny` behavior from `decideCompound()`.
-  - Keep wording distinct from persistent rule saves (e.g. “Allow ALL steps once”), and consider whether selecting it on any subcommand should immediately allow the whole compound command or only skip remaining ask prompts.
-  - Add coverage in `test-bash.mjs` or a UI-focused test if available for compounds with multiple ask steps, mixed allow/ask steps, and deny-containing compounds.
+- [x] Add an “Allow ALL steps once” option for multi-step Bash permission prompts
+  - Added a fifth choice `"Allow ALL steps once"` to the compound-Bash `ctx.ui.select()` dialog in `index.ts` (~1158 `isCompound` branch), positioned between `"Allow once"` and `"Allow always (save rule)"` so the allow-strength reads top-to-bottom: once → all-once → always.
+  - Selecting it sets a loop-scoped `allowAllStepsOnce` flag (not session-wide) that short-circuits every remaining `ask` subcommand in the *current* Bash invocation without saving any rule and without re-prompting. The flag resets when the handler returns, so the next independent Bash call starts from scratch.
+  - Explicit `deny` behavior is preserved: `decideCompound()` already short-circuits any compound containing a `deny` via the `culprit` block before the prompt loop runs, so the new choice never bypasses denies. Added an inline comment near the loop to document this invariant.
+  - Single-command (non-compound) prompts and the `applyAllowAllEdits()` session-wide write/edit toggle are untouched — the new flag is intentionally scoped to one compound Bash call.
+  - Documented in `README.md` under `## Interactive prompt` (new `### Compound Bash commands` subsection). No new unit tests — the prompt loop has no fake-UI harness today; existing `decideCompound()` tests in `test-bash.mjs` still cover the multi-ask iteration shape that makes the new choice meaningful. All 120 existing tests still pass.
 
 - [ ] Re-apply newly saved Bash rules to remaining steps in the same multi-step command
   - In `index.ts`, the compound Bash prompt loop iterates over `breakdown.filter((b) => b.action === "ask")`, so the set of prompts is fixed before any `Allow always (save rule)` / `Deny always (save rule)` choice updates the config.

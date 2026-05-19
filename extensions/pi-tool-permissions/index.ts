@@ -1155,19 +1155,40 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// ── Compound bash command: confirm each ask subcommand separately ──────
+		// Note: decideCompound() short-circuits any compound containing a `deny`
+		// subcommand before we reach this loop (see the `culprit` block above),
+		// so the loop below only iterates over `ask` items.
 		if (isCompound) {
 			const fullCmd = String((event.input as Record<string, unknown>).command ?? "");
 			const truncated = fullCmd.length > 200 ? `${fullCmd.slice(0, 197)}...` : fullCmd;
 
+			// Loop-scoped (this Bash invocation only — not session-wide): when set,
+			// every remaining `ask` step is silently allowed without re-prompting
+			// and without saving any rule. Resets when this handler returns.
+			let allowAllStepsOnce = false;
+
 			for (const item of breakdown.filter((b) => b.action === "ask")) {
+				if (allowAllStepsOnce) continue;
+
 				const suggested = suggestRule("Bash", { command: item.sub });
 				const breakdownLines = formatBreakdown(breakdown, item.sub);
 
 				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}\n\nSuggested rule: ${suggested}`;
-				const choices = ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)"];
+				const choices = [
+					"Allow once",
+					"Allow ALL steps once",
+					"Allow always (save rule)",
+					"Deny once",
+					"Deny always (save rule)",
+				];
 				const choice = await ctx.ui.select(title, choices);
 
 				if (choice === "Allow once") continue;
+
+				if (choice === "Allow ALL steps once") {
+					allowAllStepsOnce = true;
+					continue;
+				}
 
 				if (choice === "Deny once" || !choice) {
 					if (choice === "Deny once") await promptSteerMessage(ctx);

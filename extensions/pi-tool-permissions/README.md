@@ -370,6 +370,20 @@ Suggested rule: Bash(rm*)
 
 Choosing **always** saves the suggested rule into the project-local config (`.pi/pi-tool-permissions.json`).
 
+### Compound Bash commands
+
+When a single `Bash` call chains multiple subcommands (e.g. `cd foo && npm test && git status`), the prompt is shown once per `ask` subcommand. In addition to the choices above, the compound prompt offers:
+
+```
+  > Allow once
+    Allow ALL steps once
+    Allow always (save rule)
+    Deny once
+    Deny always (save rule)
+```
+
+**Allow ALL steps once** silently approves every remaining `ask` subcommand in the *current* Bash invocation without saving any rule and without re-prompting. It is scoped to this one compound command — the next independent Bash call starts from scratch. Compounds that contain a `deny` subcommand are still rejected up-front and never reach this prompt.
+
 In non-interactive modes (`-p`, JSON mode), `ask` falls back to **deny** so nothing dangerous slips through automation.
 
 ## Allow-all-edits mode
