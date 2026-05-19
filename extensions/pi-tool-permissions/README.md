@@ -368,7 +368,16 @@ Suggested rule: Bash(rm*)
     Deny always (save rule)
 ```
 
-Choosing **always** saves the suggested rule into the project-local config (`.pi/pi-tool-permissions.local.json`).
+Choosing **always** opens a second selector asking *where* to save the rule:
+
+```
+Save rule where?
+
+  > Project (.pi/pi-tool-permissions.local.json)
+    User    (~/.pi/agent/pi-tool-permissions.json)
+```
+
+The default is **Project** (machine-local, not committed). Pick **User** to apply the rule across every project on this machine. Pressing **Esc** cancels the save (the in-flight command still respects whatever once-decision the user already made: an allow-always cancel proceeds without a saved rule; a deny-always cancel still blocks just this one call).
 
 ### Compound Bash commands
 
@@ -416,24 +425,28 @@ When active, a `✏️ all edits allowed` indicator appears in the footer status
 ```
 /permissions                            # show current rules + allow-all-edits state
 /permissions list                       # alias for bare /permissions
-/permissions allow <rule>               # add an allow rule (project-local)
-/permissions deny  <rule>               # add a deny rule
-/permissions ask   <rule>               # add an ask rule
-/permissions remove <rule>              # remove a rule from any list
-/permissions default <allow|deny|ask>
+/permissions allow <rule> [--user]      # add an allow rule (default: project-local)
+/permissions deny  <rule> [--user]      # add a deny rule
+/permissions ask   <rule> [--user]      # add an ask rule
+/permissions remove <rule> [--user]     # remove a rule (searches project by default; --user searches user config)
+/permissions default <allow|deny|ask> [--user]
 /permissions reload                     # reload config from disk
 /permissions allowalledits [on|off|toggle]
 ```
+
+All write subcommands (`allow`/`deny`/`ask`/`remove`/`default`) accept `--user` to target the user-global config (`~/.pi/agent/pi-tool-permissions.json`); the default is the project-local `.pi/pi-tool-permissions.local.json`. `/permissions list` tags each rule with its source: `[implicit]`, `[user]`, `[project]`, or `[user+project]` when the same rule lives in both files.
 
 Examples:
 
 ```
 /permissions allow Bash(npm test*)
+/permissions allow Bash(rg *) --user
 /permissions allow WebSearch
 /permissions allow WebFetch(https://github.com/*)
 /permissions deny  Write(.env*)
 /permissions ask   WebFetch(*)
 /permissions default deny
+/permissions default deny --user
 /permissions allowalledits on
 ```
 

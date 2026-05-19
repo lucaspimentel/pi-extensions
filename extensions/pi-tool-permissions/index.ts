@@ -213,12 +213,33 @@ function writeJson(path: string, data: PermissionsConfig): void {
 	writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, "utf8");
 }
 
-function loadUserConfig(): PermissionsConfig {
+type Scope = "project" | "user";
+
+function loadUserConfigRaw(): PermissionsConfig {
 	return readJsonSafe(USER_CONFIG) ?? readJsonSafe(LEGACY_USER_CONFIG) ?? {};
 }
 
+function saveUserConfig(cfg: PermissionsConfig): void {
+	writeJson(USER_CONFIG, cfg);
+	// Auto-migrate: drop the legacy user file once the new file is written.
+	if (existsSync(LEGACY_USER_CONFIG)) {
+		try {
+			rmSync(LEGACY_USER_CONFIG);
+		} catch (err) {
+			console.warn(`[tool-permissions] Could not remove legacy user config ${LEGACY_USER_CONFIG}: ${(err as Error).message}`);
+		}
+	}
+}
+
+function tildify(p: string): string {
+	const home = homedir();
+	return p === home || p.startsWith(`${home}/`) || p.startsWith(`${home}\\`)
+		? `~${p.slice(home.length)}`
+		: p;
+}
+
 function loadConfig(cwd: string): ResolvedConfig {
-	const user = loadUserConfig();
+	const user = loadUserConfigRaw();
 	const project = loadProjectConfigRaw(cwd);
 
 	const allow = dedupe([...(user.allow ?? []), ...(project.allow ?? [])]);
@@ -1238,14 +1259,17 @@ export default function (pi: ExtensionAPI) {
 				if (choice === "Allow always (save rule)") {
 					const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
 					if (!edited) continue;
-					addRule(ctx.cwd, "allow", edited.trim());
+					const scope = await promptScope(ctx);
+					// Cancelling scope == cancelling the save (matches editor-cancel above).
+					if (!scope) continue;
+					addRule(scope, ctx.cwd, "allow", edited.trim());
 					cfg = loadConfig(ctx.cwd);
 					currentBreakdown = recomputeBreakdown(breakdown, cfg);
 					const autoCount = currentBreakdown.filter(
 						(b) => b.sub !== sub && askSubs.includes(b.sub) && b.action === "allow",
 					).length;
 					const suffix = autoCount > 0 ? ` (auto-allows ${autoCount} remaining step${autoCount === 1 ? "" : "s"})` : "";
-					ctx.ui.notify(`Saved allow rule: ${edited.trim()}${suffix}`, "info");
+					ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}${suffix}`, "info");
 					continue;
 				}
 				if (choice === "Deny always (save rule)") {
@@ -1254,10 +1278,16 @@ export default function (pi: ExtensionAPI) {
 						await promptSteerMessage(ctx);
 						return { block: true, reason: `Denied by user (subcommand: ${sub})` };
 					}
-					addRule(ctx.cwd, "deny", edited.trim());
+					const scope = await promptScope(ctx);
+					// Cancelling scope == treating as deny-once (no rule saved, but command still blocked).
+					if (!scope) {
+						await promptSteerMessage(ctx);
+						return { block: true, reason: `Denied by user (subcommand: ${sub})` };
+					}
+					addRule(scope, ctx.cwd, "deny", edited.trim());
 					cfg = loadConfig(ctx.cwd);
 					currentBreakdown = recomputeBreakdown(breakdown, cfg);
-					ctx.ui.notify(`Saved deny rule: ${edited.trim()}`, "info");
+					ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
 					await promptSteerMessage(ctx);
 					return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
 				}
@@ -1299,9 +1329,12 @@ export default function (pi: ExtensionAPI) {
 		if (choice === "Allow always (save rule)") {
 			const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
 			if (!edited) return undefined;
-			addRule(ctx.cwd, "allow", edited.trim());
+			const scope = await promptScope(ctx);
+			// Cancelling scope == cancelling the save (matches editor-cancel above).
+			if (!scope) return undefined;
+			addRule(scope, ctx.cwd, "allow", edited.trim());
 			cfg = loadConfig(ctx.cwd);
-			ctx.ui.notify(`Saved allow rule: ${edited.trim()}`, "info");
+			ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}`, "info");
 			return undefined;
 		}
 		if (choice === "Deny always (save rule)") {
@@ -1310,9 +1343,15 @@ export default function (pi: ExtensionAPI) {
 				await promptSteerMessage(ctx);
 				return { block: true, reason: "Denied by user" };
 			}
-			addRule(ctx.cwd, "deny", edited.trim());
+			const scope = await promptScope(ctx);
+			// Cancelling scope == treating as deny-once (no rule saved, but command still blocked).
+			if (!scope) {
+				await promptSteerMessage(ctx);
+				return { block: true, reason: "Denied by user" };
+			}
+			addRule(scope, ctx.cwd, "deny", edited.trim());
 			cfg = loadConfig(ctx.cwd);
-			ctx.ui.notify(`Saved deny rule: ${edited.trim()}`, "info");
+			ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
 			await promptSteerMessage(ctx);
 			return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
 		}
@@ -1330,19 +1369,20 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Rule helpers ─────────────────────────────────────────────────────────
 
-	function addRule(cwd: string, action: Action, rule: string): void {
-		const project = loadProjectConfigRaw(cwd);
-		const list = project[action] ?? [];
+	function addRule(scope: Scope, cwd: string, action: Action, rule: string): void {
+		const cfg = scope === "user" ? loadUserConfigRaw() : loadProjectConfigRaw(cwd);
+		const list = cfg[action] ?? [];
 		if (!list.includes(rule)) list.push(rule);
-		project[action] = dedupe(list);
-		saveProjectConfig(cwd, project);
+		cfg[action] = dedupe(list);
+		if (scope === "user") saveUserConfig(cfg);
+		else saveProjectConfig(cwd, cfg);
 	}
 
-	function removeRule(cwd: string, rule: string): boolean {
-		const project = loadProjectConfigRaw(cwd);
+	function removeRule(scope: Scope, cwd: string, rule: string): boolean {
+		const cfg = scope === "user" ? loadUserConfigRaw() : loadProjectConfigRaw(cwd);
 		let removed = false;
 		for (const key of ["allow", "deny", "ask"] as const) {
-			const list = project[key];
+			const list = cfg[key];
 			if (!list) continue;
 			const idx = list.indexOf(rule);
 			if (idx >= 0) {
@@ -1350,14 +1390,29 @@ export default function (pi: ExtensionAPI) {
 				removed = true;
 			}
 		}
-		if (removed) saveProjectConfig(cwd, project);
+		if (removed) {
+			if (scope === "user") saveUserConfig(cfg);
+			else saveProjectConfig(cwd, cfg);
+		}
 		return removed;
 	}
 
-	function setDefault(cwd: string, action: Action): void {
-		const project = loadProjectConfigRaw(cwd);
-		project.defaultAction = action;
-		saveProjectConfig(cwd, project);
+	function setDefault(scope: Scope, cwd: string, action: Action): void {
+		const cfg = scope === "user" ? loadUserConfigRaw() : loadProjectConfigRaw(cwd);
+		cfg.defaultAction = action;
+		if (scope === "user") saveUserConfig(cfg);
+		else saveProjectConfig(cwd, cfg);
+	}
+
+	// Interactive scope picker used by Allow/Deny-always prompts. Returns null on Esc.
+	async function promptScope(ctx: ExtensionContext): Promise<Scope | null> {
+		const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
+		const userPath = tildify(USER_CONFIG);
+		const projectLabel = `Project (${projectPath})`;
+		const userLabel = `User (${userPath})`;
+		const choice = await ctx.ui.select("Save rule where?", [projectLabel, userLabel]);
+		if (!choice) return null;
+		return choice === userLabel ? "user" : "project";
 	}
 
 	// ── Slash command ────────────────────────────────────────────────────────
@@ -1376,6 +1431,22 @@ export default function (pi: ExtensionAPI) {
 				const implicitAllowSet = new Set(cfg.implicit.allow);
 				const implicitTDKeys = new Set(Object.keys(cfg.implicit.toolDefaults));
 				const tdEntries = Object.entries(cfg.toolDefaults);
+				// Re-read both raw files so we can tag each merged rule with its source.
+				const userRaw = loadUserConfigRaw();
+				const projectRaw = loadProjectConfigRaw(ctx.cwd);
+				const sourceTag = (action: "allow" | "deny" | "ask", rule: string): string => {
+					const inUser = userRaw[action]?.includes(rule) ?? false;
+					const inProject = projectRaw[action]?.includes(rule) ?? false;
+					if (inUser && inProject) return "[user+project]";
+					if (inUser) return "[user]";
+					if (inProject) return "[project]";
+					return "";
+				};
+				const formatRule = (action: "allow" | "deny" | "ask", r: string, implicitSet?: Set<string>): string => {
+					if (implicitSet?.has(r)) return `  [implicit] ${r}`;
+					const tag = sourceTag(action, r);
+					return tag ? `  ${tag} ${r}` : `  - ${r}`;
+				};
 				const lines = [
 					`default: ${cfg.defaultAction}`,
 					`readAllowCwd: ${cfg.implicit.readAllowCwd}`,
@@ -1388,11 +1459,11 @@ export default function (pi: ExtensionAPI) {
 					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
 					`allow all edits (this session): ${allowAllEdits ? "ON" : "OFF"}`,
 					`allow (${cfg.allow.length}):`,
-					...cfg.allow.map((r) => implicitAllowSet.has(r) ? `  [implicit] ${r}` : `  - ${r}`),
+					...cfg.allow.map((r) => formatRule("allow", r, implicitAllowSet)),
 					`deny (${cfg.deny.length}):`,
-					...cfg.deny.map((r) => `  - ${r}`),
+					...cfg.deny.map((r) => formatRule("deny", r)),
 					`ask (${cfg.ask.length}):`,
-					...cfg.ask.map((r) => `  - ${r}`),
+					...cfg.ask.map((r) => formatRule("ask", r)),
 					`toolDefaults (${tdEntries.length}):`,
 					...tdEntries.map(([k, v]) =>
 						implicitTDKeys.has(k) ? `  [implicit] ${k} -> ${v}` : `  - ${k} -> ${v}`
@@ -1402,7 +1473,14 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const [sub, ...rest] = trimmed.split(/\s+/);
+			const [sub, ...restAll] = trimmed.split(/\s+/);
+			// Allow `--user` anywhere after the subcommand to target the user-global config.
+			let scope: Scope = "project";
+			const rest = restAll.filter((tok) => {
+				if (tok === "--user") { scope = "user"; return false; }
+				if (tok === "--project") { scope = "project"; return false; }
+				return true;
+			});
 			const value = rest.join(" ").trim();
 
 			switch (sub) {
@@ -1411,11 +1489,12 @@ export default function (pi: ExtensionAPI) {
 					return;
 				case "default": {
 					if (!isAction(value)) {
-						ctx.ui.notify(`Usage: /permissions default <allow|deny|ask>`, "warning");
+						ctx.ui.notify(`Usage: /permissions default <allow|deny|ask> [--user]`, "warning");
 						return;
 					}
-					setDefault(ctx.cwd, value);
+					setDefault(scope, ctx.cwd, value);
 					reload(ctx.cwd, ctx);
+					ctx.ui.notify(`Set default (${scope}): ${value}`, "info");
 					return;
 				}
 				case "allowalledits": {
@@ -1435,29 +1514,29 @@ export default function (pi: ExtensionAPI) {
 				case "deny":
 				case "ask": {
 					if (!value) {
-						ctx.ui.notify(`Usage: /permissions ${sub} <rule>`, "warning");
+						ctx.ui.notify(`Usage: /permissions ${sub} <rule> [--user]`, "warning");
 						return;
 					}
 					if (!parseRule(value)) {
 						ctx.ui.notify(`Invalid rule: ${value}. Expected ToolName or ToolName(pattern).`, "warning");
 						return;
 					}
-					addRule(ctx.cwd, sub, value);
+					addRule(scope, ctx.cwd, sub, value);
 					reload(ctx.cwd, ctx);
-					ctx.ui.notify(`Added ${sub} rule: ${value}`, "info");
+					ctx.ui.notify(`Added ${sub} rule (${scope}): ${value}`, "info");
 					return;
 				}
 				case "remove": {
 					if (!value) {
-						ctx.ui.notify(`Usage: /permissions remove <rule>`, "warning");
+						ctx.ui.notify(`Usage: /permissions remove <rule> [--user]`, "warning");
 						return;
 					}
-					const removed = removeRule(ctx.cwd, value);
+					const removed = removeRule(scope, ctx.cwd, value);
 					if (removed) {
 						reload(ctx.cwd, ctx);
-						ctx.ui.notify(`Removed rule: ${value}`, "info");
+						ctx.ui.notify(`Removed rule (${scope}): ${value}`, "info");
 					} else {
-						ctx.ui.notify(`Rule not found: ${value}`, "warning");
+						ctx.ui.notify(`Rule not found in ${scope} config: ${value}`, "warning");
 					}
 					return;
 				}

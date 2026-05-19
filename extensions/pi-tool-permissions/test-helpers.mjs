@@ -472,6 +472,34 @@ export function loadProjectConfigFromDisk(cwd) {
 		?? {};
 }
 
+// ── User config file paths (parameterized by `home` for tests) ─────────────
+export function userConfigPath(home) {
+	return join(home, ".pi", "agent", "pi-tool-permissions.json");
+}
+export function legacyUserConfigPath(home) {
+	return join(home, ".pi", "tool-permissions.json");
+}
+
+export function loadUserConfigFromDisk(home) {
+	const read = (p) => {
+		try {
+			if (!existsSync(p)) return null;
+			return JSON.parse(readFileSync(p, "utf8"));
+		} catch { return null; }
+	};
+	return read(userConfigPath(home)) ?? read(legacyUserConfigPath(home)) ?? {};
+}
+
+export function saveUserConfigToDisk(home, cfg) {
+	const newPath = userConfigPath(home);
+	const legacyPath = legacyUserConfigPath(home);
+	mkdirSync(dirname(newPath), { recursive: true });
+	writeFileSync(newPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+	if (existsSync(legacyPath)) {
+		try { rmSync(legacyPath); } catch { /* ignore */ }
+	}
+}
+
 export function saveProjectConfigToDisk(cwd, cfg) {
 	const newPath = join(cwd, PROJECT_CONFIG_REL);
 	mkdirSync(dirname(newPath), { recursive: true });

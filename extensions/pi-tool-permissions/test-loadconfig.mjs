@@ -2,12 +2,14 @@
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import {
 	makeTestRunner, normalizePathSep, cwdGlobPattern, skillReadGlobs, piDocsReadGlobs,
 	loadConfigFromObjects, decide,
 	PROJECT_CONFIG_REL, LEGACY_PROJECT_CONFIG_REL, LEGACY2_PROJECT_CONFIG_REL,
 	loadProjectConfigFromDisk, saveProjectConfigToDisk,
+	userConfigPath, legacyUserConfigPath,
+	loadUserConfigFromDisk, saveUserConfigToDisk,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -435,6 +437,90 @@ function cleanup(dir) {
 		const saved = loadProjectConfigFromDisk(cwd);
 		test("round-trip: allow rule preserved",             saved.allow?.[0],        "Write");
 	} finally { cleanup(cwd); }
+}
+
+// ── user config file naming (filesystem) ─────────────────────────────
+section("user config file naming (filesystem)");
+
+function writeUserJson(home, rel, obj) {
+	const path = join(home, rel);
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, JSON.stringify(obj), "utf8");
+}
+
+const USER_REL = ".pi/agent/pi-tool-permissions.json";
+const LEGACY_USER_REL = ".pi/tool-permissions.json";
+
+// 1. Only new user file present
+{
+	const home = makeTempDir();
+	try {
+		writeUserJson(home, USER_REL, { allow: ["Read(user-new)"] });
+		const cfg = loadUserConfigFromDisk(home);
+		test("user new file only: allow rule loaded", cfg.allow?.[0], "Read(user-new)");
+	} finally { cleanup(home); }
+}
+
+// 2. Only legacy user file present (fallback)
+{
+	const home = makeTempDir();
+	try {
+		writeUserJson(home, LEGACY_USER_REL, { allow: ["Read(user-legacy)"] });
+		const cfg = loadUserConfigFromDisk(home);
+		test("user legacy file only: allow rule loaded via fallback", cfg.allow?.[0], "Read(user-legacy)");
+	} finally { cleanup(home); }
+}
+
+// 3. Both user files present: new wins
+{
+	const home = makeTempDir();
+	try {
+		writeUserJson(home, USER_REL,        { allow: ["Read(user-new)"]    });
+		writeUserJson(home, LEGACY_USER_REL, { allow: ["Read(user-legacy)"] });
+		const cfg = loadUserConfigFromDisk(home);
+		test("both user files present: new wins",           cfg.allow?.[0], "Read(user-new)");
+		test("both user files present: legacy not loaded",  cfg.allow?.includes("Read(user-legacy)"), false);
+	} finally { cleanup(home); }
+}
+
+// 4. Neither user file present: empty config
+{
+	const home = makeTempDir();
+	try {
+		const cfg = loadUserConfigFromDisk(home);
+		test("neither user file present: config is empty object", Object.keys(cfg).length, 0);
+	} finally { cleanup(home); }
+}
+
+// 5. Migration: legacy user file → save → new written, legacy deleted
+{
+	const { existsSync } = await import("node:fs");
+	const home = makeTempDir();
+	try {
+		writeUserJson(home, LEGACY_USER_REL, { allow: ["Bash(npm test)"] });
+		saveUserConfigToDisk(home, { allow: ["Bash(npm test)", "Read"] });
+		const newPath    = userConfigPath(home);
+		const legacyPath = legacyUserConfigPath(home);
+		test("user migration: new file created after save",    existsSync(newPath),    true);
+		test("user migration: legacy file removed after save", existsSync(legacyPath), false);
+		const saved = loadUserConfigFromDisk(home);
+		test("user migration: saved rules round-trip correctly", saved.allow?.[1], "Read");
+	} finally { cleanup(home); }
+}
+
+// 6. Round-trip: new user file only → save → still at new path, no legacy
+{
+	const { existsSync } = await import("node:fs");
+	const home = makeTempDir();
+	try {
+		saveUserConfigToDisk(home, { allow: ["Write"] });
+		const newPath    = userConfigPath(home);
+		const legacyPath = legacyUserConfigPath(home);
+		test("user round-trip: new file exists after save", existsSync(newPath),    true);
+		test("user round-trip: no legacy file created",     existsSync(legacyPath), false);
+		const saved = loadUserConfigFromDisk(home);
+		test("user round-trip: allow rule preserved",       saved.allow?.[0],       "Write");
+	} finally { cleanup(home); }
 }
 
 process.exit(summary() > 0 ? 1 : 0);
