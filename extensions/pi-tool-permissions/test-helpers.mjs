@@ -353,6 +353,10 @@ export function formatBreakdown(breakdown, currentSub) {
 		.join("\n");
 }
 
+export function recomputeBreakdown(breakdown, cfg) {
+	return breakdown.map((b) => ({ sub: b.sub, action: decide(cfg, "bash", { command: b.sub }) }));
+}
+
 // ── Decision engine ───────────────────────────────────────────────────────
 
 export function decide(cfg, toolName, input) {

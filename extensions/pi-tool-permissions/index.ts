@@ -981,6 +981,16 @@ function formatBreakdown(breakdown: SubcommandDecision[], currentSub: string | n
 		.join("\n");
 }
 
+/**
+ * Re-evaluate every subcommand against the current `cfg` while preserving
+ * the original `sub` strings (no re-splitting). Used by the compound-Bash
+ * prompt loop after a rule is saved mid-loop so the dialog’s breakdown
+ * block and the per-step decisions reflect the freshly loaded config.
+ */
+function recomputeBreakdown(breakdown: SubcommandDecision[], cfg: ResolvedConfig): SubcommandDecision[] {
+	return breakdown.map((b) => ({ sub: b.sub, action: decide(cfg, "bash", { command: b.sub }) }));
+}
+
 function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>): Action {
 	const check = (list: string[]): boolean => {
 		for (const raw of list) {
@@ -1167,11 +1177,29 @@ export default function (pi: ExtensionAPI) {
 			// and without saving any rule. Resets when this handler returns.
 			let allowAllStepsOnce = false;
 
-			for (const item of breakdown.filter((b) => b.action === "ask")) {
+			// Snapshot of the per-subcommand decisions that the dialog renders.
+			// Mutated after each rule-save so downstream icons reflect the new cfg.
+			let currentBreakdown = breakdown;
+
+			// Iterate over the original `ask` subcommands, but re-decide each one
+			// against the current `cfg` right before prompting so newly saved
+			// allow/deny rules apply to the rest of *this* compound command.
+			const askSubs = breakdown.filter((b) => b.action === "ask").map((b) => b.sub);
+
+			for (const sub of askSubs) {
+				// User intent (`Allow ALL steps once`) beats any rule-driven decision:
+				// a freshly saved deny must not override an explicit one-shot allow.
 				if (allowAllStepsOnce) continue;
 
-				const suggested = suggestRule("Bash", { command: item.sub });
-				const breakdownLines = formatBreakdown(breakdown, item.sub);
+				const liveAction = decide(cfg, "bash", { command: sub });
+				if (liveAction === "allow") continue;
+				if (liveAction === "deny") {
+					await promptSteerMessage(ctx);
+					return { block: true, reason: `Blocked by tool-permissions deny rule (subcommand: ${sub})` };
+				}
+
+				const suggested = suggestRule("Bash", { command: sub });
+				const breakdownLines = formatBreakdown(currentBreakdown, sub);
 
 				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}\n\nSuggested rule: ${suggested}`;
 				const choices = [
@@ -1192,24 +1220,30 @@ export default function (pi: ExtensionAPI) {
 
 				if (choice === "Deny once" || !choice) {
 					if (choice === "Deny once") await promptSteerMessage(ctx);
-					return { block: true, reason: `Denied by user (subcommand: ${item.sub})` };
+					return { block: true, reason: `Denied by user (subcommand: ${sub})` };
 				}
 				if (choice === "Allow always (save rule)") {
 					const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
 					if (!edited) continue;
 					addRule(ctx.cwd, "allow", edited.trim());
 					cfg = loadConfig(ctx.cwd);
-					ctx.ui.notify(`Saved allow rule: ${edited.trim()}`, "info");
+					currentBreakdown = recomputeBreakdown(breakdown, cfg);
+					const autoCount = currentBreakdown.filter(
+						(b) => b.sub !== sub && askSubs.includes(b.sub) && b.action === "allow",
+					).length;
+					const suffix = autoCount > 0 ? ` (auto-allows ${autoCount} remaining step${autoCount === 1 ? "" : "s"})` : "";
+					ctx.ui.notify(`Saved allow rule: ${edited.trim()}${suffix}`, "info");
 					continue;
 				}
 				if (choice === "Deny always (save rule)") {
 					const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
 					if (!edited) {
 						await promptSteerMessage(ctx);
-						return { block: true, reason: `Denied by user (subcommand: ${item.sub})` };
+						return { block: true, reason: `Denied by user (subcommand: ${sub})` };
 					}
 					addRule(ctx.cwd, "deny", edited.trim());
 					cfg = loadConfig(ctx.cwd);
+					currentBreakdown = recomputeBreakdown(breakdown, cfg);
 					ctx.ui.notify(`Saved deny rule: ${edited.trim()}`, "info");
 					await promptSteerMessage(ctx);
 					return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };

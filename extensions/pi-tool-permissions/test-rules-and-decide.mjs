@@ -2,7 +2,7 @@
 
 import {
 	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideCompound, makeCfg,
-	cwdGlobPattern, normalizePathSep, inputForMatching,
+	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -214,5 +214,63 @@ test("ruleMatches: Ls relative path inside cwd matches (cwd-resolved)",
 	ruleMatches(lsRule, "ls", { path: "./foo" }, LS_CWD), true);
 test("ruleMatches: Ls absolute path outside cwd does NOT match",
 	ruleMatches(lsRule, "ls", { path: "/etc/passwd" }, LS_CWD), false);
+
+// ── recomputeBreakdown ────────────────────────────────────────────────────
+//
+// Used by the compound-Bash prompt loop after a rule save: re-decide every
+// subcommand against the freshly-loaded cfg while preserving the original
+// `sub` strings (no re-splitting). The actual prompt loop is not unit-tested
+// because it depends on ctx.ui; these tests cover the pure helper instead.
+section("recomputeBreakdown");
+
+const baseBreakdown = [
+	{ sub: "rg foo",  action: "ask" },
+	{ sub: "rg bar",  action: "ask" },
+	{ sub: "npm test", action: "ask" },
+];
+
+// No rule changes → action unchanged (per-row identity).
+const rbNoop = recomputeBreakdown(baseBreakdown, makeCfg({ defaultAction: "ask" }));
+test("no-op: length preserved",         rbNoop.length, 3);
+test("no-op: rg foo still ask",         rbNoop[0].action, "ask");
+test("no-op: rg bar still ask",         rbNoop[1].action, "ask");
+test("no-op: npm test still ask",       rbNoop[2].action, "ask");
+test("no-op: sub strings preserved",    rbNoop.map((b) => b.sub).join("|"), "rg foo|rg bar|npm test");
+
+// Saving an allow rule that matches both `rg *` subs flips them to allow,
+// while the unrelated `npm test` step stays ask.
+const rbAllow = recomputeBreakdown(baseBreakdown, makeCfg({ allow: ["Bash(rg *)"], defaultAction: "ask" }));
+test("allow Bash(rg *): rg foo → allow",   rbAllow[0].action, "allow");
+test("allow Bash(rg *): rg bar → allow",   rbAllow[1].action, "allow");
+test("allow Bash(rg *): npm test → ask",   rbAllow[2].action, "ask");
+
+// Saving a deny rule that matches one sub flips just that row to deny.
+const rbDeny = recomputeBreakdown(baseBreakdown, makeCfg({ deny: ["Bash(npm *)"], defaultAction: "ask" }));
+test("deny Bash(npm *): rg foo → ask",     rbDeny[0].action, "ask");
+test("deny Bash(npm *): rg bar → ask",     rbDeny[1].action, "ask");
+test("deny Bash(npm *): npm test → deny",  rbDeny[2].action, "deny");
+
+// Mixed allow+deny: deny wins over allow per `decide()` precedence.
+const rbMixed = recomputeBreakdown(baseBreakdown, makeCfg({
+	allow: ["Bash(*)"], deny: ["Bash(npm *)"], defaultAction: "ask",
+}));
+test("mixed: rg foo → allow",              rbMixed[0].action, "allow");
+test("mixed: rg bar → allow",              rbMixed[1].action, "allow");
+test("mixed: npm test → deny (deny wins)", rbMixed[2].action, "deny");
+
+// `sub` strings are passed through verbatim, including whitespace and quotes
+// the splitter produced. No re-splitting / no re-normalization here.
+const quirkyBreakdown = [
+	{ sub: 'echo "hi there"', action: "ask" },
+	{ sub: "cd ./sub",         action: "allow" },
+];
+const rbQuirky = recomputeBreakdown(quirkyBreakdown, makeCfg({ defaultAction: "ask", allowNoopCd: false }));
+test("verbatim sub: quoted echo preserved",  rbQuirky[0].sub, 'echo "hi there"');
+test("verbatim sub: cd preserved",            rbQuirky[1].sub, "cd ./sub");
+// (Action recomputed; cd ./sub is no longer a no-op because allowNoopCd is off.)
+test("recompute uses live cfg: cd ./sub → ask under allowNoopCd:false", rbQuirky[1].action, "ask");
+
+// Empty input → empty output (defensive).
+test("empty breakdown → empty result", recomputeBreakdown([], makeCfg()).length, 0);
 
 process.exit(summary() > 0 ? 1 : 0);

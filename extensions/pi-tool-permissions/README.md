@@ -384,6 +384,14 @@ When a single `Bash` call chains multiple subcommands (e.g. `cd foo && npm test 
 
 **Allow ALL steps once** silently approves every remaining `ask` subcommand in the *current* Bash invocation without saving any rule and without re-prompting. It is scoped to this one compound command — the next independent Bash call starts from scratch. Compounds that contain a `deny` subcommand are still rejected up-front and never reach this prompt.
 
+After you save a rule via **Allow always** / **Deny always**, the remaining subcommands of the *same* Bash invocation are re-evaluated against the new rule:
+
+- A saved `allow` rule that matches downstream steps silently allows them — no second prompt. Example: `rg foo && rg bar`, saving `Bash(rg *)` on the first step skips the second.
+- A saved `deny` rule that matches a downstream step blocks the whole command immediately with a `Blocked by tool-permissions deny rule` reason.
+- Downstream steps that still resolve to `ask` continue to prompt normally, and their breakdown icons in the next dialog reflect the freshly-saved rule.
+
+**Allow ALL steps once** still wins over any later rule-driven decision: once chosen, every remaining step is silently allowed regardless of newly-saved rules.
+
 In non-interactive modes (`-p`, JSON mode), `ask` falls back to **deny** so nothing dangerous slips through automation.
 
 ## Allow-all-edits mode

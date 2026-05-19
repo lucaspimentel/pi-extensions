@@ -49,11 +49,14 @@
   - Single-command (non-compound) prompts and the `applyAllowAllEdits()` session-wide write/edit toggle are untouched — the new flag is intentionally scoped to one compound Bash call.
   - Documented in `README.md` under `## Interactive prompt` (new `### Compound Bash commands` subsection). No new unit tests — the prompt loop has no fake-UI harness today; existing `decideCompound()` tests in `test-bash.mjs` still cover the multi-ask iteration shape that makes the new choice meaningful. All 120 existing tests still pass.
 
-- [ ] Re-apply newly saved Bash rules to remaining steps in the same multi-step command
-  - In `index.ts`, the compound Bash prompt loop iterates over `breakdown.filter((b) => b.action === "ask")`, so the set of prompts is fixed before any `Allow always (save rule)` / `Deny always (save rule)` choice updates the config.
-  - After saving a new allow/deny rule and reloading `cfg`, re-evaluate remaining subcommands so newly matching steps are skipped/allowed or blocked without asking again in the same Bash command.
-  - Preserve the current behavior for the step that was just approved/denied, and handle interactions with the planned “Allow ALL steps once” option.
-  - Add tests or UI harness coverage for commands with repeated similar steps (e.g. two `git status`/`npm`-style subcommands) where saving a rule on the first prompt affects the later prompts.
+- [x] Re-apply newly saved Bash rules to remaining steps in the same multi-step command
+  - Added a `recomputeBreakdown(breakdown, cfg)` helper in `index.ts` (mirrored in `test-helpers.mjs`) that re-decides every subcommand against the current `cfg` while preserving the original `sub` strings (no re-splitting).
+  - Refactored the compound prompt loop in `index.ts` (~1170) to iterate over the original `askSubs` list and re-evaluate each step via `decide(cfg, "bash", { command: sub })` immediately before prompting. A live `allow` silently skips the step, a live `deny` short-circuits the whole command with a `Blocked by tool-permissions deny rule` reason, and an `ask` falls through to the existing prompt.
+  - Both rule-save branches (`Allow always` / `Deny always`) now call `recomputeBreakdown(breakdown, cfg)` after the `cfg = loadConfig(ctx.cwd)` reload so the dialog's breakdown icons reflect the freshly-saved rule on subsequent steps.
+  - Precedence is explicit: the loop-scoped `allowAllStepsOnce` short-circuit runs *before* the rule-driven re-decision, so user intent (`Allow ALL steps once`) wins over any later saved deny.
+  - Polished the allow-rule notification with a `(auto-allows N remaining step(s))` suffix when the saved rule matches downstream ask steps, so the effect is visible.
+  - Tests: added a `recomputeBreakdown` section in `test-rules-and-decide.mjs` (16 cases) covering: no-op identity, allow rule flipping multiple matching rows, deny rule flipping one row, mixed allow+deny with `deny` winning, verbatim `sub` preservation (including quoted args), live cfg flag changes (`allowNoopCd`), and empty input. Documented in `README.md` under the `### Compound Bash commands` subsection.
+  - Prompt loop itself is not unit-tested (depends on `ctx.ui.select`); coverage is via the pure helper plus manual exercise. All 6 test suites still pass (`test-rules-and-decide.mjs` bumped from 90 → 106 cases).
 
 - [x] Auto-allow pi to read its own skill files by default
   - Skill files are commonly outside the project cwd (e.g. under `~/.pi/agent/git/.../skills/<skill>/SKILL.md`), so they are not covered by the existing implicit `Read(<cwd>/**)` allow in `loadConfig()`.
