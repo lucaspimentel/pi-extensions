@@ -31,11 +31,11 @@ pi -e ./pi-tool-permissions/index.ts
 Rules are loaded from two files, merged together (project overrides user for `defaultAction`; allow/deny/ask lists are concatenated):
 
 - `~/.pi/agent/pi-tool-permissions.json` — user-global
-- `<cwd>/.pi/pi-tool-permissions.json` — project-local (recommended for team-shared rules)
+- `<cwd>/.pi/pi-tool-permissions.local.json` — project-local (machine-local; the `.local.json` suffix is the convention for per-checkout settings that should *not* be committed to git)
 
 For backwards compatibility:
 - If the user-global file above does not exist or cannot be read, the extension falls back to the legacy path `~/.pi/tool-permissions.json`.
-- If the project-local `pi-tool-permissions.json` does not exist, the extension falls back to the legacy path `<cwd>/.pi/tool-permissions.json`. The first time a rule is saved, the legacy file is automatically renamed to the new filename.
+- If the project-local `pi-tool-permissions.local.json` does not exist, the extension reads (in order) the legacy paths `<cwd>/.pi/pi-tool-permissions.json` and `<cwd>/.pi/tool-permissions.json`. The first time a rule is saved, any legacy files are automatically migrated to `<cwd>/.pi/pi-tool-permissions.local.json` and deleted.
 
 See [`pi-tool-permissions.example.json`](./pi-tool-permissions.example.json) for a starter config.
 
@@ -368,7 +368,7 @@ Suggested rule: Bash(rm*)
     Deny always (save rule)
 ```
 
-Choosing **always** saves the suggested rule into the project-local config (`.pi/pi-tool-permissions.json`).
+Choosing **always** saves the suggested rule into the project-local config (`.pi/pi-tool-permissions.local.json`).
 
 ### Compound Bash commands
 

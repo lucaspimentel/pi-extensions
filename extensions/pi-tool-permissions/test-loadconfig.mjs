@@ -6,7 +6,7 @@ import { join } from "node:path";
 import {
 	makeTestRunner, normalizePathSep, cwdGlobPattern, skillReadGlobs, piDocsReadGlobs,
 	loadConfigFromObjects, decide,
-	PROJECT_CONFIG_REL, LEGACY_PROJECT_CONFIG_REL,
+	PROJECT_CONFIG_REL, LEGACY_PROJECT_CONFIG_REL, LEGACY2_PROJECT_CONFIG_REL,
 	loadProjectConfigFromDisk, saveProjectConfigToDisk,
 } from "./test-helpers.mjs";
 
@@ -333,7 +333,43 @@ function cleanup(dir) {
 	} finally { cleanup(cwd); }
 }
 
-// 5. Migration: legacy file → save → new file written, legacy deleted
+// 5. Only legacy2 file present (oldest fallback)
+{
+	const cwd = makeTempDir();
+	try {
+		writeJson(cwd, LEGACY2_PROJECT_CONFIG_REL, { allow: ["Read(legacy2)"] });
+		const cfg = loadProjectConfigFromDisk(cwd);
+		test("legacy2 file only: allow rule loaded via fallback", cfg.allow?.[0], "Read(legacy2)");
+	} finally { cleanup(cwd); }
+}
+
+// 6. All three present: new wins, neither legacy is loaded
+{
+	const cwd = makeTempDir();
+	try {
+		writeJson(cwd, PROJECT_CONFIG_REL,         { allow: ["Read(new)"]     });
+		writeJson(cwd, LEGACY_PROJECT_CONFIG_REL,  { allow: ["Read(legacy)"]  });
+		writeJson(cwd, LEGACY2_PROJECT_CONFIG_REL, { allow: ["Read(legacy2)"] });
+		const cfg = loadProjectConfigFromDisk(cwd);
+		test("all three present: new file wins",            cfg.allow?.[0], "Read(new)");
+		test("all three present: legacy rule not loaded",   cfg.allow?.includes("Read(legacy)"),  false);
+		test("all three present: legacy2 rule not loaded",  cfg.allow?.includes("Read(legacy2)"), false);
+	} finally { cleanup(cwd); }
+}
+
+// 7. legacy + legacy2 only (no new): middle legacy wins (precedence: legacy > legacy2)
+{
+	const cwd = makeTempDir();
+	try {
+		writeJson(cwd, LEGACY_PROJECT_CONFIG_REL,  { allow: ["Read(legacy)"]  });
+		writeJson(cwd, LEGACY2_PROJECT_CONFIG_REL, { allow: ["Read(legacy2)"] });
+		const cfg = loadProjectConfigFromDisk(cwd);
+		test("legacy + legacy2: legacy wins over legacy2",       cfg.allow?.[0], "Read(legacy)");
+		test("legacy + legacy2: legacy2 rule not loaded",        cfg.allow?.includes("Read(legacy2)"), false);
+	} finally { cleanup(cwd); }
+}
+
+// 8. Migration from middle legacy: save → new written, legacy removed
 {
 	const { existsSync } = await import("node:fs");
 	const cwd = makeTempDir();
@@ -342,25 +378,62 @@ function cleanup(dir) {
 		saveProjectConfigToDisk(cwd, { allow: ["Bash(npm test)", "Read"] });
 		const newPath    = join(cwd, PROJECT_CONFIG_REL);
 		const legacyPath = join(cwd, LEGACY_PROJECT_CONFIG_REL);
-		test("migration: new file created after save",    existsSync(newPath),    true);
-		test("migration: legacy file removed after save", existsSync(legacyPath), false);
+		test("migration (legacy): new file created after save",    existsSync(newPath),    true);
+		test("migration (legacy): legacy file removed after save", existsSync(legacyPath), false);
 		const saved = loadProjectConfigFromDisk(cwd);
-		test("migration: saved rules round-trip correctly", saved.allow?.[1], "Read");
+		test("migration (legacy): saved rules round-trip correctly", saved.allow?.[1], "Read");
 	} finally { cleanup(cwd); }
 }
 
-// 6. Round-trip: new file only → save → still at new path, no legacy created
+// 9. Migration from oldest legacy2: save → new written, legacy2 removed
+{
+	const { existsSync } = await import("node:fs");
+	const cwd = makeTempDir();
+	try {
+		writeJson(cwd, LEGACY2_PROJECT_CONFIG_REL, { allow: ["Bash(npm test)"] });
+		saveProjectConfigToDisk(cwd, { allow: ["Bash(npm test)", "Read"] });
+		const newPath     = join(cwd, PROJECT_CONFIG_REL);
+		const legacy2Path = join(cwd, LEGACY2_PROJECT_CONFIG_REL);
+		test("migration (legacy2): new file created after save",     existsSync(newPath),     true);
+		test("migration (legacy2): legacy2 file removed after save", existsSync(legacy2Path), false);
+		const saved = loadProjectConfigFromDisk(cwd);
+		test("migration (legacy2): saved rules round-trip correctly", saved.allow?.[1], "Read");
+	} finally { cleanup(cwd); }
+}
+
+// 10. Migration from both legacies at once: save → new written, both legacies removed
+{
+	const { existsSync } = await import("node:fs");
+	const cwd = makeTempDir();
+	try {
+		writeJson(cwd, LEGACY_PROJECT_CONFIG_REL,  { allow: ["Read(legacy)"]  });
+		writeJson(cwd, LEGACY2_PROJECT_CONFIG_REL, { allow: ["Read(legacy2)"] });
+		saveProjectConfigToDisk(cwd, { allow: ["Read(saved)"] });
+		const newPath     = join(cwd, PROJECT_CONFIG_REL);
+		const legacyPath  = join(cwd, LEGACY_PROJECT_CONFIG_REL);
+		const legacy2Path = join(cwd, LEGACY2_PROJECT_CONFIG_REL);
+		test("migration (both): new file created",                existsSync(newPath),     true);
+		test("migration (both): middle legacy file removed",      existsSync(legacyPath),  false);
+		test("migration (both): oldest legacy2 file removed",     existsSync(legacy2Path), false);
+		const saved = loadProjectConfigFromDisk(cwd);
+		test("migration (both): saved rules win after save",      saved.allow?.[0],        "Read(saved)");
+	} finally { cleanup(cwd); }
+}
+
+// 11. Round-trip: new file only → save → still at new path, no legacy created
 {
 	const { existsSync } = await import("node:fs");
 	const cwd = makeTempDir();
 	try {
 		saveProjectConfigToDisk(cwd, { allow: ["Write"] });
-		const newPath    = join(cwd, PROJECT_CONFIG_REL);
-		const legacyPath = join(cwd, LEGACY_PROJECT_CONFIG_REL);
-		test("round-trip: new file exists after save",      existsSync(newPath),    true);
-		test("round-trip: no legacy file created",          existsSync(legacyPath), false);
+		const newPath     = join(cwd, PROJECT_CONFIG_REL);
+		const legacyPath  = join(cwd, LEGACY_PROJECT_CONFIG_REL);
+		const legacy2Path = join(cwd, LEGACY2_PROJECT_CONFIG_REL);
+		test("round-trip: new file exists after save",       existsSync(newPath),     true);
+		test("round-trip: no legacy file created",           existsSync(legacyPath),  false);
+		test("round-trip: no legacy2 file created",          existsSync(legacy2Path), false);
 		const saved = loadProjectConfigFromDisk(cwd);
-		test("round-trip: allow rule preserved",            saved.allow?.[0],       "Write");
+		test("round-trip: allow rule preserved",             saved.allow?.[0],        "Write");
 	} finally { cleanup(cwd); }
 }
 

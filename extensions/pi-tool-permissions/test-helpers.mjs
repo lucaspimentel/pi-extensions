@@ -451,8 +451,9 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
 }
 
 // ── Project config file names (mirrors index.ts constants) ──────────────────
-export const PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.json");
-export const LEGACY_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
+export const PROJECT_CONFIG_REL         = join(".pi", "pi-tool-permissions.local.json");
+export const LEGACY_PROJECT_CONFIG_REL  = join(".pi", "pi-tool-permissions.json");
+export const LEGACY2_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
 
 /**
  * Mirrors loadProjectConfigRaw() + saveProjectConfig() in index.ts for
@@ -465,16 +466,21 @@ export function loadProjectConfigFromDisk(cwd) {
 			return JSON.parse(readFileSync(p, "utf8"));
 		} catch { return null; }
 	};
-	return read(join(cwd, PROJECT_CONFIG_REL)) ?? read(join(cwd, LEGACY_PROJECT_CONFIG_REL)) ?? {};
+	return read(join(cwd, PROJECT_CONFIG_REL))
+		?? read(join(cwd, LEGACY_PROJECT_CONFIG_REL))
+		?? read(join(cwd, LEGACY2_PROJECT_CONFIG_REL))
+		?? {};
 }
 
 export function saveProjectConfigToDisk(cwd, cfg) {
-	const newPath    = join(cwd, PROJECT_CONFIG_REL);
-	const legacyPath = join(cwd, LEGACY_PROJECT_CONFIG_REL);
+	const newPath = join(cwd, PROJECT_CONFIG_REL);
 	mkdirSync(dirname(newPath), { recursive: true });
 	writeFileSync(newPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
-	if (existsSync(legacyPath)) {
-		try { rmSync(legacyPath); } catch { /* ignore */ }
+	for (const legacyRel of [LEGACY_PROJECT_CONFIG_REL, LEGACY2_PROJECT_CONFIG_REL]) {
+		const legacyPath = join(cwd, legacyRel);
+		if (existsSync(legacyPath)) {
+			try { rmSync(legacyPath); } catch { /* ignore */ }
+		}
 	}
 }
 

@@ -25,8 +25,9 @@
  * Config files (merged, project overrides user):
  *   ~/.pi/agent/pi-tool-permissions.json
  *   ~/.pi/tool-permissions.json (legacy fallback when the new user config is absent)
- *   <cwd>/.pi/pi-tool-permissions.json
- *   <cwd>/.pi/tool-permissions.json (legacy fallback when the new project config is absent)
+ *   <cwd>/.pi/pi-tool-permissions.local.json
+ *   <cwd>/.pi/pi-tool-permissions.json (legacy fallback; auto-migrated on next save)
+ *   <cwd>/.pi/tool-permissions.json (older legacy fallback; auto-migrated on next save)
  *
  * Schema:
  *   {
@@ -188,8 +189,12 @@ interface ResolvedConfig {
 
 const USER_CONFIG = join(homedir(), ".pi", "agent", "pi-tool-permissions.json");
 const LEGACY_USER_CONFIG = join(homedir(), ".pi", "tool-permissions.json");
-const PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.json");
-const LEGACY_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
+// Project config: prefer the `.local.json` suffix (machine-local, not checked
+// into git). Two legacy filenames are still read as fallbacks and auto-migrated
+// to the new path on next save.
+const PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.local.json");
+const LEGACY_PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.json");
+const LEGACY2_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
 const STATUS_KEY = "tool-permissions";
 
 function readJsonSafe(path: string): PermissionsConfig | null {
@@ -294,19 +299,27 @@ function legacyProjectConfigPath(cwd: string): string {
 	return join(cwd, LEGACY_PROJECT_CONFIG_REL);
 }
 
+function legacy2ProjectConfigPath(cwd: string): string {
+	return join(cwd, LEGACY2_PROJECT_CONFIG_REL);
+}
+
 function loadProjectConfigRaw(cwd: string): PermissionsConfig {
-	return readJsonSafe(projectConfigPath(cwd)) ?? readJsonSafe(legacyProjectConfigPath(cwd)) ?? {};
+	return readJsonSafe(projectConfigPath(cwd))
+		?? readJsonSafe(legacyProjectConfigPath(cwd))
+		?? readJsonSafe(legacy2ProjectConfigPath(cwd))
+		?? {};
 }
 
 function saveProjectConfig(cwd: string, cfg: PermissionsConfig): void {
-	const legacyPath = legacyProjectConfigPath(cwd);
 	writeJson(projectConfigPath(cwd), cfg);
-	// Auto-migrate: remove the legacy file now that the new file is written.
-	if (existsSync(legacyPath)) {
-		try {
-			rmSync(legacyPath);
-		} catch (err) {
-			console.warn(`[tool-permissions] Could not remove legacy project config ${legacyPath}: ${(err as Error).message}`);
+	// Auto-migrate: remove any legacy files now that the new file is written.
+	for (const legacyPath of [legacyProjectConfigPath(cwd), legacy2ProjectConfigPath(cwd)]) {
+		if (existsSync(legacyPath)) {
+			try {
+				rmSync(legacyPath);
+			} catch (err) {
+				console.warn(`[tool-permissions] Could not remove legacy project config ${legacyPath}: ${(err as Error).message}`);
+			}
 		}
 	}
 }
