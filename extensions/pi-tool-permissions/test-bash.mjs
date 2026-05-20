@@ -6,7 +6,7 @@ import {
 	splitTopLevelShell, decideCompound, decide, makeCfg, isNoopCd,
 	isReadOnlyBashSubcommand,
 	actionIcon, formatBreakdownLine, formatBreakdown,
-	stripLineContinuations,
+	stripLineContinuations, stripStructuralKeywords,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -433,5 +433,99 @@ test("null currentSub → still 3 lines",      renderedNoCurrent.split("\n").len
 
 // Edge case: empty breakdown
 test("empty breakdown → empty string",       formatBreakdown([], null), "");
+
+section("stripStructuralKeywords");
+
+// Pure-structural keyword tokens — elided
+test("'do' alone → null",                       stripStructuralKeywords("do"),   null);
+test("'done' alone → null",                     stripStructuralKeywords("done"), null);
+test("whitespace-only → null",                  stripStructuralKeywords("   "),  null);
+test("empty string → null",                     stripStructuralKeywords(""),     null);
+
+// `for` iteration heads — elided
+test("'for x in a b c' → null",                 stripStructuralKeywords("for x in a b c"), null);
+test("'for x in $(ls)' → null",                 stripStructuralKeywords("for x in $(ls)"), null);
+test("'for x in *.txt' → null",                 stripStructuralKeywords("for x in *.txt"), null);
+test("C-style 'for ((i=0;i<10;i++))' → null",   stripStructuralKeywords("for ((i=0;i<10;i++))"), null);
+test("bare 'for x' (no `in`) → null",            stripStructuralKeywords("for x"), null);
+
+// Leading `do` is stripped, residue is returned
+test("'do echo $x' → 'echo $x'",                stripStructuralKeywords("do echo $x"), "echo $x");
+test("'do rm -rf /tmp' → 'rm -rf /tmp'",        stripStructuralKeywords("do rm -rf /tmp"), "rm -rf /tmp");
+
+// Nested loops: `do for y in b` is one split-part; strip `do ` then elide for-head
+test("'do for y in b' → null (nested for-head)", stripStructuralKeywords("do for y in b"), null);
+
+// Non-structural commands pass through unchanged
+test("'echo hi' → 'echo hi' (no strip)",         stripStructuralKeywords("echo hi"), "echo hi");
+test("'rm -rf /' → 'rm -rf /' (no strip)",      stripStructuralKeywords("rm -rf /"), "rm -rf /");
+
+// `for_foo` is not the `for` keyword (no whitespace after)
+test("'for_foo a' → unchanged",                 stripStructuralKeywords("for_foo a"), "for_foo a");
+
+// Leading whitespace is trimmed before tests
+test("'  do echo  ' → 'echo'",                  stripStructuralKeywords("  do echo  "), "echo");
+
+section("decideCompound — for loops");
+
+// Single-line for loop: only the body command enters the breakdown.
+const forCfg = makeCfg({ allow: ["Bash(echo*)"], defaultAction: "deny" });
+const forSingle = decideCompound(forCfg, "bash", { command: "for x in a b c; do echo $x; done" });
+test("for x in ...; do echo $x; done → allow",  forSingle.action, "allow");
+test("for-loop body only → isCompound false (1 command)", forSingle.isCompound, false);
+test("for-loop body only → empty breakdown (single-row downgrade)", forSingle.breakdown.length, 0);
+
+// Multiline form: same result — `do`/`done` on their own lines must also be elided.
+const forMulti = decideCompound(forCfg, "bash", { command: "for x in a b c\ndo\necho $x\ndone" });
+test("multiline for → allow",                   forMulti.action, "allow");
+test("multiline for → isCompound false",        forMulti.isCompound, false);
+
+// Two-command body — stays compound, only body commands appear.
+const forTwoBody = decideCompound(forCfg, "bash", { command: "for x in a b; do echo $x; echo done-with-$x; done" });
+test("two-command body → allow",                forTwoBody.action, "allow");
+test("two-command body → isCompound true",      forTwoBody.isCompound, true);
+test("two-command body → breakdown length 2",   forTwoBody.breakdown.length, 2);
+test("two-command body → first sub is 'echo $x'", forTwoBody.breakdown[0].sub, "echo $x");
+test("two-command body → second sub is 'echo done-with-$x'", forTwoBody.breakdown[1].sub, "echo done-with-$x");
+
+// Nested for loops: only the innermost body command survives.
+const forNested = decideCompound(forCfg, "bash", { command: "for x in a; do for y in b; do echo $x$y; done; done" });
+test("nested for → allow",                      forNested.action, "allow");
+test("nested for → isCompound false (1 command after strip)", forNested.isCompound, false);
+
+// C-style for loop: `((i=0;i<10;i++))` head is elided (paren-depth keeps inner `;` intact).
+const forCStyle = decideCompound(forCfg, "bash", { command: "for ((i=0;i<10;i++)); do echo $i; done" });
+test("C-style for → allow",                      forCStyle.action, "allow");
+test("C-style for → isCompound false",          forCStyle.isCompound, false);
+
+// Loop body with an `ask` action: final action is ask, single-command downgrade applies.
+const forAskCfg = makeCfg({ defaultAction: "ask" });
+const forAsk = decideCompound(forAskCfg, "bash", { command: "for f in *.txt; do git status; done" });
+test("for-loop ask body → ask",                  forAsk.action, "ask");
+test("for-loop ask body → isCompound false (1 cmd)", forAsk.isCompound, false);
+
+// Loop body with a `deny` action: deny propagates; single-command downgrade applies.
+const forDenyCfg = makeCfg({ deny: ["Bash(rm*)"], defaultAction: "allow" });
+const forDeny = decideCompound(forDenyCfg, "bash", { command: "for f in *.txt; do rm $f; done" });
+test("for-loop deny body → deny",                forDeny.action, "deny");
+test("for-loop deny body → isCompound false",    forDeny.isCompound, false);
+
+// Mixed body: one allow + one deny inside the same loop — deny still wins.
+const forMixed = decideCompound(forDenyCfg, "bash", { command: "for f in *.txt; do echo $f; rm $f; done" });
+test("mixed allow+deny body → deny",             forMixed.action, "deny");
+test("mixed body → isCompound true",             forMixed.isCompound, true);
+test("mixed body → breakdown length 2 (no for/do/done)", forMixed.breakdown.length, 2);
+
+// Negative case: quoted `for ... do ... done` inside an echo is a single command — the
+// splitter never sees the inner `;`/`\n` so stripStructuralKeywords never runs.
+const quotedFor = decideCompound(forCfg, "bash", { command: 'echo "for x in a; do echo; done"' });
+test("quoted for-loop → isCompound false (single, no split)", quotedFor.isCompound, false);
+test("quoted for-loop → allow (matches Bash(echo*))",         quotedFor.action, "allow");
+
+// Degenerate: empty body (`for x in a; do; done`) — nothing to evaluate, allow with empty breakdown.
+const forEmpty = decideCompound(makeCfg({ defaultAction: "deny" }), "bash", { command: "for x in a; do; done" });
+test("empty-body for → allow (no commands)",     forEmpty.action, "allow");
+test("empty-body for → isCompound false",        forEmpty.isCompound, false);
+test("empty-body for → empty breakdown",         forEmpty.breakdown.length, 0);
 
 process.exit(summary() > 0 ? 1 : 0);

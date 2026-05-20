@@ -372,6 +372,23 @@ export function decide(cfg, toolName, input) {
 	return cfg.defaultAction;
 }
 
+/**
+ * Mirrors stripStructuralKeywords() in index.ts. Strips leading `for VAR in ...`,
+ * `for ((...))`, `do`, `done` from a compound-split subcommand. Returns null when
+ * the residue is purely structural.
+ */
+export function stripStructuralKeywords(part) {
+	let s = part.trim();
+	while (s.length > 0) {
+		if (s === "do" || s === "done") return null;
+		if (/^for\s+\S+(\s+in\b[^\n]*)?$/.test(s)) return null;
+		const doMatch = s.match(/^do\s+/);
+		if (doMatch) { s = s.slice(doMatch[0].length); continue; }
+		break;
+	}
+	return s.length > 0 ? s : null;
+}
+
 export function decideCompound(cfg, toolName, input) {
 	if (normalizeTool(toolName) !== "bash")
 		return { action: decide(cfg, toolName, input), isCompound: false, ambiguous: false, breakdown: [] };
@@ -384,7 +401,16 @@ export function decideCompound(cfg, toolName, input) {
 	if (split.kind === "ambiguous") return { action: "ask", isCompound: false, ambiguous: true, breakdown: [] };
 	if (split.kind === "single") return { action: decide(cfg, "bash", normalizedInput), isCompound: false, ambiguous: false, breakdown: [] };
 
-	const breakdown = split.parts.map((sub) => ({ sub, action: decide(cfg, "bash", { command: sub }) }));
+	const breakdown = [];
+	for (const rawSub of split.parts) {
+		const stripped = stripStructuralKeywords(rawSub);
+		if (stripped === null) continue;
+		breakdown.push({ sub: stripped, action: decide(cfg, "bash", { command: stripped }) });
+	}
+
+	if (breakdown.length === 0) return { action: "allow", isCompound: false, ambiguous: false, breakdown: [] };
+	if (breakdown.length === 1) return { action: breakdown[0].action, isCompound: false, ambiguous: false, breakdown: [] };
+
 	let action = "allow";
 	for (const { action: a } of breakdown) {
 		if (a === "deny") { action = "deny"; break; }

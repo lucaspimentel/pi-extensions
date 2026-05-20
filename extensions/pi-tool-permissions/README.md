@@ -401,6 +401,12 @@ After you save a rule via **Allow always** / **Deny always**, the remaining subc
 
 **Allow ALL steps once** still wins over any later rule-driven decision: once chosen, every remaining step is silently allowed regardless of newly-saved rules.
 
+#### `for` loops
+
+Structural shell keywords inside `for` loops — `for VAR in ...`, the C-style `for ((...))` head, `do`, and `done` — are elided from the per-subcommand breakdown so only the loop body is evaluated. A loop like `for f in *.txt; do cat $f; done` prompts once for `cat $f`, not for `for f in *.txt` or `done`. Nested loops collapse the same way. Loop bodies with multiple statements keep each statement as its own row in the breakdown.
+
+> Scope: today this only covers `for`. `while` / `until` / `if` / `case` still split into all of their structural pieces. See `TODO.md` for follow-up work.
+
 In non-interactive modes (`-p`, JSON mode), `ask` falls back to **deny** so nothing dangerous slips through automation.
 
 ## Allow-all-edits mode
