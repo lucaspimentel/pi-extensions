@@ -34,7 +34,7 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 
 - **colored-footer** – custom footer styling
 - **plan-with-opus** – switch to Opus when planning
-- **questionnaire** – interactive questionnaire tool
+- **questionnaire** – interactive questionnaire tool (copied from the [pi sample](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/extensions/questionnaire.ts) by [@ferologics](https://github.com/ferologics))
 - **web** – fetch & convert web pages (depends on `html-to-text`)
 - **pi-tool-permissions** – Claude Code-style allow/deny/ask permissions
 - **external-editor-fix** – fix Ctrl+G external editor on Windows / Git Bash by adding wait flags for GUI editors
