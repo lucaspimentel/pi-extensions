@@ -1,6 +1,6 @@
 # pi-tool-permissions
 
-A [pi](https://github.com/mariozechner/pi-coding-agent) extension that adds **Claude Code–style configurable tool permissions** with `allow` / `deny` / `ask` lists.
+A [pi](https://github.com/earendil-works/pi) extension that adds **Claude Code–style configurable tool permissions** with `allow` / `deny` / `ask` lists.
 
 Every time the LLM tries to call a tool, this extension checks the call against your rules and either:
 
@@ -10,20 +10,20 @@ Every time the LLM tries to call a tool, this extension checks the call against 
 
 ## Install
 
-Copy or symlink this folder into one of pi's extension locations:
+Install via the [pi-extensions](https://github.com/lucaspimentel/pi-extensions) package (includes all extensions and skills):
 
 ```bash
 # Global (all projects)
-cp -r ./pi-tool-permissions ~/.pi/agent/extensions/
+pi install git:github.com/lucaspimentel/pi-extensions
 
-# Or project-local
-cp -r ./pi-tool-permissions .pi/extensions/
+# Project-local
+pi install -l git:github.com/lucaspimentel/pi-extensions
 ```
 
-Or test it without installing:
+Or try without installing:
 
 ```bash
-pi -e ./pi-tool-permissions/index.ts
+pi -e git:github.com/lucaspimentel/pi-extensions
 ```
 
 ## Configuration
@@ -458,4 +458,4 @@ Examples:
 
 ## How it works
 
-The extension subscribes to pi's `tool_call` event, evaluates the rules, and either lets the call through, returns `{ block, reason }`, or pops a `ctx.ui.select` dialog. See [pi extension docs](https://github.com/mariozechner/pi-coding-agent/blob/main/docs/extensions.md) for the underlying API.
+The extension subscribes to pi's `tool_call` event, evaluates the rules, and either lets the call through, returns `{ block, reason }`, or pops a `ctx.ui.select` dialog. See [pi extension docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md) for the underlying API.
