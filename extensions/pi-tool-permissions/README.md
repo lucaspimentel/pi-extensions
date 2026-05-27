@@ -420,7 +420,7 @@ Examples:
 
 Nested constructs collapse in one pass (e.g. `do while true` → `true`). When filtering leaves a single command the breakdown downgrades to a simpler single-command dialog.
 
-> `case` statements are not yet supported — they require changes to the command splitter to handle unmatched `)` in pattern clauses. Tracked in `TODO.md`.
+> `case` statements are kept as a single unit and prompt once for the whole block. Pattern-clause `)` characters would otherwise look like unmatched parentheses to the splitter, so the entire `case … esac` command is evaluated as one command against your allow/deny rules. Add an explicit `Bash(case*)` allow rule to auto-approve familiar case blocks.
 
 In non-interactive modes (`-p`, JSON mode), `ask` falls back to **deny** so nothing dangerous slips through automation.
 

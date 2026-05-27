@@ -804,10 +804,15 @@ function consumeHeredoc(cmd: string, pos: number): number | null {
  *
  * Returns:
  *   { kind: "ambiguous" }          – unmatched quote/paren; caller should fall back to ask
- *   { kind: "single" }             – no top-level operator found
+ *   { kind: "single" }             – no top-level operator found (or case block detected)
  *   { kind: "compound", parts }    – trimmed, non-empty subcommands
  */
 function splitTopLevelShell(cmd: string): SplitResult {
+	// `case` pattern clauses (`foo)`) look like unmatched parens to the splitter.
+	// Rather than attempting to parse the block, treat any command containing a
+	// top-level `case` keyword as a single unit so it falls through to decide()
+	// for normal rule matching and prompts once for the whole command.
+	if (/(?:^|[;&|]\s*|\n\s*)case\s/.test(cmd)) return { kind: "single" };
 	const parts: string[] = [];
 	let current = "";
 	let inSingle = false;

@@ -34,6 +34,14 @@ test("| → compound",               splitTopLevelShell("a | b").kind, "compound
 test("; → compound",               splitTopLevelShell("a ; b").kind, "compound");
 test("newline → compound",         splitTopLevelShell("a\nb").kind, "compound");
 test("CRLF → compound",            splitTopLevelShell("a\r\nb").kind, "compound");
+// case blocks → single (pattern-clause `)` would otherwise look like unmatched paren)
+test("case at start → single",      splitTopLevelShell("case $x in foo) cmd;; esac").kind, "single");
+test("case after ; → single",       splitTopLevelShell("echo a; case $x in foo) cmd;; esac").kind, "single");
+test("case after \\n → single",      splitTopLevelShell("echo a\ncase $x in foo) cmd;; esac").kind, "single");
+test("case after && → single",      splitTopLevelShell("echo a && case $x in foo) cmd;; esac").kind, "single");
+// negative: 'case' as argument does not trigger (not at command-start position)
+test("grep case → not affected",    splitTopLevelShell("grep case file").kind, "single");
+test("echo case → not affected",    splitTopLevelShell("echo case").kind, "single");
 
 section("splitTopLevelShell — parts");
 
@@ -670,5 +678,37 @@ test("multiline select → isCompound false",      selectMulti.isCompound, false
 const quotedWhile = decideCompound(ifCfg, "bash", { command: 'echo "while true; do sleep 1; done"' });
 test("quoted while → isCompound false",          quotedWhile.isCompound, false);
 test("quoted while → allow (matches echo*)",     quotedWhile.action, "allow");
+
+// ── case ─────────────────────────────────────────────────────────────────
+const caseCfg = makeCfg({ defaultAction: "ask" });
+const caseAllowCfg = makeCfg({ allow: ["Bash(case*)"], defaultAction: "deny" });
+
+// Whole case block treated as a single command — prompts once for the whole thing
+const caseSimple = decideCompound(caseCfg, "bash", { command: "case $x in foo) echo a;; bar) echo b;; esac" });
+test("case block → isCompound false",            caseSimple.isCompound, false);
+test("case block → ambiguous false",             caseSimple.ambiguous, false);
+test("case block → ask (defaultAction)",         caseSimple.action, "ask");
+test("case block → empty breakdown",             caseSimple.breakdown.length, 0);
+
+// Multiline case
+const caseMulti = decideCompound(caseCfg, "bash",
+	{ command: "case $x in\n  foo) echo a;;\n  bar) echo b;;\nesac" });
+test("multiline case → isCompound false",        caseMulti.isCompound, false);
+test("multiline case → ask",                     caseMulti.action, "ask");
+
+// Explicit allow rule still applies
+const caseAllow = decideCompound(caseAllowCfg, "bash", { command: "case $x in foo) echo a;; esac" });
+test("case with Bash(case*) allow → allow",      caseAllow.action, "allow");
+test("case with allow rule → isCompound false",  caseAllow.isCompound, false);
+
+// Explicit deny rule still applies
+const caseDenyCfg = makeCfg({ deny: ["Bash(case*)"], defaultAction: "allow" });
+const caseDeny = decideCompound(caseDenyCfg, "bash", { command: "case $x in foo) cmd;; esac" });
+test("case with Bash(case*) deny → deny",        caseDeny.action, "deny");
+
+// case after another command: the whole command still treated as single (pre-check fires)
+const casePreceded = decideCompound(caseCfg, "bash", { command: "echo start; case $x in foo) cmd;; esac" });
+test("cmd; case → isCompound false (pre-check)", casePreceded.isCompound, false);
+test("cmd; case → ask",                          casePreceded.action, "ask");
 
 process.exit(summary() > 0 ? 1 : 0);

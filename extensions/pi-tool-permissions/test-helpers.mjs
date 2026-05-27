@@ -292,6 +292,7 @@ export function stripLineContinuations(cmd) {
 }
 
 export function splitTopLevelShell(cmd) {
+	if (/(?:^|[;&|]\s*|\n\s*)case\s/.test(cmd)) return { kind: "single" };
 	const parts = [];
 	let current = "", inSingle = false, inDouble = false, inBacktick = false;
 	let parenDepth = 0, foundOperator = false, i = 0;

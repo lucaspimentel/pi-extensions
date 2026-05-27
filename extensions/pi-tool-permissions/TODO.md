@@ -32,13 +32,13 @@
   - Tests: added two new sections in `test-bash.mjs` — `stripStructuralKeywords` (17 cases: pure keywords, classic/C-style heads, nested-loop residue, pass-through, `for_foo` non-match, whitespace handling) and `decideCompound — for loops` (16 cases: single-line, multiline, two-command body, nested, C-style, ask body, deny body, mixed allow+deny, quoted negative case, degenerate empty body). All 6 suites still pass; `test-bash.mjs` count went from 215 → 247.
   - Follow-up TODO: extend the same handling to `while` / `until` / `if` / `case` / `select` loop and conditional keywords (filed below).
 
-- [ ] Extend structural-keyword stripping to `while` / `until` / `if` / `case` / `select`
-  - Follow-up to the `for`-loop work above. `stripStructuralKeywords()` in `index.ts` only recognises `for`/`do`/`done` today; the same structural-prompt friction exists for the other loop and conditional keywords.
-  - `while CMD; do BODY; done` and `until CMD; do BODY; done` — `CMD` is the loop-control test command and DOES run, so the prefix `while`/`until` should be stripped from the part (`while ls foo` → `ls foo`) rather than elided whole. `do`/`done` already handled.
-  - `if CMD; then BODY; fi` and `elif CMD; then BODY; fi` — same shape: strip the keyword prefix, evaluate the residue. Elide bare `then`/`else`/`fi`.
-  - `case WORD in PAT) BODY ;; esac` — trickier: the head `case WORD in` is structural (no command runs), patterns like `pat)` are structural, `;;` separators are already handled by the existing `;` splitter (each `;` is a split point), and `esac` is a bare structural keyword. Need to extend the splitter (or a post-split pattern detector) to recognise `pat)` lines.
-  - `select VAR in WORDS; do BODY; done` — same as `for`-with-`in`; head clause is structural.
-  - Tests: extend the `stripStructuralKeywords` and `decideCompound — for loops` sections in `test-bash.mjs` (or split into a wider `— control flow` section) covering each keyword. Sync `test-helpers.mjs`.
+- [x] Extend structural-keyword stripping to `while` / `until` / `if` / `case` / `select`
+  - Extended `stripStructuralKeywords()` in `index.ts` (mirrored in `test-helpers.mjs`) with two keyword classes:
+    - **Pure structural** (whole part → null): added `then`, `else`, `fi` alongside existing `do`/`done`; iteration heads expanded from `for` to `for|select` (same `VAR in ARGS` / `VAR` / C-style shapes).
+    - **Prefix-strip** (keyword stripped, residue re-evaluated): `while`, `until`, `if`, `elif`, plus leading-keyword forms of `do`/`then`/`else`. The existing iterative loop collapses chains like `do while true` → `true` in one pass.
+  - `case` blocks handled pragmatically: a one-line regex pre-check at the top of `splitTopLevelShell()` detects a top-level `case` keyword and returns `{kind: "single"}` immediately, so the whole `case … esac` block is evaluated as one unit through `decide()`. Pattern-clause `)` characters no longer cause a spurious `ambiguous` result; explicit `Bash(case*)` allow/deny rules still apply.
+  - Renamed `decideCompound — for loops` test section to `decideCompound — control flow`; added 64 new cases in `test-bash.mjs` (Phase 1: +22 `stripStructuralKeywords` + ~38 `decideCompound`; Phase 2 `case`: +6 splitter kind + 11 `decideCompound`) and 17 new splitter/case cases. `test-bash.mjs`: 247 → 328 cases across two commits.
+  - Updated `README.md` `#### Control flow` section with keyword-category table and examples; updated `index.ts` header block with full taxonomy. `case` note updated to describe single-unit behaviour.
 
 - [ ] Handle Bash output redirection (`>`, `>>`, `2>`, `&>`) as a write-risk operation
   - `index.ts` already has `hasTopLevelOutputRedirect()` and uses it to prevent auto-allowing commands in `isReadOnlyBashSubcommand()`, but explicit broad allow rules such as `Bash(rg *)` could still allow `rg "x" > results.txt` because `rg` is evaluated as a normal single Bash command.
