@@ -6,7 +6,7 @@ Fixes pi's external-editor keybinding (`Ctrl+G` by default) for GUI editors that
 
 Pi writes the current prompt to a temp file, launches `$VISUAL` or `$EDITOR`, then reads the file back and deletes it when the editor process exits.
 
-On Windows / Git Bash, `EDITOR=code` starts VS Code and returns immediately unless `--wait` is supplied. Pi then deletes the temp file before VS Code opens it, so VS Code reports that a path like `D:\lucas\temp\pi-editor-....pi.md` does not exist.
+On Windows / Git Bash, `EDITOR=code` starts VS Code and returns immediately unless `--wait` is supplied. Pi then deletes the temp file before VS Code opens it, so VS Code reports that the temp file does not exist.
 
 ## What this extension does
 
@@ -24,6 +24,6 @@ All other editor behavior is delegated to pi's normal `CustomEditor` implementat
 
 ## Notes
 
-- No path conversion is done in v1. In the Windows / Git Bash environment this was built for, Node reports `os.tmpdir()` as a Windows path such as `D:\lucas\temp`, which is what GUI editors expect.
+- No path conversion is done in v1. In the Windows / Git Bash environment this was built for, Node reports `os.tmpdir()` as a Windows path (e.g. `C:\Users\<user>\AppData\Local\Temp`), which is what GUI editors expect.
 - If you already set `EDITOR="code --wait"`, the extension will not add a duplicate wait flag.
 - Terminal editors like `vim`, `nvim`, and `nano` are passed through unchanged.
