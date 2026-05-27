@@ -466,7 +466,44 @@ test("'for_foo a' → unchanged",                 stripStructuralKeywords("for_f
 // Leading whitespace is trimmed before tests
 test("'  do echo  ' → 'echo'",                  stripStructuralKeywords("  do echo  "), "echo");
 
-section("decideCompound — for loops");
+// New pure-structural keywords: then, else, fi
+test("'then' alone → null",                     stripStructuralKeywords("then"),  null);
+test("'else' alone → null",                     stripStructuralKeywords("else"),  null);
+test("'fi' alone → null",                       stripStructuralKeywords("fi"),    null);
+
+// `select` iteration heads — same shape as `for`, no command runs
+test("'select x in a b c' → null",              stripStructuralKeywords("select x in a b c"), null);
+test("'select x in $(ls)' → null",              stripStructuralKeywords("select x in $(ls)"), null);
+test("bare 'select x' (no in) → null",          stripStructuralKeywords("select x"),          null);
+
+// Prefix-strip: while / until — the condition command is exposed
+test("'while true' → 'true'",                   stripStructuralKeywords("while true"),            "true");
+test("'while [[ -f x ]]' → '[[ -f x ]]'",       stripStructuralKeywords("while [[ -f x ]]"),      "[[ -f x ]]");
+test("'until [[ -f x ]]' → '[[ -f x ]]'",       stripStructuralKeywords("until [[ -f x ]]"),      "[[ -f x ]]");
+test("'until false' → 'false'",                 stripStructuralKeywords("until false"),           "false");
+
+// Prefix-strip: if / elif — condition command exposed
+test("'if grep foo bar' → 'grep foo bar'",       stripStructuralKeywords("if grep foo bar"),        "grep foo bar");
+test("'if [[ -d /tmp ]]' → '[[ -d /tmp ]]'",    stripStructuralKeywords("if [[ -d /tmp ]]"),       "[[ -d /tmp ]]");
+test("'elif test -f x' → 'test -f x'",          stripStructuralKeywords("elif test -f x"),         "test -f x");
+
+// Prefix-strip: then / else followed by a command
+test("'then echo found' → 'echo found'",         stripStructuralKeywords("then echo found"),        "echo found");
+test("'else rm -rf /tmp/a' → 'rm -rf /tmp/a'",  stripStructuralKeywords("else rm -rf /tmp/a"),    "rm -rf /tmp/a");
+
+// Nested prefix chains: `do while true` → strip do → strip while → `true`
+test("'do while true' → 'true'",                stripStructuralKeywords("do while true"),          "true");
+// `then if grep foo f` → strip then → strip if → `grep foo f`
+test("'then if grep foo f' → 'grep foo f'",     stripStructuralKeywords("then if grep foo f"),     "grep foo f");
+
+// Negative: no keyword match — word-boundary check
+test("'while_foo a' → unchanged",               stripStructuralKeywords("while_foo a"),           "while_foo a");
+test("'iffy a' → unchanged",                    stripStructuralKeywords("iffy a"),               "iffy a");
+test("'selectable b' → unchanged",              stripStructuralKeywords("selectable b"),          "selectable b");
+test("'fifo' → unchanged",                      stripStructuralKeywords("fifo"),                 "fifo");
+test("'elseif a b' → unchanged",                stripStructuralKeywords("elseif a b"),            "elseif a b");
+
+section("decideCompound — control flow");
 
 // Single-line for loop: only the body command enters the breakdown.
 const forCfg = makeCfg({ allow: ["Bash(echo*)"], defaultAction: "deny" });
@@ -527,5 +564,111 @@ const forEmpty = decideCompound(makeCfg({ defaultAction: "deny" }), "bash", { co
 test("empty-body for → allow (no commands)",     forEmpty.action, "allow");
 test("empty-body for → isCompound false",        forEmpty.isCompound, false);
 test("empty-body for → empty breakdown",         forEmpty.breakdown.length, 0);
+
+// ── while / until ──────────────────────────────────────────────────────────
+const wuCfg = makeCfg({ allow: ["Bash(echo*)", "Bash(sleep*)", "Bash(true)"], defaultAction: "deny" });
+
+// `while true; do sleep 1; done` — condition `true` is allowed, body `sleep 1` is allowed
+const whileTrue = decideCompound(wuCfg, "bash", { command: "while true; do sleep 1; done" });
+test("while true; do sleep 1 → allow",           whileTrue.action, "allow");
+test("while true; do sleep 1 → isCompound true", whileTrue.isCompound, true);
+test("while true; do sleep 1 → breakdown 2",     whileTrue.breakdown.length, 2);
+test("while breakdown[0].sub = 'true'",          whileTrue.breakdown[0].sub, "true");
+test("while breakdown[1].sub = 'sleep 1'",       whileTrue.breakdown[1].sub, "sleep 1");
+
+// Multiline form
+const whileMulti = decideCompound(wuCfg, "bash", { command: "while true\ndo\nsleep 1\ndone" });
+test("multiline while → allow",                  whileMulti.action, "allow");
+test("multiline while → isCompound true",        whileMulti.isCompound, true);
+test("multiline while → breakdown 2",            whileMulti.breakdown.length, 2);
+
+// `until` — same shape, different keyword.
+// Use `until true` so the stripped condition `true` is in wuCfg's allow list.
+const untilLoop = decideCompound(wuCfg, "bash", { command: "until true; do sleep 1; done" });
+test("until true; do sleep 1 → allow",           untilLoop.action, "allow");
+test("until → isCompound true",                  untilLoop.isCompound, true);
+test("until → breakdown[0].sub = 'true'",        untilLoop.breakdown[0].sub, "true");
+// Separate check: `until false` strips keyword — `false` is not in the allow list → deny
+const untilFalse = decideCompound(wuCfg, "bash", { command: "until false; do sleep 1; done" });
+test("until false → deny (false not allowed)",    untilFalse.action, "deny");
+
+// Deny in while condition propagates
+const whileDenyCfg = makeCfg({ deny: ["Bash(rm*)"], defaultAction: "allow" });
+const whileDeny = decideCompound(whileDenyCfg, "bash", { command: "while rm /tmp/lock; do echo ok; done" });
+test("deny in while condition → deny",           whileDeny.action, "deny");
+
+// Deny in while body propagates
+const whileBodyDeny = decideCompound(whileDenyCfg, "bash", { command: "while true; do rm -rf /; done" });
+test("deny in while body → deny",                whileBodyDeny.action, "deny");
+
+// Single body command after stripping → downgrade to non-compound
+const wuSingle = decideCompound(wuCfg, "bash", { command: "while true; do sleep 1; done" });
+// already tested above — also verify single-body while downgrades
+const wuSingleBody = decideCompound(makeCfg({ allow: ["Bash(sleep*)"], defaultAction: "deny" }), "bash",
+	{ command: "while true; do sleep 1; done" });
+// `true` hits deny (not in allow list), so action is deny, isCompound false (2→compound, but deny wins)
+test("while single body, condition denied → deny", wuSingleBody.action, "deny");
+
+// ── if / elif / else / fi ─────────────────────────────────────────────────
+const ifCfg = makeCfg({ allow: ["Bash(grep*)", "Bash(echo*)", "Bash(ls*)"], defaultAction: "deny" });
+
+// Simple if-then-fi
+const ifSimple = decideCompound(ifCfg, "bash", { command: "if grep foo file; then echo found; fi" });
+test("if grep…then echo…fi → allow",             ifSimple.action, "allow");
+test("if-then-fi → isCompound true",             ifSimple.isCompound, true);
+test("if-then-fi → breakdown 2",                 ifSimple.breakdown.length, 2);
+test("if breakdown[0].sub = 'grep foo file'",    ifSimple.breakdown[0].sub, "grep foo file");
+test("if breakdown[1].sub = 'echo found'",       ifSimple.breakdown[1].sub, "echo found");
+
+// if-then-elif-then-else-fi
+const ifElif = decideCompound(ifCfg, "bash",
+	{ command: "if grep a f; then echo a; elif grep b f; then echo b; else echo c; fi" });
+test("if-elif-else-fi → allow",                  ifElif.action, "allow");
+test("if-elif-else-fi → isCompound true",        ifElif.isCompound, true);
+test("if-elif-else-fi → breakdown 5",            ifElif.breakdown.length, 5);
+test("breakdown[0] = 'grep a f'",                ifElif.breakdown[0].sub, "grep a f");
+test("breakdown[1] = 'echo a'",                  ifElif.breakdown[1].sub, "echo a");
+test("breakdown[2] = 'grep b f'",                ifElif.breakdown[2].sub, "grep b f");
+test("breakdown[3] = 'echo b'",                  ifElif.breakdown[3].sub, "echo b");
+test("breakdown[4] = 'echo c'",                  ifElif.breakdown[4].sub, "echo c");
+
+// Multiline if
+const ifMulti = decideCompound(ifCfg, "bash", { command: "if grep foo file\nthen\necho found\nfi" });
+test("multiline if → allow",                     ifMulti.action, "allow");
+test("multiline if → isCompound true",           ifMulti.isCompound, true);
+test("multiline if → breakdown 2",               ifMulti.breakdown.length, 2);
+
+// Deny in if condition propagates
+const ifDenyCfg = makeCfg({ deny: ["Bash(rm*)"], defaultAction: "allow" });
+const ifCondDeny = decideCompound(ifDenyCfg, "bash", { command: "if rm /tmp/x; then echo ok; fi" });
+test("deny in if condition → deny",              ifCondDeny.action, "deny");
+
+// Deny in if body propagates
+const ifBodyDeny = decideCompound(ifDenyCfg, "bash", { command: "if grep x f; then rm -rf /; fi" });
+test("deny in if body → deny",                   ifBodyDeny.action, "deny");
+
+// Single-command if: `if ls; then ls; fi` — grep-allow cfg has ls allowed; 2 subs
+const ifLs = decideCompound(ifCfg, "bash", { command: "if ls; then ls; fi" });
+test("if ls; then ls; fi → allow",               ifLs.action, "allow");
+test("if ls; then ls; fi → isCompound true",     ifLs.isCompound, true);
+
+// ── select ────────────────────────────────────────────────────────────────
+const selCfg = makeCfg({ allow: ["Bash(echo*)"], defaultAction: "deny" });
+
+// `select x in a b c; do echo $x; done` — head is structural, body is the only real command
+const selectLoop = decideCompound(selCfg, "bash", { command: "select x in a b c; do echo $x; done" });
+test("select x in …; do echo → allow",           selectLoop.action, "allow");
+test("select → isCompound false (1 cmd)",        selectLoop.isCompound, false);
+test("select → empty breakdown (downgrade)",     selectLoop.breakdown.length, 0);
+
+// Multiline select
+const selectMulti = decideCompound(selCfg, "bash", { command: "select x in a b\ndo\necho $x\ndone" });
+test("multiline select → allow",                 selectMulti.action, "allow");
+test("multiline select → isCompound false",      selectMulti.isCompound, false);
+
+// Negative: quoted control-flow string is a single command — splitter never fires
+const quotedWhile = decideCompound(ifCfg, "bash", { command: 'echo "while true; do sleep 1; done"' });
+test("quoted while → isCompound false",          quotedWhile.isCompound, false);
+test("quoted while → allow (matches echo*)",     quotedWhile.action, "allow");
 
 process.exit(summary() > 0 ? 1 : 0);

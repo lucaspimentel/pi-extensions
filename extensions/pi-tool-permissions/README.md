@@ -401,11 +401,26 @@ After you save a rule via **Allow always** / **Deny always**, the remaining subc
 
 **Allow ALL steps once** still wins over any later rule-driven decision: once chosen, every remaining step is silently allowed regardless of newly-saved rules.
 
-#### `for` loops
+#### Control flow (`for` / `while` / `until` / `if` / `select`)
 
-Structural shell keywords inside `for` loops — `for VAR in ...`, the C-style `for ((...))` head, `do`, and `done` — are elided from the per-subcommand breakdown so only the loop body is evaluated. A loop like `for f in *.txt; do cat $f; done` prompts once for `cat $f`, not for `for f in *.txt` or `done`. Nested loops collapse the same way. Loop bodies with multiple statements keep each statement as its own row in the breakdown.
+Structural control-flow keywords are elided from the per-subcommand breakdown so only real commands enter the prompt. Two categories:
 
-> Scope: today this only covers `for`. `while` / `until` / `if` / `case` still split into all of their structural pieces. See `TODO.md` for follow-up work.
+| Category | Keywords | Effect |
+|---|---|---|
+| **Iteration heads** (whole part elided) | `for VAR in …`, `for ((…))`, bare `for VAR`, `select VAR in …`, bare `select VAR` | No command runs — part is silently dropped |
+| **Pure structural tokens** (whole part elided) | `do`, `done`, `then`, `else`, `fi` | No command runs — part is silently dropped |
+| **Prefix keywords** (keyword stripped, residue evaluated) | `while`, `until`, `if`, `elif` and leading-keyword forms of `do`/`then`/`else` | The command *after* the keyword is extracted and evaluated |
+
+Examples:
+- `for f in *.txt; do cat $f; done` → prompts once for `cat $f`
+- `while true; do sleep 1; done` → prompts for `true` and `sleep 1`
+- `if grep foo file; then echo found; fi` → prompts for `grep foo file` and `echo found`
+- `if a; then b; elif c; then d; else e; fi` → prompts for `a`, `b`, `c`, `d`, `e`
+- `select x in a b c; do echo $x; done` → prompts once for `echo $x`
+
+Nested constructs collapse in one pass (e.g. `do while true` → `true`). When filtering leaves a single command the breakdown downgrades to a simpler single-command dialog.
+
+> `case` statements are not yet supported — they require changes to the command splitter to handle unmatched `)` in pattern clauses. Tracked in `TODO.md`.
 
 In non-interactive modes (`-p`, JSON mode), `ask` falls back to **deny** so nothing dangerous slips through automation.
 

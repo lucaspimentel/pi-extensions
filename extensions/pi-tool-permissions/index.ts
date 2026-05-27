@@ -104,10 +104,21 @@
  *   POSIX shell line-continuations (`\<LF>` and `\<CRLF>` outside single
  *   quotes) are stripped before parsing, so commands split across multiple
  *   lines are matched against rules as their canonical single-line form.
- *   Structural `for` loop keywords (`for VAR in ...`, the C-style `for ((...))`,
- *   `do`, `done`) are elided from the per-subcommand breakdown so a loop like
- *   `for x in *.txt; do cat $x; done` only prompts on `cat $x` — not on the
- *   iteration head or loop scaffolding.
+ *   Structural control-flow keywords are elided from the per-subcommand breakdown
+ *   so only real commands in loop/conditional bodies enter the prompt:
+ *
+ *   Iteration heads (elided entirely — no command runs):
+ *     `for VAR in ...`, C-style `for ((...))`, bare `for VAR`
+ *     `select VAR in ...`, bare `select VAR`
+ *   Pure structural tokens (elided entirely):
+ *     `do`, `done`, `then`, `else`, `fi`
+ *   Prefix keywords (stripped — command after keyword is evaluated):
+ *     `while CMD`, `until CMD`, `if CMD`, `elif CMD`
+ *     `do CMD`, `then CMD`, `else CMD`
+ *
+ *   Example: `while true; do sleep 1; done` prompts only on `true` and `sleep 1`.
+ *   Example: `if grep foo f; then echo found; fi` prompts on `grep foo f` and `echo found`.
+ *   `case` statements are not yet supported (require splitter changes; see TODO.md).
  *
  * Allow-all-edits mode:
  *   A session-only toggle that auto-allows all Write and Edit tool calls without
@@ -934,38 +945,45 @@ function splitTopLevelShell(cmd: string): SplitResult {
 // ── Compound decision ────────────────────────────────────────────────────────
 
 /**
- * Strip leading shell structural keywords (`for VAR in ...`, `do`, `done`) from
- * a compound-split subcommand. Returns null when the residue is purely structural
- * (an iteration head, a bare `do`/`done`, or empty) with no user command to evaluate.
+ * Strip leading shell structural keywords from a compound-split subcommand.
+ * Returns null when the residue is purely structural (an iteration/case head,
+ * a bare keyword, or empty) with no user command to evaluate. Returns the
+ * stripped residue when a real command follows a prefix keyword.
  *
- * Used by `decideCompound()` on each part produced by `splitTopLevelShell` so that
- * a loop like `for x in a b c; do echo $x; done` only prompts on `echo $x` —
- * not on `for x in a b c`, `do`, or `done`.
+ * Used by `decideCompound()` on each part produced by `splitTopLevelShell` so
+ * that a loop like `for x in a b c; do echo $x; done` only prompts on `echo $x`
+ * and a conditional like `if grep foo f; then echo found; fi` only prompts on
+ * `grep foo f` and `echo found`.
  *
- * Loops iteratively so nested forms like `do for y in b` (which appears as a
- * single split part in nested loops) collapse to null after one strip + recognition pass.
+ * Two classes of keyword:
+ *   Pure structural (whole part → null): do, done, then, else, fi
+ *     plus iteration heads `for VAR in …` / `for VAR` / `for ((...))` /
+ *     `select VAR in …` / `select VAR`.
+ *   Prefix-strip (keyword stripped, residue re-evaluated): while, until,
+ *     if, elif, and the leading-keyword forms of do/then/else.
  *
- * Scope: only `for` loops today — including the C-style `for ((...))` form
- * whose inner `;`s are protected by paren-depth tracking in splitTopLevelShell.
- * `while` / `until` / `if` / `case` are intentionally out of scope (see TODO.md).
+ * Loops iteratively so nested forms like `do for y in b` (one split part in
+ * nested loops) and `do while true` collapse in a single pass.
  *
- * Risk note: a binary literally named `do` or `done` would also be elided.
+ * `case` is not yet handled here — it requires splitter changes (see TODO.md).
+ *
+ * Risk note: binaries literally named after these keywords would also be elided.
  * That is vanishingly rare in practice and accepted as a trade-off.
  */
 function stripStructuralKeywords(part: string): string | null {
 	let s = part.trim();
 	while (s.length > 0) {
-		// Pure structural keyword tokens — no command, no arguments
-		if (s === "do" || s === "done") return null;
-		// `for VAR in ARGS` / `for VAR` / `for ((...))` — iteration head only,
-		// no user command runs. \S+ greedily eats the `((i=0;i<10;i++))` form
-		// because it contains no whitespace; the optional ` in ...` clause covers
-		// the classic form.
-		if (/^for\s+\S+(\s+in\b[^\n]*)?$/.test(s)) return null;
-		// Leading `do <rest>` — strip prefix and re-test the residue so nested
-		// `do for y in b` collapses in a single pass.
-		const doMatch = s.match(/^do\s+/);
-		if (doMatch) { s = s.slice(doMatch[0].length); continue; }
+		// Pure structural keyword tokens — bare, no arguments
+		if (s === "do" || s === "done" || s === "then" || s === "else" || s === "fi") return null;
+		// Iteration / case heads — the head itself runs no user command.
+		// `for` and `select` share the same `VAR in ARGS` / `VAR` / `((...))` shapes.
+		// \S+ greedily eats the C-style `((i=0;i<10;i++))` (no whitespace inside).
+		if (/^(for|select)\s+\S+(\s+in\b[^\n]*)?$/.test(s)) return null;
+		// Prefix keywords — a command follows; strip the keyword and re-test the
+		// residue. Covers: do, then, else (when followed by a command), and the
+		// control-condition keywords while, until, if, elif.
+		const prefixMatch = s.match(/^(do|then|else|while|until|if|elif)\s+/);
+		if (prefixMatch) { s = s.slice(prefixMatch[0].length); continue; }
 		break;
 	}
 	return s.length > 0 ? s : null;

@@ -373,17 +373,17 @@ export function decide(cfg, toolName, input) {
 }
 
 /**
- * Mirrors stripStructuralKeywords() in index.ts. Strips leading `for VAR in ...`,
- * `for ((...))`, `do`, `done` from a compound-split subcommand. Returns null when
- * the residue is purely structural.
+ * Mirrors stripStructuralKeywords() in index.ts.
+ * Returns null when the part is purely structural (no user command);
+ * returns the residue after stripping a prefix keyword otherwise.
  */
 export function stripStructuralKeywords(part) {
 	let s = part.trim();
 	while (s.length > 0) {
-		if (s === "do" || s === "done") return null;
-		if (/^for\s+\S+(\s+in\b[^\n]*)?$/.test(s)) return null;
-		const doMatch = s.match(/^do\s+/);
-		if (doMatch) { s = s.slice(doMatch[0].length); continue; }
+		if (s === "do" || s === "done" || s === "then" || s === "else" || s === "fi") return null;
+		if (/^(for|select)\s+\S+(\s+in\b[^\n]*)?$/.test(s)) return null;
+		const prefixMatch = s.match(/^(do|then|else|while|until|if|elif)\s+/);
+		if (prefixMatch) { s = s.slice(prefixMatch[0].length); continue; }
 		break;
 	}
 	return s.length > 0 ? s : null;
