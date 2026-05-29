@@ -5,15 +5,25 @@
  * pi temporarily switches to a strong planning model (Claude Opus), asks for a plan,
  * then automatically restores the previous model so the implementation runs on it.
  *
- * Tweak PLANNER_PROVIDER / PLANNER_MODEL_ID below if Anthropic renames the model.
+ * The planner model is chosen based on the provider of the current (active) model:
+ *   anthropic → claude-opus-4-8, then 4-7, then 4-6 (first with a configured API key)
+ *   openai    → gpt-5.5-pro
+ *   (other)   → falls back to the anthropic entry above
+ *
+ * Edit PLANNER_CONFIGS below to add providers or swap model ids.
+ * Run `pi --list-models` to see what's registered in your build.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-// Adjust to whatever Opus id is registered in your pi build.
-// Run `pi --list-models | grep opus` to see what's available.
-const PLANNER_PROVIDER = "anthropic";
-const PLANNER_MODEL_ID = "claude-opus-4-7";
+// Maps the active model's provider to the planner that should be used.
+// For each entry, the first modelId that is registered AND has a configured API key wins.
+// Providers not listed here fall back to the "anthropic" entry.
+const PLANNER_CONFIGS: Record<string, { provider: string; modelIds: readonly string[] }> = {
+	anthropic: { provider: "anthropic", modelIds: ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"] },
+	openai:    { provider: "openai",    modelIds: ["gpt-5.5-pro"] },
+};
+const DEFAULT_PLANNER_CONFIG = PLANNER_CONFIGS["anthropic"]!;
 const PLANNER_THINKING: ThinkingLevel = "high";
 
 // Read-only tool allowlist while planning. "bash" stays in but is gated to
@@ -61,10 +71,31 @@ interface Snapshot {
 export default function planWithOpus(pi: ExtensionAPI) {
 	let snapshot: Snapshot | undefined;
 	let planning = false;
+	let activePlannerId: string | undefined;
+
+	function resolvePlanner(registry: ExtensionContext["modelRegistry"], currentProvider: string) {
+		const config = PLANNER_CONFIGS[currentProvider] ?? DEFAULT_PLANNER_CONFIG;
+		// First pass: prefer a model that is registered AND has a configured API key.
+		for (const id of config.modelIds) {
+			const model = registry.find(config.provider, id);
+			if (model && registry.hasConfiguredAuth(model)) {
+				return { model, id, config };
+			}
+		}
+		// Second pass: fall back to any registered model (setModel will surface the
+		// "missing API key" error to the user, which is more helpful than "not found").
+		for (const id of config.modelIds) {
+			const model = registry.find(config.provider, id);
+			if (model) {
+				return { model, id, config };
+			}
+		}
+		return { model: undefined, id: undefined, config };
+	}
 
 	function updateStatus(ctx: ExtensionContext) {
 		if (planning) {
-			ctx.ui.setStatus("plan-with-opus", ctx.ui.theme.fg("accent", `📐 planning (${PLANNER_MODEL_ID})`));
+			ctx.ui.setStatus("plan-with-opus", ctx.ui.theme.fg("accent", `📐 planning (${activePlannerId ?? "opus"})`));
 		} else {
 			ctx.ui.setStatus("plan-with-opus", undefined);
 		}
@@ -81,20 +112,21 @@ export default function planWithOpus(pi: ExtensionAPI) {
 		}
 
 		const current = ctx.model;
-		const planner = ctx.modelRegistry.find(PLANNER_PROVIDER, PLANNER_MODEL_ID);
-		if (!planner) {
+		if (!current) {
+			ctx.ui.notify("No active model to snapshot.", "error");
+			return;
+		}
+
+		const { model: planner, id: plannerId, config: plannerConfig } = resolvePlanner(ctx.modelRegistry, current.provider);
+		if (!planner || !plannerId) {
 			ctx.ui.notify(
-				`Planner model ${PLANNER_PROVIDER}/${PLANNER_MODEL_ID} not found. Edit PLANNER_MODEL_ID in plan-with-opus.ts.`,
+				`No planner model found for provider "${current.provider}". Tried: ${plannerConfig.modelIds.join(", ")} on ${plannerConfig.provider}. Edit PLANNER_CONFIGS in plan-with-opus.ts.`,
 				"error",
 			);
 			return;
 		}
 
 		// Snapshot current model + thinking level + active tools.
-		if (!current) {
-			ctx.ui.notify("No active model to snapshot.", "error");
-			return;
-		}
 		snapshot = {
 			provider: current.provider,
 			id: current.id,
@@ -104,10 +136,11 @@ export default function planWithOpus(pi: ExtensionAPI) {
 
 		const ok = await pi.setModel(planner);
 		if (!ok) {
-			ctx.ui.notify(`Could not switch to ${PLANNER_PROVIDER}/${PLANNER_MODEL_ID} (missing API key?)`, "error");
+			ctx.ui.notify(`Could not switch to ${plannerConfig.provider}/${plannerId} (missing API key?)`, "error");
 			snapshot = undefined;
 			return;
 		}
+		activePlannerId = plannerId;
 
 		// Bump thinking level and restrict tools to read-only set.
 		pi.setThinkingLevel(PLANNER_THINKING);
@@ -117,7 +150,7 @@ export default function planWithOpus(pi: ExtensionAPI) {
 		planning = true;
 		updateStatus(ctx);
 		ctx.ui.notify(
-			`Planning with ${planner.id} (thinking:${PLANNER_THINKING}, tools:${PLAN_TOOLS.join(",")}). Will restore after.`,
+			`Planning with ${plannerId} (thinking:${PLANNER_THINKING}, tools:${PLAN_TOOLS.join(",")}). Will restore after.`,
 			"info",
 		);
 
@@ -145,6 +178,7 @@ export default function planWithOpus(pi: ExtensionAPI) {
 			);
 		}
 		snapshot = undefined;
+		activePlannerId = undefined;
 		updateStatus(ctx);
 	}
 
@@ -199,6 +233,7 @@ export default function planWithOpus(pi: ExtensionAPI) {
 		// Reset transient state on session boundaries.
 		planning = false;
 		snapshot = undefined;
+		activePlannerId = undefined;
 		updateStatus(ctx);
 	});
 }
