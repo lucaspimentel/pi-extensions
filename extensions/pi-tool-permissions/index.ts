@@ -739,7 +739,7 @@ function ruleMatches(rule: ParsedRule, toolName: string, input: Record<string, u
 // ── Compound command splitting ─────────────────────────────────────────────
 
 type SplitResult =
-	| { kind: "single" }
+	| { kind: "single"; effectiveCmd?: string }
 	| { kind: "compound"; parts: string[] }
 	| { kind: "ambiguous" };
 
@@ -944,7 +944,12 @@ function splitTopLevelShell(cmd: string): SplitResult {
 	if (last) parts.push(last);
 
 	const nonEmpty = parts.filter((p) => p.length > 0 && !p.trimStart().startsWith("#"));
-	return nonEmpty.length > 1 ? { kind: "compound", parts: nonEmpty } : { kind: "single" };
+	if (nonEmpty.length > 1) return { kind: "compound", parts: nonEmpty };
+	// When comment-stripping collapsed a multi-part split to one real command,
+	// carry that effective command forward so callers don't match against the
+	// full comment-prefixed original string.
+	if (nonEmpty.length === 1) return { kind: "single", effectiveCmd: nonEmpty[0] };
+	return { kind: "single" };
 }
 
 // ── Compound decision ────────────────────────────────────────────────────────
@@ -1030,7 +1035,10 @@ function decideCompound(
 	}
 
 	if (split.kind === "single") {
-		return { action: decide(cfg, "bash", normalizedInput), isCompound: false, ambiguous: false, breakdown: [] };
+		const effectiveInput = split.effectiveCmd != null
+			? { ...normalizedInput, command: split.effectiveCmd }
+			: normalizedInput;
+		return { action: decide(cfg, "bash", effectiveInput), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	// compound — strip structural shell keywords (`for`, `do`, `done`) so

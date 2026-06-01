@@ -229,6 +229,16 @@ test("inline # not stripped",                 inlineHash.parts?.[0], "echo foo #
 const allComments = splitTopLevelShell("# step 1\n# step 2\n# step 3");
 test("all-comment lines → single",            allComments.kind, "single");
 
+// Leading comment + single real command → single with effectiveCmd (not the comment-prefixed string)
+const leadingComment = splitTopLevelShell("# find where X is used\nrg -A5 X /some/path");
+test("leading comment + single cmd → kind single",     leadingComment.kind, "single");
+test("leading comment + single cmd → effectiveCmd set", leadingComment.effectiveCmd, "rg -A5 X /some/path");
+
+// decideCompound uses effectiveCmd — rule matching should not see the comment prefix
+const leadingCommentCfg = makeCfg({ allow: ["Bash(rg *)"], defaultAction: "ask" });
+const leadingCommentDecide = decideCompound(leadingCommentCfg, "bash", { command: "# find DATADOG_CLIENT_COMPUTED_STATS\nrg -A5 \"DATADOG_CLIENT_COMPUTED_STATS\" /some/path" });
+test("leading comment stripped — rg command is allowed", leadingCommentDecide.action, "allow");
+
 // Comment-only lines mixed with ; operator
 const semiWithComment = splitTopLevelShell("cmd1 ; # comment ; cmd2");
 test("comment between semicolons stripped",   semiWithComment.parts?.filter((p) => p === "cmd1").length, 1);

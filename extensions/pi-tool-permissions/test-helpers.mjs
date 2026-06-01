@@ -332,7 +332,9 @@ export function splitTopLevelShell(cmd) {
 	const last = current.trim();
 	if (last) parts.push(last);
 	const nonEmpty = parts.filter((p) => p.length > 0 && !p.trimStart().startsWith("#"));
-	return nonEmpty.length > 1 ? { kind: "compound", parts: nonEmpty } : { kind: "single" };
+	if (nonEmpty.length > 1) return { kind: "compound", parts: nonEmpty };
+	if (nonEmpty.length === 1) return { kind: "single", effectiveCmd: nonEmpty[0] };
+	return { kind: "single" };
 }
 
 // ── Breakdown rendering ──────────────────────────────────────────────────────
@@ -400,7 +402,12 @@ export function decideCompound(cfg, toolName, input) {
 	const split = splitTopLevelShell(cmd);
 
 	if (split.kind === "ambiguous") return { action: "ask", isCompound: false, ambiguous: true, breakdown: [] };
-	if (split.kind === "single") return { action: decide(cfg, "bash", normalizedInput), isCompound: false, ambiguous: false, breakdown: [] };
+	if (split.kind === "single") {
+		const effectiveInput = split.effectiveCmd != null
+			? { ...normalizedInput, command: split.effectiveCmd }
+			: normalizedInput;
+		return { action: decide(cfg, "bash", effectiveInput), isCompound: false, ambiguous: false, breakdown: [] };
+	}
 
 	const breakdown = [];
 	for (const rawSub of split.parts) {
