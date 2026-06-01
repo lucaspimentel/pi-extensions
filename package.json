@@ -15,7 +15,8 @@
       "./extensions/wt-tab-status",
       "./extensions/external-editor-fix",
       "./extensions/idle-summary.ts",
-      "./extensions/pwsh.ts"
+      "./extensions/pwsh.ts",
+      "./extensions/slack-via-claude.ts"
     ],
     "skills": ["./skills"]
   },
