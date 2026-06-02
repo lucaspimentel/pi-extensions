@@ -126,7 +126,7 @@
  *   still take priority even when this mode is on.
  *
  *   Toggle via:
- *     - Ctrl+Shift+E hotkey
+ *     - Ctrl+Alt+E hotkey
  *     - "Allow all edits this session" option in the Write/Edit permission dialog
  *     - /permissions allowalledits [on|off|toggle]
  *
@@ -1449,7 +1449,11 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Hotkey ───────────────────────────────────────────────────────────────
 
-	pi.registerShortcut("ctrl+shift+e", {
+	// Note: ctrl+alt+e (not ctrl+shift+e) because most terminals can't distinguish
+	// ctrl+shift+<letter> from ctrl+<letter> — both emit the same control byte
+	// unless the terminal supports the Kitty keyboard protocol. Alt is sent as an
+	// ESC prefix, so ctrl+alt+e is reliably distinguishable from ctrl+e.
+	pi.registerShortcut("ctrl+alt+e", {
 		description: "Toggle allow-all-edits mode (this session only)",
 		handler: async (ctx) => {
 			applyAllowAllEdits(!allowAllEdits, ctx);

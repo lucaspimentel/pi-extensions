@@ -434,7 +434,7 @@ Explicit `deny` rules still win even when the mode is on.
 
 | Method | Action |
 | ------ | ------ |
-| **Ctrl+Shift+E** | Toggle on/off |
+| **Ctrl+Alt+E** | Toggle on/off |
 | Permission dialog (Write/Edit only) | Choose **"Allow all edits this session"** |
 | `/permissions allowalledits` | Toggle |
 | `/permissions allowalledits on\|off` | Set explicitly |
