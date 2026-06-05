@@ -241,6 +241,13 @@ function aborted() {
 	};
 }
 
+function progress(text: string, details: Record<string, unknown>) {
+	return {
+		content: [{ type: "text" as const, text }],
+		details,
+	};
+}
+
 // ── Tool definitions ─────────────────────────────────────────────────────────
 
 const slackSearchTool = defineTool({
@@ -261,7 +268,10 @@ const slackSearchTool = defineTool({
 		if (!getExe()) return notFound();
 		if (signal?.aborted) return aborted();
 
-		onUpdate?.({ content: [{ type: "text", text: `Searching Slack for: ${params.query}` }] });
+		onUpdate?.(progress(`Searching Slack for: ${params.query}`, {
+			phase: "searching",
+			query: params.query,
+		}));
 
 		const prompt =
 			`Search Slack for: "${params.query}"\n\n` +
@@ -294,7 +304,11 @@ const slackReadChannelTool = defineTool({
 		if (signal?.aborted) return aborted();
 
 		const limit = params.limit ?? 20;
-		onUpdate?.({ content: [{ type: "text", text: `Reading #${params.channel}...` }] });
+		onUpdate?.(progress(`Reading #${params.channel}...`, {
+			phase: "reading_channel",
+			channel: params.channel,
+			limit,
+		}));
 
 		const prompt =
 			`Read the ${limit} most recent messages from the Slack channel #${params.channel}.\n\n` +
@@ -327,9 +341,11 @@ const slackReadThreadTool = defineTool({
 		if (!getExe()) return notFound();
 		if (signal?.aborted) return aborted();
 
-		onUpdate?.({
-			content: [{ type: "text", text: `Reading thread in #${params.channel}...` }],
-		});
+		onUpdate?.(progress(`Reading thread in #${params.channel}...`, {
+			phase: "reading_thread",
+			channel: params.channel,
+			thread_ts: params.thread_ts,
+		}));
 
 		const prompt =
 			`Read the complete Slack thread in channel #${params.channel} ` +
