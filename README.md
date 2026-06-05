@@ -34,7 +34,7 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 
 - **colored-footer** – custom footer styling
 - **idle-summary** – generates a brief summary of the session when pi has been idle for a while
-- **plan-with-opus** – switch to Opus when planning
+- **plan** – `/plan <task>` switches to a strong planner model (Opus / `gpt-5.5-pro`) at thinking:xhigh with a read-only tool allowlist, then auto-restores your previous model, thinking level, and tools when the planning turn ends
 - **questionnaire** – interactive questionnaire tool (copied from the [pi sample](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/extensions/questionnaire.ts) by [@ferologics](https://github.com/ferologics))
 - **web** – fetch & convert web pages (depends on `html-to-text`)
 - **wt-tab-status** – updates the Windows Terminal tab title with the current session status

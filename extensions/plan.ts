@@ -24,7 +24,7 @@ const PLANNER_CONFIGS: Record<string, { provider: string; modelIds: readonly str
 	openai:    { provider: "openai",    modelIds: ["gpt-5.5-pro"] },
 };
 const DEFAULT_PLANNER_CONFIG = PLANNER_CONFIGS["anthropic"]!;
-const PLANNER_THINKING: ThinkingLevel = "high";
+const PLANNER_THINKING: ThinkingLevel = "xhigh";
 
 // Read-only tool allowlist while planning. "bash" stays in but is gated to
 // safe commands by the tool_call hook below.

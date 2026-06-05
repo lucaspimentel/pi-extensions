@@ -8,7 +8,7 @@
   "pi": {
     "extensions": [
       "./extensions/colored-footer.ts",
-      "./extensions/plan-with-opus.ts",
+      "./extensions/plan.ts",
       "./extensions/questionnaire.ts",
       "./extensions/web",
       "./extensions/pi-tool-permissions",
