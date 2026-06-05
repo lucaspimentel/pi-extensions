@@ -64,6 +64,115 @@ function htmlToReadable(html: string, baseUrl?: string): string {
 	}).trim();
 }
 
+const RAW_PRESERVE_EXTENSIONS = new Set([
+	".bash",
+	".c",
+	".cjs",
+	".cpp",
+	".cs",
+	".css",
+	".csv",
+	".go",
+	".h",
+	".hpp",
+	".java",
+	".js",
+	".json",
+	".jsonl",
+	".jsx",
+	".log",
+	".markdown",
+	".md",
+	".mdx",
+	".mjs",
+	".ps1",
+	".py",
+	".rb",
+	".rs",
+	".scss",
+	".sh",
+	".sql",
+	".ts",
+	".tsv",
+	".tsx",
+	".toml",
+	".txt",
+	".xml",
+	".yaml",
+	".yml",
+	".zsh",
+]);
+
+const RAW_PRESERVE_FILENAMES = new Set([
+	"code_of_conduct",
+	"contributing",
+	"changelog",
+	"dockerfile",
+	"license",
+	"makefile",
+	"readme",
+]);
+
+const CODE_HOST_SOURCE_EXTENSIONS = new Set([".htm", ".html"]);
+
+function lastPathSegment(pathname: string): string {
+	const segment = pathname.split("/").filter(Boolean).at(-1) ?? "";
+	try {
+		return decodeURIComponent(segment);
+	} catch {
+		return segment;
+	}
+}
+
+function shouldPreserveRaw(url: string): boolean {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return false;
+	}
+
+	const filename = lastPathSegment(parsed.pathname).toLowerCase();
+	if (!filename) return false;
+
+	if (RAW_PRESERVE_FILENAMES.has(filename)) return true;
+
+	const dot = filename.lastIndexOf(".");
+	if (dot < 0) return false;
+
+	const extension = filename.slice(dot);
+	if (RAW_PRESERVE_EXTENSIONS.has(extension)) return true;
+
+	const hostname = parsed.hostname.toLowerCase();
+	const parts = parsed.pathname.split("/").filter(Boolean);
+	const isGitHubFileUrl = hostname === "github.com" && (parts[2] === "blob" || parts[2] === "raw");
+	const isGitHubRawUrl = hostname === "raw.githubusercontent.com";
+	return (isGitHubFileUrl || isGitHubRawUrl) && CODE_HOST_SOURCE_EXTENSIONS.has(extension);
+}
+
+function normalizeRawFileUrl(url: string): string {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return url;
+	}
+
+	if (parsed.hostname.toLowerCase() === "github.com") {
+		const parts = parsed.pathname.split("/").filter(Boolean);
+		// GitHub web UI file links use /owner/repo/blob/ref/path/to/file. Convert
+		// them to /owner/repo/raw/ref/path/to/file so raw-preserved source/docs/data
+		// URLs return file contents instead of GitHub's HTML page.
+		if (parts.length >= 5 && parts[2] === "blob") {
+			parts[2] = "raw";
+			parsed.pathname = `/${parts.join("/")}`;
+			return parsed.toString();
+		}
+	}
+
+	return url;
+}
+
 // --------------------------- web_fetch --------------------------------
 
 const fetchParams = Type.Object({
@@ -298,25 +407,28 @@ export default function webExtension(pi: ExtensionAPI) {
 		name: "web_fetch",
 		label: "Fetch URL",
 		description:
-			"Fetch a web page and return its readable content. When TAVILY_API_KEY is set, uses Tavily Extract for cleaner content (handles JS-rendered pages, tables, embedded content). Set format='raw' for JSON APIs or source files, or engine='raw' to skip Tavily entirely.",
+			"Fetch a web page and return its readable content. When TAVILY_API_KEY is set, uses Tavily Extract for cleaner content (handles JS-rendered pages, tables, embedded content). Markdown, source, and data-file URLs are always fetched with raw HTTP to preserve exact contents. Set format='raw' for JSON APIs or source files, or engine='raw' to skip Tavily entirely.",
 		promptSnippet: "Fetch a URL and return readable text content from web pages",
 		promptGuidelines: [
 			"Use web_fetch when the user provides a URL or when web_search results need to be read in full.",
-			"Prefer the default engine for articles, docs, and HTML pages. Use format='raw' when fetching JSON APIs or source files where the literal bytes matter.",
+			"Prefer the default engine for articles, docs, and HTML pages. Markdown, source, and data-file URLs are fetched with raw HTTP automatically; use format='raw' for any other URL where the literal bytes matter.",
 		],
 		parameters: fetchParams,
 		async execute(_id, params, signal) {
-			const url = params.url;
-			if (!/^https?:\/\//i.test(url)) {
+			const originalUrl = params.url;
+			if (!/^https?:\/\//i.test(originalUrl)) {
 				throw new Error("web_fetch only supports http(s) URLs");
 			}
+			const normalizedUrl = normalizeRawFileUrl(originalUrl);
+			const preserveRaw = shouldPreserveRaw(normalizedUrl);
+			const url = preserveRaw ? normalizedUrl : originalUrl;
 			const format = params.format ?? "markdown";
 			const maxChars = params.maxChars ?? 30_000;
 			const requestedEngine = params.engine ?? "auto";
 
-			// format:raw always bypasses Tavily regardless of engine setting
+			// format:raw and Markdown/source/data URLs always bypass Tavily regardless of engine setting.
 			const effectiveEngine: "tavily" | "raw" =
-				format === "raw" ? "raw" :
+				format === "raw" || preserveRaw ? "raw" :
 				requestedEngine === "auto" ? pickFetchBackend() :
 				requestedEngine === "tavily" ? "tavily" : "raw";
 
@@ -348,10 +460,11 @@ export default function webExtension(pi: ExtensionAPI) {
 			// ----- Raw fetch path -----
 			const res = await doFetch(url, signal);
 			const ct = res.headers.get("content-type") || "";
+			const ctLower = ct.toLowerCase();
 			const body = await res.text();
 
 			let out: string;
-			if (format === "raw" || (!ct.includes("html") && !ct.includes("xml"))) {
+			if (format === "raw" || preserveRaw || (!ctLower.includes("html") && !ctLower.includes("xml"))) {
 				out = body;
 			} else {
 				out = htmlToReadable(body, res.url);
