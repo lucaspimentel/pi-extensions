@@ -3,7 +3,7 @@
  *
  * Line 1 (colored):   cwd
  * Line 2 (colored):   branch [PR icon + number]
- * Line 3 (stats):     model • thinking   ↑10 ↓5.4k $0.285   ctx-icon X% ctx        
+ * Line 3 (stats):     model • thinking   ↑10 ↓5.4k $0.285   ctx-icon X% context used        
  * Line 4+:            extension statuses (if any)
  *
  * Colors use the Campbell scheme, matching ~/.claude/statusline-command.sh.
@@ -173,7 +173,7 @@ export default function (pi: ExtensionAPI) {
 						let modelLabel = label;
 						if (model.reasoning) {
 							const lvl = (pi as any).getThinkingLevel?.() ?? "off";
-							modelLabel += ` \u2022 ${lvl}`;
+							modelLabel += ` \u2022 ${lvl} effort`;
 						}
 						line3Parts.push(`${C_BLUE}${ICON_MODEL}  ${modelLabel}${C_RESET}`);
 					}
@@ -187,7 +187,7 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					if (usage?.percent != null) {
-						line3Parts.push(`${ctxColor}${ctxIcon} ${Math.round(ctxPercentNum)}% ctx${C_RESET}`);
+						line3Parts.push(`${ctxColor}${ctxIcon} ${Math.round(ctxPercentNum)}% context used${C_RESET}`);
 					}
 
 					const lines = [truncateToWidth(line1Parts.join("  "), width)];
