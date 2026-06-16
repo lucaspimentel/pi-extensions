@@ -4,7 +4,9 @@
   "description": "Personal pi-coding-agent extensions and skills",
   "private": true,
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
     "extensions": [
       "./extensions/colored-footer.ts",
@@ -18,18 +20,21 @@
       "./extensions/pwsh.ts",
       "./extensions/slack-via-claude.ts"
     ],
-    "skills": ["./skills"]
+    "skills": [
+      "./skills"
+    ]
   },
   "dependencies": {
     "html-to-text": "^9.0.5"
   },
   "devDependencies": {
-    "@types/html-to-text": "^9.0.4"
+    "@types/html-to-text": "^9.0.4",
+    "typescript": "^6.0.3"
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
-    "@earendil-works/pi-ai": "*",
     "typebox": "*"
   }
 }

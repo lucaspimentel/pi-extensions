@@ -27,6 +27,7 @@ const C_RESET   = "\x1b[0m";
 // ── Nerd Font icons ─────────────────────────────────────────────────────────────
 const ICON_FOLDER   = "\uF07C";  // nf-fa-folder_open
 const ICON_BRANCH   = "\uE725";  // nf-dev-git_branch
+const ICON_REPO     = "\uE65B";  // nf-seti-github (repo)
 const ICON_MODEL    = "\uEE0D";  // nf-md-robot
 const ICON_PR_OPEN   = "\uEA64";  // nf-cod-git_pull_request
 const ICON_PR_CLOSED = "\uEBDA";  // nf-cod-git_pull_request_closed
@@ -60,6 +61,28 @@ function renderLineWithRightItem(left: string, right: string, width: number, edg
 interface PrInfo { number: number; icon: string; }
 
 const prCache = new Map<string, PrInfo | null>();
+
+// ── Repo name cache (cwd → "owner/repo" | null) ─────────────────────────────────
+const repoCache = new Map<string, string | null>();
+
+function fetchRepoName(cwd: string): Promise<string | null> {
+	return new Promise((resolve) => {
+		execFile(
+			"git", ["remote", "get-url", "origin"],
+			{ cwd, timeout: 5000 },
+			(err, stdout) => {
+				if (err || !stdout.trim()) {
+					resolve(null);
+					return;
+				}
+				const url = stdout.trim();
+				// Match owner/repo from git@host:owner/repo.git or https://host/owner/repo.git
+				const m = url.match(/[:/]([^/]+\/[^/]+?)(?:\.git)?$/);
+				resolve(m ? m[1] : null);
+			},
+		);
+	});
+}
 
 function fetchPrInfo(cwd: string, branch: string): Promise<PrInfo | null> {
 	return new Promise((resolve) => {
@@ -96,6 +119,17 @@ export default function (pi: ExtensionAPI) {
 				if (!prCache.has(branch)) {
 					fetchPrInfo(ctx.cwd ?? ".", branch).then((info) => {
 						prCache.set(branch, info);
+						tui.requestRender();
+					});
+				}
+			}
+
+			function maybeFetchRepo() {
+				const cwd = ctx.cwd ?? ".";
+				if (!repoCache.has(cwd)) {
+					repoCache.set(cwd, null);
+					fetchRepoName(cwd).then((name) => {
+						repoCache.set(cwd, name);
 						tui.requestRender();
 					});
 				}
@@ -157,9 +191,12 @@ export default function (pi: ExtensionAPI) {
 					const branch = footerData.getGitBranch();
 					if (branch) {
 						maybeFetchPr(branch);
+						maybeFetchRepo();
 						const pr = prCache.get(branch);
 						const prSuffix = pr != null ? `  ${pr.icon} ${pr.number}` : "";
-						line2Parts.push(`${C_MAGENTA}${ICON_BRANCH} ${branch}${prSuffix}${C_RESET}`);
+						const repo = repoCache.get(ctx.cwd ?? ".");
+						const repoPrefix = repo ? `${ICON_REPO}  ${repo}    ` : "";
+						line2Parts.push(`${C_MAGENTA}${repoPrefix}${ICON_BRANCH} ${branch}${prSuffix}${C_RESET}`);
 					}
 
 					// ─────────────────────────────────────────────────────────────────
