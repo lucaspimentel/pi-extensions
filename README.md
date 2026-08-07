@@ -41,6 +41,7 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 - **pi-tool-permissions** – Claude Code-style allow/deny/ask permissions
 - **external-editor-fix** – fix Ctrl+G external editor on Windows / Git Bash by adding wait flags for GUI editors
 - **pwsh** – PowerShell tool for Windows-native object pipelines (JSON via `ConvertFrom-Json`, registry, WMI/CIM, .NET, `Get-*` cmdlets). Auto-detects `pwsh` (7+) → `powershell` (5.1). Mirrors the built-in `bash` tool's tail-truncation and temp-file dump for long output.
+- **slack-via-claude** – read-only Slack tools (`slack_search`, `slack_read_channel`, `slack_read_thread`) backed by the Slack MCP already configured in Claude Code. Spawns `claude --print` with a read-only tool allowlist, so no separate Slack app registration is required.
 
 ### Skills
 
@@ -58,8 +59,9 @@ pi-extensions/
 │   ├── *.ts              # single-file extensions
 │   ├── web/              # multi-file extension
 │   └── pi-tool-permissions/
-└── skills/
-    └── <skill>/SKILL.md
+├── skills/
+│   └── <skill>/SKILL.md
+└── tests/                # node-runnable test harnesses (*.test.mts)
 ```
 
 Runtime npm deps live in the root `package.json` so a single `npm install`
