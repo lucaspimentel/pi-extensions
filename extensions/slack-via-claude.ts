@@ -28,6 +28,7 @@ import {
 	truncateTail,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
@@ -282,6 +283,15 @@ const slackSearchTool = defineTool({
 		const result = await runClaude(prompt, signal);
 		return buildResult(result, { query: params.query });
 	},
+
+	renderCall(args, theme, _context) {
+		const query = typeof args?.query === "string" ? args.query : "";
+		const label = theme.fg("toolTitle", theme.bold("Search Slack"));
+		const queryDisplay = query
+			? theme.fg("toolOutput", `"${query}"`)
+			: theme.fg("toolOutput", "...");
+		return new Text(`${label} ${queryDisplay}`, 0, 0);
+	},
 });
 
 const slackReadChannelTool = defineTool({
@@ -316,6 +326,22 @@ const slackReadChannelTool = defineTool({
 
 		const result = await runClaude(prompt, signal);
 		return buildResult(result, { channel: params.channel, limit });
+	},
+
+	renderCall(args, theme, _context) {
+		const channel = typeof args?.channel === "string" ? args.channel : "";
+		const label = theme.fg("toolTitle", theme.bold("Read Slack"));
+		const channelDisplay = channel
+			? theme.fg("toolOutput", `#${channel}`)
+			: theme.fg("toolOutput", "...");
+		let text = `${label} ${channelDisplay}`;
+
+		const limit = typeof args?.limit === "number" ? args.limit : undefined;
+		if (limit !== undefined) {
+			text += theme.fg("muted", ` (limit ${limit})`);
+		}
+
+		return new Text(text, 0, 0);
 	},
 });
 
@@ -355,6 +381,22 @@ const slackReadThreadTool = defineTool({
 
 		const result = await runClaude(prompt, signal);
 		return buildResult(result, { channel: params.channel, thread_ts: params.thread_ts });
+	},
+
+	renderCall(args, theme, _context) {
+		const channel = typeof args?.channel === "string" ? args.channel : "";
+		const threadTs = typeof args?.thread_ts === "string" ? args.thread_ts : "";
+		const label = theme.fg("toolTitle", theme.bold("Read Slack thread"));
+		const channelDisplay = channel
+			? theme.fg("toolOutput", `#${channel}`)
+			: theme.fg("toolOutput", "...");
+		let text = `${label} ${channelDisplay}`;
+
+		if (threadTs) {
+			text += theme.fg("muted", ` @${threadTs}`);
+		}
+
+		return new Text(text, 0, 0);
 	},
 });
 

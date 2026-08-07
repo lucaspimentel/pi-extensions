@@ -25,6 +25,7 @@ import {
 	formatSize,
 	truncateTail,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
@@ -236,6 +237,15 @@ const pwshTool = defineTool({
 			},
 			isError,
 		};
+	},
+
+	renderCall(args, theme, _context) {
+		const command = typeof args?.command === "string" ? args.command : "";
+		const timeout = args?.timeout;
+		const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
+		const commandDisplay = command ? command : theme.fg("toolOutput", "...");
+		const text = theme.fg("toolTitle", theme.bold(`pwsh> ${commandDisplay}`)) + timeoutSuffix;
+		return new Text(text, 0, 0);
 	},
 });
 

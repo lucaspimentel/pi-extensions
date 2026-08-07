@@ -20,6 +20,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
+import { Text } from "@earendil-works/pi-tui";
 import { convert as htmlToText } from "html-to-text";
 import { Type } from "typebox";
 
@@ -491,6 +492,21 @@ export default function webExtension(pi: ExtensionAPI) {
 				},
 			};
 		},
+
+		renderCall(args, theme, _context) {
+			const url = typeof args?.url === "string" ? args.url : "";
+			const label = theme.fg("toolTitle", theme.bold("Fetch"));
+			const urlDisplay = url ? theme.fg("toolOutput", url) : theme.fg("toolOutput", "...");
+			let text = `${label} ${urlDisplay}`;
+
+			const format = typeof args?.format === "string" ? args.format : undefined;
+			const engine = typeof args?.engine === "string" ? args.engine : undefined;
+			if (format === "raw" || engine === "raw") {
+				text += theme.fg("muted", " (raw)");
+			}
+
+			return new Text(text, 0, 0);
+		},
 	});
 
 	pi.registerTool<typeof searchParams, WebSearchDetails>({
@@ -566,6 +582,28 @@ export default function webExtension(pi: ExtensionAPI) {
 				content: [{ type: "text", text: lines.join("\n") }],
 				details: { backend, query: q, results, answer: tavilyAnswer },
 			};
+		},
+
+		renderCall(args, theme, _context) {
+			const query = typeof args?.query === "string" ? args.query : "";
+			const label = theme.fg("toolTitle", theme.bold("Web Search"));
+			const queryDisplay = query
+				? theme.fg("toolOutput", `"${query}"`)
+				: theme.fg("toolOutput", "...");
+			let text = `${label} ${queryDisplay}`;
+
+			const parts: string[] = [];
+			const topic = typeof args?.topic === "string" ? args.topic : undefined;
+			if (topic && topic !== "general") parts.push(topic);
+			const timeRange = typeof args?.timeRange === "string" ? args.timeRange : undefined;
+			if (timeRange) parts.push(timeRange);
+			const maxResults = typeof args?.maxResults === "number" ? args.maxResults : undefined;
+			if (maxResults !== undefined && maxResults !== 8) parts.push(`${maxResults} results`);
+			if (parts.length > 0) {
+				text += theme.fg("muted", ` (${parts.join(", ")})`);
+			}
+
+			return new Text(text, 0, 0);
 		},
 	});
 }
