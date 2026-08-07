@@ -20,7 +20,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 // For each entry, the first modelId that is registered AND has a configured API key wins.
 // Providers not listed here fall back to the "anthropic" entry.
 const PLANNER_CONFIGS: Record<string, { provider: string; modelIds: readonly string[] }> = {
-	anthropic: { provider: "anthropic", modelIds: ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"] },
+	anthropic: { provider: "anthropic", modelIds: ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"] },
 	openai:    { provider: "openai",    modelIds: ["gpt-5.5-pro"] },
 };
 const DEFAULT_PLANNER_CONFIG = PLANNER_CONFIGS["anthropic"]!;
