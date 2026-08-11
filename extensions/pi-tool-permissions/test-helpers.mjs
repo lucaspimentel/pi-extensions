@@ -563,6 +563,18 @@ export function decideCompound(cfg, toolName, input, autoActive = false) {
 const dedupe = (items) => [...new Set(items)];
 
 /**
+ * Sane default NL rules for `defaultAction: "auto"` — mirrors DEFAULT_AUTO_MODE
+ * in index.ts. Always prepended to user/project lists (additive). `classifier`
+ * (auto-select) and `environment` (empty) have no defaults.
+ */
+export const DEFAULT_AUTO_MODE = {
+	allow: ["Running tests and linters"],
+	soft_deny: ["Force pushing, deleting remote branches"],
+	hard_deny: ["Sending repo contents to third-party APIs"],
+	classifyAllShell: true,
+};
+
+/**
  * Drives loadConfig without touching the filesystem.
  * Pass raw config objects (as they would appear in pi-tool-permissions.json).
  * When `home` is provided, also injects the readAllowSkills globs as the
@@ -608,10 +620,10 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
 	const autoMode = {
 		classifier: projectAuto.classifier ?? userAuto.classifier,
 		environment: dedupe([...(userAuto.environment ?? []), ...(projectAuto.environment ?? [])]),
-		allow: dedupe([...(userAuto.allow ?? []), ...(projectAuto.allow ?? [])]),
-		soft_deny: dedupe([...(userAuto.soft_deny ?? []), ...(projectAuto.soft_deny ?? [])]),
-		hard_deny: dedupe([...(userAuto.hard_deny ?? []), ...(projectAuto.hard_deny ?? [])]),
-		classifyAllShell: projectAuto.classifyAllShell ?? userAuto.classifyAllShell ?? false,
+		allow: dedupe([...DEFAULT_AUTO_MODE.allow, ...(userAuto.allow ?? []), ...(projectAuto.allow ?? [])]),
+		soft_deny: dedupe([...DEFAULT_AUTO_MODE.soft_deny, ...(userAuto.soft_deny ?? []), ...(projectAuto.soft_deny ?? [])]),
+		hard_deny: dedupe([...DEFAULT_AUTO_MODE.hard_deny, ...(userAuto.hard_deny ?? []), ...(projectAuto.hard_deny ?? [])]),
+		classifyAllShell: projectAuto.classifyAllShell ?? userAuto.classifyAllShell ?? DEFAULT_AUTO_MODE.classifyAllShell,
 	};
 
 	return {

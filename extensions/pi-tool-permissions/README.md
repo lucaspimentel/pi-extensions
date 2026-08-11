@@ -516,14 +516,16 @@ When active, a `🤖 auto mode on` indicator appears in the footer status bar.
 }
 ```
 
-| Field | Purpose |
-| ----- | ------- |
-| `classifier` | Optional explicit model pin (`{ provider, model }`). If omitted, a haiku-tier model is auto-selected from the available pool, preferring the currently selected model's provider. |
-| `environment` | Free-text facts shown to the classifier (e.g. trusted repos/domains). |
-| `allow` | NL descriptions of actions to silently allow. |
-| `soft_deny` | NL descriptions of actions to prompt for (with the classifier's reason). |
-| `hard_deny` | NL descriptions of actions to always block. |
-| `classifyAllShell` | When `true`, route every bash subcommand (including read-only auto-allowed ones) through the classifier. |
+| Field | Default | Purpose |
+| ----- | ------- | ------- |
+| `classifier` | _(auto-select)_ | Optional explicit model pin (`{ provider, model }`). If omitted, a haiku-tier model is auto-selected from the available pool, preferring the currently selected model's provider. |
+| `environment` | `[]` | Free-text facts shown to the classifier (e.g. trusted repos/domains). Inherently user-specific — no default. |
+| `allow` | `["Running tests and linters"]` | NL descriptions of actions to silently allow. |
+| `soft_deny` | `["Force pushing, deleting remote branches"]` | NL descriptions of actions to prompt for (with the classifier's reason). |
+| `hard_deny` | `["Sending repo contents to third-party APIs"]` | NL descriptions of actions to always block. |
+| `classifyAllShell` | `true` | When `true`, route every bash subcommand (including read-only auto-allowed ones) through the classifier. |
+
+The `allow` / `soft_deny` / `hard_deny` lists and `classifyAllShell` have **sane defaults** baked in — a bare `{ "defaultAction": "auto" }` with no `autoMode` block works out of the box. Your configured lists are **additive** on top of the defaults (concatenated + deduped), so you can extend them without losing the safe baseline. `classifier` and `environment` have no defaults — they're inherently user-specific. To override `classifyAllShell` back to `false`, set it explicitly.
 
 In non-interactive modes (`-p`, JSON mode), classifier `soft_deny` and no-match verdicts fall back to **deny** so automation can't silently run something the classifier flagged.
 

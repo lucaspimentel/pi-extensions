@@ -162,7 +162,11 @@
  *   Config (`autoMode` block): `classifier` (optional explicit model pin),
  *   `environment`, `allow`, `soft_deny`, `hard_deny` (NL string lists),
  *   `classifyAllShell` (route every bash subcommand through the classifier).
- *   See docs/auto-mode-design.md for the full design.
+ *   The `allow`/`soft_deny`/`hard_deny` lists and `classifyAllShell` have sane
+ *   defaults baked in (see DEFAULT_AUTO_MODE) — a bare `defaultAction: "auto"`
+ *   with no `autoMode` block works out of the box. User/project lists are
+ *   additive on top of the defaults. `classifier` and `environment` have no
+ *   defaults (user-specific). See docs/auto-mode-design.md for the full design.
  *
  * Slash commands:
  *   /permissions                       - show current rules + allow-all-edits state
@@ -288,6 +292,19 @@ const LEGACY2_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
 const STATUS_KEY = "tool-permissions";
 const STATUS_KEY_AUTO = "tool-permissions-auto";
 
+/**
+ * Sane default NL rules for `defaultAction: "auto"`, used when the user omits
+ * the corresponding field. Always prepended to user/project lists (additive —
+ * user config adds on top, never replaces). `classifier` (auto-select) and
+ * `environment` (empty) have no defaults — they are inherently user-specific.
+ */
+const DEFAULT_AUTO_MODE = {
+	allow: ["Running tests and linters"],
+	soft_deny: ["Force pushing, deleting remote branches"],
+	hard_deny: ["Sending repo contents to third-party APIs"],
+	classifyAllShell: true,
+};
+
 function readJsonSafe(path: string): PermissionsConfig | null {
 	try {
 		if (!existsSync(path)) return null;
@@ -394,10 +411,10 @@ function loadConfig(cwd: string): ResolvedConfig {
 	const autoMode: ResolvedAutoModeConfig = {
 		classifier: projectAuto.classifier ?? userAuto.classifier,
 		environment: dedupe([...(userAuto.environment ?? []), ...(projectAuto.environment ?? [])]),
-		allow: dedupe([...(userAuto.allow ?? []), ...(projectAuto.allow ?? [])]),
-		soft_deny: dedupe([...(userAuto.soft_deny ?? []), ...(projectAuto.soft_deny ?? [])]),
-		hard_deny: dedupe([...(userAuto.hard_deny ?? []), ...(projectAuto.hard_deny ?? [])]),
-		classifyAllShell: projectAuto.classifyAllShell ?? userAuto.classifyAllShell ?? false,
+		allow: dedupe([...DEFAULT_AUTO_MODE.allow, ...(userAuto.allow ?? []), ...(projectAuto.allow ?? [])]),
+		soft_deny: dedupe([...DEFAULT_AUTO_MODE.soft_deny, ...(userAuto.soft_deny ?? []), ...(projectAuto.soft_deny ?? [])]),
+		hard_deny: dedupe([...DEFAULT_AUTO_MODE.hard_deny, ...(userAuto.hard_deny ?? []), ...(projectAuto.hard_deny ?? [])]),
+		classifyAllShell: projectAuto.classifyAllShell ?? userAuto.classifyAllShell ?? DEFAULT_AUTO_MODE.classifyAllShell,
 	};
 
 	return {

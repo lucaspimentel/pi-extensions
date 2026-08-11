@@ -329,20 +329,40 @@ const mergedAuto = loadConfigFromObjects(
 );
 test("loadConfig: project classifier wins",
 	mergedAuto.autoMode.classifier.model, "gpt-4o-mini");
-test("loadConfig: allow lists concatenated + deduped",
-	mergedAuto.autoMode.allow.join("|"), "Running tests|Running linters");
-test("loadConfig: soft_deny from project",
-	mergedAuto.autoMode.soft_deny.join("|"), "Force push");
+test("loadConfig: allow lists concatenated + deduped (defaults prepended)",
+	mergedAuto.autoMode.allow.join("|"), "Running tests and linters|Running tests|Running linters");
+test("loadConfig: soft_deny from project (default prepended)",
+	mergedAuto.autoMode.soft_deny.join("|"), "Force pushing, deleting remote branches|Force push");
 test("loadConfig: environment from user",
 	mergedAuto.autoMode.environment.join("|"), "Trusted repo: a");
 test("loadConfig: classifyAllShell project wins (true)",
 	mergedAuto.autoMode.classifyAllShell, true);
 
-// No autoMode configured → empty defaults, not undefined.
+// No autoMode configured → sane defaults for lists + classifyAllShell;
+// classifier (auto-select) and environment (empty) have no defaults.
 const emptyAuto = loadConfigFromObjects({}, {}, "C:/proj");
 test("loadConfig: no autoMode → empty classifier",       emptyAuto.autoMode.classifier, undefined);
-test("loadConfig: no autoMode → empty allow list",        emptyAuto.autoMode.allow.length, 0);
-test("loadConfig: no autoMode → classifyAllShell false",  emptyAuto.autoMode.classifyAllShell, false);
+test("loadConfig: no autoMode → empty environment",      emptyAuto.autoMode.environment.length, 0);
+test("loadConfig: no autoMode → default allow list",       emptyAuto.autoMode.allow.join("|"), "Running tests and linters");
+test("loadConfig: no autoMode → default soft_deny list",  emptyAuto.autoMode.soft_deny.join("|"), "Force pushing, deleting remote branches");
+test("loadConfig: no autoMode → default hard_deny list",  emptyAuto.autoMode.hard_deny.join("|"), "Sending repo contents to third-party APIs");
+test("loadConfig: no autoMode → classifyAllShell true (default)",  emptyAuto.autoMode.classifyAllShell, true);
+
+// User/project lists are ADDITIVE on top of the defaults (concatenated + deduped).
+const additiveAuto = loadConfigFromObjects(
+	{ autoMode: { allow: ["Running builds"] } },
+	{ autoMode: { soft_deny: ["Rebasing"] } },
+	"C:/proj",
+);
+test("loadConfig: user allow added on top of default",
+	additiveAuto.autoMode.allow.join("|"), "Running tests and linters|Running builds");
+test("loadConfig: project soft_deny added on top of default",
+	additiveAuto.autoMode.soft_deny.join("|"), "Force pushing, deleting remote branches|Rebasing");
+
+// A user can override classifyAllShell to false; defaults don't force it on.
+const noShellAuto = loadConfigFromObjects({ autoMode: { classifyAllShell: false } }, {}, "C:/proj");
+test("loadConfig: user can override classifyAllShell to false",
+	noShellAuto.autoMode.classifyAllShell, false);
 
 // ── Auto-mode classifier (Step 3) ──────────────────────────────────────
 section("auto mode — classifier runtime");
