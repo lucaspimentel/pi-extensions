@@ -172,12 +172,21 @@ export default function (pi: ExtensionAPI) {
 		if (!summary) return;
 
 		const modelLabel = `${selectedModel.provider}/${selectedModel.id}`;
-		pi.sendMessage({
-			customType: CUSTOM_TYPE,
-			content: summary,
-			details: { model: modelLabel },
-			display: true,
-		});
+		// The model call above can take several seconds. If a /reload or session
+		// replacement (/new, /resume, /fork) happens during that await, the captured
+		// `pi` and `ctx` are invalidated and pi.sendMessage throws a stale-ctx error.
+		// That means this summary belongs to a now-dead session, so bail silently
+		// instead of propagating (e.g. as a `command:summary` error).
+		try {
+			pi.sendMessage({
+				customType: CUSTOM_TYPE,
+				content: summary,
+				details: { model: modelLabel },
+				display: true,
+			});
+		} catch {
+			return;
+		}
 	}
 
 	// Render summary inline in chat history
