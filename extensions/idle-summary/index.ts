@@ -6,13 +6,16 @@
  * Use the `/summary` command to trigger it immediately; doing so suppresses the
  * pending idle timer for the current idle period.
  *
- * Model priority: anthropic/claude-haiku-4-5 → anthropic/claude-sonnet-4-5 → openai/gpt-4.1-mini
- * Falls back gracefully if no model or API key is available.
+ * Model selection: prefers the cheapest/fastest model from the same provider as
+ * the currently selected model, then falls back through the remaining scoped (or
+ * available) models in ascending cost order. Falls back gracefully if no model or
+ * API key is available.
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
+import { selectSummaryModel } from "./idle-summary-models.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -36,11 +39,21 @@ type SessionEntry = {
 const IDLE_DELAY_MS = 120_000;
 const CUSTOM_TYPE = "idle-summary";
 
-const MODEL_CANDIDATES = [
-	{ provider: "anthropic", id: "claude-haiku-4-5" },
-	{ provider: "anthropic", id: "claude-sonnet-4-6" },
-	{ provider: "openai", id: "gpt-5.4-mini" },
-] as const;
+// Build the candidate pool from the session's scoped models, or all available
+// models when no scoping is configured (scopedModels is empty in that case).
+// Delegates to the pure `selectSummaryModel` helper (see idle-summary-models.ts)
+// which ranks by: cheapest model from the currently selected model's provider
+// first, then the rest by ascending cost. Returns the first ranked model with
+// configured auth.
+const pickSummaryModel = (ctx: ExtensionContext): Model<Api> | undefined => {
+	const pool =
+		ctx.scopedModels.length > 0
+			? ctx.scopedModels.map((s) => s.model)
+			: ctx.modelRegistry.getAvailable();
+	return selectSummaryModel(pool, ctx.model?.provider, (m) =>
+		ctx.modelRegistry.hasConfiguredAuth(m),
+	);
+};
 
 // ── Conversation helpers ─────────────────────────────────────────────────────
 
@@ -129,21 +142,10 @@ export default function (pi: ExtensionAPI) {
 		const conversationText = buildConversationText(branch as SessionEntry[]);
 		if (!conversationText.trim()) return;
 
-		// Find first model with a working API key. ctx.modelRegistry.find() is sync and
-		// takes plain strings, so the KnownProvider/never casts the old getModel() needed
-		// are gone. hasConfiguredAuth() gates without an async auth round-trip; the
-		// registry's complete() resolves provider auth internally, so no auth is threaded
-		// through the call.
-		let selectedModel: Model<Api> | undefined = undefined;
-
-		for (const candidate of MODEL_CANDIDATES) {
-			const model = ctx.modelRegistry.find(candidate.provider, candidate.id);
-			if (model && ctx.modelRegistry.hasConfiguredAuth(model)) {
-				selectedModel = model;
-				break;
-			}
-		}
-
+		// Prefer the cheapest/fastest model from the same provider as the currently
+		// selected model, then fall back through the remaining scoped (or available)
+		// models. hasConfiguredAuth() gates without an async auth round-trip.
+		const selectedModel = pickSummaryModel(ctx);
 		if (!selectedModel) return; // No model available — bail silently
 
 		const messages = [

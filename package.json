@@ -16,7 +16,7 @@
       "./extensions/pi-tool-permissions",
       "./extensions/wt-tab-status",
       "./extensions/external-editor-fix",
-      "./extensions/idle-summary.ts",
+      "./extensions/idle-summary",
       "./extensions/pwsh.ts",
       "./extensions/slack-via-claude.ts"
     ],
