@@ -171,9 +171,11 @@ export default function (pi: ExtensionAPI) {
 
 		if (!summary) return;
 
+		const modelLabel = `${selectedModel.provider}/${selectedModel.id}`;
 		pi.sendMessage({
 			customType: CUSTOM_TYPE,
 			content: summary,
+			details: { model: modelLabel },
 			display: true,
 		});
 	}
@@ -181,8 +183,11 @@ export default function (pi: ExtensionAPI) {
 	// Render summary inline in chat history
 	pi.registerMessageRenderer(CUSTOM_TYPE, (message, _options, theme) => {
 		const summary = (message.content as string).trim();
+		const model = ((message.details as { model?: string } | undefined)?.model) ?? "";
 		const box = new Box(1, 0, (t: string) => theme.bg("customMessageBg", t));
-		box.addChild(new Text(`${theme.fg("accent", "📋")} ${theme.fg("muted", summary)}`, 0, 0));
+		const body = `${theme.fg("accent", "📋")} ${theme.fg("muted", summary)}`;
+		const line = model ? `${body}  ${theme.fg("muted", `· ${model}`)}` : body;
+		box.addChild(new Text(line, 0, 0));
 		return box;
 	});
 
