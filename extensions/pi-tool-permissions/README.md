@@ -444,8 +444,9 @@ When active, a `✏️ all edits allowed` indicator appears in the footer status
 ## Slash command
 
 ```
-/permissions                            # show current rules + allow-all-edits + auto-mode state
-/permissions list                       # alias for bare /permissions
+/permissions                            # show this help
+/permissions help                       # show this help
+/permissions list                       # show current rules + allow-all-edits + auto-mode state
 /permissions allow <rule> [--user]      # add an allow rule (default: project-local)
 /permissions deny  <rule> [--user]      # add a deny rule
 /permissions ask   <rule> [--user]      # add an ask rule

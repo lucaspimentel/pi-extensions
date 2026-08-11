@@ -169,8 +169,9 @@
  *   defaults (user-specific). See docs/auto-mode-design.md for the full design.
  *
  * Slash commands:
- *   /permissions                       - show current rules + allow-all-edits state
- *   /permissions list                  - alias for bare /permissions
+ *   /permissions                       - show this help
+ *   /permissions help                  - show this help
+ *   /permissions list                  - show current rules + allow-all-edits / auto state
  *   /permissions allow <rule>          - add an allow rule (project)
  *   /permissions deny  <rule>          - add a deny rule (project)
  *   /permissions ask   <rule>          - add an ask rule (project)
@@ -1923,16 +1924,53 @@ export default function (pi: ExtensionAPI) {
 	// ── Slash command ────────────────────────────────────────────────────────
 
 	pi.registerCommand("permissions", {
-		description: "Manage tool permissions (allow/deny/ask) and allow-all-edits mode",
+		description: "Manage tool permissions (allow/deny/ask/auto) and allow-all-edits / auto modes",
 		getArgumentCompletions: (prefix: string) => {
-			const subs = ["allow", "deny", "ask", "remove", "default", "reload", "list", "allowalledits", "auto"];
+			const subs = ["help", "list", "allow", "deny", "ask", "remove", "default", "reload", "allowalledits", "auto"];
 			const items = subs.map((s) => ({ value: s, label: s }));
 			const filtered = items.filter((i) => i.value.startsWith(prefix));
 			return filtered.length > 0 ? filtered : null;
 		},
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const trimmed = (args ?? "").trim();
-			if (!trimmed || trimmed === "list") {
+			if (!trimmed || trimmed === "help") {
+				const helpLines = [
+					"pi-tool-permissions — usage",
+					"",
+					"Subcommands:",
+					"  /permissions                  Show this help",
+					"  /permissions help             Show this help",
+					"  /permissions list             Show current rules + allow-all-edits / auto state",
+					"  /permissions allow <rule> [--user]   Add an allow rule (default: project)",
+					"  /permissions deny  <rule> [--user]   Add a deny rule",
+					"  /permissions ask   <rule> [--user]   Add an ask rule",
+					"  /permissions remove <rule> [--user]  Remove a rule from any list",
+					"  /permissions default <allow|deny|ask|auto> [--user]",
+					"  /permissions reload           Reload config from disk",
+					"  /permissions allowalledits [on|off|toggle]",
+					"  /permissions auto [on|off|toggle]   Toggle auto-mode (LLM classifier) for this session",
+					"",
+					"Rule syntax:  ToolName  or  ToolName(pattern)",
+					"  Patterns are case-insensitive globs (* = any chars, ? = one char).",
+					"  A ' *' pair is optional, so Bash(git status *) matches 'git status' too.",
+					"  Wrap in slashes for regex: Bash(/^git (push|tag) /)",
+					"",
+					"Precedence (first match wins):  deny > ask > allow > toolDefaults > defaultAction",
+					"",
+					"Session toggles (off by default, never persisted):",
+					"  allow-all-edits  — auto-approve every Write/Edit  (Ctrl+Alt+E)",
+					"  auto mode       — classifier screens fallthroughs   (Ctrl+Alt+A)",
+					"    Only active when defaultAction === \"auto\". See docs/auto-mode-design.md.",
+					"",
+					"Config files (project overrides user for defaultAction; lists concat):",
+					"  ~/.pi/agent/pi-tool-permissions.json          (user)",
+					"  <cwd>/.pi/pi-tool-permissions.local.json      (project, machine-local)",
+				];
+				ctx.ui.notify(helpLines.join("\n"), "info");
+				return;
+			}
+
+			if (trimmed === "list") {
 				const implicitAllowSet = new Set(cfg.implicit.allow);
 				const implicitTDKeys = new Set(Object.keys(cfg.implicit.toolDefaults));
 				const tdEntries = Object.entries(cfg.toolDefaults);
@@ -2000,6 +2038,11 @@ export default function (pi: ExtensionAPI) {
 			const value = rest.join(" ").trim();
 
 			switch (sub) {
+				case "help":
+					// Bare /permissions and /permissions help are handled above; this covers
+					// `/permissions help <anything>` by just re-showing help.
+					ctx.ui.notify("Use /permissions to see help, or /permissions help.", "info");
+					return;
 				case "reload":
 					reload(ctx.cwd, ctx);
 					return;
@@ -2071,7 +2114,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				default:
 					ctx.ui.notify(
-						`Unknown subcommand: ${sub}. Use: list | allow | deny | ask | remove | default | reload | allowalledits | auto`,
+						`Unknown subcommand: ${sub}. Use: help | list | allow | deny | ask | remove | default | reload | allowalledits | auto`,
 						"warning",
 					);
 			}
