@@ -357,10 +357,14 @@ export function formatBreakdown(breakdown, currentSub) {
 }
 
 export function recomputeBreakdown(breakdown, cfg) {
-	return breakdown.map((b) => ({ sub: b.sub, action: decide(cfg, "bash", { command: b.sub }) }));
+	return breakdown.map((b) => ({ sub: b.sub, action: effectiveAction(decide(cfg, "bash", { command: b.sub })) }));
 }
 
 // ── Decision engine ───────────────────────────────────────────────────────
+
+export function effectiveAction(action) {
+	return action === "auto" ? "ask" : action;
+}
 
 export function decide(cfg, toolName, input) {
 	const cwd = cfg.cwd;
@@ -394,7 +398,7 @@ export function stripStructuralKeywords(part) {
 
 export function decideCompound(cfg, toolName, input) {
 	if (normalizeTool(toolName) !== "bash")
-		return { action: decide(cfg, toolName, input), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: effectiveAction(decide(cfg, toolName, input)), isCompound: false, ambiguous: false, breakdown: [] };
 
 	const rawCmd = String(input.command ?? "");
 	const cmd = stripLineContinuations(rawCmd);
@@ -406,14 +410,14 @@ export function decideCompound(cfg, toolName, input) {
 		const effectiveInput = split.effectiveCmd != null
 			? { ...normalizedInput, command: split.effectiveCmd }
 			: normalizedInput;
-		return { action: decide(cfg, "bash", effectiveInput), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: effectiveAction(decide(cfg, "bash", effectiveInput)), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	const breakdown = [];
 	for (const rawSub of split.parts) {
 		const stripped = stripStructuralKeywords(rawSub);
 		if (stripped === null) continue;
-		breakdown.push({ sub: stripped, action: decide(cfg, "bash", { command: stripped }) });
+		breakdown.push({ sub: stripped, action: effectiveAction(decide(cfg, "bash", { command: stripped })) });
 	}
 
 	if (breakdown.length === 0) return { action: "allow", isCompound: false, ambiguous: false, breakdown: [] };
@@ -472,6 +476,17 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
 	const implicitToolDefaults = {};
 	if (explicitToolDefaults["write"] === undefined) implicitToolDefaults["write"] = "ask";
 
+	const userAuto = user.autoMode ?? {};
+	const projectAuto = project.autoMode ?? {};
+	const autoMode = {
+		classifier: projectAuto.classifier ?? userAuto.classifier,
+		environment: dedupe([...(userAuto.environment ?? []), ...(projectAuto.environment ?? [])]),
+		allow: dedupe([...(userAuto.allow ?? []), ...(projectAuto.allow ?? [])]),
+		soft_deny: dedupe([...(userAuto.soft_deny ?? []), ...(projectAuto.soft_deny ?? [])]),
+		hard_deny: dedupe([...(userAuto.hard_deny ?? []), ...(projectAuto.hard_deny ?? [])]),
+		classifyAllShell: projectAuto.classifyAllShell ?? userAuto.classifyAllShell ?? false,
+	};
+
 	return {
 		defaultAction: project.defaultAction ?? user.defaultAction ?? "ask",
 		allow: [...implicitAllow, ...allow],
@@ -480,6 +495,7 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
 		cwd,
 		allowNoopCd,
 		bashReadOnlyAllowCwd,
+		autoMode,
 		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, readAllowPiDocs, bashReadOnlyAllowCwd, allowNoopCd },
 	};
 }
@@ -550,9 +566,9 @@ export function saveProjectConfigToDisk(cwd, cfg) {
  * Note: bashReadOnlyAllowCwd defaults to false here to preserve existing test
  * semantics. Pass bashReadOnlyAllowCwd: true explicitly when testing that feature.
  */
-export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, cwd = process.cwd() } = {}) {
+export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, cwd = process.cwd(), autoMode } = {}) {
 	// Normalize toolDefault keys so decide() can look them up via normalizeTool()
-	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, bashReadOnlyAllowCwd, cwd, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, allowNoopCd } };
+	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, bashReadOnlyAllowCwd, cwd, autoMode: autoMode ?? { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false }, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, allowNoopCd } };
 }
 
 // ── Test runner ───────────────────────────────────────────────────────────

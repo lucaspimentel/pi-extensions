@@ -444,15 +444,16 @@ When active, a `✏️ all edits allowed` indicator appears in the footer status
 ## Slash command
 
 ```
-/permissions                            # show current rules + allow-all-edits state
+/permissions                            # show current rules + allow-all-edits + auto-mode state
 /permissions list                       # alias for bare /permissions
 /permissions allow <rule> [--user]      # add an allow rule (default: project-local)
 /permissions deny  <rule> [--user]      # add a deny rule
 /permissions ask   <rule> [--user]      # add an ask rule
 /permissions remove <rule> [--user]     # remove a rule (searches project by default; --user searches user config)
-/permissions default <allow|deny|ask> [--user]
+/permissions default <allow|deny|ask|auto> [--user]
 /permissions reload                     # reload config from disk
 /permissions allowalledits [on|off|toggle]
+/permissions auto [on|off|toggle]       # toggle auto-mode (LLM classifier) for this session
 ```
 
 All write subcommands (`allow`/`deny`/`ask`/`remove`/`default`) accept `--user` to target the user-global config (`~/.pi/agent/pi-tool-permissions.json`); the default is the project-local `.pi/pi-tool-permissions.local.json`. `/permissions list` tags each rule with its source: `[implicit]`, `[user]`, `[project]`, or `[user+project]` when the same rule lives in both files.
@@ -469,7 +470,64 @@ Examples:
 /permissions default deny
 /permissions default deny --user
 /permissions allowalledits on
+/permissions auto on
 ```
+
+## Auto mode (defaultAction: "auto")
+
+Auto mode is a middle ground between Manual (prompt for everything) and `bypassPermissions` (prompt for nothing). Set `"defaultAction": "auto"` and turn on the session toggle, and before each tool call that **falls through the static rules**, a cheap/fast LLM **classifier** screens the action against natural-language `allow` / `soft_deny` / `hard_deny` lists plus an `environment` fact list, then either allows silently, prompts (with the classifier's reason), or blocks.
+
+It is layered **on top of** the existing static rules, not alongside them:
+
+- `deny` rules block *before* the classifier is consulted (neither the classifier nor user intent can override).
+- `ask` rules always prompt (the classifier cannot auto-approve a matching action).
+- The classifier only decides for actions that fall through to `defaultAction: "auto"`.
+
+Auto mode is **off by default** and **never persisted** (session-only, like allow-all-edits). Even with `defaultAction: "auto"` in config, the classifier only runs while the session toggle is on; otherwise fallthroughs behave as `ask` (safe default). Explicit `deny` rules always win.
+
+> **Status:** The type/config spine, session toggle, `/permissions auto` subcommand, and footer indicator are wired. The classifier runtime itself is tracked in [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) (Step 2); until it lands, `"auto"` fallthroughs behave as `"ask"`.
+
+### Ways to toggle
+
+| Method | Action |
+| ------ | ------ |
+| **Ctrl+Alt+A** | Toggle on/off |
+| `/permissions auto` | Toggle |
+| `/permissions auto on\|off` | Set explicitly |
+
+When active, a `🤖 auto mode on` indicator appears in the footer status bar.
+
+### Config
+
+```json
+{
+  "defaultAction": "auto",
+  "autoMode": {
+    "classifier": { "provider": "anthropic", "model": "claude-haiku-4-5" },
+    "environment": [
+      "Trusted repo: github.com/lucaspimentel/*",
+      "Trusted domains: *.internal.example.com"
+    ],
+    "allow":     ["Running tests and linters"],
+    "soft_deny": ["Force pushing, deleting remote branches"],
+    "hard_deny": ["Sending repo contents to third-party APIs"],
+    "classifyAllShell": true
+  }
+}
+```
+
+| Field | Purpose |
+| ----- | ------- |
+| `classifier` | Optional explicit model pin (`{ provider, model }`). If omitted, a haiku-tier model is auto-selected from the available pool, preferring the currently selected model's provider. |
+| `environment` | Free-text facts shown to the classifier (e.g. trusted repos/domains). |
+| `allow` | NL descriptions of actions to silently allow. |
+| `soft_deny` | NL descriptions of actions to prompt for (with the classifier's reason). |
+| `hard_deny` | NL descriptions of actions to always block. |
+| `classifyAllShell` | When `true`, route every bash subcommand (including read-only auto-allowed ones) through the classifier. |
+
+In non-interactive modes (`-p`, JSON mode), classifier `soft_deny` and no-match verdicts fall back to **deny** so automation can't silently run something the classifier flagged.
+
+See [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) for the full design.
 
 ## How it works
 

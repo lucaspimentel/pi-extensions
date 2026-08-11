@@ -2,7 +2,8 @@
 
 import {
 	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideCompound, makeCfg,
-	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown,
+	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown, effectiveAction,
+	loadConfigFromObjects,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -272,5 +273,73 @@ test("recompute uses live cfg: cd ./sub → ask under allowNoopCd:false", rbQuir
 
 // Empty input → empty output (defensive).
 test("empty breakdown → empty result", recomputeBreakdown([], makeCfg()).length, 0);
+
+// ── Auto mode (Step 1 spine) ───────────────────────────────────────────
+//
+// `defaultAction: "auto"` is a valid action. decide() returns the raw "auto"
+// (it does not resolve it); decideCompound / recomputeBreakdown resolve "auto"
+// → "ask" via effectiveAction so the existing prompt path runs unchanged until
+// the classifier runtime is wired (Step 2). See docs/auto-mode-design.md.
+section("auto mode — Step 1 spine");
+
+test("effectiveAction: allow passes through",  effectiveAction("allow"), "allow");
+test("effectiveAction: deny passes through",   effectiveAction("deny"),  "deny");
+test("effectiveAction: ask passes through",     effectiveAction("ask"),    "ask");
+test("effectiveAction: auto → ask (stub)",      effectiveAction("auto"),    "ask");
+
+const autoCfg = makeCfg({ defaultAction: "auto" });
+test("decide: returns raw 'auto' for fallthrough (no static match)",
+	decide(autoCfg, "bash", { command: "some-unknown-cmd" }), "auto");
+test("decide: deny still beats auto default",
+	decide(makeCfg({ deny: ["Bash(rm*)"], defaultAction: "auto" }), "bash", { command: "rm -rf ." }), "deny");
+test("decide: ask still beats auto default",
+	decide(makeCfg({ ask: ["Bash(git push*)"], defaultAction: "auto" }), "bash", { command: "git push" }), "ask");
+test("decide: allow still beats auto default",
+	decide(makeCfg({ allow: ["Bash(npm*)"], defaultAction: "auto" }), "bash", { command: "npm test" }), "allow");
+
+// decideCompound resolves auto → ask in its output so the handler/prompt path is unchanged.
+const dcAutoSingle = decideCompound(autoCfg, "bash", { command: "some-unknown-cmd" });
+test("decideCompound: single bash auto fallthrough → ask (stub)", dcAutoSingle.action, "ask");
+test("decideCompound: single bash not compound",        dcAutoSingle.isCompound, false);
+
+const dcAutoRead = decideCompound(autoCfg, "read", { path: "./outside.txt" });
+test("decideCompound: non-bash auto fallthrough → ask (stub)", dcAutoRead.action, "ask");
+
+// Compound with an auto subcommand: the aggregate treats auto like ask (prompt).
+const dcAutoCompound = decideCompound(autoCfg, "bash", { command: "npm test && unknown-cmd" });
+test("decideCompound: compound with one allow + one auto → ask aggregate",
+	dcAutoCompound.action, "ask");
+test("decideCompound: compound flagged isCompound",
+	dcAutoCompound.isCompound, true);
+
+// recomputeBreakdown also resolves auto → ask.
+const rbAuto = recomputeBreakdown(
+	[{ sub: "unknown-cmd", action: "auto" }],
+	autoCfg,
+);
+test("recomputeBreakdown: auto → ask (stub)", rbAuto[0].action, "ask");
+
+// loadConfigFromObjects merges autoMode (user + project), project classifier wins, lists concat.
+const mergedAuto = loadConfigFromObjects(
+	{ autoMode: { classifier: { provider: "anthropic", model: "claude-haiku-4-5" }, allow: ["Running tests"], environment: ["Trusted repo: a"] } },
+	{ autoMode: { classifier: { provider: "openai", model: "gpt-4o-mini" }, allow: ["Running linters"], soft_deny: ["Force push"], classifyAllShell: true } },
+	"C:/proj",
+);
+test("loadConfig: project classifier wins",
+	mergedAuto.autoMode.classifier.model, "gpt-4o-mini");
+test("loadConfig: allow lists concatenated + deduped",
+	mergedAuto.autoMode.allow.join("|"), "Running tests|Running linters");
+test("loadConfig: soft_deny from project",
+	mergedAuto.autoMode.soft_deny.join("|"), "Force push");
+test("loadConfig: environment from user",
+	mergedAuto.autoMode.environment.join("|"), "Trusted repo: a");
+test("loadConfig: classifyAllShell project wins (true)",
+	mergedAuto.autoMode.classifyAllShell, true);
+
+// No autoMode configured → empty defaults, not undefined.
+const emptyAuto = loadConfigFromObjects({}, {}, "C:/proj");
+test("loadConfig: no autoMode → empty classifier",       emptyAuto.autoMode.classifier, undefined);
+test("loadConfig: no autoMode → empty allow list",        emptyAuto.autoMode.allow.length, 0);
+test("loadConfig: no autoMode → classifyAllShell false",  emptyAuto.autoMode.classifyAllShell, false);
 
 process.exit(summary() > 0 ? 1 : 0);

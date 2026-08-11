@@ -34,5 +34,16 @@
     "Bash(git push*)",
     "Bash(npm publish*)",
     "WebFetch(*)"
-  ]
+  ],
+  "autoMode": {
+    "classifier": { "provider": "anthropic", "model": "claude-haiku-4-5" },
+    "environment": [
+      "Trusted repo: github.com/lucaspimentel/*",
+      "Trusted domains: *.internal.example.com"
+    ],
+    "allow":     ["Running tests and linters"],
+    "soft_deny": ["Force pushing, deleting remote branches"],
+    "hard_deny": ["Sending repo contents to third-party APIs"],
+    "classifyAllShell": true
+  }
 }
