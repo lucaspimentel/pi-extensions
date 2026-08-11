@@ -151,6 +151,28 @@ function shouldPreserveRaw(url: string): boolean {
 	return (isGitHubFileUrl || isGitHubRawUrl) && CODE_HOST_SOURCE_EXTENSIONS.has(extension);
 }
 
+/** Detect GitHub pull-request or issue web URLs so we can redirect to the `gh` CLI. */
+function ghRoute(
+	url: string,
+): { kind: "pull" | "issue"; owner: string; repo: string; n: string; command: string } | null {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return null;
+	}
+	if (parsed.hostname.toLowerCase() !== "github.com") return null;
+	const m = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/(pull|issues)\/(\d+)/);
+	if (!m) return null;
+	const kind = m[3] === "pull" ? "pull" : "issue";
+	const selector = `${m[1]}/${m[2]}#${m[4]}`;
+	const command =
+		kind === "pull"
+			? `gh pr view ${selector} --json title,body,state,additions,deletions,files,reviews,commits`
+			: `gh issue view ${selector} --json title,body,state,comments`;
+	return { kind, owner: m[1], repo: m[2], n: m[4], command };
+}
+
 function normalizeRawFileUrl(url: string): string {
 	let parsed: URL;
 	try {
@@ -408,17 +430,35 @@ export default function webExtension(pi: ExtensionAPI) {
 		name: "web_fetch",
 		label: "Fetch URL",
 		description:
-			"Fetch a web page and return its readable content. When TAVILY_API_KEY is set, uses Tavily Extract for cleaner content (handles JS-rendered pages, tables, embedded content). Markdown, source, and data-file URLs are always fetched with raw HTTP to preserve exact contents. Set format='raw' for JSON APIs or source files, or engine='raw' to skip Tavily entirely.",
+			"Fetch a web page and return its readable content. When TAVILY_API_KEY is set, uses Tavily Extract for cleaner content (handles JS-rendered pages, tables, embedded content). Markdown, source, and data-file URLs are always fetched with raw HTTP to preserve exact contents. Set format='raw' for JSON APIs or source files, or engine='raw' to skip Tavily entirely. For GitHub pull requests and issues, prefer the `gh` CLI over this tool.",
 		promptSnippet: "Fetch a URL and return readable text content from web pages",
 		promptGuidelines: [
 			"Use web_fetch when the user provides a URL or when web_search results need to be read in full.",
 			"Prefer the default engine for articles, docs, and HTML pages. Markdown, source, and data-file URLs are fetched with raw HTTP automatically; use format='raw' for any other URL where the literal bytes matter.",
+			"For GitHub pull requests, issues, or repository pages, prefer the `gh` CLI (`gh pr view <url> --json ...`, `gh pr diff <url>`, `gh issue view <url>`) over web_fetch — it returns clean structured JSON instead of HTML. Only fall back to web_fetch if `gh` is unavailable or the URL isn't covered by `gh`.",
 		],
 		parameters: fetchParams,
 		async execute(_id, params, signal) {
 			const originalUrl = params.url;
 			if (!/^https?:\/\//i.test(originalUrl)) {
 				throw new Error("web_fetch only supports http(s) URLs");
+			}
+
+			// GitHub PR/issue web URLs: redirect to the `gh` CLI for structured JSON
+			// instead of scraping the HTML page. Returns a hint only — does not shell out.
+			const gh = ghRoute(originalUrl);
+			if (gh) {
+				const hint = [
+					`This is a GitHub ${gh.kind} URL. Use the \`gh\` CLI for structured data instead of fetching the HTML:`,
+					"",
+					`  ${gh.command}`,
+					"",
+					"Run it with the `bash` tool. For diffs, also run `gh pr diff <url>`.",
+				].join("\n");
+				return {
+					content: [{ type: "text", text: hint }],
+					details: { url: originalUrl, source: "raw", bytes: 0, truncated: false, format: params.format ?? "markdown" },
+				};
 			}
 			const normalizedUrl = normalizeRawFileUrl(originalUrl);
 			const preserveRaw = shouldPreserveRaw(normalizedUrl);
