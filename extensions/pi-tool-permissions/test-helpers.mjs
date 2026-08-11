@@ -200,7 +200,7 @@ export function parseRule(raw) {
 
 export function getMatchField(toolName, input) {
 	const t = normalizeTool(toolName);
-	if (t === "bash") return String(input.command ?? "");
+	if (t === "bash" || t === "pwsh") return String(input.command ?? "");
 	if (t === "read" || t === "write" || t === "edit") return String(input.path ?? "");
 	if (t === "grep" || t === "glob" || t === "ls") return String(input.path ?? "");
 	if (t === "webfetch") return String(input.url ?? "");
@@ -241,7 +241,7 @@ export function inputForMatching(toolName, input, cwd) {
 
 export function suggestRule(toolName, input) {
 	const t = normalizeTool(toolName);
-	if (t === "bash") {
+	if (t === "bash" || t === "pwsh") {
 		const cmd = String(input.command ?? "").trim();
 		const head = cmd.split(/\s+/)[0] ?? "";
 		return head ? `${toolName}(${head} *)` : toolName;

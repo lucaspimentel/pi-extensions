@@ -9,6 +9,7 @@
  *
  * Match field per tool:
  *   bash             -> command
+ *   pwsh             -> command
  *   read/write/edit  -> path
  *   grep/glob/ls     -> path (directory being searched/listed; defaults to cwd when the call omits it)
  *   web_fetch        -> url
@@ -706,7 +707,7 @@ function parseRule(raw: string): ParsedRule | null {
 
 function getMatchField(toolName: string, input: Record<string, unknown>): string {
 	const t = normalizeTool(toolName);
-	if (t === "bash") return String(input.command ?? "");
+	if (t === "bash" || t === "pwsh") return String(input.command ?? "");
 	if (t === "read" || t === "write" || t === "edit") return String(input.path ?? "");
 	if (t === "grep" || t === "glob" || t === "ls") return String(input.path ?? "");
 	if (t === "webfetch") return String(input.url ?? "");
@@ -1137,7 +1138,7 @@ function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unk
 /** Suggest a rule string that matches the current call exactly enough to be useful. */
 function suggestRule(toolName: string, input: Record<string, unknown>): string {
 	const t = normalizeTool(toolName);
-	if (t === "bash") {
+	if (t === "bash" || t === "pwsh") {
 		const cmd = String(input.command ?? "").trim();
 		// Use first token plus * so similar variations match
 		const head = cmd.split(/\s+/)[0] ?? "";
@@ -1166,6 +1167,22 @@ function suggestRule(toolName: string, input: Record<string, unknown>): string {
 		return "WebFetch";
 	}
 	return toolName;
+}
+
+/**
+ * Build an optional extra-info line for the pwsh permission prompt showing the
+ * working directory and/or timeout when the call provided them. Returns an empty
+ * string for non-pwsh tools or when neither field is present, so the generic
+ * single-command prompt title is unaffected.
+ */
+function pwshExtraInfo(toolName: string, input: Record<string, unknown>): string {
+	if (normalizeTool(toolName) !== "pwsh") return "";
+	const parts: string[] = [];
+	const cwd = input.cwd;
+	if (typeof cwd === "string" && cwd) parts.push(`cwd: ${cwd}`);
+	const timeout = input.timeout;
+	if (typeof timeout === "number") parts.push(`timeout: ${timeout}s`);
+	return parts.length ? `\n  ${parts.join(", ")}` : "";
 }
 
 /**
@@ -1389,7 +1406,8 @@ export default function (pi: ExtensionAPI) {
 		const matchField = getMatchField(event.toolName, event.input as Record<string, unknown>);
 		const preview = matchField.length > 200 ? `${matchField.slice(0, 197)}...` : matchField;
 		const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
-		const title = `Allow ${event.toolName}?\n\n  ${preview}${ambiguousNote}\n\nSuggested rule: ${suggested}`;
+		const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
+		const title = `Allow ${event.toolName}?\n\n  ${preview}${extraInfo}${ambiguousNote}\n\nSuggested rule: ${suggested}`;
 
 		// Extra "allow all edits" option only for write/edit dialogs
 		const choices = isWriteOrEdit

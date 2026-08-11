@@ -117,4 +117,35 @@ test("[regression] rule 'WebFetch(https://github.com/*)' matches event 'web_fetc
 	decide(makeCfg({ allow: ["WebFetch(https://github.com/*)"], defaultAction: "ask" }),
 		"web_fetch", { url: "https://github.com/foo" }), "allow");
 
+// ── pwsh (PowerShell) ─────────────────────────────────────────────────────
+
+section("pwsh — getMatchField");
+
+test("pwsh returns input.command (not JSON)",
+	getMatchField("pwsh", { command: "Get-NetAdapter | Format-Table" }),
+	"Get-NetAdapter | Format-Table");
+test("pwsh (PascalCase) also works",
+	getMatchField("Pwsh", { command: "Get-Process" }), "Get-Process");
+test("missing command returns empty string",
+	getMatchField("pwsh", {}), "");
+
+section("pwsh — rule matching");
+
+const pwshAllowCfg = makeCfg({ allow: ["Pwsh(Get-NetAdapter*)"], defaultAction: "deny" });
+test("Pwsh(Get-NetAdapter*) allows matching command",
+	decide(pwshAllowCfg, "pwsh", { command: "Get-NetAdapter | Select-Object Name" }), "allow");
+test("Pwsh(Get-NetAdapter*) does NOT match unrelated command",
+	decide(pwshAllowCfg, "pwsh", { command: "Get-Process" }), "deny");
+
+const pwshDenyCfg = makeCfg({ deny: ["Pwsh(Remove-Item*)"], defaultAction: "allow" });
+test("Pwsh(Remove-Item*) deny blocks matching command",
+	decide(pwshDenyCfg, "pwsh", { command: "Remove-Item -Recurse ./foo" }), "deny");
+
+section("pwsh — suggestRule");
+
+test("uses first token plus * like bash",
+	suggestRule("pwsh", { command: "Get-NetAdapter | Format-Table" }), "pwsh(Get-NetAdapter *)");
+test("empty command falls back to bare tool name",
+	suggestRule("pwsh", { command: "" }), "pwsh");
+
 process.exit(summary() > 0 ? 1 : 0);
