@@ -4,6 +4,8 @@ import {
 	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideCompound, makeCfg,
 	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown, effectiveAction,
 	loadConfigFromObjects,
+	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
+	classifyAction, classifierCacheKey, pickClassifierModel, rankClassifierModels, dedupeModels,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -341,5 +343,195 @@ const emptyAuto = loadConfigFromObjects({}, {}, "C:/proj");
 test("loadConfig: no autoMode → empty classifier",       emptyAuto.autoMode.classifier, undefined);
 test("loadConfig: no autoMode → empty allow list",        emptyAuto.autoMode.allow.length, 0);
 test("loadConfig: no autoMode → classifyAllShell false",  emptyAuto.autoMode.classifyAllShell, false);
+
+// ── Auto-mode classifier (Step 3) ──────────────────────────────────────
+section("auto mode — classifier runtime");
+
+// verdictToAction mapping (interactive vs non-interactive)
+test("verdictToAction: allow → allow (interactive)",        verdictToAction("allow", false),     "allow");
+test("verdictToAction: allow → allow (non-interactive)",    verdictToAction("allow", true),      "allow");
+test("verdictToAction: hard_deny → deny (interactive)",     verdictToAction("hard_deny", false),  "deny");
+test("verdictToAction: hard_deny → deny (non-interactive)", verdictToAction("hard_deny", true),   "deny");
+test("verdictToAction: soft_deny → ask (interactive)",      verdictToAction("soft_deny", false),  "ask");
+test("verdictToAction: soft_deny → deny (non-interactive)", verdictToAction("soft_deny", true),   "deny");
+test("verdictToAction: no_match → ask (interactive)",        verdictToAction("no_match", false),   "ask");
+test("verdictToAction: no_match → deny (non-interactive)",   verdictToAction("no_match", true),     "deny");
+
+// parseClassifierResponse
+{
+	const a = parseClassifierResponse("VERDICT: allow\nREASON: safe test command");
+	test("parse: allow verdict",  a.verdict, "allow");
+	test("parse: reason captured", a.reason,  "safe test command");
+}
+{
+	const h = parseClassifierResponse("VERDICT: hard_deny\nREASON: destructive");
+	test("parse: hard_deny verdict", h.verdict, "hard_deny");
+}
+{
+	const s = parseClassifierResponse("VERDICT: soft_deny\nREASON: force push");
+	test("parse: soft_deny verdict", s.verdict, "soft_deny");
+}
+{
+	const n = parseClassifierResponse("VERDICT: no_match\nREASON: nothing matched");
+	test("parse: no_match verdict", n.verdict, "no_match");
+}
+{
+	const m = parseClassifierResponse("sorry, I could not decide");
+	test("parse: unparseable → no_match", m.verdict, "no_match");
+	test("parse: unparseable → empty reason", m.reason, "");
+}
+{
+	const ci = parseClassifierResponse("verdict: ALLOW\nReason: UpPeRcAsE");
+	test("parse: case-insensitive verdict", ci.verdict, "allow");
+	test("parse: reason trimmed",       ci.reason,  "UpPeRcAsE");
+}
+
+// describeAction per tool
+test("describeAction: bash shows command",
+	describeAction("bash", { command: "ls -la" }), "Tool: bash\nCommand: ls -la");
+test("describeAction: read shows path",
+	describeAction("read", { path: "./f.ts" }), "Tool: read\nPath: ./f.ts");
+test("describeAction: web_fetch shows url",
+	describeAction("web_fetch", { url: "https://x.com" }), "Tool: web_fetch\nURL: https://x.com");
+test("describeAction: unknown tool → JSON",
+	describeAction("custom", { foo: 1 }).includes("Input:"), true);
+
+// buildClassifierPrompt contains the NL lists + action description
+{
+	const am = { environment: ["Trusted repo: a"], allow: ["Running tests"], soft_deny: ["Force push"], hard_deny: ["Exfil data"], classifyAllShell: false };
+	const p = buildClassifierPrompt("bash", { command: "npm test" }, am);
+	test("prompt: contains tool action",   p.includes("Tool: bash\nCommand: npm test"), true);
+	test("prompt: contains environment",    p.includes("Trusted repo: a"), true);
+	test("prompt: contains allow list",     p.includes("Running tests"), true);
+	test("prompt: contains soft_deny list", p.includes("Force push"), true);
+	test("prompt: contains hard_deny list", p.includes("Exfil data"), true);
+	test("prompt: contains verdict schema",  p.includes("VERDICT:"), true);
+}
+
+// classifyAction with a fake complete seam
+{
+	const am = { environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false };
+	const fakeCompleteAllow = async (_m, _c) => ({
+		content: [{ type: "text", text: "VERDICT: allow\nREASON: safe" }],
+	});
+	const res = await classifyAction(fakeCompleteAllow, { id: "m" }, "bash", { command: "npm test" }, am, new Map());
+	test("classifyAction: returns allow verdict", res.verdict, "allow");
+	test("classifyAction: returns reason",       res.reason,  "safe");
+}
+
+// classifyAction cache hit: complete is not called the second time
+{
+	let calls = 0;
+	const am = { environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false };
+	const counting = async () => { calls++; return { content: [{ type: "text", text: "VERDICT: no_match\nREASON: x" }] }; };
+	const cache = new Map();
+	await classifyAction(counting, { id: "m" }, "bash", { command: "rm -rf ." }, am, cache);
+	await classifyAction(counting, { id: "m" }, "bash", { command: "rm -rf ." }, am, cache);
+	test("classifyAction: cache hit — complete called once", calls, 1);
+	// A different input should miss the cache and call again.
+	await classifyAction(counting, { id: "m" }, "bash", { command: "rm -rf /" }, am, cache);
+	test("classifyAction: different input — complete called twice", calls, 2);
+}
+
+// classifyAction API error → safe no_match fallback
+{
+	const am = { environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false };
+	const throwing = async () => { throw new Error("network"); };
+	const res = await classifyAction(throwing, { id: "m" }, "bash", { command: "x" }, am, new Map());
+	test("classifyAction: API error → no_match",  res.verdict, "no_match");
+	test("classifyAction: API error reason set",   res.reason,  "classifier call failed");
+}
+
+// classifierCacheKey: deterministic + sensitive to input and ruleset
+{
+	const am = { environment: ["e"], allow: ["a"], soft_deny: ["s"], hard_deny: ["h"], classifyAllShell: false };
+	const k1 = classifierCacheKey("bash", { command: "npm test" }, am);
+	const k2 = classifierCacheKey("bash", { command: "npm test" }, am);
+	test("cacheKey: same input+ruleset → same key", k1 === k2, true);
+	const k3 = classifierCacheKey("bash", { command: "npm run" }, am);
+	test("cacheKey: different input → different key", k1 === k3, false);
+	const am2 = { ...am, allow: ["a", "b"] };
+	const k4 = classifierCacheKey("bash", { command: "npm test" }, am2);
+	test("cacheKey: different ruleset → different key", k1 === k4, false);
+	const k5 = classifierCacheKey("read", { command: "npm test" }, am);
+	test("cacheKey: different toolName → different key", k1 === k5, false);
+}
+
+// Model selection: rankClassifierModels prefers same provider, cheapest first
+{
+	const mk = (provider, id, input, output) => ({ provider, id, cost: { input, output, cacheRead: 0, cacheWrite: 0 } });
+	const pool = [
+		mk("openai", "gpt-4o",      5, 15),
+		mk("anthropic", "haiku",    1, 5),
+		mk("anthropic", "sonnet",   3, 15),
+		mk("openai", "mini",        1, 2),
+	];
+	const ranked = rankClassifierModels(pool, "anthropic");
+	test("rank: same-provider models come first",   ranked[0].provider === "anthropic", true);
+	test("rank: cheapest same-provider first",       ranked[0].id, "haiku");
+	test("rank: then other providers ascending cost",  ranked[2].id, "mini"); // openai mini (cost 3) before gpt-4o (cost 20)
+	test("rank: most expensive same-provider last of its kind", ranked[1].id, "sonnet");
+}
+
+// pickClassifierModel: explicit pin wins; hasAuth gates; auto-select respects provider
+{
+	const mk = (provider, id, input, output) => ({ provider, id, cost: { input, output, cacheRead: 0, cacheWrite: 0 } });
+	const pool = [mk("anthropic", "haiku", 1, 5), mk("openai", "mini", 1, 2)];
+	const allAuth = () => true;
+	const noneAuth = () => false;
+	const find = (provider, id) => pool.find((m) => m.provider === provider && m.id === id);
+	test("pick: explicit pin found + authed",
+		pickClassifierModel(pool, "openai", allAuth, { provider: "anthropic", model: "haiku" }, find).id, "haiku");
+	test("pick: auto-select prefers same provider",
+		pickClassifierModel(pool, "anthropic", allAuth).id, "haiku");
+	test("pick: auto-select falls back to cheapest other provider",
+		pickClassifierModel(pool, "google", allAuth).id, "mini");
+	test("pick: no authed model → undefined",
+		pickClassifierModel(pool, "anthropic", noneAuth), undefined);
+	test("pick: explicit pin not found → auto-select",
+		pickClassifierModel(pool, "anthropic", allAuth, { provider: "x", model: "y" }, find).id, "haiku");
+}
+
+// ── deny/ask-beat-classifier invariant ────────────────────────────────────
+//
+// The classifier only sees true fallthroughs. With autoActive=true, a static
+// deny/ask/allow rule still wins (decide returns deny/ask/allow, not "auto").
+// classifyAllShell routes otherwise-auto-allowed read-only bash through the
+// classifier (decide returns "auto" instead of "allow").
+section("auto mode — static rules beat classifier");
+
+const autoCfg2 = makeCfg({ defaultAction: "auto" });
+test("invariant: deny beats auto (autoActive=true)",
+	decide(makeCfg({ deny: ["Bash(rm*)"], defaultAction: "auto" }), "bash", { command: "rm -rf ." }, true), "deny");
+test("invariant: ask beats auto (autoActive=true)",
+	decide(makeCfg({ ask: ["Bash(git push*)"], defaultAction: "auto" }), "bash", { command: "git push" }, true), "ask");
+test("invariant: allow beats auto (autoActive=true)",
+	decide(makeCfg({ allow: ["Bash(npm*)"], defaultAction: "auto" }), "bash", { command: "npm test" }, true), "allow");
+
+// Without classifyAllShell, read-only bash is still auto-allowed (does not reach classifier).
+const roCfg = makeCfg({ defaultAction: "auto", bashReadOnlyAllowCwd: true });
+test("no classifyAllShell: read-only bash auto-allowed (autoActive=true)",
+	decide(roCfg, "bash", { command: "ls" }, true), "allow");
+
+// With classifyAllShell, read-only bash falls through to "auto" (reaches classifier).
+const classifyAllCfg = makeCfg({ defaultAction: "auto", bashReadOnlyAllowCwd: true, autoMode: { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: true } });
+test("classifyAllShell: read-only bash → auto (reaches classifier)",
+	decide(classifyAllCfg, "bash", { command: "ls" }, true), "auto");
+test("classifyAllShell: no-op cd still auto-allowed (cd is harmless bookkeeping)",
+	decide(classifyAllCfg, "bash", { command: "cd ." }, true), "allow");
+
+// decideCompound surfaces "auto" when autoActive (not stubbed to ask)
+{
+	const dc = decideCompound(autoCfg2, "bash", { command: "npm test && unknown-cmd" }, true);
+	test("decideCompound (autoActive): compound aggregate surfaces auto",
+		dc.action, "auto");
+	test("decideCompound (autoActive): breakdown keeps auto sub",
+		dc.breakdown.some((b) => b.action === "auto"), true);
+}
+// Without autoActive, auto resolves to ask (stub) as in Step 1.
+{
+	const dc = decideCompound(autoCfg2, "bash", { command: "unknown-cmd" }, false);
+	test("decideCompound (not autoActive): auto → ask (stub)", dc.action, "ask");
+}
 
 process.exit(summary() > 0 ? 1 : 0);

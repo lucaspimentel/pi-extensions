@@ -496,7 +496,7 @@ export function decide(cfg, toolName, input, autoActive = false) {
 	if (check(cfg.deny)) return "deny";
 	const skipReadOnlyBash = autoActive && cfg.autoMode?.classifyAllShell;
 	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
-	if (!skipReadOnlyBash && (cfg.allowNoopCd !== false) && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
+	if ((cfg.allowNoopCd !== false) && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
 	if (check(cfg.ask)) return "ask";
 	if (check(cfg.allow)) return "allow";
 	const td = cfg.toolDefaults?.[normalizeTool(toolName)];

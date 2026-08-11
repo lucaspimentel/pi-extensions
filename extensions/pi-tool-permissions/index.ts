@@ -1409,12 +1409,13 @@ function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unk
 		return false;
 	};
 	if (check(cfg.deny)) return "deny";
-	// Read-only / no-op-cd auto-allow short-circuits. When auto-mode is engaged AND
-	// classifyAllShell is set, route every bash subcommand (including read-only
-	// ones) through the classifier instead of silently allowing them.
+	// Read-only bash auto-allow short-circuit. When auto-mode is engaged AND
+	// classifyAllShell is set, route read-only bash subcommands through the
+	// classifier instead of silently allowing them. (No-op `cd` is pure
+	// bookkeeping with zero side-effects/data access, so allowNoopCd stays active.)
 	const skipReadOnlyBash = autoActive && cfg.autoMode.classifyAllShell;
 	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd)) return "allow";
-	if (!skipReadOnlyBash && cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
+	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
 	if (check(cfg.ask)) return "ask";
 	if (check(cfg.allow)) return "allow";
 	const td = cfg.toolDefaults[normalizeTool(toolName)];
