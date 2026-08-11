@@ -345,7 +345,7 @@ test("loadConfig: no autoMode → empty classifier",       emptyAuto.autoMode.cl
 test("loadConfig: no autoMode → empty environment",      emptyAuto.autoMode.environment.length, 0);
 test("loadConfig: no autoMode → default allow list",       emptyAuto.autoMode.allow.join("|"), "Running tests and linters");
 test("loadConfig: no autoMode → default soft_deny list",  emptyAuto.autoMode.soft_deny.join("|"), "Force pushing, deleting remote branches");
-test("loadConfig: no autoMode → default hard_deny list",  emptyAuto.autoMode.hard_deny.join("|"), "Sending repo contents to third-party APIs");
+test("loadConfig: no autoMode → default hard_deny list",  emptyAuto.autoMode.hard_deny.join("|"), "Sending data to third-party APIs or external services");
 test("loadConfig: no autoMode → classifyAllShell true (default)",  emptyAuto.autoMode.classifyAllShell, true);
 
 // User/project lists are ADDITIVE on top of the defaults (concatenated + deduped).

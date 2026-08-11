@@ -63,7 +63,7 @@ Extends `Config` / `LoadedConfig` in `index.ts` (~107–142):
     ],
     "allow":     ["Running tests and linters"],
     "soft_deny": ["Force pushing, deleting remote branches"],
-    "hard_deny": ["Sending repo contents to third-party APIs"],
+    "hard_deny": ["Sending data to third-party APIs or external services"],
     "classifyAllShell": true
   }
 }

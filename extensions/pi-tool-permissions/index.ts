@@ -49,7 +49,7 @@
  *       "environment": ["Trusted repo: github.com/lucaspimentel/*"],
  *       "allow":     ["Running tests and linters"],
  *       "soft_deny": ["Force pushing, deleting remote branches"],
- *       "hard_deny": ["Sending repo contents to third-party APIs"],
+ *       "hard_deny": ["Sending data to third-party APIs or external services"],
  *       "classifyAllShell": true
  *     }
  *   }
@@ -301,7 +301,7 @@ const STATUS_KEY_AUTO = "tool-permissions-auto";
 const DEFAULT_AUTO_MODE = {
 	allow: ["Running tests and linters"],
 	soft_deny: ["Force pushing, deleting remote branches"],
-	hard_deny: ["Sending repo contents to third-party APIs"],
+	hard_deny: ["Sending data to third-party APIs or external services"],
 	classifyAllShell: true,
 };
 
