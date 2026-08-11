@@ -1717,7 +1717,10 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (liveAction === "allow") continue;
 				if (liveAction === "deny") {
-					await promptSteerMessage(ctx);
+					// No steer prompt here — this branch is only reached for static deny rules
+					// and classifier hard_deny verdicts (neither is user-initiated). The
+					// classifier's reason is already in the block message; user denies
+					// steer via the Deny-once / Deny-always choice branches below.
 					const reason = subReason
 						? `Blocked by classifier (subcommand: ${sub}): ${subReason}`
 						: `Blocked by tool-permissions deny rule (subcommand: ${sub})`;
