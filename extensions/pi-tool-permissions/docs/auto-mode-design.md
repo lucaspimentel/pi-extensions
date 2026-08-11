@@ -40,7 +40,7 @@ No `pi.ai` on the `ExtensionAPI`. As of pi-ai 0.84, `complete()`/`getModel()` ar
 - `getAvailable()` — pool of configured models
 - `complete(model, context)` — resolves provider auth internally, no auth threading
 
-Template: `extensions/idle-summary/index.ts` + `idle-summary-models.ts` (note: moved out of the old `extensions/idle-summary.ts` path in commit `d1a3504`). That extension uses type-only `Api`/`Model` imports from `@earendil-works/pi-ai`, builds the pool from `ctx.scopedModels` (falling back to `ctx.modelRegistry.getAvailable()`), ranks via `selectSummaryModel` (cheapest same-provider model first, then ascending cost), gates with `ctx.modelRegistry.hasConfiguredAuth(model)`, and calls `await ctx.modelRegistry.complete(model, { messages })`. **Reuse that pattern — not the old `getModel`/threaded-auth form.**
+Template: `extensions/idle-summary/index.ts` + `idle-summary-models.ts` (note: moved out of the old `extensions/idle-summary.ts` path in commit `d1a3504`). That extension uses type-only `Api`/`Model` imports from `@earendil-works/pi-ai`, builds the pool from `ctx.scopedModels` (falling back to `ctx.modelRegistry.getAvailable()`), ranks via `selectSummaryModel` (**same provider as the currently selected model first** — cheapest-to-most-expensive within that provider — then all other providers in ascending cost order; see `rankSummaryModels` in `idle-summary-models.ts`, with `currentProvider = ctx.model?.provider`), gates with `ctx.modelRegistry.hasConfiguredAuth(model)`, and calls `await ctx.modelRegistry.complete(model, { messages })`. **Reuse that pattern — not the old `getModel`/threaded-auth form.**
 
 ## Proposed config shape
 
@@ -50,6 +50,12 @@ Extends `Config` / `LoadedConfig` in `index.ts` (~107–142):
 {
   "defaultAction": "auto",
   "autoMode": {
+    // Optional explicit pin. If omitted, the classifier model is selected
+    // from the available pool using the same ranking as idle-summary:
+    // prefer models from the currently selected model's provider (cheapest
+    // first within that provider), then other providers in ascending cost.
+    // In either case, restrict to a haiku-tier / fast-cheap model — never the
+    // main reasoning model.
     "classifier": { "provider": "anthropic", "model": "claude-haiku-4-5" },
     "environment": [
       "Trusted repo: github.com/lucaspimentel/*",
@@ -114,7 +120,7 @@ Foundation; nothing else compiles cleanly without it. Independently shippable.
 
 ### Step 2 — Classifier runtime (the real work)
 
-6. **Classifier call seam.** Following the TODO guidance: use `ctx.modelRegistry.find()` + `hasConfiguredAuth()` + `ctx.modelRegistry.complete(model, { messages })`, pool from `ctx.scopedModels`/`getAvailable()`, template on `extensions/idle-summary/index.ts` + `idle-summary-models.ts`. Extract the classifier into a pure helper (`classifyAction(model, toolName, input, autoMode) → { verdict, reason }`) with `complete` injected as a seam so it's unit-testable without HTTP.
+6. **Classifier call seam.** Following the TODO guidance: use `ctx.modelRegistry.find()` + `hasConfiguredAuth()` + `ctx.modelRegistry.complete(model, { messages })`, pool from `ctx.scopedModels`/`getAvailable()`, template on `extensions/idle-summary/index.ts` + `idle-summary-models.ts`. **Model selection mirrors `idle-summary`'s `selectSummaryModel`/`rankSummaryModels`: if `autoMode.classifier` is explicitly set, `ctx.modelRegistry.find(provider, id)` it directly; otherwise rank the pool with `currentProvider = ctx.model?.provider` (same-provider models first, cheapest within that provider first, then other providers ascending cost) and pick the first with configured auth. In both cases restrict to a haiku-tier / fast-cheap model — never the main reasoning model.** Extract the classifier into a pure helper (`classifyAction(model, toolName, input, autoMode) → { verdict, reason }`) with `complete` injected as a seam so it's unit-testable without HTTP.
 7. **Wire into `decide()`'s tail**: when `defaultAction === "auto"` (and the session toggle is on), call the classifier instead of returning `"ask"`. Map `hard_deny`→`deny`, `soft_deny`→`ask` (with reason surfaced), `allow`→`allow`, no-match→`ask`. Preserve the static precedence invariant.
 8. **Non-interactive fallback**: in `ctx.mode === "print"`/`"json"`, `soft_deny` and no-match resolve to `deny`.
 9. **Verdict cache** by `hash(toolName, JSON.stringify(input), rulesetHash)` to bound token cost on loops.
