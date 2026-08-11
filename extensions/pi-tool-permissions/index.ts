@@ -178,9 +178,11 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
 
 type Action = "allow" | "deny" | "ask" | "auto";
 
@@ -1107,9 +1109,13 @@ function decideCompound(
 	cfg: ResolvedConfig,
 	toolName: string,
 	input: Record<string, unknown>,
+	autoActive = false,
 ): CompoundDecision {
+	// When auto-mode is not engaged, "auto" resolves to "ask" (stub). When engaged,
+	// "auto" surfaces so the handler can run the classifier.
+	const resolve = (a: Action): Action => autoActive ? a : effectiveAction(a);
 	if (normalizeTool(toolName) !== "bash") {
-		return { action: effectiveAction(decide(cfg, toolName, input)), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: resolve(decide(cfg, toolName, input, autoActive)), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	const rawCmd = String(input.command ?? "");
@@ -1127,7 +1133,7 @@ function decideCompound(
 		const effectiveInput = split.effectiveCmd != null
 			? { ...normalizedInput, command: split.effectiveCmd }
 			: normalizedInput;
-		return { action: effectiveAction(decide(cfg, "bash", effectiveInput)), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: resolve(decide(cfg, "bash", effectiveInput, autoActive)), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	// compound — strip structural shell keywords (`for`, `do`, `done`) so
@@ -1136,7 +1142,7 @@ function decideCompound(
 	for (const rawSub of split.parts) {
 		const stripped = stripStructuralKeywords(rawSub);
 		if (stripped === null) continue;
-		breakdown.push({ sub: stripped, action: effectiveAction(decide(cfg, "bash", { command: stripped })) });
+		breakdown.push({ sub: stripped, action: resolve(decide(cfg, "bash", { command: stripped }, autoActive)) });
 	}
 
 	// Entirely structural (e.g. empty-body `for x in a; do; done`) — no commands
@@ -1155,7 +1161,8 @@ function decideCompound(
 	let action: Action = "allow";
 	for (const { action: a } of breakdown) {
 		if (a === "deny") { action = "deny"; break; }
-		if (a === "ask") action = "ask";
+		if (a === "auto") action = "auto";
+		else if (a === "ask" && action !== "auto") action = "ask";
 	}
 
 	return { action, isCompound: true, ambiguous: false, breakdown };
@@ -1199,8 +1206,9 @@ function formatBreakdown(breakdown: SubcommandDecision[], currentSub: string | n
  * prompt loop after a rule is saved mid-loop so the dialog’s breakdown
  * block and the per-step decisions reflect the freshly loaded config.
  */
-function recomputeBreakdown(breakdown: SubcommandDecision[], cfg: ResolvedConfig): SubcommandDecision[] {
-	return breakdown.map((b) => ({ sub: b.sub, action: effectiveAction(decide(cfg, "bash", { command: b.sub })) }));
+function recomputeBreakdown(breakdown: SubcommandDecision[], cfg: ResolvedConfig, autoActive = false): SubcommandDecision[] {
+	const resolve = (a: Action): Action => autoActive ? a : effectiveAction(a);
+	return breakdown.map((b) => ({ sub: b.sub, action: resolve(decide(cfg, "bash", { command: b.sub }, autoActive)) }));
 }
 
 /**
@@ -1214,7 +1222,185 @@ function effectiveAction(action: Action): Action {
 	return action === "auto" ? "ask" : action;
 }
 
-function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>): Action {
+// ── Auto-mode classifier (Step 2) ─────────────────────────────────────────
+//
+// When `defaultAction === "auto"` and the session toggle is on, fallthroughs are
+// screened by a cheap/fast classifier model. The classifier is a pure helper
+// with the `complete` call injected as a seam so it is unit-testable without
+// HTTP. See docs/auto-mode-design.md.
+
+type ClassifierVerdict = "allow" | "soft_deny" | "hard_deny" | "no_match";
+
+interface ClassifyResult {
+	verdict: ClassifierVerdict;
+	reason: string;
+}
+
+/** Seam type for the model completion call (mirrors ModelRegistry.complete). */
+type ClassifierComplete = (model: Model<Api>, context: Context) => Promise<AssistantMessage>;
+
+/** Auth-gate seam for model selection (mirrors ModelRegistry.hasConfiguredAuth). */
+type HasAuth = (model: Model<Api>) => boolean;
+
+/** Cost proxy: cheaper/faster models first. Lower score = preferred. */
+function modelCostScore(model: Model<Api>): number {
+	return (model.cost.input ?? 0) + (model.cost.output ?? 0);
+}
+
+function dedupeModels(pool: Model<Api>[]): Model<Api>[] {
+	const seen = new Set<string>();
+	const out: Model<Api>[] = [];
+	for (const m of pool) {
+		const key = `${m.provider}/${m.id}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(m);
+	}
+	return out;
+}
+
+/**
+ * Rank a model pool for the classifier, mirroring idle-summary's rankSummaryModels:
+ * models from `currentProvider` come first (cheapest within that provider first),
+ * then all other providers in ascending cost order. Ties keep insertion order.
+ */
+function rankClassifierModels(pool: Model<Api>[], currentProvider: string | undefined): Model<Api>[] {
+	const unique = dedupeModels(pool);
+	return [...unique].sort((a, b) => {
+		const aSame = currentProvider !== undefined && a.provider === currentProvider;
+		const bSame = currentProvider !== undefined && b.provider === currentProvider;
+		if (aSame !== bSame) return aSame ? -1 : 1;
+		return modelCostScore(a) - modelCostScore(b);
+	});
+}
+
+/**
+ * Pick the classifier model. If `explicit` is set, `find` it directly; otherwise
+ * rank the pool (preferring the current provider) and return the first with
+ * configured auth. `find` and `hasAuth` are injected seams.
+ */
+function pickClassifierModel(
+	pool: Model<Api>[],
+	currentProvider: string | undefined,
+	hasAuth: HasAuth,
+	explicit?: { provider: string; model: string },
+	find?: (provider: string, modelId: string) => Model<Api> | undefined,
+): Model<Api> | undefined {
+	if (explicit && find) {
+		const m = find(explicit.provider, explicit.model);
+		if (m && hasAuth(m)) return m;
+	}
+	for (const m of rankClassifierModels(pool, currentProvider)) {
+		if (hasAuth(m)) return m;
+	}
+	return undefined;
+}
+
+/** Build a short human-readable description of the action for the classifier. */
+function describeAction(toolName: string, input: Record<string, unknown>): string {
+	const t = normalizeTool(toolName);
+	if (t === "bash" || t === "pwsh") return `Tool: ${toolName}\nCommand: ${String(input.command ?? "")}`;
+	if (t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls")
+		return `Tool: ${toolName}\nPath: ${String(input.path ?? "")}`;
+	if (t === "webfetch") return `Tool: ${toolName}\nURL: ${String(input.url ?? "")}`;
+	try { return `Tool: ${toolName}\nInput: ${JSON.stringify(input)}`; } catch { return `Tool: ${toolName}`; }
+}
+
+function buildClassifierPrompt(toolName: string, input: Record<string, unknown>, autoMode: ResolvedAutoModeConfig): string {
+	const env = autoMode.environment.length ? autoMode.environment.map((e) => `  - ${e}`).join("\n") : "  (none)";
+	const allow = autoMode.allow.length ? autoMode.allow.map((r) => `  - ${r}`).join("\n") : "  (none)";
+	const soft = autoMode.soft_deny.length ? autoMode.soft_deny.map((r) => `  - ${r}`).join("\n") : "  (none)";
+	const hard = autoMode.hard_deny.length ? autoMode.hard_deny.map((r) => `  - ${r}`).join("\n") : "  (none)";
+	return [
+		"You are a permissions safety classifier for a coding agent. Decide whether the agent should be allowed to run the following action.",
+		"",
+		"Action:",
+		describeAction(toolName, input),
+		"",
+		"Environment:",
+		env,
+		"",
+		"Rules:",
+		"Allow (silently permit):",
+		allow,
+		"Soft deny (prompt the user, include the reason):",
+		soft,
+		"Hard deny (always block, include the reason):",
+		hard,
+		"",
+		"Decide which list (if any) the action matches. Respond with exactly two lines:",
+		"VERDICT: <allow|soft_deny|hard_deny|no_match>",
+		"REASON: <one short sentence>",
+		"If the action matches an Allow rule, verdict is allow. If it matches a Hard deny rule, verdict is hard_deny. If it matches a Soft deny rule, verdict is soft_deny. Otherwise, verdict is no_match.",
+	].join("\n");
+}
+
+function parseClassifierResponse(text: string): ClassifyResult {
+	const verdictMatch = text.match(/VERDICT:\s*(allow|soft_deny|hard_deny|no_match)\b/i);
+	const verdict = verdictMatch ? (verdictMatch[1].toLowerCase() as ClassifierVerdict) : "no_match";
+	const reasonMatch = text.match(/REASON:\s*(.+)/i);
+	const reason = reasonMatch ? reasonMatch[1].trim() : "";
+	return { verdict, reason };
+}
+
+/** Map a classifier verdict to a concrete Action. In non-interactive modes, soft_deny/no_match → deny. */
+function verdictToAction(verdict: ClassifierVerdict, nonInteractive: boolean): Action {
+	if (verdict === "allow") return "allow";
+	if (verdict === "hard_deny") return "deny";
+	// soft_deny or no_match
+	return nonInteractive ? "deny" : "ask";
+}
+
+/** Cache key: hash(toolName, input, ruleset). Binds token cost on loops. */
+function classifierCacheKey(toolName: string, input: Record<string, unknown>, autoMode: ResolvedAutoModeConfig): string {
+	const ruleset = JSON.stringify({
+		c: autoMode.classifier,
+		e: autoMode.environment,
+		a: autoMode.allow,
+		s: autoMode.soft_deny,
+		h: autoMode.hard_deny,
+	});
+	const inputJson = JSON.stringify(input);
+	return createHash("sha256").update(`${toolName}\u0000${inputJson}\u0000${ruleset}`).digest("hex");
+}
+
+/**
+ * Run the classifier. `complete` is injected so this is unit-testable without HTTP.
+ * Results are cached by (toolName, input, ruleset) for the lifetime of the
+ * provided cache Map.
+ */
+async function classifyAction(
+	complete: ClassifierComplete,
+	model: Model<Api>,
+	toolName: string,
+	input: Record<string, unknown>,
+	autoMode: ResolvedAutoModeConfig,
+	cache: Map<string, ClassifyResult>,
+): Promise<ClassifyResult> {
+	const key = classifierCacheKey(toolName, input, autoMode);
+	const cached = cache.get(key);
+	if (cached) return cached;
+	const prompt = buildClassifierPrompt(toolName, input, autoMode);
+	let result: ClassifyResult;
+	try {
+		const response = await complete(model, {
+			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
+		});
+		const text = response.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map((c) => c.text)
+			.join("\n")
+			.trim();
+		result = parseClassifierResponse(text);
+	} catch {
+		// Network/API error → safe fallback (no_match → ask / deny in non-interactive).
+		result = { verdict: "no_match", reason: "classifier call failed" };
+	}
+	cache.set(key, result);
+	return result;
+}
+
+function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>, autoActive = false): Action {
 	const check = (list: string[]): boolean => {
 		for (const raw of list) {
 			const rule = parseRule(raw);
@@ -1223,10 +1409,12 @@ function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unk
 		return false;
 	};
 	if (check(cfg.deny)) return "deny";
-	// Silently allow read-only bash subcommands with paths inside cwd
-	if (cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd)) return "allow";
-	// Silently allow no-op `cd` (changing to the current directory) — harmless bookkeeping
-	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
+	// Read-only / no-op-cd auto-allow short-circuits. When auto-mode is engaged AND
+	// classifyAllShell is set, route every bash subcommand (including read-only
+	// ones) through the classifier instead of silently allowing them.
+	const skipReadOnlyBash = autoActive && cfg.autoMode.classifyAllShell;
+	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd)) return "allow";
+	if (!skipReadOnlyBash && cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
 	if (check(cfg.ask)) return "ask";
 	if (check(cfg.allow)) return "allow";
 	const td = cfg.toolDefaults[normalizeTool(toolName)];
@@ -1320,6 +1508,9 @@ export default function (pi: ExtensionAPI) {
 	// `defaultAction === "auto"`, fallthroughs go to the classifier (Step 2) or
 	// behave as `ask` (Step 1 stub). Mirrors `allowAllEdits` lifecycle.
 	let autoModeEnabled = false;
+	// Per-session classifier verdict cache (keyed by toolName+input+ruleset). Bounds
+	// token cost when the same action repeats in a loop. See classifierCacheKey().
+	const verdictCache = new Map<string, ClassifyResult>();
 
 	// ── Deny-with-message helper ─────────────────────────────────────────────
 
@@ -1388,17 +1579,54 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const matchInput = inputForMatching(event.toolName, event.input as Record<string, unknown>, ctx.cwd);
-		const compound = decideCompound(cfg, event.toolName, matchInput);
-		const { action, isCompound, ambiguous, breakdown } = compound;
+		const nonInteractive = ctx.mode === "print" || ctx.mode === "json";
+		const autoActive = autoModeEnabled && cfg.defaultAction === "auto";
+		// Pick the classifier model (explicit pin, or auto-select from the pool
+		// preferring the currently selected model's provider). Mirrors idle-summary.
+		const classifierModel = autoActive
+			? pickClassifierModel(
+				ctx.scopedModels.length > 0 ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable(),
+				ctx.model?.provider,
+				(m) => ctx.modelRegistry.hasConfiguredAuth(m),
+				cfg.autoMode.classifier,
+				(provider, modelId) => ctx.modelRegistry.find(provider, modelId),
+			)
+			: undefined;
+		const autoEngaged = autoActive && classifierModel !== undefined;
+		const compound = decideCompound(cfg, event.toolName, matchInput, autoEngaged);
+		let { action, isCompound, ambiguous, breakdown } = compound;
+		let classifierReason = "";
+
+		// Resolve a fallthrough "auto" verdict. For single/ambiguous commands we
+		// classify up front; for compound commands the prompt loop classifies each
+		// auto sub. When auto-mode is not engaged, "auto" behaves as "ask" (stub).
+		if (action === "auto") {
+			if (autoEngaged && classifierModel && !isCompound) {
+				const result = await classifyAction(
+					(m, c) => ctx.modelRegistry.complete(m, c),
+					classifierModel,
+				event.toolName,
+				matchInput,
+				cfg.autoMode,
+				verdictCache,
+			);
+				classifierReason = result.reason;
+				action = verdictToAction(result.verdict, nonInteractive);
+			} else if (!autoEngaged || isCompound) {
+				// Stub (toggle off / no model) or compound (loop handles per-sub).
+				action = "ask";
+			}
+		}
 
 		if (action === "allow") return undefined;
 
 		// Explicit deny rules always win, even over allow-all-edits
 		if (action === "deny") {
 			const culprit = isCompound ? breakdown.find((b) => b.action === "deny") : null;
-			const message = culprit
+			const base = culprit
 				? `Blocked ${event.toolName}: '${culprit.sub}' matched a deny rule`
 				: `Blocked ${event.toolName} by tool-permissions deny rule`;
+			const message = classifierReason ? `${base} (classifier: ${classifierReason})` : base;
 			if (ctx.hasUI) {
 				ctx.ui.notify(message, "warning");
 			}
@@ -1439,27 +1667,49 @@ export default function (pi: ExtensionAPI) {
 			// Mutated after each rule-save so downstream icons reflect the new cfg.
 			let currentBreakdown = breakdown;
 
-			// Iterate over the original `ask` subcommands, but re-decide each one
+			// Iterate over the original `ask`/`auto` subcommands, but re-decide each one
 			// against the current `cfg` right before prompting so newly saved
 			// allow/deny rules apply to the rest of *this* compound command.
-			const askSubs = breakdown.filter((b) => b.action === "ask").map((b) => b.sub);
+			const askSubs = breakdown.filter((b) => b.action === "ask" || b.action === "auto").map((b) => b.sub);
 
 			for (const sub of askSubs) {
 				// User intent (`Allow ALL steps once`) beats any rule-driven decision:
 				// a freshly saved deny must not override an explicit one-shot allow.
 				if (allowAllStepsOnce) continue;
 
-				const liveAction = decide(cfg, "bash", { command: sub });
+				let liveAction = decide(cfg, "bash", { command: sub }, autoEngaged);
+				let subReason = "";
+				// Auto fallthrough: run the classifier for this subcommand.
+				if (liveAction === "auto") {
+					if (autoEngaged && classifierModel) {
+						const result = await classifyAction(
+							(m, c) => ctx.modelRegistry.complete(m, c),
+							classifierModel,
+							"bash",
+							{ command: sub },
+							cfg.autoMode,
+							verdictCache,
+						);
+						subReason = result.reason;
+						liveAction = verdictToAction(result.verdict, nonInteractive);
+					} else {
+						liveAction = "ask";
+					}
+				}
 				if (liveAction === "allow") continue;
 				if (liveAction === "deny") {
 					await promptSteerMessage(ctx);
-					return { block: true, reason: `Blocked by tool-permissions deny rule (subcommand: ${sub})` };
+					const reason = subReason
+						? `Blocked by classifier (subcommand: ${sub}): ${subReason}`
+						: `Blocked by tool-permissions deny rule (subcommand: ${sub})`;
+					return { block: true, reason };
 				}
 
 				const suggested = suggestRule("Bash", { command: sub });
 				const breakdownLines = formatBreakdown(currentBreakdown, sub);
 
-				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}\n\nSuggested rule: ${suggested}`;
+				const reasonNote = subReason ? `\n  classifier: ${subReason}` : "";
+				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}\n\nSuggested rule: ${suggested}`;
 				const choices = [
 					"Allow once",
 					"Allow ALL steps once",
@@ -1488,7 +1738,7 @@ export default function (pi: ExtensionAPI) {
 					if (!scope) continue;
 					addRule(scope, ctx.cwd, "allow", edited.trim());
 					cfg = loadConfig(ctx.cwd);
-					currentBreakdown = recomputeBreakdown(breakdown, cfg);
+					currentBreakdown = recomputeBreakdown(breakdown, cfg, autoEngaged);
 					const autoCount = currentBreakdown.filter(
 						(b) => b.sub !== sub && askSubs.includes(b.sub) && b.action === "allow",
 					).length;
@@ -1510,7 +1760,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					addRule(scope, ctx.cwd, "deny", edited.trim());
 					cfg = loadConfig(ctx.cwd);
-					currentBreakdown = recomputeBreakdown(breakdown, cfg);
+					currentBreakdown = recomputeBreakdown(breakdown, cfg, autoEngaged);
 					ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
 					await promptSteerMessage(ctx);
 					return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
@@ -1525,7 +1775,8 @@ export default function (pi: ExtensionAPI) {
 		const preview = matchField.length > 200 ? `${matchField.slice(0, 197)}...` : matchField;
 		const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
 		const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
-		const title = `Allow ${event.toolName}?\n\n  ${preview}${extraInfo}${ambiguousNote}\n\nSuggested rule: ${suggested}`;
+		const reasonNote = classifierReason ? `\n  classifier: ${classifierReason}` : "";
+		const title = `Allow ${event.toolName}?\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}\n\nSuggested rule: ${suggested}`;
 
 		// Extra "allow all edits" option only for write/edit dialogs
 		const choices = isWriteOrEdit

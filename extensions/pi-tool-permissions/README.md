@@ -485,7 +485,7 @@ It is layered **on top of** the existing static rules, not alongside them:
 
 Auto mode is **off by default** and **never persisted** (session-only, like allow-all-edits). Even with `defaultAction: "auto"` in config, the classifier only runs while the session toggle is on; otherwise fallthroughs behave as `ask` (safe default). Explicit `deny` rules always win.
 
-> **Status:** The type/config spine, session toggle, `/permissions auto` subcommand, and footer indicator are wired. The classifier runtime itself is tracked in [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) (Step 2); until it lands, `"auto"` fallthroughs behave as `"ask"`.
+> **Status:** The type/config spine, session toggle, `/permissions auto` subcommand, footer indicator, and the classifier runtime are wired. When auto-mode is engaged and a classifier model is available, fallthroughs are screened by the classifier; otherwise they behave as `ask` (safe fallback). See [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) for the full design.
 
 ### Ways to toggle
 

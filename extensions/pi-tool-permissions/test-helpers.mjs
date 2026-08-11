@@ -3,6 +3,7 @@
 // When index.ts changes, update this file to match.
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
 // ── Tool name helpers ─────────────────────────────────────────────────────
@@ -356,8 +357,9 @@ export function formatBreakdown(breakdown, currentSub) {
 		.join("\n");
 }
 
-export function recomputeBreakdown(breakdown, cfg) {
-	return breakdown.map((b) => ({ sub: b.sub, action: effectiveAction(decide(cfg, "bash", { command: b.sub })) }));
+export function recomputeBreakdown(breakdown, cfg, autoActive = false) {
+	const resolve = (a) => autoActive ? a : effectiveAction(a);
+	return breakdown.map((b) => ({ sub: b.sub, action: resolve(decide(cfg, "bash", { command: b.sub }, autoActive)) }));
 }
 
 // ── Decision engine ───────────────────────────────────────────────────────
@@ -366,12 +368,135 @@ export function effectiveAction(action) {
 	return action === "auto" ? "ask" : action;
 }
 
-export function decide(cfg, toolName, input) {
+// ── Auto-mode classifier helpers (Step 2) ─────────────────────────────────
+
+export function modelCostScore(model) {
+	return (model.cost.input ?? 0) + (model.cost.output ?? 0);
+}
+
+export function dedupeModels(pool) {
+	const seen = new Set();
+	const out = [];
+	for (const m of pool) {
+		const key = `${m.provider}/${m.id}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(m);
+	}
+	return out;
+}
+
+export function rankClassifierModels(pool, currentProvider) {
+	const unique = dedupeModels(pool);
+	return [...unique].sort((a, b) => {
+		const aSame = currentProvider !== undefined && a.provider === currentProvider;
+		const bSame = currentProvider !== undefined && b.provider === currentProvider;
+		if (aSame !== bSame) return aSame ? -1 : 1;
+		return modelCostScore(a) - modelCostScore(b);
+	});
+}
+
+export function pickClassifierModel(pool, currentProvider, hasAuth, explicit, find) {
+	if (explicit && find) {
+		const m = find(explicit.provider, explicit.model);
+		if (m && hasAuth(m)) return m;
+	}
+	for (const m of rankClassifierModels(pool, currentProvider)) {
+		if (hasAuth(m)) return m;
+	}
+	return undefined;
+}
+
+export function describeAction(toolName, input) {
+	const t = normalizeTool(toolName);
+	if (t === "bash" || t === "pwsh") return `Tool: ${toolName}\nCommand: ${String(input.command ?? "")}`;
+	if (t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls")
+		return `Tool: ${toolName}\nPath: ${String(input.path ?? "")}`;
+	if (t === "webfetch") return `Tool: ${toolName}\nURL: ${String(input.url ?? "")}`;
+	try { return `Tool: ${toolName}\nInput: ${JSON.stringify(input)}`; } catch { return `Tool: ${toolName}`; }
+}
+
+export function buildClassifierPrompt(toolName, input, autoMode) {
+	const env = autoMode.environment.length ? autoMode.environment.map((e) => `  - ${e}`).join("\n") : "  (none)";
+	const allow = autoMode.allow.length ? autoMode.allow.map((r) => `  - ${r}`).join("\n") : "  (none)";
+	const soft = autoMode.soft_deny.length ? autoMode.soft_deny.map((r) => `  - ${r}`).join("\n") : "  (none)";
+	const hard = autoMode.hard_deny.length ? autoMode.hard_deny.map((r) => `  - ${r}`).join("\n") : "  (none)";
+	return [
+		"You are a permissions safety classifier for a coding agent. Decide whether the agent should be allowed to run the following action.",
+		"",
+		"Action:",
+		describeAction(toolName, input),
+		"",
+		"Environment:",
+		env,
+		"",
+		"Rules:",
+		"Allow (silently permit):",
+		allow,
+		"Soft deny (prompt the user, include the reason):",
+		soft,
+		"Hard deny (always block, include the reason):",
+		hard,
+		"",
+		"Decide which list (if any) the action matches. Respond with exactly two lines:",
+		"VERDICT: <allow|soft_deny|hard_deny|no_match>",
+		"REASON: <one short sentence>",
+		"If the action matches an Allow rule, verdict is allow. If it matches a Hard deny rule, verdict is hard_deny. If it matches a Soft deny rule, verdict is soft_deny. Otherwise, verdict is no_match.",
+	].join("\n");
+}
+
+export function parseClassifierResponse(text) {
+	const verdictMatch = text.match(/VERDICT:\s*(allow|soft_deny|hard_deny|no_match)\b/i);
+	const verdict = verdictMatch ? verdictMatch[1].toLowerCase() : "no_match";
+	const reasonMatch = text.match(/REASON:\s*(.+)/i);
+	const reason = reasonMatch ? reasonMatch[1].trim() : "";
+	return { verdict, reason };
+}
+
+export function verdictToAction(verdict, nonInteractive) {
+	if (verdict === "allow") return "allow";
+	if (verdict === "hard_deny") return "deny";
+	return nonInteractive ? "deny" : "ask";
+}
+
+export function classifierCacheKey(toolName, input, autoMode) {
+	const ruleset = JSON.stringify({
+		c: autoMode.classifier, e: autoMode.environment, a: autoMode.allow, s: autoMode.soft_deny, h: autoMode.hard_deny,
+	});
+	const inputJson = JSON.stringify(input);
+	return createHash("sha256").update(`${toolName}\u0000${inputJson}\u0000${ruleset}`).digest("hex");
+}
+
+export async function classifyAction(complete, model, toolName, input, autoMode, cache) {
+	const key = classifierCacheKey(toolName, input, autoMode);
+	const cached = cache.get(key);
+	if (cached) return cached;
+	const prompt = buildClassifierPrompt(toolName, input, autoMode);
+	let result;
+	try {
+		const response = await complete(model, {
+			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
+		});
+		const text = response.content
+			.filter((c) => c.type === "text")
+			.map((c) => c.text)
+			.join("\n")
+			.trim();
+		result = parseClassifierResponse(text);
+	} catch {
+		result = { verdict: "no_match", reason: "classifier call failed" };
+	}
+	cache.set(key, result);
+	return result;
+}
+
+export function decide(cfg, toolName, input, autoActive = false) {
 	const cwd = cfg.cwd;
 	const check = (list) => list.some((raw) => { const r = parseRule(raw); return r && ruleMatches(r, toolName, input, cwd); });
 	if (check(cfg.deny)) return "deny";
-	if (cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
-	if ((cfg.allowNoopCd !== false) && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
+	const skipReadOnlyBash = autoActive && cfg.autoMode?.classifyAllShell;
+	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
+	if (!skipReadOnlyBash && (cfg.allowNoopCd !== false) && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
 	if (check(cfg.ask)) return "ask";
 	if (check(cfg.allow)) return "allow";
 	const td = cfg.toolDefaults?.[normalizeTool(toolName)];
@@ -396,9 +521,10 @@ export function stripStructuralKeywords(part) {
 	return s.length > 0 ? s : null;
 }
 
-export function decideCompound(cfg, toolName, input) {
+export function decideCompound(cfg, toolName, input, autoActive = false) {
+	const resolve = (a) => autoActive ? a : effectiveAction(a);
 	if (normalizeTool(toolName) !== "bash")
-		return { action: effectiveAction(decide(cfg, toolName, input)), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: resolve(decide(cfg, toolName, input, autoActive)), isCompound: false, ambiguous: false, breakdown: [] };
 
 	const rawCmd = String(input.command ?? "");
 	const cmd = stripLineContinuations(rawCmd);
@@ -410,14 +536,14 @@ export function decideCompound(cfg, toolName, input) {
 		const effectiveInput = split.effectiveCmd != null
 			? { ...normalizedInput, command: split.effectiveCmd }
 			: normalizedInput;
-		return { action: effectiveAction(decide(cfg, "bash", effectiveInput)), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: resolve(decide(cfg, "bash", effectiveInput, autoActive)), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	const breakdown = [];
 	for (const rawSub of split.parts) {
 		const stripped = stripStructuralKeywords(rawSub);
 		if (stripped === null) continue;
-		breakdown.push({ sub: stripped, action: effectiveAction(decide(cfg, "bash", { command: stripped })) });
+		breakdown.push({ sub: stripped, action: resolve(decide(cfg, "bash", { command: stripped }, autoActive)) });
 	}
 
 	if (breakdown.length === 0) return { action: "allow", isCompound: false, ambiguous: false, breakdown: [] };
@@ -426,7 +552,8 @@ export function decideCompound(cfg, toolName, input) {
 	let action = "allow";
 	for (const { action: a } of breakdown) {
 		if (a === "deny") { action = "deny"; break; }
-		if (a === "ask") action = "ask";
+		if (a === "auto") action = "auto";
+		else if (a === "ask" && action !== "auto") action = "ask";
 	}
 	return { action, isCompound: true, ambiguous: false, breakdown };
 }
