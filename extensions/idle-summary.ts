@@ -10,7 +10,7 @@
  * Falls back gracefully if no model or API key is available.
  */
 
-import { complete, getModel, type Api, type KnownProvider, type Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 
@@ -129,27 +129,22 @@ export default function (pi: ExtensionAPI) {
 		const conversationText = buildConversationText(branch as SessionEntry[]);
 		if (!conversationText.trim()) return;
 
-		// Find first model with a working API key.
-		// Use Model<Api> as a broad type since MODEL_CANDIDATES spans multiple providers,
-		// and getModel's generics can't be inferred across the union of candidate shapes.
+		// Find first model with a working API key. ctx.modelRegistry.find() is sync and
+		// takes plain strings, so the KnownProvider/never casts the old getModel() needed
+		// are gone. hasConfiguredAuth() gates without an async auth round-trip; the
+		// registry's complete() resolves provider auth internally, so no auth is threaded
+		// through the call.
 		let selectedModel: Model<Api> | undefined = undefined;
-		let selectedAuth: { apiKey: string; headers?: Record<string, string> } | undefined;
 
 		for (const candidate of MODEL_CANDIDATES) {
-			// Cast: each candidate is a known-good (provider, id) pair, but TS widens to a
-			// union across the loop body which collapses getModel's TModelId param to `never`.
-			const model = getModel(candidate.provider as KnownProvider, candidate.id as never);
-			if (!model) continue;
-
-			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-			if (auth?.ok && auth.apiKey) {
+			const model = ctx.modelRegistry.find(candidate.provider, candidate.id);
+			if (model && ctx.modelRegistry.hasConfiguredAuth(model)) {
 				selectedModel = model;
-				selectedAuth = { apiKey: auth.apiKey, headers: auth.headers };
 				break;
 			}
 		}
 
-		if (!selectedModel || !selectedAuth) return; // No model available — bail silently
+		if (!selectedModel) return; // No model available — bail silently
 
 		const messages = [
 			{
@@ -161,7 +156,7 @@ export default function (pi: ExtensionAPI) {
 
 		let response;
 		try {
-			response = await complete(selectedModel, { messages }, selectedAuth);
+			response = await ctx.modelRegistry.complete(selectedModel, { messages });
 		} catch {
 			return; // Network or API error — bail silently
 		}
