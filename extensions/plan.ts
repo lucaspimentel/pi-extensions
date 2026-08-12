@@ -1,30 +1,17 @@
 /**
- * plan-with-opus
+ * plan
  *
- * When the user runs `/plan <task>` (or presses Ctrl+Alt+P with text in the editor),
- * pi temporarily switches to a strong planning model (Claude Opus), asks for a plan,
- * then automatically restores the previous model so the implementation runs on it.
+ * When the user runs `/plan <task>`, pi narrows the active tools to a read-only
+ * allowlist (read/bash/grep/find/ls, with bash gated to safe commands) and sends
+ * a planning prompt as a user message. When the planning turn ends, the
+ * previous tool set is restored.
  *
- * The planner model is chosen based on the provider of the current (active) model:
- *   anthropic → claude-opus-4-8, then 4-7, then 4-6 (first with a configured API key)
- *   openai    → gpt-5.5-pro
- *   (other)   → falls back to the anthropic entry above
- *
- * Edit PLANNER_CONFIGS below to add providers or swap model ids.
- * Run `pi --list-models` to see what's registered in your build.
+ * The extension no longer switches the model or thinking effort — switch to
+ * your preferred planner model (and thinking level) yourself before calling
+ * `/plan`, and switch back afterwards. `/plan-cancel` restores your tools early.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-
-// Maps the active model's provider to the planner that should be used.
-// For each entry, the first modelId that is registered AND has a configured API key wins.
-// Providers not listed here fall back to the "anthropic" entry.
-const PLANNER_CONFIGS: Record<string, { provider: string; modelIds: readonly string[] }> = {
-	anthropic: { provider: "anthropic", modelIds: ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"] },
-	openai:    { provider: "openai",    modelIds: ["gpt-5.5-pro"] },
-};
-const DEFAULT_PLANNER_CONFIG = PLANNER_CONFIGS["anthropic"]!;
-const PLANNER_THINKING: ThinkingLevel = "xhigh";
 
 // Read-only tool allowlist while planning. "bash" stays in but is gated to
 // safe commands by the tool_call hook below.
@@ -53,51 +40,21 @@ function isSafeBash(cmd: string): boolean {
 	return SAFE_BASH.some((p) => p.test(cmd));
 }
 
-type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-
 const PLAN_SYSTEM_NUDGE = `
 The user has asked for a plan. Produce a clear, numbered implementation plan.
 Do NOT modify files yet. Do NOT call write/edit tools. You may use read/grep/bash
 (read-only) to gather context. End with: "Plan ready — reply to implement."
 `.trim();
 
-interface Snapshot {
-	provider: string;
-	id: string;
-	thinkingLevel: ThinkingLevel;
-	tools: string[];
-}
-
-export default function planWithOpus(pi: ExtensionAPI) {
-	let snapshot: Snapshot | undefined;
+export default function plan(pi: ExtensionAPI) {
 	let planning = false;
-	let activePlannerId: string | undefined;
-
-	function resolvePlanner(registry: ExtensionContext["modelRegistry"], currentProvider: string) {
-		const config = PLANNER_CONFIGS[currentProvider] ?? DEFAULT_PLANNER_CONFIG;
-		// First pass: prefer a model that is registered AND has a configured API key.
-		for (const id of config.modelIds) {
-			const model = registry.find(config.provider, id);
-			if (model && registry.hasConfiguredAuth(model)) {
-				return { model, id, config };
-			}
-		}
-		// Second pass: fall back to any registered model (setModel will surface the
-		// "missing API key" error to the user, which is more helpful than "not found").
-		for (const id of config.modelIds) {
-			const model = registry.find(config.provider, id);
-			if (model) {
-				return { model, id, config };
-			}
-		}
-		return { model: undefined, id: undefined, config };
-	}
+	let savedTools: string[] | undefined;
 
 	function updateStatus(ctx: ExtensionContext) {
 		if (planning) {
-			ctx.ui.setStatus("plan-with-opus", ctx.ui.theme.fg("accent", `📐 planning (${activePlannerId ?? "opus"})`));
+			ctx.ui.setStatus("plan", ctx.ui.theme.fg("accent", `📐 planning`));
 		} else {
-			ctx.ui.setStatus("plan-with-opus", undefined);
+			ctx.ui.setStatus("plan", undefined);
 		}
 	}
 
@@ -111,74 +68,29 @@ export default function planWithOpus(pi: ExtensionAPI) {
 			return;
 		}
 
-		const current = ctx.model;
-		if (!current) {
-			ctx.ui.notify("No active model to snapshot.", "error");
-			return;
-		}
+		// Snapshot the active tool set so it can be restored after the turn.
+		savedTools = pi.getActiveTools();
 
-		const { model: planner, id: plannerId, config: plannerConfig } = resolvePlanner(ctx.modelRegistry, current.provider);
-		if (!planner || !plannerId) {
-			ctx.ui.notify(
-				`No planner model found for provider "${current.provider}". Tried: ${plannerConfig.modelIds.join(", ")} on ${plannerConfig.provider}. Edit PLANNER_CONFIGS in plan-with-opus.ts.`,
-				"error",
-			);
-			return;
-		}
-
-		// Snapshot current model + thinking level + active tools.
-		snapshot = {
-			provider: current.provider,
-			id: current.id,
-			thinkingLevel: pi.getThinkingLevel() as ThinkingLevel,
-			tools: pi.getActiveTools(),
-		};
-
-		const ok = await pi.setModel(planner);
-		if (!ok) {
-			ctx.ui.notify(`Could not switch to ${plannerConfig.provider}/${plannerId} (missing API key?)`, "error");
-			snapshot = undefined;
-			return;
-		}
-		activePlannerId = plannerId;
-
-		// Bump thinking level and restrict tools to read-only set.
-		pi.setThinkingLevel(PLANNER_THINKING);
 		const allTools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(PLAN_TOOLS.filter((t) => allTools.includes(t)));
 
 		planning = true;
 		updateStatus(ctx);
-		ctx.ui.notify(
-			`Planning with ${plannerId} (thinking:${PLANNER_THINKING}, tools:${PLAN_TOOLS.join(",")}). Will restore after.`,
-			"info",
-		);
+		ctx.ui.notify(`Planning (tools: ${PLAN_TOOLS.join(",")}). Will restore after.`, "info");
 
 		// Send the planning prompt as a real user message so it triggers a turn.
 		pi.sendUserMessage(`${PLAN_SYSTEM_NUDGE}\n\nTask:\n${task}`);
 	}
 
-	async function restoreModel(ctx: ExtensionContext): Promise<void> {
+	async function restoreTools(ctx: ExtensionContext): Promise<void> {
 		if (!planning) return;
 		planning = false;
 
-		if (snapshot) {
-			const prev = ctx.modelRegistry.find(snapshot.provider, snapshot.id);
-			if (prev) {
-				const ok = await pi.setModel(prev);
-				if (!ok) {
-					ctx.ui.notify(`Could not restore ${snapshot.provider}/${snapshot.id}.`, "warning");
-				}
-			}
-			pi.setThinkingLevel(snapshot.thinkingLevel);
-			pi.setActiveTools(snapshot.tools);
-			ctx.ui.notify(
-				`Plan ready. Restored ${snapshot.provider}/${snapshot.id} (thinking:${snapshot.thinkingLevel}).`,
-				"info",
-			);
+		if (savedTools) {
+			pi.setActiveTools(savedTools);
+			ctx.ui.notify("Plan ready. Restored your previous tool set.", "info");
 		}
-		snapshot = undefined;
-		activePlannerId = undefined;
+		savedTools = undefined;
 		updateStatus(ctx);
 	}
 
@@ -196,44 +108,43 @@ export default function planWithOpus(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("plan", {
-		description: "Plan with Opus, then auto-restore previous model",
+		description: "Plan with the current model using a read-only tool allowlist",
 		handler: async (args, ctx) => {
 			await startPlanning(args ?? "", ctx);
 		},
 	});
 
 	pi.registerCommand("plan-cancel", {
-		description: "Cancel planning mode and restore previous model immediately",
+		description: "Cancel planning mode and restore your previous tools immediately",
 		handler: async (_args, ctx) => {
 			if (!planning) {
 				ctx.ui.notify("Not in planning mode.", "info");
 				return;
 			}
-			await restoreModel(ctx);
+			await restoreTools(ctx);
 		},
 	});
 
 	// Ctrl+Alt+P: take whatever's currently in the editor and use it as the plan task.
 	pi.registerShortcut("ctrl+alt+p", {
-		description: "Plan current editor text with Opus",
+		description: "Plan current editor text",
 		handler: async (ctx) => {
 			// Grab editor text via setEditorText round-trip is not possible; rely on /plan.
-			ctx.ui.notify("Use /plan <task> to start planning with Opus.", "info");
+			ctx.ui.notify("Use /plan <task> to start planning.", "info");
 		},
 	});
 
-	// After the planning turn finishes, restore the original model.
+	// After the planning turn finishes, restore the original tools.
 	pi.on("agent_end", async (_event, ctx) => {
 		if (planning) {
-			await restoreModel(ctx);
+			await restoreTools(ctx);
 		}
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		// Reset transient state on session boundaries.
 		planning = false;
-		snapshot = undefined;
-		activePlannerId = undefined;
+		savedTools = undefined;
 		updateStatus(ctx);
 	});
 }
