@@ -305,16 +305,23 @@ interface ResolvedConfig {
 	};
 }
 
-const USER_CONFIG = join(homedir(), ".pi", "agent", "pi-tool-permissions.json");
-const LEGACY_USER_CONFIG = join(homedir(), ".pi", "tool-permissions.json");
 // Project config: prefer the `.local.json` suffix (machine-local, not checked
 // into git). Two legacy filenames are still read as fallbacks and auto-migrated
 // to the new path on next save.
-const PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.local.json");
-const LEGACY_PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.json");
-const LEGACY2_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
+export const PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.local.json");
+export const LEGACY_PROJECT_CONFIG_REL = join(".pi", "pi-tool-permissions.json");
+export const LEGACY2_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
 const STATUS_KEY = "tool-permissions";
 const STATUS_KEY_AUTO = "tool-permissions-auto";
+
+// User config paths, parameterized by `home` so tests can exercise the
+// load/save/migration logic against a temp directory.
+export function userConfigPath(home: string = homedir()): string {
+	return join(home, ".pi", "agent", "pi-tool-permissions.json");
+}
+export function legacyUserConfigPath(home: string = homedir()): string {
+	return join(home, ".pi", "tool-permissions.json");
+}
 
 /**
  * Sane default NL rules for the auto-mode layer, used when the user omits
@@ -322,7 +329,7 @@ const STATUS_KEY_AUTO = "tool-permissions-auto";
  * user config adds on top, never replaces). `classifier` (auto-select) and
  * `environment` (empty) have no defaults — they are inherently user-specific.
  */
-const DEFAULT_AUTO_MODE = {
+export const DEFAULT_AUTO_MODE = {
 	allow: ["Running tests and linters"],
 	soft_deny: ["Force pushing, deleting remote branches"],
 	hard_deny: ["Sending data to third-party APIs or external services"],
@@ -347,18 +354,19 @@ function writeJson(path: string, data: PermissionsConfig): void {
 
 type Scope = "project" | "user";
 
-function loadUserConfigRaw(): PermissionsConfig {
-	return readJsonSafe(USER_CONFIG) ?? readJsonSafe(LEGACY_USER_CONFIG) ?? {};
+export function loadUserConfigRaw(home: string = homedir()): PermissionsConfig {
+	return readJsonSafe(userConfigPath(home)) ?? readJsonSafe(legacyUserConfigPath(home)) ?? {};
 }
 
-function saveUserConfig(cfg: PermissionsConfig): void {
-	writeJson(USER_CONFIG, cfg);
+export function saveUserConfig(cfg: PermissionsConfig, home: string = homedir()): void {
+	writeJson(userConfigPath(home), cfg);
 	// Auto-migrate: drop the legacy user file once the new file is written.
-	if (existsSync(LEGACY_USER_CONFIG)) {
+	const legacy = legacyUserConfigPath(home);
+	if (existsSync(legacy)) {
 		try {
-			rmSync(LEGACY_USER_CONFIG);
+			rmSync(legacy);
 		} catch (err) {
-			console.warn(`[tool-permissions] Could not remove legacy user config ${LEGACY_USER_CONFIG}: ${(err as Error).message}`);
+			console.warn(`[tool-permissions] Could not remove legacy user config ${legacy}: ${(err as Error).message}`);
 		}
 	}
 }
@@ -373,7 +381,20 @@ function tildify(p: string): string {
 function loadConfig(cwd: string): ResolvedConfig {
 	const user = loadUserConfigRaw();
 	const project = loadProjectConfigRaw(cwd);
+	return mergeConfig(user, project, cwd, homedir());
+}
 
+/**
+ * Pure merge of user + project config objects into a ResolvedConfig. Factored
+ * from loadConfig so tests can exercise the merge logic without touching disk.
+ * `home` is used to expand the readAllowSkills / readAllowPiDocs globs.
+ */
+export function mergeConfig(
+	user: PermissionsConfig,
+	project: PermissionsConfig,
+	cwd: string,
+	home: string,
+): ResolvedConfig {
 	const allow = dedupe([...(user.allow ?? []), ...(project.allow ?? [])]);
 	const deny  = dedupe([...(user.deny  ?? []), ...(project.deny  ?? [])]);
 	const ask   = dedupe([...(user.ask   ?? []), ...(project.ask   ?? [])]);
@@ -406,15 +427,15 @@ function loadConfig(cwd: string): ResolvedConfig {
 	if (lsAllowCwd) {
 		implicitAllow.push(`Ls(${cwdGlobPattern(cwd)})`);
 	}
-	if (readAllowSkills) {
-		for (const glob of skillReadGlobs(homedir())) {
+	if (home && readAllowSkills) {
+		for (const glob of skillReadGlobs(home)) {
 			for (const tool of READONLY_PATH_TOOLS) {
 				implicitAllow.push(`${tool}(${glob})`);
 			}
 		}
 	}
-	if (readAllowPiDocs) {
-		for (const glob of piDocsReadGlobs(homedir())) {
+	if (home && readAllowPiDocs) {
+		for (const glob of piDocsReadGlobs(home)) {
 			for (const tool of READONLY_PATH_TOOLS) {
 				implicitAllow.push(`${tool}(${glob})`);
 			}
@@ -465,7 +486,7 @@ function dedupe(items: string[]): string[] {
  * layer controlled by the `/permissions auto` toggle); legacy configs that
  * still set it are coerced to `"ask"` (safe) with a warning.
  */
-function coerceDefaultAction(raw: unknown): DefaultAction {
+export function coerceDefaultAction(raw: unknown): DefaultAction {
 	if (raw === "allow" || raw === "deny" || raw === "ask") return raw;
 	if (raw === "auto") {
 		console.warn('[tool-permissions] defaultAction: "auto" is no longer a valid default — auto mode is now controlled by the /permissions auto toggle. Coercing to "ask".');
@@ -474,26 +495,26 @@ function coerceDefaultAction(raw: unknown): DefaultAction {
 	return "ask";
 }
 
-function projectConfigPath(cwd: string): string {
+export function projectConfigPath(cwd: string): string {
 	return join(cwd, PROJECT_CONFIG_REL);
 }
 
-function legacyProjectConfigPath(cwd: string): string {
+export function legacyProjectConfigPath(cwd: string): string {
 	return join(cwd, LEGACY_PROJECT_CONFIG_REL);
 }
 
-function legacy2ProjectConfigPath(cwd: string): string {
+export function legacy2ProjectConfigPath(cwd: string): string {
 	return join(cwd, LEGACY2_PROJECT_CONFIG_REL);
 }
 
-function loadProjectConfigRaw(cwd: string): PermissionsConfig {
+export function loadProjectConfigRaw(cwd: string): PermissionsConfig {
 	return readJsonSafe(projectConfigPath(cwd))
 		?? readJsonSafe(legacyProjectConfigPath(cwd))
 		?? readJsonSafe(legacy2ProjectConfigPath(cwd))
 		?? {};
 }
 
-function saveProjectConfig(cwd: string, cfg: PermissionsConfig): void {
+export function saveProjectConfig(cwd: string, cfg: PermissionsConfig): void {
 	writeJson(projectConfigPath(cwd), cfg);
 	// Auto-migrate: remove any legacy files now that the new file is written.
 	for (const legacyPath of [legacyProjectConfigPath(cwd), legacy2ProjectConfigPath(cwd)]) {
@@ -520,7 +541,7 @@ const READONLY_PATH_TOOLS = ["Read", "Ls", "Glob", "Grep"] as const;
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 /** Replace all backslashes with forward slashes. */
-function normalizePathSep(p: string): string {
+export function normalizePathSep(p: string): string {
 	return p.replace(/\\/g, "/");
 }
 
@@ -529,7 +550,7 @@ function normalizePathSep(p: string): string {
  * Replaces backslashes with forward slashes, and resolves relative paths against cwd
  * so they can be compared against absolute patterns like the injected cwd glob.
  */
-function normalizeMatchPath(p: string, cwd: string): string {
+export function normalizeMatchPath(p: string, cwd: string): string {
 	if (!p) return p;
 	const sep = normalizePathSep(p);
 	// Relative: doesn't start with / or a Windows drive letter (e.g. C:)
@@ -540,7 +561,7 @@ function normalizeMatchPath(p: string, cwd: string): string {
 }
 
 /** Returns the glob pattern that matches cwd and all its descendants. */
-function cwdGlobPattern(cwd: string): string {
+export function cwdGlobPattern(cwd: string): string {
 	return normalizePathSep(cwd) + "/**";
 }
 
@@ -554,7 +575,7 @@ function cwdGlobPattern(cwd: string): string {
  *   ~/.pi/agent/git/**\/skills/**   — skills inside cloned skill repos
  *   ~/.agents/skills/**             — alternate user-global skill location
  */
-function skillReadGlobs(home: string): string[] {
+export function skillReadGlobs(home: string): string[] {
 	const h = normalizePathSep(home);
 	return [
 		`${h}/.pi/agent/skills/**`,
@@ -579,7 +600,7 @@ function skillReadGlobs(home: string): string[] {
  * Note: system-wide install paths (/usr/local/lib/..., /usr/lib/...) are not
  * covered here as they are not relative to the home directory.
  */
-function piDocsReadGlobs(home: string): string[] {
+export function piDocsReadGlobs(home: string): string[] {
 	const h = normalizePathSep(home);
 	return [
 		`${h}/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/**`,
@@ -604,7 +625,7 @@ function piDocsReadGlobs(home: string): string[] {
  * Bare `cd` (no argument) navigates to $HOME, not cwd, so it is NOT matched.
  * Arguments containing unrecognised shell metacharacters are rejected for safety.
  */
-function isNoopCd(cmd: string, cwd: string): boolean {
+export function isNoopCd(cmd: string, cwd: string): boolean {
 	const trimmed = cmd.trim();
 	if (!/^cd(\s|$)/.test(trimmed)) return false;
 
@@ -674,7 +695,7 @@ const READONLY_BASH_WITH_PATHS = new Set([
  * consumers — rule pattern matching, `tokenizeSimple`, `hasTopLevelOutputRedirect`,
  * `isNoopCd` — all see the canonical form even when the command is non-compound.
  */
-function stripLineContinuations(cmd: string): string {
+export function stripLineContinuations(cmd: string): string {
 	let out = "";
 	let inSingle = false;
 	let i = 0;
@@ -759,7 +780,7 @@ function tokenizeSimple(cmd: string): string[] {
  *     every non-flag argument resolves to a path inside (or equal to) cwd.
  *  4. Anything else → false.
  */
-function isReadOnlyBashSubcommand(cmd: string, cwd: string): boolean {
+export function isReadOnlyBashSubcommand(cmd: string, cwd: string): boolean {
 	const trimmed = cmd.trim();
 	if (!trimmed) return false;
 	if (hasTopLevelOutputRedirect(trimmed)) return false;
@@ -784,7 +805,7 @@ function isReadOnlyBashSubcommand(cmd: string, cwd: string): boolean {
  * Normalize a tool name for comparison: lowercase and strip underscores.
  * Makes WebSearch, websearch, and web_search all equivalent.
  */
-function normalizeTool(name: string): string {
+export function normalizeTool(name: string): string {
 	return name.toLowerCase().replace(/_/g, "");
 }
 
@@ -794,7 +815,7 @@ function normalizeTool(name: string): string {
  * Normalize toolDefaults keys (tool names) and validate values.
  * Invalid action strings are silently dropped.
  */
-function normalizeToolDefaultsKeys(td: Record<string, string>): Record<string, Action> {
+export function normalizeToolDefaultsKeys(td: Record<string, string>): Record<string, Action> {
 	const out: Record<string, Action> = {};
 	for (const [k, v] of Object.entries(td)) {
 		if (v === "allow" || v === "deny" || v === "ask") {
@@ -813,7 +834,7 @@ function normalizeToolDefaultsKeys(td: Record<string, string>): Record<string, A
  * A bare `*` without a leading space is unaffected (e.g. `npm*` still requires the
  * matched string to start with `npm`).
  */
-function compilePattern(pattern: string): RegExp {
+export function compilePattern(pattern: string): RegExp {
 	if (pattern.length >= 2 && pattern.startsWith("/") && pattern.endsWith("/")) {
 		return new RegExp(pattern.slice(1, -1), "i");
 	}
@@ -835,8 +856,8 @@ interface ParsedRule {
 	raw: string;
 }
 
-function parseRule(raw: string): ParsedRule | null {
-	const trimmed = raw.trim();
+export function parseRule(raw: string): ParsedRule | null {
+	const trimmed = (raw ?? "").trim();
 	if (!trimmed) return null;
 	const m = trimmed.match(/^([A-Za-z0-9_]+)(?:\((.*)\))?$/);
 	if (!m) return null;
@@ -850,7 +871,7 @@ function parseRule(raw: string): ParsedRule | null {
 	};
 }
 
-function getMatchField(toolName: string, input: Record<string, unknown>): string {
+export function getMatchField(toolName: string, input: Record<string, unknown>): string {
 	const t = normalizeTool(toolName);
 	if (t === "bash" || t === "pwsh") return String(input.command ?? "");
 	if (t === "read" || t === "write" || t === "edit") return String(input.path ?? "");
@@ -868,7 +889,7 @@ function isPathTool(toolName: string): boolean {
 	return t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls";
 }
 
-function ruleMatches(rule: ParsedRule, toolName: string, input: Record<string, unknown>, cwd?: string): boolean {
+export function ruleMatches(rule: ParsedRule, toolName: string, input: Record<string, unknown>, cwd?: string): boolean {
 	if (rule.tool !== normalizeTool(toolName)) return false;
 	if (!rule.regex) return true;
 	const field = getMatchField(toolName, input);
@@ -953,7 +974,7 @@ function consumeHeredoc(cmd: string, pos: number): number | null {
  *   { kind: "single" }             – no top-level operator found (or case block detected)
  *   { kind: "compound", parts }    – trimmed, non-empty subcommands
  */
-function splitTopLevelShell(cmd: string): SplitResult {
+export function splitTopLevelShell(cmd: string): SplitResult {
 	// `case` pattern clauses (`foo)`) look like unmatched parens to the splitter.
 	// Rather than attempting to parse the block, treat any command containing a
 	// top-level `case` keyword as a single unit so it falls through to decide()
@@ -1126,7 +1147,7 @@ function splitTopLevelShell(cmd: string): SplitResult {
  * Risk note: binaries literally named after these keywords would also be elided.
  * That is vanishingly rare in practice and accepted as a trade-off.
  */
-function stripStructuralKeywords(part: string): string | null {
+export function stripStructuralKeywords(part: string): string | null {
 	let s = part.trim();
 	while (s.length > 0) {
 		// Pure structural keyword tokens — bare, no arguments
@@ -1160,7 +1181,7 @@ interface CompoundDecision {
 	breakdown: SubcommandDecision[];
 }
 
-function decideCompound(
+export function decideCompound(
 	cfg: ResolvedConfig,
 	toolName: string,
 	input: Record<string, unknown>,
@@ -1226,7 +1247,7 @@ function decideCompound(
 // ── Breakdown rendering ──────────────────────────────────────────────────────
 
 /** Single-character status icon for a per-subcommand action. */
-function actionIcon(action: Action): string {
+export function actionIcon(action: Action): string {
 	if (action === "allow") return "✓";
 	if (action === "deny") return "✗";
 	return "?";
@@ -1240,7 +1261,7 @@ function actionIcon(action: Action): string {
  * of which row is current. Keep gutter widths in sync — see the
  * column-alignment test in test-bash.mjs.
  */
-function formatBreakdownLine(sub: string, action: Action, isCurrent: boolean): string {
+export function formatBreakdownLine(sub: string, action: Action, isCurrent: boolean): string {
 	const gutter = isCurrent ? " » " : "   ";
 	return `${gutter}[${actionIcon(action)}] ${sub}`;
 }
@@ -1249,7 +1270,7 @@ function formatBreakdownLine(sub: string, action: Action, isCurrent: boolean): s
  * Render the full breakdown block (newline-joined). When `currentSub` is null,
  * no row is marked current (all rows use the blank gutter).
  */
-function formatBreakdown(breakdown: SubcommandDecision[], currentSub: string | null): string {
+export function formatBreakdown(breakdown: SubcommandDecision[], currentSub: string | null): string {
 	return breakdown
 		.map((b) => formatBreakdownLine(b.sub, b.action, currentSub !== null && b.sub === currentSub))
 		.join("\n");
@@ -1261,7 +1282,7 @@ function formatBreakdown(breakdown: SubcommandDecision[], currentSub: string | n
  * prompt loop after a rule is saved mid-loop so the dialog’s breakdown
  * block and the per-step decisions reflect the freshly loaded config.
  */
-function recomputeBreakdown(breakdown: SubcommandDecision[], cfg: ResolvedConfig, autoActive = false): SubcommandDecision[] {
+export function recomputeBreakdown(breakdown: SubcommandDecision[], cfg: ResolvedConfig, autoActive = false): SubcommandDecision[] {
 	return breakdown.map((b) => ({ sub: b.sub, action: decide(cfg, "bash", { command: b.sub }, autoActive) }));
 }
 
@@ -1286,11 +1307,11 @@ type ClassifierComplete = (model: Model<Api>, context: Context) => Promise<Assis
 type HasAuth = (model: Model<Api>) => boolean;
 
 /** Cost proxy: cheaper/faster models first. Lower score = preferred. */
-function modelCostScore(model: Model<Api>): number {
+export function modelCostScore(model: Model<Api>): number {
 	return (model.cost.input ?? 0) + (model.cost.output ?? 0);
 }
 
-function dedupeModels(pool: Model<Api>[]): Model<Api>[] {
+export function dedupeModels(pool: Model<Api>[]): Model<Api>[] {
 	const seen = new Set<string>();
 	const out: Model<Api>[] = [];
 	for (const m of pool) {
@@ -1307,7 +1328,7 @@ function dedupeModels(pool: Model<Api>[]): Model<Api>[] {
  * models from `currentProvider` come first (cheapest within that provider first),
  * then all other providers in ascending cost order. Ties keep insertion order.
  */
-function rankClassifierModels(pool: Model<Api>[], currentProvider: string | undefined): Model<Api>[] {
+export function rankClassifierModels(pool: Model<Api>[], currentProvider: string | undefined): Model<Api>[] {
 	const unique = dedupeModels(pool);
 	return [...unique].sort((a, b) => {
 		const aSame = currentProvider !== undefined && a.provider === currentProvider;
@@ -1322,7 +1343,7 @@ function rankClassifierModels(pool: Model<Api>[], currentProvider: string | unde
  * rank the pool (preferring the current provider) and return the first with
  * configured auth. `find` and `hasAuth` are injected seams.
  */
-function pickClassifierModel(
+export function pickClassifierModel(
 	pool: Model<Api>[],
 	currentProvider: string | undefined,
 	hasAuth: HasAuth,
@@ -1340,7 +1361,7 @@ function pickClassifierModel(
 }
 
 /** Build a short human-readable description of the action for the classifier. */
-function describeAction(toolName: string, input: Record<string, unknown>): string {
+export function describeAction(toolName: string, input: Record<string, unknown>): string {
 	const t = normalizeTool(toolName);
 	if (t === "bash" || t === "pwsh") return `Tool: ${toolName}\nCommand: ${String(input.command ?? "")}`;
 	if (t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls")
@@ -1349,7 +1370,7 @@ function describeAction(toolName: string, input: Record<string, unknown>): strin
 	try { return `Tool: ${toolName}\nInput: ${JSON.stringify(input)}`; } catch { return `Tool: ${toolName}`; }
 }
 
-function buildClassifierPrompt(toolName: string, input: Record<string, unknown>, autoMode: ResolvedAutoModeConfig): string {
+export function buildClassifierPrompt(toolName: string, input: Record<string, unknown>, autoMode: ResolvedAutoModeConfig): string {
 	const env = autoMode.environment.length ? autoMode.environment.map((e) => `  - ${e}`).join("\n") : "  (none)";
 	const allow = autoMode.allow.length ? autoMode.allow.map((r) => `  - ${r}`).join("\n") : "  (none)";
 	const soft = autoMode.soft_deny.length ? autoMode.soft_deny.map((r) => `  - ${r}`).join("\n") : "  (none)";
@@ -1378,7 +1399,7 @@ function buildClassifierPrompt(toolName: string, input: Record<string, unknown>,
 	].join("\n");
 }
 
-function parseClassifierResponse(text: string): ClassifyResult {
+export function parseClassifierResponse(text: string): ClassifyResult {
 	const verdictMatch = text.match(/VERDICT:\s*(allow|soft_deny|hard_deny|no_match)\b/i);
 	const verdict = verdictMatch ? (verdictMatch[1].toLowerCase() as ClassifierVerdict) : "no_match";
 	const reasonMatch = text.match(/REASON:\s*(.+)/i);
@@ -1397,7 +1418,7 @@ function parseClassifierResponse(text: string): ClassifyResult {
  *   non-interactive modes — the non-interactive `ask`→deny fallback is
  *   handled by the `tool_call` handler's `!ctx.hasUI` branch, not here.
  */
-function verdictToAction(verdict: ClassifierVerdict, nonInteractive: boolean, defaultAction: DefaultAction): DefaultAction {
+export function verdictToAction(verdict: ClassifierVerdict, nonInteractive: boolean, defaultAction: DefaultAction): DefaultAction {
 	if (verdict === "allow") return "allow";
 	if (verdict === "hard_deny") return "deny";
 	if (verdict === "soft_deny") return nonInteractive ? "deny" : "ask";
@@ -1405,7 +1426,7 @@ function verdictToAction(verdict: ClassifierVerdict, nonInteractive: boolean, de
 }
 
 /** Cache key: hash(toolName, input, ruleset). Binds token cost on loops. */
-function classifierCacheKey(toolName: string, input: Record<string, unknown>, autoMode: ResolvedAutoModeConfig): string {
+export function classifierCacheKey(toolName: string, input: Record<string, unknown>, autoMode: ResolvedAutoModeConfig): string {
 	const ruleset = JSON.stringify({
 		c: autoMode.classifier,
 		e: autoMode.environment,
@@ -1422,7 +1443,7 @@ function classifierCacheKey(toolName: string, input: Record<string, unknown>, au
  * Results are cached by (toolName, input, ruleset) for the lifetime of the
  * provided cache Map.
  */
-async function classifyAction(
+export async function classifyAction(
 	complete: ClassifierComplete,
 	model: Model<Api>,
 	toolName: string,
@@ -1453,7 +1474,7 @@ async function classifyAction(
 	return result;
 }
 
-function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>, autoActive = false): Action {
+export function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>, autoActive = false): Action {
 	const check = (list: string[]): boolean => {
 		for (const raw of list) {
 			const rule = parseRule(raw);
@@ -1482,7 +1503,7 @@ function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unk
 }
 
 /** Suggest a rule string that matches the current call exactly enough to be useful. */
-function suggestRule(toolName: string, input: Record<string, unknown>): string {
+export function suggestRule(toolName: string, input: Record<string, unknown>): string {
 	const t = normalizeTool(toolName);
 	if (t === "bash" || t === "pwsh") {
 		const cmd = String(input.command ?? "").trim();
@@ -1533,7 +1554,7 @@ function pwshExtraInfo(toolName: string, input: Record<string, unknown>): string
  * Return a copy of the tool input with the path field normalized for permission matching.
  * The original event.input is never mutated — only this copy enters decide/ruleMatches.
  */
-function inputForMatching(
+export function inputForMatching(
 	toolName: string,
 	input: Record<string, unknown>,
 	cwd: string,
@@ -1978,7 +1999,7 @@ export default function (pi: ExtensionAPI) {
 	// Interactive scope picker used by Allow/Deny-always prompts. Returns null on Esc.
 	async function promptScope(ctx: ExtensionContext): Promise<Scope | null> {
 		const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
-		const userPath = tildify(USER_CONFIG);
+		const userPath = tildify(userConfigPath());
 		const projectLabel = `Project (${projectPath})`;
 		const userLabel = `User (${userPath})`;
 		const choice = await ctx.ui.select("Save rule where?", [projectLabel, userLabel]);

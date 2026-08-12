@@ -1,4 +1,9 @@
 // run: node run-all.mjs
+//
+// Runs all extension-level test suites with `node --experimental-strip-types`
+// (Node >= 22.6) because the suites import test-helpers.mjs, which imports the
+// real TypeScript module (./index.ts) so tests exercise the actual code, not a
+// mirror.
 
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -20,7 +25,7 @@ let failed = 0;
 
 for (const file of suites) {
 	console.log(`\n${BAR}\n  ${file}\n${BAR}`);
-	const result = spawnSync("node", [file], { stdio: "inherit", cwd: __dirname, shell: true });
+	const result = spawnSync("node", ["--experimental-strip-types", file], { stdio: "inherit", cwd: __dirname, shell: true });
 	if (result.status !== 0) failed++;
 }
 

@@ -1,708 +1,79 @@
 // Shared helpers for all test files.
-// These are plain-JS mirrors of the pure functions in index.ts.
-// When index.ts changes, update this file to match.
-
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
-
-// ── Tool name helpers ─────────────────────────────────────────────────────
-
-export const normalizeTool = (name) => name.toLowerCase().replace(/_/g, "");
-
-// ── Path helpers ──────────────────────────────────────────────────────────
-
-export const normalizePathSep = (p) => p.replace(/\\/g, "/");
-
-export function normalizeMatchPath(p, cwd) {
-	if (!p) return p;
-	const sep = normalizePathSep(p);
-	if (!sep.startsWith("/") && !/^[A-Za-z]:/.test(sep))
-		return normalizePathSep(resolve(cwd, p));
-	return sep;
-}
-
-export function cwdGlobPattern(cwd) {
-	return normalizePathSep(cwd) + "/**";
-}
-
-/**
- * Mirrors skillReadGlobs() in index.ts: canonical list of glob patterns covering
- * pi's known skill roots relative to the given home directory.
- */
-export function skillReadGlobs(home) {
-	const h = normalizePathSep(home);
-	return [
-		`${h}/.pi/agent/skills/**`,
-		`${h}/.pi/agent/git/**/skills/**`,
-		`${h}/.agents/skills/**`,
-	];
-}
-
-/**
- * Mirrors piDocsReadGlobs() in index.ts: canonical list of glob patterns covering
- * pi's bundled documentation package relative to the given home directory.
- */
-export function piDocsReadGlobs(home) {
-	const h = normalizePathSep(home);
-	return [
-		`${h}/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/**`,
-		`${h}/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/**`,
-		`${h}/.nvm/versions/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**`,
-		`${h}/.volta/tools/image/node/*/lib/node_modules/@earendil-works/pi-coding-agent/**`,
-		`${h}/.local/share/npm/lib/node_modules/@earendil-works/pi-coding-agent/**`,
-		`${h}/Library/Application Support/npm/lib/node_modules/@earendil-works/pi-coding-agent/**`,
-	];
-}
-
-/**
- * Returns true when `cmd` is a `cd` invocation whose destination resolves to
- * the current working directory.  Mirrors isNoopCd() in index.ts.
- */
-export function isNoopCd(cmd, cwd) {
-	const trimmed = cmd.trim();
-	if (!/^cd(\s|$)/.test(trimmed)) return false;
-
-	let arg = trimmed.slice(2).trim();
-
-	// Strip a single pair of surrounding single or double quotes
-	if (
-		arg.length >= 2 &&
-		((arg[0] === "'" && arg[arg.length - 1] === "'") ||
-			(arg[0] === '"' && arg[arg.length - 1] === '"'))
-	) {
-		arg = arg.slice(1, -1).trim();
-	}
-
-	// Bare `cd` → goes to HOME, not cwd
-	if (!arg) return false;
-
-	// Well-known symbolic references to cwd (checked before metachar rejection)
-	if (arg === "." || arg === "./" || arg === "$PWD" || arg === "${PWD}" || arg === "~+") return true;
-
-	// Reject if the argument contains shell metacharacters not already handled above
-	if (/[`$(){}|&;<>]/.test(arg)) return false;
-
-	// Check whether the path (absolute or relative) resolves to cwd.
-	// For absolute paths we compare directly to avoid OS-specific resolve() quirks
-	// (e.g. on Windows, resolve('/unix/path') prepends the current drive).
-	try {
-		const stripped = arg.replace(/\/+$/, "");
-		const argNorm = normalizePathSep(stripped);
-		const isAbsolute = argNorm.startsWith("/") || /^[A-Za-z]:/.test(argNorm);
-		const resolved = isAbsolute ? argNorm : normalizePathSep(resolve(cwd, stripped));
-		return resolved.toLowerCase() === normalizePathSep(cwd).toLowerCase();
-	} catch {
-		return false;
-	}
-}
-
-// ── Read-only bash helpers ────────────────────────────────────────
-
-export const READONLY_BASH_SAFE_ALWAYS = new Set([
-	"pwd", "echo", "printf", "date", "whoami", "id", "hostname",
-	"uname", "env", "printenv", "true", "false", "which", "type", "command",
-]);
-
-export const READONLY_BASH_WITH_PATHS = new Set([
-	"ls", "cat", "head", "tail", "wc", "file", "stat", "tree",
-	"du", "realpath", "readlink", "dirname", "basename",
-]);
-
-export function hasTopLevelOutputRedirect(cmd) {
-	let inSingle = false, inDouble = false;
-	for (let i = 0; i < cmd.length; i++) {
-		const ch = cmd[i];
-		if (ch === "\\" && !inSingle) { i++; continue; }
-		if (ch === "'" && !inDouble) { inSingle = !inSingle; continue; }
-		if (ch === '"' && !inSingle) { inDouble = !inDouble; continue; }
-		if (!inSingle && !inDouble && ch === ">") return true;
-	}
-	return false;
-}
-
-export function tokenizeSimple(cmd) {
-	const tokens = [];
-	let current = "", inSingle = false, inDouble = false, i = 0;
-	while (i < cmd.length) {
-		const ch = cmd[i];
-		if (ch === "\\" && !inSingle) {
-			if (i + 1 < cmd.length) { current += cmd[i + 1]; i += 2; } else i++;
-			continue;
-		}
-		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
-		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
-		if ((ch === " " || ch === "\t") && !inSingle && !inDouble) {
-			if (current) { tokens.push(current); current = ""; }
-			i++; continue;
-		}
-		current += ch; i++;
-	}
-	if (current) tokens.push(current);
-	return tokens;
-}
-
-export function isReadOnlyBashSubcommand(cmd, cwd) {
-	const trimmed = cmd.trim();
-	if (!trimmed) return false;
-	if (hasTopLevelOutputRedirect(trimmed)) return false;
-	const tokens = tokenizeSimple(trimmed);
-	if (tokens.length === 0) return false;
-	const cmdName = tokens[0].toLowerCase();
-	if (READONLY_BASH_SAFE_ALWAYS.has(cmdName)) return true;
-	if (READONLY_BASH_WITH_PATHS.has(cmdName)) {
-		const pathArgs = tokens.slice(1).filter((t) => t.length > 0 && !t.startsWith("-"));
-		if (pathArgs.length === 0) return true;
-		const cwdNorm = normalizePathSep(cwd).toLowerCase();
-		return pathArgs.every((arg) => {
-			const norm = normalizeMatchPath(arg, cwd).toLowerCase();
-			return norm === cwdNorm || norm.startsWith(cwdNorm + "/");
-		});
-	}
-	return false;
-}
-
-// ── toolDefaults helpers ──────────────────────────────────────────────────
-
-export function normalizeToolDefaultsKeys(td) {
-	const out = {};
-	for (const [k, v] of Object.entries(td)) {
-		if (v === "allow" || v === "deny" || v === "ask")
-			out[normalizeTool(k)] = v;
-	}
-	return out;
-}
-
-/** Coerce a raw defaultAction into a valid persistable default. "auto" is no
- * longer a valid default (auto mode is a session-only layer); coerce to "ask". */
-export function coerceDefaultAction(raw) {
-	if (raw === "allow" || raw === "deny" || raw === "ask") return raw;
-	return "ask";
-}
-
-// ── Pattern / rule helpers ────────────────────────────────────────────────
-
-export function compilePattern(pattern) {
-	if (pattern.length >= 2 && pattern.startsWith("/") && pattern.endsWith("/"))
-		return new RegExp(pattern.slice(1, -1), "i");
-	// " *" → "( .*)?" so a rule like Bash(git status *) matches the bare "git status" too.
-	const PLACEHOLDER = "\u0000";
-	const escaped = pattern
-		.replace(/ \*/g, PLACEHOLDER)
-		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-		.replace(/\*/g, ".*")
-		.replace(/\?/g, ".")
-		.replace(/\u0000/g, "( .*)?");
-	return new RegExp(`^${escaped}$`, "i");
-}
-
-export function parseRule(raw) {
-	const trimmed = (raw ?? "").trim();
-	if (!trimmed) return null;
-	const m = trimmed.match(/^([A-Za-z0-9_]+)(?:\((.*)\))?$/);
-	if (!m) return null;
-	const tool = normalizeTool(m[1]);
-	const pattern = m[2];
-	return { tool, pattern, regex: pattern ? compilePattern(pattern) : undefined, raw: trimmed };
-}
-
-export function getMatchField(toolName, input) {
-	const t = normalizeTool(toolName);
-	if (t === "bash" || t === "pwsh") return String(input.command ?? "");
-	if (t === "read" || t === "write" || t === "edit") return String(input.path ?? "");
-	if (t === "grep" || t === "glob" || t === "ls") return String(input.path ?? "");
-	if (t === "webfetch") return String(input.url ?? "");
-	try { return JSON.stringify(input); } catch { return ""; }
-}
-
-const PATH_TOOLS = new Set(["read", "write", "edit", "grep", "glob", "ls"]);
-
-export function ruleMatches(rule, toolName, input, cwd) {
-	if (rule.tool !== normalizeTool(toolName)) return false;
-	if (!rule.regex) return true;
-	const field = getMatchField(toolName, input);
-	// For path-based tools, also test the cwd-resolved absolute path so that the
-	// implicit Read(<cwd>/**) rule matches relative calls like Read(./TODO.md).
-	if (cwd && field && PATH_TOOLS.has(normalizeTool(toolName))) {
-		const resolved = normalizeMatchPath(field, cwd);
-		if (resolved !== field && rule.regex.test(resolved)) return true;
-	}
-	return rule.regex.test(field);
-}
-
-export function inputForMatching(toolName, input, cwd) {
-	const t = normalizeTool(toolName);
-	if (t === "read" || t === "write" || t === "edit") {
-		// Only normalise separators — do NOT resolve relative paths to absolute.
-		// Resolving would break user rules like Write(.env*) when paths are relative.
-		// The synthetic cwd rule works when pi provides absolute paths (the common case).
-		const p = String(input.path ?? "");
-		return p ? { ...input, path: normalizePathSep(p) } : input;
-	}
-	if (t === "grep" || t === "glob" || t === "ls") {
-		const p = input.path ? String(input.path) : cwd;
-		const normalized = normalizeMatchPath(p, cwd);
-		return { ...input, path: normalized.endsWith("/") ? normalized : normalized + "/" };
-	}
-	return input;
-}
-
-export function suggestRule(toolName, input) {
-	const t = normalizeTool(toolName);
-	if (t === "bash" || t === "pwsh") {
-		const cmd = String(input.command ?? "").trim();
-		return cmd ? `${toolName}(${cmd})` : toolName;
-	}
-	if (t === "read" || t === "write" || t === "edit") {
-		const p = String(input.path ?? "");
-		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
-	}
-	if (t === "grep" || t === "glob" || t === "ls") {
-		const p = String(input.path ?? "");
-		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
-	}
-	if (t === "websearch") return "WebSearch";
-	if (t === "webfetch") {
-		const url = String(input.url ?? "");
-		if (url) {
-			try { return `WebFetch(${new URL(url).origin}/*)`; } catch { /* fall through */ }
-		}
-		return "WebFetch";
-	}
-	return toolName;
-}
-
-// ── Compound bash splitting ───────────────────────────────────────────────
-
-/**
- * Mirrors stripLineContinuations() in index.ts. Strips POSIX `\<LF>` and
- * `\<CRLF>` line-continuations outside single quotes; preserves them inside
- * single quotes; leaves other backslash-escapes (`\&`, `\$`, ...) untouched.
- */
-export function stripLineContinuations(cmd) {
-	let out = "";
-	let inSingle = false;
-	let i = 0;
-	while (i < cmd.length) {
-		const ch = cmd[i];
-		if (ch === "'") { inSingle = !inSingle; out += ch; i++; continue; }
-		if (ch === "\\" && !inSingle) {
-			const next = cmd[i + 1];
-			if (next === "\n") { i += 2; continue; }
-			if (next === "\r" && cmd[i + 2] === "\n") { i += 3; continue; }
-			if (next !== undefined) { out += ch + next; i += 2; continue; }
-			out += ch; i++; continue;
-		}
-		out += ch; i++;
-	}
-	return out;
-}
-
-export function splitTopLevelShell(cmd) {
-	if (/(?:^|[;&|]\s*|\n\s*)case\s/.test(cmd)) return { kind: "single" };
-	const parts = [];
-	let current = "", inSingle = false, inDouble = false, inBacktick = false;
-	let parenDepth = 0, foundOperator = false, i = 0;
-
-	while (i < cmd.length) {
-		const ch = cmd[i];
-		if (ch === "\\" && !inSingle) {
-			const next = cmd[i + 1];
-			if (next === "\n") { i += 2; continue; }
-			if (next === "\r" && cmd[i + 2] === "\n") { i += 3; continue; }
-			current += ch + (next ?? ""); i += 2; continue;
-		}
-		if (ch === "'" && !inDouble && !inBacktick) { inSingle = !inSingle; current += ch; i++; continue; }
-		if (ch === '"' && !inSingle && !inBacktick) { inDouble = !inDouble; current += ch; i++; continue; }
-		if (ch === "`" && !inSingle && !inDouble) { inBacktick = !inBacktick; current += ch; i++; continue; }
-		if (!inSingle && !inDouble && !inBacktick) {
-			if (ch === "(") { parenDepth++; current += ch; i++; continue; }
-			if (ch === ")") {
-				if (parenDepth <= 0) return { kind: "ambiguous" };
-				parenDepth--; current += ch; i++; continue;
-			}
-		}
-		if (!inSingle && !inDouble && !inBacktick && parenDepth === 0) {
-			if (ch === "&" && cmd[i + 1] === "&") { parts.push(current.trim()); current = ""; i += 2; foundOperator = true; continue; }
-			if (ch === "|" && cmd[i + 1] === "|") { parts.push(current.trim()); current = ""; i += 2; foundOperator = true; continue; }
-			if (ch === "|" && cmd[i + 1] !== "|") { parts.push(current.trim()); current = ""; i++; foundOperator = true; continue; }
-			if (ch === ";") { parts.push(current.trim()); current = ""; i++; foundOperator = true; continue; }
-			if (ch === "\n" || (ch === "\r" && cmd[i + 1] === "\n")) {
-				parts.push(current.trim()); current = ""; i += ch === "\r" ? 2 : 1; foundOperator = true; continue;
-			}
-		}
-		current += ch; i++;
-	}
-
-	if (inSingle || inDouble || inBacktick || parenDepth !== 0) return { kind: "ambiguous" };
-	if (!foundOperator) return { kind: "single" };
-	const last = current.trim();
-	if (last) parts.push(last);
-	const nonEmpty = parts.filter((p) => p.length > 0 && !p.trimStart().startsWith("#"));
-	if (nonEmpty.length > 1) return { kind: "compound", parts: nonEmpty };
-	if (nonEmpty.length === 1) return { kind: "single", effectiveCmd: nonEmpty[0] };
-	return { kind: "single" };
-}
-
-// ── Breakdown rendering ──────────────────────────────────────────────────────
-
-export function actionIcon(action) {
-	if (action === "allow") return "✓";
-	if (action === "deny") return "✗";
-	return "?";
-}
-
-export function formatBreakdownLine(sub, action, isCurrent) {
-	const gutter = isCurrent ? " » " : "   ";
-	return `${gutter}[${actionIcon(action)}] ${sub}`;
-}
-
-export function formatBreakdown(breakdown, currentSub) {
-	return breakdown
-		.map((b) => formatBreakdownLine(b.sub, b.action, currentSub !== null && b.sub === currentSub))
-		.join("\n");
-}
-
-export function recomputeBreakdown(breakdown, cfg, autoActive = false) {
-	return breakdown.map((b) => ({ sub: b.sub, action: decide(cfg, "bash", { command: b.sub }, autoActive) }));
-}
-
-// ── Decision engine ───────────────────────────────────────────────────────
-
-// ── Auto-mode classifier helpers (Step 2) ─────────────────────────────────
-
-export function modelCostScore(model) {
-	return (model.cost.input ?? 0) + (model.cost.output ?? 0);
-}
-
-export function dedupeModels(pool) {
-	const seen = new Set();
-	const out = [];
-	for (const m of pool) {
-		const key = `${m.provider}/${m.id}`;
-		if (seen.has(key)) continue;
-		seen.add(key);
-		out.push(m);
-	}
-	return out;
-}
-
-export function rankClassifierModels(pool, currentProvider) {
-	const unique = dedupeModels(pool);
-	return [...unique].sort((a, b) => {
-		const aSame = currentProvider !== undefined && a.provider === currentProvider;
-		const bSame = currentProvider !== undefined && b.provider === currentProvider;
-		if (aSame !== bSame) return aSame ? -1 : 1;
-		return modelCostScore(a) - modelCostScore(b);
-	});
-}
-
-export function pickClassifierModel(pool, currentProvider, hasAuth, explicit, find) {
-	if (explicit && find) {
-		const m = find(explicit.provider, explicit.model);
-		if (m && hasAuth(m)) return m;
-	}
-	for (const m of rankClassifierModels(pool, currentProvider)) {
-		if (hasAuth(m)) return m;
-	}
-	return undefined;
-}
-
-export function describeAction(toolName, input) {
-	const t = normalizeTool(toolName);
-	if (t === "bash" || t === "pwsh") return `Tool: ${toolName}\nCommand: ${String(input.command ?? "")}`;
-	if (t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls")
-		return `Tool: ${toolName}\nPath: ${String(input.path ?? "")}`;
-	if (t === "webfetch") return `Tool: ${toolName}\nURL: ${String(input.url ?? "")}`;
-	try { return `Tool: ${toolName}\nInput: ${JSON.stringify(input)}`; } catch { return `Tool: ${toolName}`; }
-}
-
-export function buildClassifierPrompt(toolName, input, autoMode) {
-	const env = autoMode.environment.length ? autoMode.environment.map((e) => `  - ${e}`).join("\n") : "  (none)";
-	const allow = autoMode.allow.length ? autoMode.allow.map((r) => `  - ${r}`).join("\n") : "  (none)";
-	const soft = autoMode.soft_deny.length ? autoMode.soft_deny.map((r) => `  - ${r}`).join("\n") : "  (none)";
-	const hard = autoMode.hard_deny.length ? autoMode.hard_deny.map((r) => `  - ${r}`).join("\n") : "  (none)";
-	return [
-		"You are a permissions safety classifier for a coding agent. Decide whether the agent should be allowed to run the following action.",
-		"",
-		"Action:",
-		describeAction(toolName, input),
-		"",
-		"Environment:",
-		env,
-		"",
-		"Rules:",
-		"Allow (silently permit):",
-		allow,
-		"Soft deny (prompt the user, include the reason):",
-		soft,
-		"Hard deny (always block, include the reason):",
-		hard,
-		"",
-		"Decide which list (if any) the action matches. Respond with exactly two lines:",
-		"VERDICT: <allow|soft_deny|hard_deny|no_match>",
-		"REASON: <one short sentence>",
-		"If the action matches an Allow rule, verdict is allow. If it matches a Hard deny rule, verdict is hard_deny. If it matches a Soft deny rule, verdict is soft_deny. Otherwise, verdict is no_match.",
-	].join("\n");
-}
-
-export function parseClassifierResponse(text) {
-	const verdictMatch = text.match(/VERDICT:\s*(allow|soft_deny|hard_deny|no_match)\b/i);
-	const verdict = verdictMatch ? verdictMatch[1].toLowerCase() : "no_match";
-	const reasonMatch = text.match(/REASON:\s*(.+)/i);
-	const reason = reasonMatch ? reasonMatch[1].trim() : "";
-	return { verdict, reason };
-}
-
-export function verdictToAction(verdict, nonInteractive, defaultAction) {
-	if (verdict === "allow") return "allow";
-	if (verdict === "hard_deny") return "deny";
-	if (verdict === "soft_deny") return nonInteractive ? "deny" : "ask";
-	return defaultAction; // no_match
-}
-
-export function classifierCacheKey(toolName, input, autoMode) {
-	const ruleset = JSON.stringify({
-		c: autoMode.classifier, e: autoMode.environment, a: autoMode.allow, s: autoMode.soft_deny, h: autoMode.hard_deny,
-	});
-	const inputJson = JSON.stringify(input);
-	return createHash("sha256").update(`${toolName}\u0000${inputJson}\u0000${ruleset}`).digest("hex");
-}
-
-export async function classifyAction(complete, model, toolName, input, autoMode, cache) {
-	const key = classifierCacheKey(toolName, input, autoMode);
-	const cached = cache.get(key);
-	if (cached) return cached;
-	const prompt = buildClassifierPrompt(toolName, input, autoMode);
-	let result;
-	try {
-		const response = await complete(model, {
-			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
-		});
-		const text = response.content
-			.filter((c) => c.type === "text")
-			.map((c) => c.text)
-			.join("\n")
-			.trim();
-		result = parseClassifierResponse(text);
-	} catch {
-		result = { verdict: "no_match", reason: "classifier call failed" };
-	}
-	cache.set(key, result);
-	return result;
-}
-
-export function decide(cfg, toolName, input, autoActive = false) {
-	const cwd = cfg.cwd;
-	const check = (list) => list.some((raw) => { const r = parseRule(raw); return r && ruleMatches(r, toolName, input, cwd); });
-	if (check(cfg.deny)) return "deny";
-	const skipReadOnlyBash = autoActive && cfg.autoMode?.classifyAllShell;
-	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
-	if ((cfg.allowNoopCd !== false) && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd ?? process.cwd())) return "allow";
-	if (check(cfg.ask)) return "ask";
-	if (check(cfg.allow)) return "allow";
-	const td = cfg.toolDefaults?.[normalizeTool(toolName)];
-	if (td !== undefined) return td;
-	// Auto layer: when the session toggle is on, return the "auto" sentinel.
-	if (autoActive) return "auto";
-	return cfg.defaultAction;
-}
-
-/**
- * Mirrors stripStructuralKeywords() in index.ts.
- * Returns null when the part is purely structural (no user command);
- * returns the residue after stripping a prefix keyword otherwise.
- */
-export function stripStructuralKeywords(part) {
-	let s = part.trim();
-	while (s.length > 0) {
-		if (s === "do" || s === "done" || s === "then" || s === "else" || s === "fi") return null;
-		if (/^(for|select)\s+\S+(\s+in\b[^\n]*)?$/.test(s)) return null;
-		const prefixMatch = s.match(/^(do|then|else|while|until|if|elif)\s+/);
-		if (prefixMatch) { s = s.slice(prefixMatch[0].length); continue; }
-		break;
-	}
-	return s.length > 0 ? s : null;
-}
-
-export function decideCompound(cfg, toolName, input, autoActive = false) {
-	if (normalizeTool(toolName) !== "bash")
-		return { action: decide(cfg, toolName, input, autoActive), isCompound: false, ambiguous: false, breakdown: [] };
-
-	const rawCmd = String(input.command ?? "");
-	const cmd = stripLineContinuations(rawCmd);
-	const normalizedInput = cmd === rawCmd ? input : { ...input, command: cmd };
-	const split = splitTopLevelShell(cmd);
-
-	if (split.kind === "ambiguous") return { action: "ask", isCompound: false, ambiguous: true, breakdown: [] };
-	if (split.kind === "single") {
-		const effectiveInput = split.effectiveCmd != null
-			? { ...normalizedInput, command: split.effectiveCmd }
-			: normalizedInput;
-		return { action: decide(cfg, "bash", effectiveInput, autoActive), isCompound: false, ambiguous: false, breakdown: [] };
-	}
-
-	const breakdown = [];
-	for (const rawSub of split.parts) {
-		const stripped = stripStructuralKeywords(rawSub);
-		if (stripped === null) continue;
-		breakdown.push({ sub: stripped, action: decide(cfg, "bash", { command: stripped }, autoActive) });
-	}
-
-	if (breakdown.length === 0) return { action: "allow", isCompound: false, ambiguous: false, breakdown: [] };
-	if (breakdown.length === 1) return { action: breakdown[0].action, isCompound: false, ambiguous: false, breakdown: [] };
-
-	let action = "allow";
-	for (const { action: a } of breakdown) {
-		if (a === "deny") { action = "deny"; break; }
-		if (a === "auto") action = "auto";
-		else if (a === "ask" && action !== "auto") action = "ask";
-	}
-	return { action, isCompound: true, ambiguous: false, breakdown };
-}
-
-// ── Config helpers ────────────────────────────────────────────────────────
-
-const dedupe = (items) => [...new Set(items)];
-
-/**
- * Sane default NL rules for the auto-mode layer — mirrors DEFAULT_AUTO_MODE
- * in index.ts. Always prepended to user/project lists (additive). `classifier`
- * (auto-select) and `environment` (empty) have no defaults.
- */
-export const DEFAULT_AUTO_MODE = {
-	allow: ["Running tests and linters"],
-	soft_deny: ["Force pushing, deleting remote branches"],
-	hard_deny: ["Sending data to third-party APIs or external services"],
-	classifyAllShell: true,
-};
-
-/**
- * Drives loadConfig without touching the filesystem.
- * Pass raw config objects (as they would appear in pi-tool-permissions.json).
- * When `home` is provided, also injects the readAllowSkills globs as the
- * production loadConfig() does. When omitted, skill globs are not injected
- * (so existing tests that don't care about skills stay deterministic).
- */
-export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
-	const allow = dedupe([...(user.allow ?? []), ...(project.allow ?? [])]);
-	const deny  = dedupe([...(user.deny  ?? []), ...(project.deny  ?? [])]);
-	const ask   = dedupe([...(user.ask   ?? []), ...(project.ask   ?? [])]);
-
-	const explicitToolDefaults = {
-		...normalizeToolDefaultsKeys(user.toolDefaults ?? {}),
-		...normalizeToolDefaultsKeys(project.toolDefaults ?? {}),
-	};
-
-	const readAllowCwd = project.readAllowCwd ?? user.readAllowCwd ?? true;
-	const grepAllowCwd = project.grepAllowCwd ?? user.grepAllowCwd ?? true;
-	const globAllowCwd = project.globAllowCwd ?? user.globAllowCwd ?? true;
-	const lsAllowCwd = project.lsAllowCwd ?? user.lsAllowCwd ?? true;
-	const readAllowSkills = project.readAllowSkills ?? user.readAllowSkills ?? true;
-	const readAllowPiDocs = project.readAllowPiDocs ?? user.readAllowPiDocs ?? true;
-	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
-	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
-	const READONLY_PATH_TOOLS = ["Read", "Ls", "Glob", "Grep"];
-	const expandReadonly = (globs) => globs.flatMap((g) => READONLY_PATH_TOOLS.map((t) => `${t}(${g})`));
-	const skillRules = (home && readAllowSkills) ? expandReadonly(skillReadGlobs(home)) : [];
-	const piDocsRules = (home && readAllowPiDocs) ? expandReadonly(piDocsReadGlobs(home)) : [];
-	const implicitAllow = [
-		...(readAllowCwd ? [`Read(${cwdGlobPattern(cwd)})`] : []),
-		...(grepAllowCwd ? [`Grep(${cwdGlobPattern(cwd)})`] : []),
-		...(globAllowCwd ? [`Glob(${cwdGlobPattern(cwd)})`] : []),
-		...(lsAllowCwd  ? [`Ls(${cwdGlobPattern(cwd)})`]   : []),
-		...skillRules,
-		...piDocsRules,
-	];
-
-	const implicitToolDefaults = {};
-	if (explicitToolDefaults["write"] === undefined) implicitToolDefaults["write"] = "ask";
-
-	const userAuto = user.autoMode ?? {};
-	const projectAuto = project.autoMode ?? {};
-	const autoMode = {
-		classifier: projectAuto.classifier ?? userAuto.classifier,
-		environment: dedupe([...(userAuto.environment ?? []), ...(projectAuto.environment ?? [])]),
-		allow: dedupe([...DEFAULT_AUTO_MODE.allow, ...(userAuto.allow ?? []), ...(projectAuto.allow ?? [])]),
-		soft_deny: dedupe([...DEFAULT_AUTO_MODE.soft_deny, ...(userAuto.soft_deny ?? []), ...(projectAuto.soft_deny ?? [])]),
-		hard_deny: dedupe([...DEFAULT_AUTO_MODE.hard_deny, ...(userAuto.hard_deny ?? []), ...(projectAuto.hard_deny ?? [])]),
-		classifyAllShell: projectAuto.classifyAllShell ?? userAuto.classifyAllShell ?? DEFAULT_AUTO_MODE.classifyAllShell,
-	};
-
-	return {
-		defaultAction: coerceDefaultAction(project.defaultAction ?? user.defaultAction ?? "ask"),
-		allow: [...implicitAllow, ...allow],
-		deny, ask,
-		toolDefaults: { ...implicitToolDefaults, ...explicitToolDefaults },
-		cwd,
-		allowNoopCd,
-		bashReadOnlyAllowCwd,
-		autoMode,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, readAllowPiDocs, bashReadOnlyAllowCwd, allowNoopCd },
-	};
-}
-
-// ── Project config file names (mirrors index.ts constants) ──────────────────
-export const PROJECT_CONFIG_REL         = join(".pi", "pi-tool-permissions.local.json");
-export const LEGACY_PROJECT_CONFIG_REL  = join(".pi", "pi-tool-permissions.json");
-export const LEGACY2_PROJECT_CONFIG_REL = join(".pi", "tool-permissions.json");
-
-/**
- * Mirrors loadProjectConfigRaw() + saveProjectConfig() in index.ts for
- * filesystem-based tests. These touch the real filesystem; use a temp directory.
- */
-export function loadProjectConfigFromDisk(cwd) {
-	const read = (p) => {
-		try {
-			if (!existsSync(p)) return null;
-			return JSON.parse(readFileSync(p, "utf8"));
-		} catch { return null; }
-	};
-	return read(join(cwd, PROJECT_CONFIG_REL))
-		?? read(join(cwd, LEGACY_PROJECT_CONFIG_REL))
-		?? read(join(cwd, LEGACY2_PROJECT_CONFIG_REL))
-		?? {};
-}
-
-// ── User config file paths (parameterized by `home` for tests) ─────────────
-export function userConfigPath(home) {
-	return join(home, ".pi", "agent", "pi-tool-permissions.json");
-}
-export function legacyUserConfigPath(home) {
-	return join(home, ".pi", "tool-permissions.json");
-}
-
-export function loadUserConfigFromDisk(home) {
-	const read = (p) => {
-		try {
-			if (!existsSync(p)) return null;
-			return JSON.parse(readFileSync(p, "utf8"));
-		} catch { return null; }
-	};
-	return read(userConfigPath(home)) ?? read(legacyUserConfigPath(home)) ?? {};
-}
-
+//
+// The pure logic (rule matching, decide, suggestRule, config merge, classifier
+// helpers, etc.) lives in index.ts and is re-exported here so the tests exercise
+// the REAL code, not a hand-maintained mirror. Run the suites with
+// `node --experimental-strip-types` (Node >= 22.6) so the .mjs tests can import
+// the .ts module — see run-all.mjs.
+//
+// Only genuinely test-only helpers (makeCfg, makeTestRunner) and a thin alias
+// for saveUserConfig live in this file.
+
+import {
+	normalizeToolDefaultsKeys,
+	coerceDefaultAction,
+	saveUserConfig,
+} from "./index.ts";
+
+// ── Re-export the real pure functions from index.ts ──────────────────────
+export {
+	normalizeTool,
+	normalizePathSep,
+	normalizeMatchPath,
+	cwdGlobPattern,
+	skillReadGlobs,
+	piDocsReadGlobs,
+	isNoopCd,
+	isReadOnlyBashSubcommand,
+	normalizeToolDefaultsKeys,
+	coerceDefaultAction,
+	compilePattern,
+	parseRule,
+	getMatchField,
+	ruleMatches,
+	inputForMatching,
+	suggestRule,
+	stripLineContinuations,
+	splitTopLevelShell,
+	stripStructuralKeywords,
+	decideCompound,
+	decide,
+	actionIcon,
+	formatBreakdownLine,
+	formatBreakdown,
+	recomputeBreakdown,
+	modelCostScore,
+	dedupeModels,
+	rankClassifierModels,
+	pickClassifierModel,
+	describeAction,
+	buildClassifierPrompt,
+	parseClassifierResponse,
+	verdictToAction,
+	classifierCacheKey,
+	classifyAction,
+	mergeConfig as loadConfigFromObjects,
+	// Config paths / disk IO (test-friendly aliases below)
+	PROJECT_CONFIG_REL,
+	LEGACY_PROJECT_CONFIG_REL,
+	LEGACY2_PROJECT_CONFIG_REL,
+	projectConfigPath,
+	legacyProjectConfigPath,
+	legacy2ProjectConfigPath,
+	loadProjectConfigRaw as loadProjectConfigFromDisk,
+	saveProjectConfig as saveProjectConfigToDisk,
+	userConfigPath,
+	legacyUserConfigPath,
+	loadUserConfigRaw as loadUserConfigFromDisk,
+	DEFAULT_AUTO_MODE,
+} from "./index.ts";
+
+// saveUserConfigToDisk(home, cfg) — index.ts's saveUserConfig takes (cfg, home).
 export function saveUserConfigToDisk(home, cfg) {
-	const newPath = userConfigPath(home);
-	const legacyPath = legacyUserConfigPath(home);
-	mkdirSync(dirname(newPath), { recursive: true });
-	writeFileSync(newPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
-	if (existsSync(legacyPath)) {
-		try { rmSync(legacyPath); } catch { /* ignore */ }
-	}
+	return saveUserConfig(cfg, home);
 }
 
-export function saveProjectConfigToDisk(cwd, cfg) {
-	const newPath = join(cwd, PROJECT_CONFIG_REL);
-	mkdirSync(dirname(newPath), { recursive: true });
-	writeFileSync(newPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
-	for (const legacyRel of [LEGACY_PROJECT_CONFIG_REL, LEGACY2_PROJECT_CONFIG_REL]) {
-		const legacyPath = join(cwd, legacyRel);
-		if (existsSync(legacyPath)) {
-			try { rmSync(legacyPath); } catch { /* ignore */ }
-		}
-	}
-}
+// ── Test-only helpers ─────────────────────────────────────────────────────
 
 /** Build a minimal ResolvedConfig for decide/decideCompound tests.
  * Note: bashReadOnlyAllowCwd defaults to false here to preserve existing test
