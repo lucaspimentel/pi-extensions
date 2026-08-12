@@ -251,8 +251,7 @@ export function suggestRule(toolName, input) {
 	const t = normalizeTool(toolName);
 	if (t === "bash" || t === "pwsh") {
 		const cmd = String(input.command ?? "").trim();
-		const head = cmd.split(/\s+/)[0] ?? "";
-		return head ? `${toolName}(${head} *)` : toolName;
+		return cmd ? `${toolName}(${cmd})` : toolName;
 	}
 	if (t === "read" || t === "write" || t === "edit") {
 		const p = String(input.path ?? "");

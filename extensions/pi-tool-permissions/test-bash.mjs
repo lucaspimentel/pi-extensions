@@ -19,8 +19,8 @@ test("missing command returns empty string", getMatchField("bash",  {}), "");
 
 section("suggestRule");
 
-test("first token + * for multi-word command",  suggestRule("bash", { command: "npm test --watch" }), "bash(npm *)");
-test("first token + * for git command",         suggestRule("bash", { command: "git push origin main" }), "bash(git *)");
+test("full command for multi-word command",  suggestRule("bash", { command: "npm test --watch" }), "bash(npm test --watch)");
+test("full command for git command",         suggestRule("bash", { command: "git push origin main" }), "bash(git push origin main)");
 test("bare tool name for empty command",        suggestRule("bash", { command: "" }), "bash");
 test("bare tool name for missing command",      suggestRule("bash", {}), "bash");
 

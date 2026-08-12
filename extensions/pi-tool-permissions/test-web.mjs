@@ -143,8 +143,8 @@ test("Pwsh(Remove-Item*) deny blocks matching command",
 
 section("pwsh — suggestRule");
 
-test("uses first token plus * like bash",
-	suggestRule("pwsh", { command: "Get-NetAdapter | Format-Table" }), "pwsh(Get-NetAdapter *)");
+test("uses full command like bash",
+	suggestRule("pwsh", { command: "Get-NetAdapter | Format-Table" }), "pwsh(Get-NetAdapter | Format-Table)");
 test("empty command falls back to bare tool name",
 	suggestRule("pwsh", { command: "" }), "pwsh");
 

@@ -809,8 +809,7 @@ function normalizeToolDefaultsKeys(td: Record<string, string>): Record<string, A
  *
  * Special glob rule: a space-asterisk pair `" *"` is treated as *optional* — it compiles
  * to `( .*)?` so that `Bash(git status *)` matches both `"git status"` and `"git status -s"`.
- * This mirrors the format produced by suggestRule (which always appends `" *"` to the
- * first token), ensuring every auto-suggested rule also covers the bare command form.
+ * This lets users write broad rules that also cover the bare command form.
  * A bare `*` without a leading space is unaffected (e.g. `npm*` still requires the
  * matched string to start with `npm`).
  */
@@ -1487,9 +1486,7 @@ function suggestRule(toolName: string, input: Record<string, unknown>): string {
 	const t = normalizeTool(toolName);
 	if (t === "bash" || t === "pwsh") {
 		const cmd = String(input.command ?? "").trim();
-		// Use first token plus * so similar variations match
-		const head = cmd.split(/\s+/)[0] ?? "";
-		return head ? `${toolName}(${head} *)` : toolName;
+		return cmd ? `${toolName}(${cmd})` : toolName;
 	}
 	if (t === "read" || t === "write" || t === "edit") {
 		const p = String(input.path ?? "");
