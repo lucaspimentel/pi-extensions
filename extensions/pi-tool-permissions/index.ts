@@ -1778,7 +1778,7 @@ export default function (pi: ExtensionAPI) {
 				const breakdownLines = formatBreakdown(currentBreakdown, sub);
 
 				const reasonNote = subReason ? `\n  classifier: ${subReason}` : "";
-				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}\n\nSuggested rule: ${suggested}`;
+				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}`;
 				const choices = [
 					"Allow once",
 					"Allow ALL steps once",
@@ -1855,7 +1855,7 @@ export default function (pi: ExtensionAPI) {
 		const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
 		const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
 		const reasonNote = classifierReason ? `\n  classifier: ${classifierReason}` : "";
-		const title = `Allow ${event.toolName}?\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}\n\nSuggested rule: ${suggested}`;
+		const title = `Allow ${event.toolName}?\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
 
 		// Extra "allow all edits" option only for write/edit dialogs; "Switch to
 		// auto mode" appears for every dialog when auto mode isn't already active.
