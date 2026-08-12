@@ -2,7 +2,7 @@
 
 import {
 	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideCompound, makeCfg,
-	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown, effectiveAction,
+	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown,
 	loadConfigFromObjects,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
 	classifyAction, classifierCacheKey, pickClassifierModel, rankClassifierModels, dedupeModels,
@@ -276,50 +276,67 @@ test("recompute uses live cfg: cd ./sub → ask under allowNoopCd:false", rbQuir
 // Empty input → empty output (defensive).
 test("empty breakdown → empty result", recomputeBreakdown([], makeCfg()).length, 0);
 
-// ── Auto mode (Step 1 spine) ───────────────────────────────────────────
+// ── Auto mode (session-toggle layer) ──────────────────────────────────
 //
-// `defaultAction: "auto"` is a valid action. decide() returns the raw "auto"
-// (it does not resolve it); decideCompound / recomputeBreakdown resolve "auto"
-// → "ask" via effectiveAction so the existing prompt path runs unchanged until
-// the classifier runtime is wired (Step 2). See docs/auto-mode-design.md.
-section("auto mode — Step 1 spine");
+// Auto mode is a LAYER between `toolDefaults` and `defaultAction`, controlled
+// by the session toggle (autoActive). `defaultAction` is never "auto" (legacy
+// configs that set it are coerced to "ask"). When autoActive is on, decide()
+// returns an "auto" sentinel for fallthroughs; the handler then runs the
+// classifier (or stubs to "ask" if no model). When autoActive is off, decide()
+// returns the terminal defaultAction directly. See docs/auto-mode-design.md.
+section("auto mode — layer + sentinel");
 
-test("effectiveAction: allow passes through",  effectiveAction("allow"), "allow");
-test("effectiveAction: deny passes through",   effectiveAction("deny"),  "deny");
-test("effectiveAction: ask passes through",     effectiveAction("ask"),    "ask");
-test("effectiveAction: auto → ask (stub)",      effectiveAction("auto"),    "ask");
+// defaultAction: "auto" is coerced to "ask" (no longer a valid default).
+const autoCoercedCfg = makeCfg({ defaultAction: "auto" });
+test("makeCfg: defaultAction \"auto\" coerced to \"ask\"", autoCoercedCfg.defaultAction, "ask");
+test("decide: coerced auto default → ask fallthrough (autoActive off)",
+	decide(autoCoercedCfg, "bash", { command: "some-unknown-cmd" }), "ask");
 
-const autoCfg = makeCfg({ defaultAction: "auto" });
-test("decide: returns raw 'auto' for fallthrough (no static match)",
-	decide(autoCfg, "bash", { command: "some-unknown-cmd" }), "auto");
-test("decide: deny still beats auto default",
-	decide(makeCfg({ deny: ["Bash(rm*)"], defaultAction: "auto" }), "bash", { command: "rm -rf ." }), "deny");
-test("decide: ask still beats auto default",
-	decide(makeCfg({ ask: ["Bash(git push*)"], defaultAction: "auto" }), "bash", { command: "git push" }), "ask");
-test("decide: allow still beats auto default",
-	decide(makeCfg({ allow: ["Bash(npm*)"], defaultAction: "auto" }), "bash", { command: "npm test" }), "allow");
+// With autoActive ON, a fallthrough returns the "auto" sentinel.
+const askCfg = makeCfg({ defaultAction: "ask" });
+test("decide: autoActive fallthrough → \"auto\" sentinel",
+	decide(askCfg, "bash", { command: "some-unknown-cmd" }, true), "auto");
+test("decide: deny still beats auto layer (autoActive=true)",
+	decide(makeCfg({ deny: ["Bash(rm*)"], defaultAction: "ask" }), "bash", { command: "rm -rf ." }, true), "deny");
+test("decide: ask still beats auto layer (autoActive=true)",
+	decide(makeCfg({ ask: ["Bash(git push*)"], defaultAction: "ask" }), "bash", { command: "git push" }, true), "ask");
+test("decide: allow still beats auto layer (autoActive=true)",
+	decide(makeCfg({ allow: ["Bash(npm*)"], defaultAction: "ask" }), "bash", { command: "npm test" }, true), "allow");
+test("decide: toolDefaults beats auto layer (autoActive=true)",
+	decide(makeCfg({ toolDefaults: { bash: "ask" }, defaultAction: "allow" }), "bash", { command: "x" }, true), "ask");
 
-// decideCompound resolves auto → ask in its output so the handler/prompt path is unchanged.
-const dcAutoSingle = decideCompound(autoCfg, "bash", { command: "some-unknown-cmd" });
-test("decideCompound: single bash auto fallthrough → ask (stub)", dcAutoSingle.action, "ask");
-test("decideCompound: single bash not compound",        dcAutoSingle.isCompound, false);
+// decideCompound surfaces the sentinel when autoActive; terminal defaultAction when not.
+const dcAutoOn = decideCompound(askCfg, "bash", { command: "some-unknown-cmd" }, true);
+test("decideCompound: single bash autoActive fallthrough → auto sentinel", dcAutoOn.action, "auto");
+test("decideCompound: single bash not compound",        dcAutoOn.isCompound, false);
+const dcAutoOff = decideCompound(askCfg, "bash", { command: "some-unknown-cmd" }, false);
+test("decideCompound: single bash (autoActive off) → ask defaultAction", dcAutoOff.action, "ask");
 
-const dcAutoRead = decideCompound(autoCfg, "read", { path: "./outside.txt" });
-test("decideCompound: non-bash auto fallthrough → ask (stub)", dcAutoRead.action, "ask");
+const dcAutoRead = decideCompound(askCfg, "read", { path: "./outside.txt" }, true);
+test("decideCompound: non-bash autoActive fallthrough → auto sentinel", dcAutoRead.action, "auto");
 
-// Compound with an auto subcommand: the aggregate treats auto like ask (prompt).
-const dcAutoCompound = decideCompound(autoCfg, "bash", { command: "npm test && unknown-cmd" });
-test("decideCompound: compound with one allow + one auto → ask aggregate",
-	dcAutoCompound.action, "ask");
+// Compound with an auto-subcommand: aggregate surfaces "auto" when autoActive.
+const dcAutoCompound = decideCompound(askCfg, "bash", { command: "npm test && unknown-cmd" }, true);
+test("decideCompound: compound (autoActive) → auto aggregate",
+	dcAutoCompound.action, "auto");
 test("decideCompound: compound flagged isCompound",
 	dcAutoCompound.isCompound, true);
+// Without autoActive the unknown sub falls to defaultAction (ask), so aggregate is ask.
+const dcAskCompound = decideCompound(askCfg, "bash", { command: "npm test && unknown-cmd" }, false);
+test("decideCompound: compound (autoActive off) → ask aggregate",
+	dcAskCompound.action, "ask");
 
-// recomputeBreakdown also resolves auto → ask.
-const rbAuto = recomputeBreakdown(
-	[{ sub: "unknown-cmd", action: "auto" }],
-	autoCfg,
-);
-test("recomputeBreakdown: auto → ask (stub)", rbAuto[0].action, "ask");
+// recomputeBreakdown preserves the sentinel when autoActive.
+const rbAuto = recomputeBreakdown([{ sub: "unknown-cmd", action: "auto" }], askCfg, true);
+test("recomputeBreakdown: autoActive keeps auto sentinel", rbAuto[0].action, "auto");
+const rbAsk = recomputeBreakdown([{ sub: "unknown-cmd", action: "auto" }], askCfg, false);
+test("recomputeBreakdown: autoActive off → defaultAction (ask)", rbAsk[0].action, "ask");
+
+// loadConfigFromObjects coerces legacy defaultAction: "auto" → "ask".
+test("loadConfig: defaultAction \"auto\" coerced to \"ask\"",
+	loadConfigFromObjects({ defaultAction: "auto" }, {}, "C:/proj").defaultAction, "ask");
+test("loadConfig: defaultAction \"allow\" preserved",
+	loadConfigFromObjects({ defaultAction: "allow" }, {}, "C:/proj").defaultAction, "allow");
 
 // loadConfigFromObjects merges autoMode (user + project), project classifier wins, lists concat.
 const mergedAuto = loadConfigFromObjects(
@@ -367,15 +384,17 @@ test("loadConfig: user can override classifyAllShell to false",
 // ── Auto-mode classifier (Step 3) ──────────────────────────────────────
 section("auto mode — classifier runtime");
 
-// verdictToAction mapping (interactive vs non-interactive)
-test("verdictToAction: allow → allow (interactive)",        verdictToAction("allow", false),     "allow");
-test("verdictToAction: allow → allow (non-interactive)",    verdictToAction("allow", true),      "allow");
-test("verdictToAction: hard_deny → deny (interactive)",     verdictToAction("hard_deny", false),  "deny");
-test("verdictToAction: hard_deny → deny (non-interactive)", verdictToAction("hard_deny", true),   "deny");
-test("verdictToAction: soft_deny → ask (interactive)",      verdictToAction("soft_deny", false),  "ask");
-test("verdictToAction: soft_deny → deny (non-interactive)", verdictToAction("soft_deny", true),   "deny");
-test("verdictToAction: no_match → ask (interactive)",        verdictToAction("no_match", false),   "ask");
-test("verdictToAction: no_match → deny (non-interactive)",   verdictToAction("no_match", true),     "deny");
+// verdictToAction mapping: no_match → defaultAction (the terminal fallback).
+// soft_deny → ask (interactive) / deny (non-interactive). allow/hard_deny fixed.
+test("verdictToAction: allow → allow (interactive)",        verdictToAction("allow", false, "ask"),     "allow");
+test("verdictToAction: allow → allow (non-interactive)",    verdictToAction("allow", true, "ask"),      "allow");
+test("verdictToAction: hard_deny → deny (interactive)",     verdictToAction("hard_deny", false, "ask"),  "deny");
+test("verdictToAction: hard_deny → deny (non-interactive)", verdictToAction("hard_deny", true, "ask"),   "deny");
+test("verdictToAction: soft_deny → ask (interactive)",      verdictToAction("soft_deny", false, "ask"),  "ask");
+test("verdictToAction: soft_deny → deny (non-interactive)", verdictToAction("soft_deny", true, "ask"),   "deny");
+test("verdictToAction: no_match → defaultAction=ask",        verdictToAction("no_match", false, "ask"),   "ask");
+test("verdictToAction: no_match → defaultAction=allow",    verdictToAction("no_match", true, "allow"),   "allow");
+test("verdictToAction: no_match → defaultAction=deny",     verdictToAction("no_match", false, "deny"),    "deny");
 
 // parseClassifierResponse
 {
@@ -517,30 +536,31 @@ test("describeAction: unknown tool → JSON",
 // The classifier only sees true fallthroughs. With autoActive=true, a static
 // deny/ask/allow rule still wins (decide returns deny/ask/allow, not "auto").
 // classifyAllShell routes otherwise-auto-allowed read-only bash through the
-// classifier (decide returns "auto" instead of "allow").
+// classifier (decide returns "auto" instead of "allow"). defaultAction is now
+// "ask" (auto coerced); the auto layer is reached via the session toggle.
 section("auto mode — static rules beat classifier");
 
-const autoCfg2 = makeCfg({ defaultAction: "auto" });
+const autoCfg2 = makeCfg({ defaultAction: "ask" });
 test("invariant: deny beats auto (autoActive=true)",
-	decide(makeCfg({ deny: ["Bash(rm*)"], defaultAction: "auto" }), "bash", { command: "rm -rf ." }, true), "deny");
+	decide(makeCfg({ deny: ["Bash(rm*)"], defaultAction: "ask" }), "bash", { command: "rm -rf ." }, true), "deny");
 test("invariant: ask beats auto (autoActive=true)",
-	decide(makeCfg({ ask: ["Bash(git push*)"], defaultAction: "auto" }), "bash", { command: "git push" }, true), "ask");
+	decide(makeCfg({ ask: ["Bash(git push*)"], defaultAction: "ask" }), "bash", { command: "git push" }, true), "ask");
 test("invariant: allow beats auto (autoActive=true)",
-	decide(makeCfg({ allow: ["Bash(npm*)"], defaultAction: "auto" }), "bash", { command: "npm test" }, true), "allow");
+	decide(makeCfg({ allow: ["Bash(npm*)"], defaultAction: "ask" }), "bash", { command: "npm test" }, true), "allow");
 
 // Without classifyAllShell, read-only bash is still auto-allowed (does not reach classifier).
-const roCfg = makeCfg({ defaultAction: "auto", bashReadOnlyAllowCwd: true });
+const roCfg = makeCfg({ defaultAction: "ask", bashReadOnlyAllowCwd: true });
 test("no classifyAllShell: read-only bash auto-allowed (autoActive=true)",
 	decide(roCfg, "bash", { command: "ls" }, true), "allow");
 
 // With classifyAllShell, read-only bash falls through to "auto" (reaches classifier).
-const classifyAllCfg = makeCfg({ defaultAction: "auto", bashReadOnlyAllowCwd: true, autoMode: { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: true } });
+const classifyAllCfg = makeCfg({ defaultAction: "ask", bashReadOnlyAllowCwd: true, autoMode: { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: true } });
 test("classifyAllShell: read-only bash → auto (reaches classifier)",
 	decide(classifyAllCfg, "bash", { command: "ls" }, true), "auto");
 test("classifyAllShell: no-op cd still auto-allowed (cd is harmless bookkeeping)",
 	decide(classifyAllCfg, "bash", { command: "cd ." }, true), "allow");
 
-// decideCompound surfaces "auto" when autoActive (not stubbed to ask)
+// decideCompound surfaces "auto" when autoActive (sentinel preserved)
 {
 	const dc = decideCompound(autoCfg2, "bash", { command: "npm test && unknown-cmd" }, true);
 	test("decideCompound (autoActive): compound aggregate surfaces auto",
@@ -548,10 +568,10 @@ test("classifyAllShell: no-op cd still auto-allowed (cd is harmless bookkeeping)
 	test("decideCompound (autoActive): breakdown keeps auto sub",
 		dc.breakdown.some((b) => b.action === "auto"), true);
 }
-// Without autoActive, auto resolves to ask (stub) as in Step 1.
+// Without autoActive, fallthroughs resolve to defaultAction (ask) directly.
 {
 	const dc = decideCompound(autoCfg2, "bash", { command: "unknown-cmd" }, false);
-	test("decideCompound (not autoActive): auto → ask (stub)", dc.action, "ask");
+	test("decideCompound (not autoActive): fallthrough → defaultAction (ask)", dc.action, "ask");
 }
 
 process.exit(summary() > 0 ? 1 : 0);

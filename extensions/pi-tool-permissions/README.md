@@ -344,7 +344,7 @@ allow/deny/ask lists but **before** `defaultAction`:
 For each tool call, the first matching slot wins:
 
 ```
-deny  >  ask  >  allow  >  toolDefaults  >  defaultAction
+deny  >  ask  >  allow  >  toolDefaults  >  auto (if session toggle on)  >  defaultAction
 ```
 
 So a `deny` rule always overrides an `allow` rule, and an explicit `allow` rule always overrides
@@ -367,6 +367,8 @@ Suggested rule: Bash(rm*)
     Deny once
     Deny always (save rule)
 ```
+
+Every permission dialog also offers a **"Switch to auto mode (this session)"** choice (see [Auto mode](#auto-mode) below) when auto mode isn't already active.
 
 Choosing **always** opens a second selector asking *where* to save the rule:
 
@@ -474,35 +476,54 @@ Examples:
 /permissions auto on
 ```
 
-## Auto mode (defaultAction: "auto")
+## Auto mode
 
-Auto mode is a middle ground between Manual (prompt for everything) and `bypassPermissions` (prompt for nothing). Set `"defaultAction": "auto"` and turn on the session toggle, and before each tool call that **falls through the static rules**, a cheap/fast LLM **classifier** screens the action against natural-language `allow` / `soft_deny` / `hard_deny` lists plus an `environment` fact list, then either allows silently, prompts (with the classifier's reason), or blocks.
+Auto mode is a **session-toggle layer between `toolDefaults` and `defaultAction`** — a middle ground between Manual (prompt for everything) and `bypassPermissions` (prompt for nothing). Turn on the session toggle, and before each tool call that **falls through the static rules AND any `toolDefaults`**, a cheap/fast LLM **classifier** screens the action against natural-language `allow` / `soft_deny` / `hard_deny` lists plus an `environment` fact list, then either allows silently, prompts (with the classifier's reason), or blocks.
 
-It is layered **on top of** the existing static rules, not alongside them:
+It is a **layer in the precedence chain**, not a `defaultAction` value:
+
+```
+deny > ask > allow > toolDefaults > auto (if session toggle on) > defaultAction
+```
 
 - `deny` rules block *before* the classifier is consulted (neither the classifier nor user intent can override).
 - `ask` rules always prompt (the classifier cannot auto-approve a matching action).
-- The classifier only decides for actions that fall through to `defaultAction: "auto"`.
+- `toolDefaults` (e.g. the implicit `write → ask` guard) win over the classifier — a per-tool deterministic action is never screened by the LLM.
+- The classifier only decides for actions that fall through all of those — true unknowns.
 
-Auto mode is **off by default** and **never persisted** (session-only, like allow-all-edits). Even with `defaultAction: "auto"` in config, the classifier only runs while the session toggle is on; otherwise fallthroughs behave as `ask` (safe default). Explicit `deny` rules always win.
+**Verdict mapping:**
 
-> **Status:** The type/config spine, session toggle, `/permissions auto` subcommand, footer indicator, and the classifier runtime are wired. When auto-mode is engaged and a classifier model is available, fallthroughs are screened by the classifier; otherwise they behave as `ask` (safe fallback). See [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) for the full design.
+| Classifier verdict | Result |
+| --- | --- |
+| `allow` | allow (silent) |
+| `hard_deny` | block |
+| `soft_deny` | prompt with reason (deny in non-interactive modes — can't prompt) |
+| `no_match` | fall through to `defaultAction` (the classifier ran and had no opinion, so the user's terminal default applies) |
+
+When the toggle is on but **no classifier model is available**, the auto layer stubs to `ask` (safe) rather than applying `defaultAction` — screening was requested but couldn't be performed, so prompt instead.
+
+Auto mode is **off by default** and **never persisted** (session-only, like allow-all-edits). `defaultAction` is never `"auto"` — legacy configs that still set it are coerced to `"ask"` with a warning. Explicit `deny` rules always win.
+
+> **Status:** The session toggle, `/permissions auto` subcommand, footer indicator, and the classifier runtime are wired. When the toggle is on and a classifier model is available, fallthroughs are screened by the classifier; if no model is available they prompt (`ask`); if the toggle is off, fallthroughs use `defaultAction`. See [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) for the full design.
 
 ### Ways to toggle
 
 | Method | Action |
 | ------ | ------ |
 | **Ctrl+Alt+A** | Toggle on/off |
+| Any permission dialog | Choose **"Switch to auto mode (this session)"** |
 | `/permissions auto` | Toggle |
 | `/permissions auto on\|off` | Set explicitly |
 
 When active, a `🤖 auto mode on` indicator appears in the footer status bar.
 
+The **"Switch to auto mode (this session)"** dialog option just flips the toggle — it's the same as the hotkey, but contextual (available right where you're already being prompted). It only appears when auto mode isn't already active.
+
 ### Config
 
 ```json
 {
-  "defaultAction": "auto",
+  "defaultAction": "ask",
   "autoMode": {
     "classifier": { "provider": "anthropic", "model": "claude-haiku-4-5" },
     "environment": [
@@ -526,9 +547,11 @@ When active, a `🤖 auto mode on` indicator appears in the footer status bar.
 | `hard_deny` | `["Sending data to third-party APIs or external services"]` | NL descriptions of actions to always block. |
 | `classifyAllShell` | `true` | When `true`, route every bash subcommand (including read-only auto-allowed ones) through the classifier. |
 
-The `allow` / `soft_deny` / `hard_deny` lists and `classifyAllShell` have **sane defaults** baked in — a bare `{ "defaultAction": "auto" }` with no `autoMode` block works out of the box. Your configured lists are **additive** on top of the defaults (concatenated + deduped), so you can extend them without losing the safe baseline. `classifier` and `environment` have no defaults — they're inherently user-specific. To override `classifyAllShell` back to `false`, set it explicitly.
+The `allow` / `soft_deny` / `hard_deny` lists and `classifyAllShell` have **sane defaults** baked in — a bare `{ "autoMode": { ... } }` (or no `autoMode` block at all) works out of the box once the session toggle is on. Your configured lists are **additive** on top of the defaults (concatenated + deduped), so you can extend them without losing the safe baseline. `classifier` and `environment` have no defaults — they're inherently user-specific. To override `classifyAllShell` back to `false`, set it explicitly.
 
-In non-interactive modes (`-p`, JSON mode), classifier `soft_deny` and no-match verdicts fall back to **deny** so automation can't silently run something the classifier flagged.
+`defaultAction` is independent of auto mode: it's the terminal fallback (`allow` / `deny` / `ask`) used when the classifier returns `no_match` (or when the toggle is off). The `autoMode` block configures the classifier itself.
+
+In non-interactive modes (`-p`, JSON mode), classifier `soft_deny` verdicts fall back to **deny** (can't prompt); `no_match` falls through to `defaultAction` (so automation respects the user's terminal default).
 
 See [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) for the full design.
 

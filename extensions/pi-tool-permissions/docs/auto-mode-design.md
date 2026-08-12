@@ -5,20 +5,26 @@
 ## Status
 
 - **2026-08-11** — Updated auto-mode TODO for pi-ai 0.84 `modelRegistry` migration (commit `ee68d35`). TODO entry in `TODO.md` now points at `ctx.modelRegistry.find()` / `hasConfiguredAuth()` / `complete()` and the current `extensions/idle-summary/index.ts` template, not the removed `@earendil-works/pi-ai` main-entry `complete()`/`getModel()`.
+- **2026-08-12** — Simplified auto mode from a `defaultAction: "auto"` value into a **session-toggle layer** between `toolDefaults` and `defaultAction`. `defaultAction` is back to `allow | deny | ask`; legacy `"auto"` coerces to `"ask"`. The `/permissions auto` toggle alone now engages the classifier — no on-disk `defaultAction: "auto"` requirement. `no_match` verdicts fall through to `defaultAction`; "classifier unavailable" stubs to `ask`. Removed `effectiveAction` / `sessionDefaultAction` / `resolveConfig` / `switchToAutoMode`.
 - **Next** — Implement type/config spine for `"auto"` `defaultAction`, then classifier runtime.
 
 ## Goal
 
-Add a middle-ground permission mode between Manual (prompt for everything) and `bypassPermissions` (prompt for nothing). Before each tool call that falls through the static-rule layer, a **safety classifier** (a separate, cheap/fast LLM call) screens the action:
+Add a middle-ground permission mode between Manual (prompt for everything) and `bypassPermissions` (prompt for nothing). Before each tool call that falls through the static-rule layer **and any `toolDefaults`**, a **safety classifier** (a separate, cheap/fast LLM call) screens the action:
 
 - **Safe** → runs silently.
 - **Risky** → still prompts (with the classifier's reason).
 
-It is layered **on top of** the existing static rules, not alongside them:
+It is layered **as a precedence layer between `toolDefaults` and `defaultAction`**, not alongside them:
+
+```
+deny > ask > allow > toolDefaults > auto (if session toggle on) > defaultAction
+```
 
 - `deny` rules block *before* the classifier is consulted (neither classifier nor user intent can override).
 - `ask` rules always prompt (classifier cannot auto-approve a matching action).
-- The classifier only decides for actions that fall through to `defaultAction: "auto"`.
+- `toolDefaults` (e.g. the implicit `write → ask` guard) win over the classifier — a per-tool deterministic action is never screened by the LLM.
+- The classifier only decides for actions that fall through all of those — true unknowns.
 
 Reference: Claude Code's auto mode — https://code.claude.com/docs/en/permission-modes and https://code.claude.com/docs/en/auto-mode-config.
 
@@ -29,7 +35,7 @@ Reference: Claude Code's auto mode — https://code.claude.com/docs/en/permissio
 
 ## Architecture
 
-Slots in as a **fourth `defaultAction` value (`"auto"`)**, not a new system. pi's extension API provides every primitive needed: the `tool_call` event hook can `{ block: true, reason }`, mutate `event.input`, and `await ctx.ui.confirm/select`. The existing `pi-tool-permissions` already implements the static-rule layer (`deny`/`ask`/`allow` lists + `toolDefaults` + `defaultAction`, precedence `deny > ask > allow > toolDefaults > defaultAction`), the interactive prompt, the compound-bash splitter, persistence, and the `/permissions` slash command.
+Slots in as a **session-toggle layer between `toolDefaults` and `defaultAction`**, not a new system or a `defaultAction` value. pi's extension API provides every primitive needed: the `tool_call` event hook can `{ block: true, reason }`, mutate `event.input`, and `await ctx.ui.confirm/select`. The existing `pi-tool-permissions` already implements the static-rule layer (`deny`/`ask`/`allow` lists + `toolDefaults` + `defaultAction`, precedence `deny > ask > allow > toolDefaults > defaultAction`), the interactive prompt, the compound-bash splitter, persistence, and the `/permissions` slash command. Auto mode inserts one more slot: `… > toolDefaults > auto (if toggle on) > defaultAction`.
 
 ### Model access (post-0.84)
 
@@ -48,7 +54,7 @@ Extends `Config` / `LoadedConfig` in `index.ts` (~107–142):
 
 ```jsonc
 {
-  "defaultAction": "auto",
+  "defaultAction": "ask",
   "autoMode": {
     // Optional explicit pin. If omitted, the classifier model is selected
     // from the available pool using the same ranking as idle-summary:
@@ -71,17 +77,17 @@ Extends `Config` / `LoadedConfig` in `index.ts` (~107–142):
 
 ## Decision flow
 
-When no static rule matches and `defaultAction === "auto"` (and the session toggle is on):
+When no static rule or `toolDefaults` entry matches and the session toggle is on:
 
 1. Run the classifier with the action + environment + NL rules.
 2. Map the verdict:
    - `hard_deny` match (or classifier verdict) → **block**
-   - `soft_deny` match → **prompt with reason** (reuse existing `ctx.ui.select` dialog)
+   - `soft_deny` match → **prompt with reason** (reuse existing `ctx.ui.select` dialog); in non-interactive modes → **deny** (can't prompt)
    - `allow` match → **allow silently**
-   - no match → **prompt** (safe default)
-3. In non-interactive modes (`ctx.mode === "print"` / `"json"`), classifier `soft_deny` and "no match" must fall back to **deny** (the extension already does this for `ask`) so automation can't silently run something the classifier flagged.
+   - `no_match` → **fall through to `defaultAction`** (the classifier ran and had no opinion, so the user's terminal default applies — in both interactive and non-interactive modes)
+3. When the toggle is on but **no classifier model is available**, the auto layer stubs to **prompt** (`ask`) rather than applying `defaultAction` — screening was requested but couldn't be performed, so prompt instead. (The non-interactive `!ctx.hasUI` branch then blocks `ask`.)
 
-**Static precedence invariant**: `deny`/`ask` rules at the top of `decide()` already win, so the classifier only sees true fallthroughs. Keep it that way — the classifier is never the first thing consulted.
+**Static precedence invariant**: `deny`/`ask`/`toolDefaults` at the top of `decide()` already win, so the classifier only sees true fallthroughs. Keep it that way — the classifier is never the first thing consulted.
 
 ## Session toggle
 
@@ -90,8 +96,9 @@ Mirrors the existing allow-all-edits one:
 - `Ctrl+Alt+A` shortcut
 - `/permissions auto on|off|toggle` subcommand
 - `🤖 auto mode on` footer indicator via `ctx.ui.setStatus`
+- **"Switch to auto mode (this session)"** option in any permission dialog (just flips the toggle — same as the hotkey, but contextual)
 
-Auto mode is **off by default** and **never persisted** (session-only), like allow-all-edits. Explicit `deny` rules still win even when auto mode is on.
+Auto mode is **off by default** and **never persisted** (session-only), like allow-all-edits. The toggle alone engages the classifier — there is no on-disk `defaultAction: "auto"` requirement (that value is no longer valid and is coerced to `"ask"`). Explicit `deny` rules still win even when auto mode is on.
 
 ## Caching
 

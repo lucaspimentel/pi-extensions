@@ -173,6 +173,13 @@ export function normalizeToolDefaultsKeys(td) {
 	return out;
 }
 
+/** Coerce a raw defaultAction into a valid persistable default. "auto" is no
+ * longer a valid default (auto mode is a session-only layer); coerce to "ask". */
+export function coerceDefaultAction(raw) {
+	if (raw === "allow" || raw === "deny" || raw === "ask") return raw;
+	return "ask";
+}
+
 // ── Pattern / rule helpers ────────────────────────────────────────────────
 
 export function compilePattern(pattern) {
@@ -358,15 +365,10 @@ export function formatBreakdown(breakdown, currentSub) {
 }
 
 export function recomputeBreakdown(breakdown, cfg, autoActive = false) {
-	const resolve = (a) => autoActive ? a : effectiveAction(a);
-	return breakdown.map((b) => ({ sub: b.sub, action: resolve(decide(cfg, "bash", { command: b.sub }, autoActive)) }));
+	return breakdown.map((b) => ({ sub: b.sub, action: decide(cfg, "bash", { command: b.sub }, autoActive) }));
 }
 
 // ── Decision engine ───────────────────────────────────────────────────────
-
-export function effectiveAction(action) {
-	return action === "auto" ? "ask" : action;
-}
 
 // ── Auto-mode classifier helpers (Step 2) ─────────────────────────────────
 
@@ -453,10 +455,11 @@ export function parseClassifierResponse(text) {
 	return { verdict, reason };
 }
 
-export function verdictToAction(verdict, nonInteractive) {
+export function verdictToAction(verdict, nonInteractive, defaultAction) {
 	if (verdict === "allow") return "allow";
 	if (verdict === "hard_deny") return "deny";
-	return nonInteractive ? "deny" : "ask";
+	if (verdict === "soft_deny") return nonInteractive ? "deny" : "ask";
+	return defaultAction; // no_match
 }
 
 export function classifierCacheKey(toolName, input, autoMode) {
@@ -501,6 +504,8 @@ export function decide(cfg, toolName, input, autoActive = false) {
 	if (check(cfg.allow)) return "allow";
 	const td = cfg.toolDefaults?.[normalizeTool(toolName)];
 	if (td !== undefined) return td;
+	// Auto layer: when the session toggle is on, return the "auto" sentinel.
+	if (autoActive) return "auto";
 	return cfg.defaultAction;
 }
 
@@ -522,9 +527,8 @@ export function stripStructuralKeywords(part) {
 }
 
 export function decideCompound(cfg, toolName, input, autoActive = false) {
-	const resolve = (a) => autoActive ? a : effectiveAction(a);
 	if (normalizeTool(toolName) !== "bash")
-		return { action: resolve(decide(cfg, toolName, input, autoActive)), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: decide(cfg, toolName, input, autoActive), isCompound: false, ambiguous: false, breakdown: [] };
 
 	const rawCmd = String(input.command ?? "");
 	const cmd = stripLineContinuations(rawCmd);
@@ -536,14 +540,14 @@ export function decideCompound(cfg, toolName, input, autoActive = false) {
 		const effectiveInput = split.effectiveCmd != null
 			? { ...normalizedInput, command: split.effectiveCmd }
 			: normalizedInput;
-		return { action: resolve(decide(cfg, "bash", effectiveInput, autoActive)), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: decide(cfg, "bash", effectiveInput, autoActive), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	const breakdown = [];
 	for (const rawSub of split.parts) {
 		const stripped = stripStructuralKeywords(rawSub);
 		if (stripped === null) continue;
-		breakdown.push({ sub: stripped, action: resolve(decide(cfg, "bash", { command: stripped }, autoActive)) });
+		breakdown.push({ sub: stripped, action: decide(cfg, "bash", { command: stripped }, autoActive) });
 	}
 
 	if (breakdown.length === 0) return { action: "allow", isCompound: false, ambiguous: false, breakdown: [] };
@@ -563,7 +567,7 @@ export function decideCompound(cfg, toolName, input, autoActive = false) {
 const dedupe = (items) => [...new Set(items)];
 
 /**
- * Sane default NL rules for `defaultAction: "auto"` — mirrors DEFAULT_AUTO_MODE
+ * Sane default NL rules for the auto-mode layer — mirrors DEFAULT_AUTO_MODE
  * in index.ts. Always prepended to user/project lists (additive). `classifier`
  * (auto-select) and `environment` (empty) have no defaults.
  */
@@ -627,7 +631,7 @@ export function loadConfigFromObjects(user = {}, project = {}, cwd, home) {
 	};
 
 	return {
-		defaultAction: project.defaultAction ?? user.defaultAction ?? "ask",
+		defaultAction: coerceDefaultAction(project.defaultAction ?? user.defaultAction ?? "ask"),
 		allow: [...implicitAllow, ...allow],
 		deny, ask,
 		toolDefaults: { ...implicitToolDefaults, ...explicitToolDefaults },
@@ -707,7 +711,8 @@ export function saveProjectConfigToDisk(cwd, cfg) {
  */
 export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, cwd = process.cwd(), autoMode } = {}) {
 	// Normalize toolDefault keys so decide() can look them up via normalizeTool()
-	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction, allowNoopCd, bashReadOnlyAllowCwd, cwd, autoMode: autoMode ?? { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false }, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, allowNoopCd } };
+	// Coerce legacy `defaultAction: "auto"` → "ask" (auto mode is now a session toggle).
+	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction: coerceDefaultAction(defaultAction), allowNoopCd, bashReadOnlyAllowCwd, cwd, autoMode: autoMode ?? { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false }, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, allowNoopCd } };
 }
 
 // ── Test runner ───────────────────────────────────────────────────────────

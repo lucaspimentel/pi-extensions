@@ -32,7 +32,7 @@
  *
  * Schema:
  *   {
- *     "defaultAction": "allow" | "deny" | "ask" | "auto",
+ *     "defaultAction": "allow" | "deny" | "ask",
  *     "allow": ["Bash(npm test)", "Read"],
  *     "deny":  ["Bash(rm -rf*)", "Write(.env*)"],
  *     "ask":   ["Bash(git push*)"],
@@ -44,7 +44,7 @@
  *     "readAllowSkills": true,
  *     "readAllowPiDocs": true,
  *     "bashReadOnlyAllowCwd": true,
- *     "autoMode": {                       // used only when defaultAction === "auto"
+ *     "autoMode": {                       // used when the session auto toggle is on
  *       "classifier": { "provider": "anthropic", "model": "claude-haiku-4-5" },
  *       "environment": ["Trusted repo: github.com/lucaspimentel/*"],
  *       "allow":     ["Running tests and linters"],
@@ -54,7 +54,8 @@
  *     }
  *   }
  *
- * Precedence (first match wins): deny > ask > allow > toolDefaults > defaultAction.
+ * Precedence (first match wins):
+ *   deny > ask > allow > toolDefaults > auto (if session toggle on) > defaultAction.
  *
  * Implicit defaults (session-only, never persisted to disk):
  *   readAllowCwd (default: true)
@@ -139,32 +140,45 @@
  *     - "Allow all edits this session" option in the Write/Edit permission dialog
  *     - /permissions allowalledits [on|off|toggle]
  *
- * Auto mode (defaultAction: "auto"):
+ * Auto mode (session toggle, layered between toolDefaults and defaultAction):
  *   A middle ground between Manual (prompt for everything) and bypassPermissions
  *   (prompt for nothing). Before each tool call that falls through the static-rule
- *   layer, a cheap/fast LLM classifier screens the action against natural-language
- *   `allow` / `soft_deny` / `hard_deny` lists and an `environment` fact list, then
- *   either allows silently, prompts (with the classifier's reason), or blocks.
+ *   layer AND any toolDefaults, a cheap/fast LLM classifier screens the action
+ *   against natural-language `allow` / `soft_deny` / `hard_deny` lists and an
+ *   `environment` fact list, then either allows silently, prompts (with the
+ *   classifier's reason), or blocks.
  *
- *   It is layered ON TOP of the existing static rules: `deny` rules block before
- *   the classifier is consulted; `ask` rules always prompt; the classifier only
- *   decides for actions that fall through to `defaultAction: "auto"`.
+ *   It is a LAYER in the precedence chain, not a `defaultAction` value:
+ *     deny > ask > allow > toolDefaults > auto (if toggle on) > defaultAction
+ *   `deny` rules block before the classifier is consulted; `ask` rules always
+ *   prompt; `toolDefaults` (e.g. the implicit `write → ask` guard) win over the
+ *   classifier. The classifier only decides for actions that fall through all of
+ *   those — true unknowns.
+ *
+ *   Verdict mapping: `allow` → allow; `hard_deny` → block; `soft_deny` → prompt
+ *   (deny in non-interactive modes); `no_match` → fall through to `defaultAction`
+ *   (the classifier ran and had no opinion, so the user's terminal default
+ *   applies). When the toggle is on but no classifier model is available, the
+ *   auto layer stubs to `ask` (safe) rather than applying `defaultAction` —
+ *   screening was requested but couldn't be performed.
  *
  *   Auto mode is OFF by default and NEVER persisted — it is a session-only toggle
- *   mirroring allow-all-edits. Even when `defaultAction: "auto"` is set in config,
- *   the classifier only runs while the session toggle is on; otherwise fallthroughs
- *   behave as `ask` (safe default). Explicit `deny` rules always win.
+ *   mirroring allow-all-edits. `defaultAction` is never `"auto"` (legacy configs
+ *   that set it are coerced to `"ask"` with a warning). Explicit `deny` rules
+ *   always win.
  *
  *   Toggle via:
  *     - Ctrl+Alt+A hotkey
  *     - /permissions auto [on|off|toggle]
+ *     - "Switch to auto mode (this session)" option in any permission dialog
+ *       (just flips the toggle — same as the hotkey, but contextual).
  *
  *   Config (`autoMode` block): `classifier` (optional explicit model pin),
  *   `environment`, `allow`, `soft_deny`, `hard_deny` (NL string lists),
  *   `classifyAllShell` (route every bash subcommand through the classifier).
  *   The `allow`/`soft_deny`/`hard_deny` lists and `classifyAllShell` have sane
- *   defaults baked in (see DEFAULT_AUTO_MODE) — a bare `defaultAction: "auto"`
- *   with no `autoMode` block works out of the box. User/project lists are
+ *   defaults baked in (see DEFAULT_AUTO_MODE) — a bare `autoMode` block (or none
+ *   at all) works out of the box once the toggle is on. User/project lists are
  *   additive on top of the defaults. `classifier` and `environment` have no
  *   defaults (user-specific). See docs/auto-mode-design.md for the full design.
  *
@@ -176,7 +190,7 @@
  *   /permissions deny  <rule>          - add a deny rule (project)
  *   /permissions ask   <rule>          - add an ask rule (project)
  *   /permissions remove <rule>         - remove a rule from any list
- *   /permissions default <allow|deny|ask|auto>
+ *   /permissions default <allow|deny|ask>
  *   /permissions reload                - reload config from disk
  *   /permissions allowalledits [on|off|toggle]
  *   /permissions auto [on|off|toggle]  - toggle auto-mode (LLM classifier) for this session
@@ -195,10 +209,19 @@ type Action = "allow" | "deny" | "ask" | "auto";
 type ListAction = "allow" | "deny" | "ask";
 
 /**
- * Natural-language rules and model selection for `defaultAction: "auto"`.
- * When no static rule matches and `defaultAction === "auto"` (and the session
- * toggle is on), a cheap/fast classifier model screens the action against these
- * NL lists and returns a verdict (allow / soft_deny / hard_deny / no-match).
+ * Persistable `defaultAction` values. `"auto"` is NOT a valid default — auto
+ * mode is a session-only layer between `toolDefaults` and `defaultAction`,
+ * controlled by the `/permissions auto` toggle. `Action` still includes
+ * `"auto"` because `decide()` returns it as a sentinel ("reached the auto
+ * layer — handler should classify") when the session toggle is on.
+ */
+type DefaultAction = "allow" | "deny" | "ask";
+
+/**
+ * Natural-language rules and model selection for the auto-mode layer.
+ * When no static rule or `toolDefaults` entry matches and the session toggle
+ * is on, a cheap/fast classifier model screens the action against these NL
+ * lists and returns a verdict (allow / soft_deny / hard_deny / no-match).
  * See `docs/auto-mode-design.md` for the full design.
  */
 interface AutoModeConfig {
@@ -227,7 +250,7 @@ interface ResolvedAutoModeConfig {
 }
 
 interface PermissionsConfig {
-	defaultAction?: Action;
+	defaultAction?: DefaultAction;
 	allow?: string[];
 	deny?: string[];
 	ask?: string[];
@@ -253,7 +276,7 @@ interface PermissionsConfig {
 }
 
 interface ResolvedConfig {
-	defaultAction: Action;
+	defaultAction: DefaultAction;
 	allow: string[];
 	deny: string[];
 	ask: string[];
@@ -265,7 +288,7 @@ interface ResolvedConfig {
 	allowNoopCd: boolean;
 	/** When true, read-only bash subcommands with paths inside cwd are silently allowed. */
 	bashReadOnlyAllowCwd: boolean;
-	/** Resolved auto-mode config (merged user + project). Always present; used when `defaultAction === "auto"`. */
+	/** Resolved auto-mode config (merged user + project). Always present; used when the session auto toggle is on. */
 	autoMode: ResolvedAutoModeConfig;
 	/** Tracks synthetically injected rules/defaults (never written to disk). */
 	implicit: {
@@ -294,7 +317,7 @@ const STATUS_KEY = "tool-permissions";
 const STATUS_KEY_AUTO = "tool-permissions-auto";
 
 /**
- * Sane default NL rules for `defaultAction: "auto"`, used when the user omits
+ * Sane default NL rules for the auto-mode layer, used when the user omits
  * the corresponding field. Always prepended to user/project lists (additive —
  * user config adds on top, never replaces). `classifier` (auto-select) and
  * `environment` (empty) have no defaults — they are inherently user-specific.
@@ -419,7 +442,7 @@ function loadConfig(cwd: string): ResolvedConfig {
 	};
 
 	return {
-		defaultAction: (project.defaultAction ?? user.defaultAction ?? "ask") as Action,
+		defaultAction: coerceDefaultAction(project.defaultAction ?? user.defaultAction ?? "ask"),
 		allow: [...implicitAllow, ...allow],
 		deny,
 		ask,
@@ -434,6 +457,21 @@ function loadConfig(cwd: string): ResolvedConfig {
 
 function dedupe(items: string[]): string[] {
 	return Array.from(new Set(items));
+}
+
+/**
+ * Coerce a raw `defaultAction` value from config into a valid `DefaultAction`.
+ * `"auto"` is no longer a persistable default (auto mode is now a session-only
+ * layer controlled by the `/permissions auto` toggle); legacy configs that
+ * still set it are coerced to `"ask"` (safe) with a warning.
+ */
+function coerceDefaultAction(raw: unknown): DefaultAction {
+	if (raw === "allow" || raw === "deny" || raw === "ask") return raw;
+	if (raw === "auto") {
+		console.warn('[tool-permissions] defaultAction: "auto" is no longer a valid default — auto mode is now controlled by the /permissions auto toggle. Coercing to "ask".');
+		return "ask";
+	}
+	return "ask";
 }
 
 function projectConfigPath(cwd: string): string {
@@ -1129,11 +1167,11 @@ function decideCompound(
 	input: Record<string, unknown>,
 	autoActive = false,
 ): CompoundDecision {
-	// When auto-mode is not engaged, "auto" resolves to "ask" (stub). When engaged,
-	// "auto" surfaces so the handler can run the classifier.
-	const resolve = (a: Action): Action => autoActive ? a : effectiveAction(a);
+	// `autoActive` is the session-toggle state. When on, `decide()` returns an
+	// "auto" sentinel for fallthroughs (the handler runs the classifier); when
+	// off, `decide()` returns the terminal `defaultAction` directly.
 	if (normalizeTool(toolName) !== "bash") {
-		return { action: resolve(decide(cfg, toolName, input, autoActive)), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: decide(cfg, toolName, input, autoActive), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	const rawCmd = String(input.command ?? "");
@@ -1151,7 +1189,7 @@ function decideCompound(
 		const effectiveInput = split.effectiveCmd != null
 			? { ...normalizedInput, command: split.effectiveCmd }
 			: normalizedInput;
-		return { action: resolve(decide(cfg, "bash", effectiveInput, autoActive)), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: decide(cfg, "bash", effectiveInput, autoActive), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	// compound — strip structural shell keywords (`for`, `do`, `done`) so
@@ -1160,7 +1198,7 @@ function decideCompound(
 	for (const rawSub of split.parts) {
 		const stripped = stripStructuralKeywords(rawSub);
 		if (stripped === null) continue;
-		breakdown.push({ sub: stripped, action: resolve(decide(cfg, "bash", { command: stripped }, autoActive)) });
+		breakdown.push({ sub: stripped, action: decide(cfg, "bash", { command: stripped }, autoActive) });
 	}
 
 	// Entirely structural (e.g. empty-body `for x in a; do; done`) — no commands
@@ -1225,24 +1263,12 @@ function formatBreakdown(breakdown: SubcommandDecision[], currentSub: string | n
  * block and the per-step decisions reflect the freshly loaded config.
  */
 function recomputeBreakdown(breakdown: SubcommandDecision[], cfg: ResolvedConfig, autoActive = false): SubcommandDecision[] {
-	const resolve = (a: Action): Action => autoActive ? a : effectiveAction(a);
-	return breakdown.map((b) => ({ sub: b.sub, action: resolve(decide(cfg, "bash", { command: b.sub }, autoActive)) }));
-}
-
-/**
- * Resolve an `Action` that may be `"auto"` into a concrete action for the
- * static decision layer. Until the classifier runtime is wired (see
- * `docs/auto-mode-design.md` Step 2), `"auto"` behaves as `"ask"` — a safe
- * fallback that prompts the user. Step 2 replaces this with a classifier call
- * when the session auto-mode toggle is on and a classifier model is available.
- */
-function effectiveAction(action: Action): Action {
-	return action === "auto" ? "ask" : action;
+	return breakdown.map((b) => ({ sub: b.sub, action: decide(cfg, "bash", { command: b.sub }, autoActive) }));
 }
 
 // ── Auto-mode classifier (Step 2) ─────────────────────────────────────────
 //
-// When `defaultAction === "auto"` and the session toggle is on, fallthroughs are
+// When the session auto toggle is on, fallthroughs are
 // screened by a cheap/fast classifier model. The classifier is a pure helper
 // with the `complete` call injected as a seam so it is unit-testable without
 // HTTP. See docs/auto-mode-design.md.
@@ -1361,12 +1387,22 @@ function parseClassifierResponse(text: string): ClassifyResult {
 	return { verdict, reason };
 }
 
-/** Map a classifier verdict to a concrete Action. In non-interactive modes, soft_deny/no_match → deny. */
-function verdictToAction(verdict: ClassifierVerdict, nonInteractive: boolean): Action {
+/**
+ * Map a classifier verdict to a concrete Action.
+ * - `allow` → allow (short-circuit)
+ * - `hard_deny` → deny (block)
+ * - `soft_deny` → ask (prompt with reason); deny in non-interactive modes
+ *   (can't prompt)
+ * - `no_match` → `defaultAction` (the classifier ran and had no opinion; the
+ *   user's terminal fallback applies). This holds in both interactive and
+ *   non-interactive modes — the non-interactive `ask`→deny fallback is
+ *   handled by the `tool_call` handler's `!ctx.hasUI` branch, not here.
+ */
+function verdictToAction(verdict: ClassifierVerdict, nonInteractive: boolean, defaultAction: DefaultAction): DefaultAction {
 	if (verdict === "allow") return "allow";
 	if (verdict === "hard_deny") return "deny";
-	// soft_deny or no_match
-	return nonInteractive ? "deny" : "ask";
+	if (verdict === "soft_deny") return nonInteractive ? "deny" : "ask";
+	return defaultAction; // no_match
 }
 
 /** Cache key: hash(toolName, input, ruleset). Binds token cost on loops. */
@@ -1427,10 +1463,11 @@ function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unk
 		return false;
 	};
 	if (check(cfg.deny)) return "deny";
-	// Read-only bash auto-allow short-circuit. When auto-mode is engaged AND
-	// classifyAllShell is set, route read-only bash subcommands through the
-	// classifier instead of silently allowing them. (No-op `cd` is pure
-	// bookkeeping with zero side-effects/data access, so allowNoopCd stays active.)
+	// Read-only bash auto-allow short-circuit. When the auto layer is engaged
+	// (session toggle on) AND classifyAllShell is set, route read-only bash
+	// subcommands through the classifier instead of silently allowing them.
+	// (No-op `cd` is pure bookkeeping with zero side-effects/data access, so
+	// allowNoopCd stays active regardless of the toggle.)
 	const skipReadOnlyBash = autoActive && cfg.autoMode.classifyAllShell;
 	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd)) return "allow";
 	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
@@ -1438,6 +1475,10 @@ function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unk
 	if (check(cfg.allow)) return "allow";
 	const td = cfg.toolDefaults[normalizeTool(toolName)];
 	if (td !== undefined) return td;
+	// Auto layer: when the session toggle is on, return the "auto" sentinel so the
+	// `tool_call` handler can run the classifier (or stub to `ask` if no model is
+	// available). When the toggle is off, fall through to `defaultAction`.
+	if (autoActive) return "auto";
 	return cfg.defaultAction;
 }
 
@@ -1523,9 +1564,10 @@ function inputForMatching(
 export default function (pi: ExtensionAPI) {
 	let cfg: ResolvedConfig = loadConfig(process.cwd());
 	let allowAllEdits = false;
-	// Auto-mode session toggle (off by default, never persisted). When on AND
-	// `defaultAction === "auto"`, fallthroughs go to the classifier (Step 2) or
-	// behave as `ask` (Step 1 stub). Mirrors `allowAllEdits` lifecycle.
+	// Auto-mode session toggle (off by default, never persisted). When on,
+	// fallthroughs that reach the auto layer (between `toolDefaults` and
+	// `defaultAction`) are screened by the classifier; if no classifier model
+	// is available they fall back to `ask` (safe stub). Mirrors `allowAllEdits`.
 	let autoModeEnabled = false;
 	// Per-session classifier verdict cache (keyed by toolName+input+ruleset). Bounds
 	// token cost when the same action repeats in a loop. See classifierCacheKey().
@@ -1587,7 +1629,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		cfg = loadConfig(ctx.cwd);
-		// Always reset allow-all-edits and auto-mode at session start — never persisted
+		// Always reset allow-all-edits and auto-mode at session start — never persisted.
 		allowAllEdits = false;
 		autoModeEnabled = false;
 		ctx.ui.setStatus(STATUS_KEY, "");
@@ -1599,7 +1641,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		const matchInput = inputForMatching(event.toolName, event.input as Record<string, unknown>, ctx.cwd);
 		const nonInteractive = ctx.mode === "print" || ctx.mode === "json";
-		const autoActive = autoModeEnabled && cfg.defaultAction === "auto";
+		const autoActive = autoModeEnabled;
 		// Pick the classifier model (explicit pin, or auto-select from the pool
 		// preferring the currently selected model's provider). Mirrors idle-summary.
 		const classifierModel = autoActive
@@ -1612,13 +1654,18 @@ export default function (pi: ExtensionAPI) {
 			)
 			: undefined;
 		const autoEngaged = autoActive && classifierModel !== undefined;
-		const compound = decideCompound(cfg, event.toolName, matchInput, autoEngaged);
+		// Pass `autoActive` (session toggle), not `autoEngaged`: the "auto" sentinel
+		// should surface whenever the toggle is on so the loop below can stub it to
+		// `ask` when no classifier model is available (rather than silently applying
+		// `defaultAction`).
+		const compound = decideCompound(cfg, event.toolName, matchInput, autoActive);
 		let { action, isCompound, ambiguous, breakdown } = compound;
 		let classifierReason = "";
 
-		// Resolve a fallthrough "auto" verdict. For single/ambiguous commands we
+		// Resolve a fallthrough "auto" sentinel. For single/ambiguous commands we
 		// classify up front; for compound commands the prompt loop classifies each
-		// auto sub. When auto-mode is not engaged, "auto" behaves as "ask" (stub).
+		// auto sub. When the toggle is on but no classifier model is available
+		// (`!autoEngaged`), stub to `ask` (safe) rather than applying `defaultAction`.
 		if (action === "auto") {
 			if (autoEngaged && classifierModel && !isCompound) {
 				const result = await classifyAction(
@@ -1630,9 +1677,9 @@ export default function (pi: ExtensionAPI) {
 				verdictCache,
 			);
 				classifierReason = result.reason;
-				action = verdictToAction(result.verdict, nonInteractive);
+				action = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
 			} else if (!autoEngaged || isCompound) {
-				// Stub (toggle off / no model) or compound (loop handles per-sub).
+				// Stub (no model) or compound (loop handles per-sub).
 				action = "ask";
 			}
 		}
@@ -1696,7 +1743,7 @@ export default function (pi: ExtensionAPI) {
 				// a freshly saved deny must not override an explicit one-shot allow.
 				if (allowAllStepsOnce) continue;
 
-				let liveAction = decide(cfg, "bash", { command: sub }, autoEngaged);
+				let liveAction = decide(cfg, "bash", { command: sub }, autoActive);
 				let subReason = "";
 				// Auto fallthrough: run the classifier for this subcommand.
 				if (liveAction === "auto") {
@@ -1710,7 +1757,7 @@ export default function (pi: ExtensionAPI) {
 							verdictCache,
 						);
 						subReason = result.reason;
-						liveAction = verdictToAction(result.verdict, nonInteractive);
+						liveAction = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
 					} else {
 						liveAction = "ask";
 					}
@@ -1735,6 +1782,7 @@ export default function (pi: ExtensionAPI) {
 				const choices = [
 					"Allow once",
 					"Allow ALL steps once",
+					...(!autoActive ? ["Switch to auto mode (this session)"] : []),
 					"Allow always (save rule)",
 					"Deny once",
 					"Deny always (save rule)",
@@ -1744,6 +1792,15 @@ export default function (pi: ExtensionAPI) {
 				if (choice === "Allow once") continue;
 
 				if (choice === "Allow ALL steps once") {
+					allowAllStepsOnce = true;
+					continue;
+				}
+
+				if (choice === "Switch to auto mode (this session)") {
+					applyAutoMode(true, ctx);
+					// Let the rest of this compound finish without re-prompting; future
+					// tool calls go through the classifier. (Any `deny` sub was already
+					// blocked by decideCompound before this loop runs.)
 					allowAllStepsOnce = true;
 					continue;
 				}
@@ -1760,7 +1817,7 @@ export default function (pi: ExtensionAPI) {
 					if (!scope) continue;
 					addRule(scope, ctx.cwd, "allow", edited.trim());
 					cfg = loadConfig(ctx.cwd);
-					currentBreakdown = recomputeBreakdown(breakdown, cfg, autoEngaged);
+					currentBreakdown = recomputeBreakdown(breakdown, cfg, autoActive);
 					const autoCount = currentBreakdown.filter(
 						(b) => b.sub !== sub && askSubs.includes(b.sub) && b.action === "allow",
 					).length;
@@ -1782,7 +1839,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					addRule(scope, ctx.cwd, "deny", edited.trim());
 					cfg = loadConfig(ctx.cwd);
-					currentBreakdown = recomputeBreakdown(breakdown, cfg, autoEngaged);
+					currentBreakdown = recomputeBreakdown(breakdown, cfg, autoActive);
 					ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
 					await promptSteerMessage(ctx);
 					return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
@@ -1800,16 +1857,19 @@ export default function (pi: ExtensionAPI) {
 		const reasonNote = classifierReason ? `\n  classifier: ${classifierReason}` : "";
 		const title = `Allow ${event.toolName}?\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}\n\nSuggested rule: ${suggested}`;
 
-		// Extra "allow all edits" option only for write/edit dialogs
+		// Extra "allow all edits" option only for write/edit dialogs; "Switch to
+		// auto mode" appears for every dialog when auto mode isn't already active.
+		const autoSwitch = !autoActive ? ["Switch to auto mode (this session)"] : [];
 		const choices = isWriteOrEdit
 			? [
 					"Allow once",
 					"Allow all edits this session",
+					...autoSwitch,
 					"Allow always (save rule)",
 					"Deny once",
 					"Deny always (save rule)",
 			  ]
-			: ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)"];
+			: ["Allow once", ...autoSwitch, "Allow always (save rule)", "Deny once", "Deny always (save rule)"];
 
 		const choice = await ctx.ui.select(title, choices);
 
@@ -1817,6 +1877,11 @@ export default function (pi: ExtensionAPI) {
 
 		if (choice === "Allow all edits this session") {
 			applyAllowAllEdits(true, ctx);
+			return undefined;
+		}
+
+		if (choice === "Switch to auto mode (this session)") {
+			applyAutoMode(true, ctx);
 			return undefined;
 		}
 
@@ -1906,7 +1971,7 @@ export default function (pi: ExtensionAPI) {
 		return removed;
 	}
 
-	function setDefault(scope: Scope, cwd: string, action: Action): void {
+	function setDefault(scope: Scope, cwd: string, action: DefaultAction): void {
 		const cfg = scope === "user" ? loadUserConfigRaw() : loadProjectConfigRaw(cwd);
 		cfg.defaultAction = action;
 		if (scope === "user") saveUserConfig(cfg);
@@ -1948,7 +2013,7 @@ export default function (pi: ExtensionAPI) {
 					"  /permissions deny  <rule> [--user]   Add a deny rule",
 					"  /permissions ask   <rule> [--user]   Add an ask rule",
 					"  /permissions remove <rule> [--user]  Remove a rule from any list",
-					"  /permissions default <allow|deny|ask|auto> [--user]",
+					"  /permissions default <allow|deny|ask> [--user]",
 					"  /permissions reload           Reload config from disk",
 					"  /permissions allowalledits [on|off|toggle]",
 					"  /permissions auto [on|off|toggle]   Toggle auto-mode (LLM classifier) for this session",
@@ -2050,8 +2115,8 @@ export default function (pi: ExtensionAPI) {
 					reload(ctx.cwd, ctx);
 					return;
 				case "default": {
-					if (!isAction(value)) {
-							ctx.ui.notify(`Usage: /permissions default <allow|deny|ask|auto> [--user]`, "warning");
+					if (!isDefaultAction(value)) {
+						ctx.ui.notify(`Usage: /permissions default <allow|deny|ask> [--user] (use \`/permissions auto on\` for auto mode)`, "warning");
 						return;
 					}
 					setDefault(scope, ctx.cwd, value);
@@ -2125,6 +2190,6 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-function isAction(s: string): s is Action {
-	return s === "allow" || s === "deny" || s === "ask" || s === "auto";
+function isDefaultAction(s: string): s is DefaultAction {
+	return s === "allow" || s === "deny" || s === "ask";
 }
