@@ -530,8 +530,19 @@ The **"Switch to auto mode (this session)"** dialog option just flips the toggle
       "Trusted repo: github.com/lucaspimentel/*",
       "Trusted domains: *.internal.example.com"
     ],
-    "allow":     ["Running tests and linters"],
-    "soft_deny": ["Force pushing, deleting remote branches"],
+    "allow":     [
+      "Running tests and linters",
+      "Editing files in a source-controlled repository (changes are reversible via git)",
+      "Read-only inspection commands (e.g. pwd, ls, cat, head, tail, wc, stat, file, du, df)",
+      "Searching the codebase with grep, rg, find, or glob",
+      "Running git status, git diff, git log, and other read-only git queries",
+      "Read-only GitHub API requests (e.g. fetching files, listing issues, reading repos) via gh or the web API",
+      "Read-only GitHub API call to fetch a file, not sending data or modifying remote state"
+    ],
+    "soft_deny": [
+      "Force pushing, deleting remote branches",
+      "Bulk or recursive file deletions (e.g. rm -rf, rm -r, Remove-Item -Recurse)"
+    ],
     "hard_deny": ["Sending data to third-party APIs or external services"],
     "classifyAllShell": true
   }
@@ -542,8 +553,8 @@ The **"Switch to auto mode (this session)"** dialog option just flips the toggle
 | ----- | ------- | ------- |
 | `classifier` | _(auto-select)_ | Optional explicit model pin (`{ provider, model }`). If omitted, a haiku-tier model is auto-selected from the available pool, preferring the currently selected model's provider. |
 | `environment` | `[]` | Free-text facts shown to the classifier (e.g. trusted repos/domains). Inherently user-specific — no default. |
-| `allow` | `["Running tests and linters"]` | NL descriptions of actions to silently allow. |
-| `soft_deny` | `["Force pushing, deleting remote branches"]` | NL descriptions of actions to prompt for (with the classifier's reason). |
+| `allow` | See [`DEFAULT_AUTO_MODE.allow`](./index.ts) | NL descriptions of actions to silently allow. |
+| `soft_deny` | See [`DEFAULT_AUTO_MODE.soft_deny`](./index.ts) | NL descriptions of actions to prompt for (with the classifier's reason). |
 | `hard_deny` | `["Sending data to third-party APIs or external services"]` | NL descriptions of actions to always block. |
 | `classifyAllShell` | `true` | When `true`, route every bash subcommand (including read-only auto-allowed ones) through the classifier. |
 

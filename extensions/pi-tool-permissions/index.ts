@@ -330,8 +330,19 @@ export function legacyUserConfigPath(home: string = homedir()): string {
  * `environment` (empty) have no defaults — they are inherently user-specific.
  */
 export const DEFAULT_AUTO_MODE = {
-	allow: ["Running tests and linters"],
-	soft_deny: ["Force pushing, deleting remote branches"],
+	allow: [
+		"Running tests and linters",
+		"Editing files in a source-controlled repository (changes are reversible via git)",
+		"Read-only inspection commands (e.g. pwd, ls, cat, head, tail, wc, stat, file, du, df)",
+		"Searching the codebase with grep, rg, find, or glob",
+		"Running git status, git diff, git log, and other read-only git queries",
+		"Read-only GitHub API requests (e.g. fetching files, listing issues, reading repos) via gh or the web API",
+		"Read-only GitHub API call to fetch a file, not sending data or modifying remote state",
+	],
+	soft_deny: [
+		"Force pushing, deleting remote branches",
+		"Bulk or recursive file deletions (e.g. rm -rf, rm -r, Remove-Item -Recurse)",
+	],
 	hard_deny: ["Sending data to third-party APIs or external services"],
 	classifyAllShell: true,
 };
@@ -1396,6 +1407,7 @@ export function buildClassifierPrompt(toolName: string, input: Record<string, un
 		"VERDICT: <allow|soft_deny|hard_deny|no_match>",
 		"REASON: <one short sentence>",
 		"If the action matches an Allow rule, verdict is allow. If it matches a Hard deny rule, verdict is hard_deny. If it matches a Soft deny rule, verdict is soft_deny. Otherwise, verdict is no_match.",
+		"The reason should describe what the action does (e.g. 'read-only GitHub API call to fetch a file'). Do not mention whether it matches or fails to match any rules — that is implied by the verdict.",
 	].join("\n");
 }
 
@@ -1795,7 +1807,7 @@ export default function (pi: ExtensionAPI) {
 				const suggested = suggestRule("Bash", { command: sub });
 				const breakdownLines = formatBreakdown(currentBreakdown, sub);
 
-				const reasonNote = subReason ? `\n  classifier: ${subReason}` : "";
+				const reasonNote = subReason ? `\n\n  classifier: ${subReason}` : "";
 				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}`;
 				const choices = [
 					"Allow once",
@@ -1872,7 +1884,7 @@ export default function (pi: ExtensionAPI) {
 		const preview = matchField.length > 200 ? `${matchField.slice(0, 197)}...` : matchField;
 		const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
 		const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
-		const reasonNote = classifierReason ? `\n  classifier: ${classifierReason}` : "";
+		const reasonNote = classifierReason ? `\n\n  classifier: ${classifierReason}` : "";
 		const title = `Allow ${event.toolName}?\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
 
 		// Extra "allow all edits" option only for write/edit dialogs; "Switch to
