@@ -338,6 +338,9 @@ export const DEFAULT_AUTO_MODE = {
 		"Running git status, git diff, git log, and other read-only git queries",
 		"Read-only GitHub API requests (e.g. fetching files, listing issues, reading repos) via gh or the web API",
 		"Read-only GitHub API call to fetch a file, not sending data or modifying remote state",
+		"Read-only Atlassian API call to fetch a Jira issue",
+		"Read-only Atlassian API call to fetch a Confluence page",
+		"Read-only Confluence search query using CQL",
 	],
 	soft_deny: [
 		"Force pushing, deleting remote branches",

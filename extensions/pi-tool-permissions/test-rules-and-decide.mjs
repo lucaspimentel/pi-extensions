@@ -17,6 +17,9 @@ const DEFAULT_ALLOW = [
 	"Running git status, git diff, git log, and other read-only git queries",
 	"Read-only GitHub API requests (e.g. fetching files, listing issues, reading repos) via gh or the web API",
 	"Read-only GitHub API call to fetch a file, not sending data or modifying remote state",
+	"Read-only Atlassian API call to fetch a Jira issue",
+	"Read-only Atlassian API call to fetch a Confluence page",
+	"Read-only Confluence search query using CQL",
 ];
 // Mirror of DEFAULT_AUTO_MODE.soft_deny in index.ts. Keep in sync.
 const DEFAULT_SOFT_DENY = [
