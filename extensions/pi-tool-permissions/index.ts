@@ -345,6 +345,7 @@ export const DEFAULT_AUTO_MODE = {
 	soft_deny: [
 		"Force pushing, deleting remote branches",
 		"Bulk or recursive file deletions (e.g. rm -rf, rm -r, Remove-Item -Recurse)",
+		"Editing a file outside a source-controlled repository",
 	],
 	hard_deny: ["Sending data to third-party APIs or external services"],
 	classifyAllShell: true,

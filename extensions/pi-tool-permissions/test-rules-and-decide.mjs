@@ -25,6 +25,7 @@ const DEFAULT_ALLOW = [
 const DEFAULT_SOFT_DENY = [
 	"Force pushing, deleting remote branches",
 	"Bulk or recursive file deletions (e.g. rm -rf, rm -r, Remove-Item -Recurse)",
+	"Editing a file outside a source-controlled repository",
 ];
 
 const { test, section, summary } = makeTestRunner();
