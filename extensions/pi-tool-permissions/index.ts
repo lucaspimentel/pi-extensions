@@ -98,7 +98,9 @@
  *     cat, head, tail, wc, stat, …) when their path arguments resolve inside cwd.
  *     Commands with top-level *file* output redirections (>, >>, 2>, &>, …) are
  *     never auto-allowed. Descriptor-to-descriptor dups like `2>&1` / `1>&2` are
- *     NOT file writes and stay auto-allowable.
+ *     NOT file writes and stay auto-allowable. Redirects to `/dev/null` (the
+ *     Unix null device — writes are discarded) are likewise NOT file writes and
+ *     stay auto-allowable, so `cmd 2>/dev/null` is not blocked.
  *     Disable with "bashReadOnlyAllowCwd": false.
  *   write → ask (automatic)
  *     Unless toolDefaults.write is explicitly set, Write always prompts regardless
@@ -114,7 +116,8 @@
  *   whose pattern includes `>` (e.g. `Bash(rg * > *)`). `deny` and `ask` rules
  *   are redirect-agnostic and always still apply, so safety rules win over a
  *   redirected command. Descriptor-to-descriptor redirects (`2>&1`, `1>&2`,
- *   `>&2`, `>&-`) are NOT file writes and are exempt from this filter. pwsh is
+ *   `>&2`, `>&-`) are NOT file writes and are exempt from this filter. Redirects
+ *   to `/dev/null` are likewise exempt (null device, no persistence). pwsh is
  *   out of scope (different syntax) and stays redirect-agnostic.
  *
  * Compound bash commands (&&, ||, |, ;):
@@ -753,12 +756,45 @@ export function stripLineContinuations(cmd: string): string {
 }
 
 /**
+ * If the redirect target beginning at `start` (after skipping spaces/tabs)
+ * is exactly `/dev/null` — optionally single- or double-quoted — returns the
+ * index just past the consumed target so the caller can resume scanning for a
+ * later real redirect. Returns -1 otherwise (no target, or a different path).
+ *
+ * `/dev/null` is the Unix null device: writes are discarded and nothing is
+ * persisted, so it is exempted from the write-risk filter just like descriptor
+ * dups (`2>&1`). Only an *exact* `/dev/null` match is exempted — subpaths
+ * (`/dev/null/x`) or suffixed forms (`/dev/nullx`) are real-ish paths and stay
+ * write-risk. The target is read up to whitespace or a shell separator
+ * (`;`, `|`, `&`, `(`, `)`, `<`, `>`) so idioms like `cmd >/dev/null; echo`
+ * and `cmd >/dev/null 2>&1` resolve cleanly.
+ */
+function devNullTargetAt(cmd: string, start: number): number {
+	let j = start;
+	while (j < cmd.length && (cmd[j] === " " || cmd[j] === "\t")) j++;
+	if (j >= cmd.length) return -1; // no target — conservatively a write
+	let target = "";
+	if (cmd[j] === '"' || cmd[j] === "'") {
+		const q = cmd[j];
+		j++;
+		while (j < cmd.length && cmd[j] !== q) target += cmd[j++];
+		if (j < cmd.length) j++; // skip closing quote
+	} else {
+		while (j < cmd.length && !/[\s;|&()<>]/.test(cmd[j])) target += cmd[j++];
+	}
+	return target === "/dev/null" ? j : -1;
+}
+
+/**
  * Returns true when `cmd` contains a top-level *file* output redirection
  * (`>`, `>>`, `2>`, `&>`, `n>>`, …) outside of single/double quotes, backticks,
  * command substitution (parens), and heredoc bodies. Descriptor-to-descriptor
  * redirects (`2>&1`, `1>&2`, `>&2`, `>&-`, `>>&N`) are NOT file writes and
  * return false — they only rearrange existing streams and are commonly used
- * for combined output capture/logging.
+ * for combined output capture/logging. Redirects whose target is exactly
+ * `/dev/null` (the Unix null device — writes are discarded, nothing persisted)
+ * are likewise NOT file writes and return false, so common idioms like
+ * `cmd 2>/dev/null` or `cmd >/dev/null 2>&1` stay auto-allowable.
  *
  * Used to flag otherwise-safe commands that write to files via redirection
  * so that (a) the read-only bash auto-allow short-circuit rejects them, and
@@ -852,7 +888,12 @@ export function hasTopLevelFileRedirect(cmd: string): boolean {
 				const next2 = cmd[i + 2];
 				const next3 = cmd[i + 3];
 				// `&>` / `&>>` — redirect both stdout+stderr to a file.
-				if (prev === "&") return true;
+				if (prev === "&") {
+					const tgtStart = next === ">" ? i + 2 : i + 1;
+					const after = devNullTargetAt(cmd, tgtStart);
+					if (after >= 0) { i = after; continue; }
+					return true;
+				}
 				if (next === "&") {
 					// `>&N` / `N>&M` — descriptor dup; `>&-` — close. Not a file write.
 					if (next2 !== undefined && /[0-9]/.test(next2)) { i += 3; continue; }
@@ -863,10 +904,19 @@ export function hasTopLevelFileRedirect(cmd: string): boolean {
 				if (next === ">") {
 					// `>>` append. `>>&N` (rare) is a descriptor dup, not a file write.
 					if (next2 === "&" && next3 !== undefined && /[0-9]/.test(next3)) { i += 4; continue; }
+					const after = devNullTargetAt(cmd, i + 2);
+					if (after >= 0) { i = after; continue; }
 					return true;
 				}
-				// `> file` / `N> file` / process substitution `>(...)` — file write.
-				return true;
+				// `> file` / `N> file` — file write. Process substitution `>(...)`
+				// targets a subshell, not a path, so it stays a write. Otherwise
+				// check for an exempt `/dev/null` target before flagging a write.
+				if (next === "(") return true;
+				{
+					const after = devNullTargetAt(cmd, i + 1);
+					if (after >= 0) { i = after; continue; }
+					return true;
+				}
 			}
 		}
 		i++;
@@ -911,7 +961,8 @@ function tokenizeSimple(cmd: string): string[] {
  * Rules:
  *  1. Reject if cmd contains a top-level *file* output redirection (>, >>,
  *     2>, &>, …). Descriptor-to-descriptor dups like `2>&1` are NOT file
- *     writes and stay auto-allowable.
+ *     writes and stay auto-allowable. Redirects to `/dev/null` (null device,
+ *     no persistence) are likewise NOT file writes and stay auto-allowable.
  *  2. If the first token is in READONLY_BASH_SAFE_ALWAYS → allow.
  *  3. If the first token is in READONLY_BASH_WITH_PATHS → allow only when
  *     every non-flag argument resolves to a path inside (or equal to) cwd.

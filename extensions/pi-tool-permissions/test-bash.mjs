@@ -750,6 +750,36 @@ test(">>&1 (append dup) → false",       hasTopLevelFileRedirect("cmd >>&1"), f
 test("bare command → false",            hasTopLevelFileRedirect("echo foo"), false);
 test("empty → false",                   hasTopLevelFileRedirect(""), false);
 
+section("hasTopLevelFileRedirect — /dev/null sink (NOT a file write)");
+
+test(">/dev/null → false",              hasTopLevelFileRedirect("cmd >/dev/null"), false);
+test("> /dev/null → false",             hasTopLevelFileRedirect("cmd > /dev/null"), false);
+test("2>/dev/null → false",             hasTopLevelFileRedirect("cmd 2>/dev/null"), false);
+test("2>>/dev/null → false",            hasTopLevelFileRedirect("cmd 2>>/dev/null"), false);
+test("1>/dev/null → false",             hasTopLevelFileRedirect("cmd 1>/dev/null"), false);
+test(">>/dev/null → false",             hasTopLevelFileRedirect("cmd >>/dev/null"), false);
+test("&>/dev/null → false",             hasTopLevelFileRedirect("cmd &>/dev/null"), false);
+test("&>>/dev/null → false",            hasTopLevelFileRedirect("cmd &>>/dev/null"), false);
+test("> \"/dev/null\" → false (dquote)",  hasTopLevelFileRedirect('cmd > "/dev/null"'), false);
+test("> '/dev/null' → false (squote)",  hasTopLevelFileRedirect("cmd > '/dev/null'"), false);
+test(">/dev/null 2>&1 → false",         hasTopLevelFileRedirect("cmd >/dev/null 2>&1"), false);
+test(">/dev/null; echo → false",        hasTopLevelFileRedirect("cmd >/dev/null; echo hi"), false);
+test(">/dev/null|cat → false",         hasTopLevelFileRedirect("cmd >/dev/null|cat"), false);
+test(">/dev/null& → false",            hasTopLevelFileRedirect("cmd >/dev/null&"), false);
+// A later real redirect still wins
+
+section("hasTopLevelFileRedirect — /dev/null does not mask a real redirect");
+
+test("2>/dev/null > realfile → true",   hasTopLevelFileRedirect("cmd 2>/dev/null > realfile"), true);
+test("> realfile 2>/dev/null → true",   hasTopLevelFileRedirect("cmd > realfile 2>/dev/null"), true);
+test(">/dev/null >realfile → true",    hasTopLevelFileRedirect("cmd >/dev/null >realfile"), true);
+// Non-exact /dev/null forms stay write-risk
+test(">/dev/nullx → true",              hasTopLevelFileRedirect("cmd >/dev/nullx"), true);
+test("> /dev/null/x → true",            hasTopLevelFileRedirect("cmd > /dev/null/x"), true);
+test("> /dev/null foo → false (foo is arg)", hasTopLevelFileRedirect("cmd > /dev/null foo"), false);
+// Process substitution stays a write even if inner targets /dev/null
+test(">(tee /dev/null) → true",        hasTopLevelFileRedirect("echo >(tee /dev/null)"), true);
+
 section("hasTopLevelFileRedirect — quoting / escaping / nesting");
 
 test("double-quoted > → false",         hasTopLevelFileRedirect('echo "a > b"'), false);
@@ -766,6 +796,8 @@ section("isReadOnlyBashSubcommand — descriptor dup is read-only");
 test("echo foo 2>&1 → true (dup, no file)",  isReadOnlyBashSubcommand("echo foo 2>&1", WIN_CWD), true);
 test("echo foo 1>&2 → true",                 isReadOnlyBashSubcommand("echo foo 1>&2", WIN_CWD), true);
 test("echo foo >&2 → true",                  isReadOnlyBashSubcommand("echo foo >&2", WIN_CWD), true);
+test("echo foo >/dev/null → true (null sink)", isReadOnlyBashSubcommand("echo foo >/dev/null", WIN_CWD), true);
+test("echo foo 2>/dev/null → true (null sink)",  isReadOnlyBashSubcommand("echo foo 2>/dev/null", WIN_CWD), true);
 test("echo foo > out → false (file write)",  isReadOnlyBashSubcommand("echo foo > out", WIN_CWD), false);
 test("cmd 2> err → false",                   isReadOnlyBashSubcommand("cmd 2> err", WIN_CWD), false);
 test("cmd &> all → false",                  isReadOnlyBashSubcommand("cmd &> all", WIN_CWD), false);
@@ -777,6 +809,8 @@ test("rg x → allow (broad rule)",                 decide(rgBroadCfg, "bash", {
 test("rg x > out.txt → ask (broad rule skipped)", decide(rgBroadCfg, "bash", { command: "rg x > out.txt" }), "ask");
 test("rg x >> out.txt → ask",                     decide(rgBroadCfg, "bash", { command: "rg x >> out.txt" }), "ask");
 test("rg x 2>&1 → allow (descriptor dup, broad ok)", decide(rgBroadCfg, "bash", { command: "rg x 2>&1" }), "allow");
+test("rg x >/dev/null → allow (null sink, broad ok)", decide(rgBroadCfg, "bash", { command: "rg x >/dev/null" }), "allow");
+test("rg x 2>/dev/null → allow (null sink, broad ok)", decide(rgBroadCfg, "bash", { command: "rg x 2>/dev/null" }), "allow");
 test("rg x 2> err → ask",                         decide(rgBroadCfg, "bash", { command: "rg x 2> err" }), "ask");
 
 const rgRedirectCfg = makeCfg({ allow: ["Bash(rg *)", "Bash(rg * > *)"], defaultAction: "ask", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });

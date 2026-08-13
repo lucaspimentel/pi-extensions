@@ -313,7 +313,7 @@ Two tiers of safe commands:
 | **Safe always** — no filesystem access | `pwd`, `echo`, `printf`, `date`, `whoami`, `id`, `hostname`, `uname`, `env`, `printenv`, `true`, `false`, `which`, `type`, `command` | Always allowed |
 | **Safe with paths** — read-only filesystem access | `ls`, `cat`, `head`, `tail`, `wc`, `file`, `stat`, `tree`, `du`, `realpath`, `readlink`, `dirname`, `basename` | Allowed when all non-flag arguments resolve inside cwd |
 
-Commands containing top-level *file* output redirections (`>`, `>>`, `2>`, `&>`, etc.) are **never** auto-allowed, even if the base command is in the safe list — e.g. `echo foo > /tmp/out` is denied. Descriptor-to-descriptor redirects such as `2>&1` / `1>&2` / `>&2` are **not** file writes (they only rearrange existing streams) and stay auto-allowable, so common combined-output patterns like `cmd 2>&1` are not blocked.
+Commands containing top-level *file* output redirections (`>`, `>>`, `2>`, `&>`, etc.) are **never** auto-allowed, even if the base command is in the safe list — e.g. `echo foo > /tmp/out` is denied. Descriptor-to-descriptor redirects such as `2>&1` / `1>&2` / `>&2` are **not** file writes (they only rearrange existing streams) and stay auto-allowable, so common combined-output patterns like `cmd 2>&1` are not blocked. Redirects to `/dev/null` (the Unix null device — writes are discarded, nothing persisted) are likewise **not** file writes, so idioms like `cmd 2>/dev/null` or `cmd >/dev/null 2>&1` stay auto-allowable.
 
 The compound-command splitter applies first, so each subcommand in a `&&` / `||` / `;` chain is evaluated independently. A chain like `ls && pwd` is fully auto-allowed; `ls && rm -rf .` is denied because `rm` is not on the safe list.
 
@@ -338,6 +338,7 @@ Notes:
 - The `>` in a rule pattern is literal, so `Bash(rg * > *)` covers `rg x > out.txt` but **not** `rg x >> out.txt` — add `Bash(rg * >> *)` separately for the append form.
 - `deny` and `ask` rules are **redirect-agnostic** and always still apply, so safety rules win over a redirected command even when a redirect-aware `allow` rule exists.
 - Descriptor-to-descriptor redirects (`2>&1`, `1>&2`, `>&2`, `>&-`) are **not** file writes and are exempt from this filter — `cmd 2>&1` is still covered by a broad `Bash(cmd *)` rule.
+- Redirects to `/dev/null` (the Unix null device) are **not** file writes either — `cmd 2>/dev/null` and `cmd >/dev/null 2>&1` stay auto-allowable and covered by broad rules. Only an *exact* `/dev/null` target is exempted; subpaths like `/dev/null/x` stay write-risk. Process substitution `>(...)` still counts as a write.
 - `toolDefaults` and `defaultAction` are **not** gated by the redirect filter.
 - `pwsh` is out of scope (different redirection syntax) and stays redirect-agnostic.
 
