@@ -2,6 +2,7 @@
 name: ship
 description: "Run one or more release actions: version, changelog, docs, commit, tag, push, watch, release. With no arguments, auto-detects needed actions from repo state and asks for confirmation. Use when the user says 'ship', 'ship it', 'ship <target>', 'version and push', 'tag and push', 'bump version and push', 'release', 'cut a release', 'publish', 'ship and watch', 'push and watch CI', 'tag and watch', or any combination of these release steps."
 allowed-tools: Bash(git status *) Bash(git log *) Bash(git tag --list *) Bash(git rev-parse *) Bash(git diff *) Bash(gh run list *) Bash(gh run watch *) Bash(gh release list *) Bash(sleep *)
+disable-model-invocation: true
 ---
 
 Release automation skill. Load the repo's shipping config, parse the user's arguments, then run the requested actions in canonical order.

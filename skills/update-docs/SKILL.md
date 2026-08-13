@@ -1,6 +1,7 @@
 ---
 name: update-docs
 description: "Update project documentation based on recent changes and current codebase state. Use when the user says 'update docs', 'update readme', 'sync docs', 'docs are stale', 'update CLAUDE.md', 'refresh documentation', or any variation of wanting documentation updated."
+disable-model-invocation: true
 ---
 
 Verify and update project documentation so it accurately reflects the current state of the codebase.
