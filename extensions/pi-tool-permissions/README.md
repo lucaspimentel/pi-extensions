@@ -125,6 +125,7 @@ path, the permission system treats it as if `path` were the current working dire
 | `ls`                  | `path` (directory listed; defaults to cwd)         |
 | `web_fetch`           | `url`                                              |
 | `web_search`          | bare rule only — `WebSearch` matches any search    |
+| `mcp`                 | `tool` (the MCP tool name, e.g. `slack_slack_*`)   |
 | anything else         | `JSON.stringify(input)`                            |
 
 ### Tool name matching
@@ -134,11 +135,12 @@ Tool names in rules are **case-insensitive** and **underscore-agnostic**. These 
 ```
 WebSearch   websearch   web_search   WEB_SEARCH
 WebFetch    webfetch    web_fetch
+Mcp         mcp
 Bash        bash
 Read        read
 ```
 
-The canonical style used in suggestions and examples is `PascalCase` (e.g. `WebSearch`, `WebFetch`, `Bash`, `Read`).
+The canonical style used in suggestions and examples is `PascalCase` (e.g. `WebSearch`, `WebFetch`, `Bash`, `Read`, `Mcp`).
 
 ### WebSearch
 
@@ -169,6 +171,48 @@ to match query parameters precisely, use regex syntax:
 
 ```json
 "WebFetch(/https:\\/\\/example\\.com\\/page\\?q=.*/)"
+```
+
+### MCP
+
+Every MCP tool call arrives as the single pi tool `mcp`, with the real tool name in
+its `tool` field (conventionally `<server>_<tool>`, e.g. `slack_slack_search_public_and_private`).
+`Mcp(pattern)` rules match against that tool name, so you can allow, deny, or gate
+individual MCP tools — or whole servers — with the same glob / regex syntax as the
+other tools:
+
+```json
+{
+  "allow": [
+    "Mcp(slack_*)",
+    "Mcp(github_*)"
+  ],
+  "deny":  ["Mcp(slack_slack_post_*)"],
+  "ask":   ["Mcp(atlassian_*)"]
+}
+```
+
+- `Mcp(slack_*)` — every tool on the `slack` server
+- `Mcp(slack_slack_search_*)` — a tool family
+- `Mcp(slack_slack_search_public_and_private)` — one exact tool
+- `Mcp(/atlassian_.*/)` — regex
+
+Because all MCP calls share toolName `mcp`, a useful baseline is `"toolDefaults": { "mcp": "ask" }`
+(prompt for any MCP tool that no static rule covers). Per-MCP-tool *defaults* aren't
+expressible in `toolDefaults` (the key would collide); use an `ask` rule to force a
+prompt for a specific tool instead. Static rules match on the tool name only — to
+discriminate by argument values, use [auto mode](#auto-mode), whose classifier sees
+the full call (tool name + parsed args).
+
+The interactive prompt renders the parsed arguments one-per-line instead of raw
+JSON, e.g.:
+
+```
+Allow MCP tool slack_slack_search_public_and_private?
+
+  query: from:<@UA81XRMD2> after:2026-08-11 before:2026-08-13
+  sort:  timestamp
+  limit: 20
 ```
 
 ### Implicit defaults
@@ -468,8 +512,11 @@ Examples:
 /permissions allow Bash(rg *) --user
 /permissions allow WebSearch
 /permissions allow WebFetch(https://github.com/*)
+/permissions allow Mcp(slack_*)
+/permissions deny  Mcp(slack_slack_post_*)
 /permissions deny  Write(.env*)
 /permissions ask   WebFetch(*)
+/permissions ask   Mcp(atlassian_*)
 /permissions default deny
 /permissions default deny --user
 /permissions allowalledits on

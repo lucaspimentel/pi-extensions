@@ -6,6 +6,7 @@ import {
 	loadConfigFromObjects,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
 	classifyAction, classifierCacheKey, pickClassifierModel, rankClassifierModels, dedupeModels,
+	getMatchField, suggestRule, mcpPreview,
 } from "./test-helpers.mjs";
 
 // Mirror of DEFAULT_AUTO_MODE.allow in index.ts. Keep in sync.
@@ -237,6 +238,83 @@ test("ruleMatches: Ls relative path inside cwd matches (cwd-resolved)",
 	ruleMatches(lsRule, "ls", { path: "./foo" }, LS_CWD), true);
 test("ruleMatches: Ls absolute path outside cwd does NOT match",
 	ruleMatches(lsRule, "ls", { path: "/etc/passwd" }, LS_CWD), false);
+
+// ── MCP — per-tool rules & human-readable preview ─────────────────────────
+//
+// MCP calls arrive as toolName "mcp" with the real tool name in input.tool
+// (conventionally "<server>_<tool>") and args as a JSON string. Matching is
+// done against input.tool so Mcp(<pattern>) rules can target individual tools;
+// the prompt preview renders the parsed args one-per-line instead of raw JSON.
+section("MCP — getMatchField / suggestRule / ruleMatches");
+
+const MCP_INPUT = {
+	tool: "slack_slack_search_public_and_private",
+	args: JSON.stringify({ query: "from:foo after:2026-08-11", sort: "timestamp", limit: 20 }),
+};
+
+test("getMatchField: mcp returns the MCP tool name",
+	getMatchField("mcp", MCP_INPUT), "slack_slack_search_public_and_private");
+test("getMatchField: mcp normalises case/underscores",
+	getMatchField("Mcp", MCP_INPUT), "slack_slack_search_public_and_private");
+test("getMatchField: mcp with no tool → empty string",
+	getMatchField("mcp", { args: "{}" }), "");
+
+test("suggestRule: mcp suggests Mcp(<tool>)",
+	suggestRule("mcp", MCP_INPUT), "Mcp(slack_slack_search_public_and_private)");
+test("suggestRule: mcp with no tool → bare MCP",
+	suggestRule("mcp", {}), "Mcp");
+
+test("parseRule: Mcp(slack_*) parses",
+	parseRule("Mcp(slack_*)")?.tool, "mcp");
+test("parseRule: Mcp(slack_*) pattern",
+	parseRule("Mcp(slack_*)")?.pattern, "slack_*");
+
+test("ruleMatches: Mcp(slack_*) matches slack tool",
+	ruleMatches(parseRule("Mcp(slack_*)"), "mcp", MCP_INPUT), true);
+test("ruleMatches: Mcp(slack_slack_search_*) matches",
+	ruleMatches(parseRule("Mcp(slack_slack_search_*)"), "mcp", MCP_INPUT), true);
+test("ruleMatches: exact MCP tool name matches",
+	ruleMatches(parseRule("Mcp(slack_slack_search_public_and_private)"), "mcp", MCP_INPUT), true);
+test("ruleMatches: Mcp(github_*) does NOT match slack tool",
+	ruleMatches(parseRule("Mcp(github_*)"), "mcp", MCP_INPUT), false);
+test("ruleMatches: MCP regex /atlassian_.*/ does NOT match slack",
+	ruleMatches(parseRule("Mcp(/atlassian_.*/)"), "mcp", MCP_INPUT), false);
+
+section("MCP — decide precedence");
+
+test("decide: MCP allow rule → allow",
+	decide(makeCfg({ allow: ["Mcp(slack_*)"], defaultAction: "ask" }), "mcp", MCP_INPUT), "allow");
+test("decide: MCP deny beats allow",
+	decide(makeCfg({ allow: ["Mcp(slack_*)"], deny: ["Mcp(slack_slack_post_*)"], defaultAction: "ask" }), "mcp", MCP_INPUT), "allow");
+test("decide: MCP ask beats allow",
+	decide(makeCfg({ allow: ["Mcp(slack_*)"], ask: ["Mcp(slack_slack_search_*)"], defaultAction: "allow" }), "mcp", MCP_INPUT), "ask");
+test("decide: toolDefaults.mcp → ask when no rule matches",
+	decide(makeCfg({ toolDefaults: { mcp: "ask" }, defaultAction: "allow" }), "mcp", MCP_INPUT), "ask");
+test("decide: explicit MCP allow beats toolDefaults.mcp ask",
+	decide(makeCfg({ allow: ["Mcp(slack_*)"], toolDefaults: { mcp: "ask" }, defaultAction: "deny" }), "mcp", MCP_INPUT), "allow");
+test("decide: MCP deny beats toolDefaults.mcp allow",
+	decide(makeCfg({ deny: ["Mcp(slack_*)"], toolDefaults: { mcp: "allow" }, defaultAction: "ask" }), "mcp", MCP_INPUT), "deny");
+
+section("MCP — mcpPreview");
+
+test("mcpPreview: renders each arg on its own line",
+	mcpPreview(MCP_INPUT),
+	"query: from:foo after:2026-08-11\n  sort: timestamp\n  limit: 20");
+test("mcpPreview: non-string values are JSON-encoded",
+	mcpPreview({ tool: "x", args: JSON.stringify({ n: 3, b: true, obj: { a: 1 } }) }),
+	"n: 3\n  b: true\n  obj: {\"a\":1}");
+test("mcpPreview: object args (not stringified) render too",
+	mcpPreview({ tool: "x", args: { q: "hi" } }), "q: hi");
+test("mcpPreview: no args → placeholder",
+	mcpPreview({ tool: "x" }), "(no arguments)");
+test("mcpPreview: invalid JSON args fall back to raw string",
+	mcpPreview({ tool: "x", args: "not-json" }), "not-json");
+test("mcpPreview: truncates long output",
+	mcpPreview({ tool: "x", args: JSON.stringify({ long: "a".repeat(1000) }) }, 50).length <= 50, true);
+
+test("describeAction: mcp shows tool + args",
+	describeAction("mcp", MCP_INPUT),
+	"Tool: mcp\nMCP tool: slack_slack_search_public_and_private\nArgs: query=from:foo after:2026-08-11, sort=timestamp, limit=20");
 
 // ── recomputeBreakdown ────────────────────────────────────────────────────
 //

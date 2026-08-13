@@ -47,6 +47,7 @@ export {
 	rankClassifierModels,
 	pickClassifierModel,
 	describeAction,
+	mcpPreview,
 	buildClassifierPrompt,
 	parseClassifierResponse,
 	verdictToAction,

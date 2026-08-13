@@ -892,6 +892,11 @@ export function getMatchField(toolName: string, input: Record<string, unknown>):
 	if (t === "read" || t === "write" || t === "edit") return String(input.path ?? "");
 	if (t === "grep" || t === "glob" || t === "ls") return String(input.path ?? "");
 	if (t === "webfetch") return String(input.url ?? "");
+	// MCP: every MCP call arrives as toolName "mcp" with the real tool name in
+	// input.tool (conventionally "<server>_<tool>"). Match against that so rules
+	// like Mcp(slack_*) or Mcp(slack_slack_search_*) can target individual MCP
+	// tools. Args are shown in the prompt preview (see mcpPreview), not matched.
+	if (t === "mcp") return String(input.tool ?? "");
 	try {
 		return JSON.stringify(input);
 	} catch {
@@ -1382,7 +1387,66 @@ export function describeAction(toolName: string, input: Record<string, unknown>)
 	if (t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls")
 		return `Tool: ${toolName}\nPath: ${String(input.path ?? "")}`;
 	if (t === "webfetch") return `Tool: ${toolName}\nURL: ${String(input.url ?? "")}`;
+	if (t === "mcp") {
+		const tool = String(input.tool ?? "");
+		return `Tool: ${toolName}\nMCP tool: ${tool}\nArgs: ${mcpArgsString(input)}`;
+	}
 	try { return `Tool: ${toolName}\nInput: ${JSON.stringify(input)}`; } catch { return `Tool: ${toolName}`; }
+}
+
+/**
+ * Parse an MCP call's `args` field into a value. The args arrive as a JSON
+ * string (double-encoded), so we parse it once here. Returns the parsed value,
+ * or the raw string if it isn't valid JSON, or undefined when absent.
+ */
+function parseMcpArgs(input: Record<string, unknown>): unknown {
+	const raw = input.args;
+	if (typeof raw === "string" && raw) {
+		try { return JSON.parse(raw); } catch { return raw; }
+	}
+	return raw;
+}
+
+/**
+ * Render an MCP call's args as a single-line `k=v, k2=v2` string for the
+ * classifier's `describeAction` summary. Falls back to the raw value.
+ */
+function mcpArgsString(input: Record<string, unknown>): string {
+	const args = parseMcpArgs(input);
+	if (args && typeof args === "object" && !Array.isArray(args)) {
+		return Object.entries(args as Record<string, unknown>)
+			.map(([k, v]) => `${k}=${typeof v === "string" ? v : safeJson(v)}`)
+			.join(", ");
+	}
+	return args == null ? "" : String(args);
+}
+
+/**
+ * Build a human-readable, multi-line preview of an MCP call's arguments for the
+ * permission prompt. Each key/value pair gets its own indented line so the user
+ * can read what the tool is about to do instead of seeing a wall of escaped
+ * JSON. The whole block is truncated to `maxChars` to keep the prompt readable.
+ */
+export function mcpPreview(input: Record<string, unknown>, maxChars = 800): string {
+	const args = parseMcpArgs(input);
+	const lines: string[] = [];
+	if (args && typeof args === "object" && !Array.isArray(args)) {
+		for (const [k, v] of Object.entries(args as Record<string, unknown>)) {
+			const val = typeof v === "string" ? v : safeJson(v);
+			lines.push(`${k}: ${val}`);
+		}
+	} else if (args != null) {
+		lines.push(String(args));
+	}
+	if (lines.length === 0) lines.push("(no arguments)");
+	let body = lines.join("\n  ");
+	if (body.length > maxChars) body = `${body.slice(0, maxChars - 3)}...`;
+	return body;
+}
+
+/** Safe JSON.stringify that never throws on circular references. */
+function safeJson(v: unknown): string {
+	try { return JSON.stringify(v); } catch { return String(v); }
 }
 
 export function buildClassifierPrompt(toolName: string, input: Record<string, unknown>, autoMode: ResolvedAutoModeConfig): string {
@@ -1535,6 +1599,13 @@ export function suggestRule(toolName: string, input: Record<string, unknown>): s
 		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
 	}
 	if (t === "websearch") return "WebSearch";
+	if (t === "mcp") {
+		// Suggest the exact MCP tool. The first underscore separates the server
+		// name from the tool name (e.g. slack_slack_search_*), so a broader
+		// server-level rule would be Mcp(<server>_*); we leave that to the user.
+		const tool = String(input.tool ?? "");
+		return tool ? `Mcp(${tool})` : "Mcp";
+	}
 	if (t === "webfetch") {
 		const url = String(input.url ?? "");
 		if (url) {
@@ -1885,11 +1956,19 @@ export default function (pi: ExtensionAPI) {
 		// ── Single or ambiguous command ask ────────────────────────────────────
 		const suggested = suggestRule(event.toolName, event.input as Record<string, unknown>);
 		const matchField = getMatchField(event.toolName, event.input as Record<string, unknown>);
-		const preview = matchField.length > 200 ? `${matchField.slice(0, 197)}...` : matchField;
+		const isMcp = normalizeTool(event.toolName) === "mcp";
+		// MCP calls arrive as toolName "mcp" with the real tool name in input.tool;
+		// render a human-readable preview of the parsed args instead of raw JSON.
+		const preview = isMcp
+			? mcpPreview(event.input as Record<string, unknown>)
+			: (matchField.length > 200 ? `${matchField.slice(0, 197)}...` : matchField);
+		const titleHeader = isMcp
+			? `Allow MCP tool ${String((event.input as Record<string, unknown>).tool ?? "")}?`
+			: `Allow ${event.toolName}?`;
 		const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
 		const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
 		const reasonNote = classifierReason ? `\n\n  classifier: ${classifierReason}` : "";
-		const title = `Allow ${event.toolName}?\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
+		const title = `${titleHeader}\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
 
 		// Extra "allow all edits" option only for write/edit dialogs; "Switch to
 		// auto mode" appears for every dialog when auto mode isn't already active.

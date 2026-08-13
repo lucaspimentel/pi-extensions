@@ -8,12 +8,15 @@
   "readAllowPiDocs": true,
   "bashReadOnlyAllowCwd": true,
   "toolDefaults": {
-    "write": "ask"
+    "write": "ask",
+    "mcp": "ask"
   },
   "allow": [
     "Glob",
     "Grep",
     "WebSearch",
+    "Mcp(slack_*)",
+    "Mcp(github_*)",
     "WebFetch(https://github.com/*)",
     "WebFetch(https://docs.*)",
     "Bash(npm test*)",
@@ -26,6 +29,7 @@
     "Bash(rm -rf*)",
     "Bash(sudo*)",
     "Bash(/.*\\b(chmod|chown)\\b.*777.*/)",
+    "Mcp(slack_slack_post_*)",
     "Write(.env*)",
     "Write(*/.git/*)",
     "Edit(.env*)"
@@ -33,6 +37,7 @@
   "ask": [
     "Bash(git push*)",
     "Bash(npm publish*)",
+    "Mcp(atlassian_*)",
     "WebFetch(*)"
   ],
   "autoMode": {
