@@ -672,4 +672,30 @@ test("classifyAllShell: no-op cd still auto-allowed (cd is harmless bookkeeping)
 	test("decideCompound (not autoActive): fallthrough → defaultAction (ask)", dc.action, "ask");
 }
 
+// ── Bash output redirection as a write-risk operation ──────────────────────
+
+section("decide — bash redirect-aware allow filter");
+
+const cwd = process.cwd().replace(/\\/g, "/");
+const rCfg = makeCfg({ allow: ["Bash(rg *)"], defaultAction: "ask", bashReadOnlyAllowCwd: true, cwd });
+test("rg x → allow (broad rule)",                  decide(rCfg, "bash", { command: "rg x" }), "allow");
+test("rg x > out → ask (broad rule skips redirect)", decide(rCfg, "bash", { command: "rg x > out" }), "ask");
+test("rg x 2>&1 → allow (descriptor dup, not a file write)", decide(rCfg, "bash", { command: "rg x 2>&1" }), "allow");
+
+test("deny beats redirect-aware allow", decide(
+	makeCfg({ deny: ["Bash(rm -rf*)"], allow: ["Bash(rm -rf * > *)"], defaultAction: "ask" }),
+	"bash", { command: "rm -rf x > out" }), "deny");
+
+test("ask beats redirect-aware allow (broad ask rule)", decide(
+	makeCfg({ ask: ["Bash(rg *)"], allow: ["Bash(rg * > *)"], defaultAction: "allow" }),
+	"bash", { command: "rg x > out" }), "ask");
+
+test("toolDefaults not gated by redirect filter", decide(
+	makeCfg({ toolDefaults: { bash: "allow" }, defaultAction: "ask" }),
+	"bash", { command: "rg x > out" }), "allow");
+
+test("pwsh redirect not filtered (out of scope)", decide(
+	makeCfg({ allow: ["Pwsh(*)"], defaultAction: "ask" }),
+	"pwsh", { command: "$x > out" }), "allow");
+
 process.exit(summary() > 0 ? 1 : 0);

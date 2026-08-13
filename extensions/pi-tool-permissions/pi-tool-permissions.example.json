@@ -21,6 +21,7 @@
     "WebFetch(https://docs.*)",
     "Bash(npm test*)",
     "Bash(npm run *)",
+    "Bash(npm run * > /tmp/*)",
     "Bash(git status*)",
     "Bash(git diff*)",
     "Bash(git log*)"

@@ -4,7 +4,8 @@ import { resolve } from "node:path";
 import {
 	makeTestRunner, getMatchField, suggestRule,
 	splitTopLevelShell, decideCompound, decide, makeCfg, isNoopCd,
-	isReadOnlyBashSubcommand,
+	isReadOnlyBashSubcommand, hasTopLevelFileRedirect, rulePatternAllowsRedirect,
+	parseRule,
 	actionIcon, formatBreakdownLine, formatBreakdown,
 	stripLineContinuations, stripStructuralKeywords,
 } from "./test-helpers.mjs";
@@ -720,5 +721,121 @@ test("case with Bash(case*) deny → deny",        caseDeny.action, "deny");
 const casePreceded = decideCompound(caseCfg, "bash", { command: "echo start; case $x in foo) cmd;; esac" });
 test("cmd; case → isCompound false (pre-check)", casePreceded.isCompound, false);
 test("cmd; case → ask",                          casePreceded.action, "ask");
+
+// ── Output redirection as a write-risk operation ──────────────────────────
+
+section("hasTopLevelFileRedirect — file writes");
+
+test("> file → true",                   hasTopLevelFileRedirect("echo foo > out.txt"), true);
+test(">> file → true",                  hasTopLevelFileRedirect("echo foo >> out.txt"), true);
+test("2> file → true",                  hasTopLevelFileRedirect("cmd 2> err.txt"), true);
+test("2>> file → true",                 hasTopLevelFileRedirect("cmd 2>> err.txt"), true);
+test("1> file → true",                  hasTopLevelFileRedirect("cmd 1> out.txt"), true);
+test("&> file → true (both streams)",   hasTopLevelFileRedirect("cmd &> all.txt"), true);
+test("&>> file → true (both append)",   hasTopLevelFileRedirect("cmd &>> all.txt"), true);
+test("> file with leading space → true", hasTopLevelFileRedirect("rg x  >  out"), true);
+test("> file no space → true",          hasTopLevelFileRedirect("rg x>out"), true);
+test("process subst >(...) → true",      hasTopLevelFileRedirect("echo >(tee f)"), true);
+test("redirect after heredoc → true",   hasTopLevelFileRedirect("cat <<EOF > out.txt\nbody\nEOF"), true);
+
+section("hasTopLevelFileRedirect — descriptor dups (NOT file writes)");
+
+test("2>&1 → false",                   hasTopLevelFileRedirect("echo foo 2>&1"), false);
+test("1>&2 → false",                   hasTopLevelFileRedirect("echo foo 1>&2"), false);
+test(">&1 → false",                    hasTopLevelFileRedirect("echo foo >&1"), false);
+test(">&2 → false",                    hasTopLevelFileRedirect("echo foo >&2"), false);
+test(">&- (close) → false",            hasTopLevelFileRedirect("cmd >&-"), false);
+test(">&10 → false",                   hasTopLevelFileRedirect("cmd >&10"), false);
+test(">>&1 (append dup) → false",       hasTopLevelFileRedirect("cmd >>&1"), false);
+test("bare command → false",            hasTopLevelFileRedirect("echo foo"), false);
+test("empty → false",                   hasTopLevelFileRedirect(""), false);
+
+section("hasTopLevelFileRedirect — quoting / escaping / nesting");
+
+test("double-quoted > → false",         hasTopLevelFileRedirect('echo "a > b"'), false);
+test("single-quoted > → false",         hasTopLevelFileRedirect("echo 'a > b'"), false);
+test("backtick > → false",              hasTopLevelFileRedirect("echo `echo x > y`"), false);
+test("escaped \\> → false",              hasTopLevelFileRedirect("echo a \\> b"), false);
+test("> inside $(...) → false",         hasTopLevelFileRedirect('echo $(grep ">" f)'), false);
+test("> inside (...) → false",          hasTopLevelFileRedirect("(echo a > b)"), false);
+test("> inside heredoc body → false",   hasTopLevelFileRedirect("cat <<EOF\nx > y\nEOF"), false);
+test("mixed 2>&1 > file → true",         hasTopLevelFileRedirect("echo hi 2>&1 > out.txt"), true);
+
+section("isReadOnlyBashSubcommand — descriptor dup is read-only");
+
+test("echo foo 2>&1 → true (dup, no file)",  isReadOnlyBashSubcommand("echo foo 2>&1", WIN_CWD), true);
+test("echo foo 1>&2 → true",                 isReadOnlyBashSubcommand("echo foo 1>&2", WIN_CWD), true);
+test("echo foo >&2 → true",                  isReadOnlyBashSubcommand("echo foo >&2", WIN_CWD), true);
+test("echo foo > out → false (file write)",  isReadOnlyBashSubcommand("echo foo > out", WIN_CWD), false);
+test("cmd 2> err → false",                   isReadOnlyBashSubcommand("cmd 2> err", WIN_CWD), false);
+test("cmd &> all → false",                  isReadOnlyBashSubcommand("cmd &> all", WIN_CWD), false);
+
+section("decide — redirect-aware allow rules");
+
+const rgBroadCfg = makeCfg({ allow: ["Bash(rg *)"], defaultAction: "ask", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });
+test("rg x → allow (broad rule)",                 decide(rgBroadCfg, "bash", { command: "rg x" }), "allow");
+test("rg x > out.txt → ask (broad rule skipped)", decide(rgBroadCfg, "bash", { command: "rg x > out.txt" }), "ask");
+test("rg x >> out.txt → ask",                     decide(rgBroadCfg, "bash", { command: "rg x >> out.txt" }), "ask");
+test("rg x 2>&1 → allow (descriptor dup, broad ok)", decide(rgBroadCfg, "bash", { command: "rg x 2>&1" }), "allow");
+test("rg x 2> err → ask",                         decide(rgBroadCfg, "bash", { command: "rg x 2> err" }), "ask");
+
+const rgRedirectCfg = makeCfg({ allow: ["Bash(rg *)", "Bash(rg * > *)"], defaultAction: "ask", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });
+test("rg x > out.txt → allow (redirect-aware rule)", decide(rgRedirectCfg, "bash", { command: "rg x > out.txt" }), "allow");
+test("rg x >> out.txt → ask (`>` pattern is literal, does not cover `>>`)", decide(rgRedirectCfg, "bash", { command: "rg x >> out.txt" }), "ask");
+test("rg x → allow (broad rule still works)",        decide(rgRedirectCfg, "bash", { command: "rg x" }), "allow");
+
+// A `>>`-aware rule covers the append form (separate from `>`).
+const rgAppendCfg = makeCfg({ allow: ["Bash(rg *)", "Bash(rg * >> *)"], defaultAction: "ask", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });
+test("rg x >> out.txt → allow (>> rule)", decide(rgAppendCfg, "bash", { command: "rg x >> out.txt" }), "allow");
+test("rg x > out.txt → ask (> not covered by >> rule)", decide(rgAppendCfg, "bash", { command: "rg x > out.txt" }), "ask");
+
+// deny rules are redirect-agnostic: they always win over a redirected command
+const denyRmCfg = makeCfg({ deny: ["Bash(rm -rf*)"], allow: ["Bash(rm -rf * > *)"], defaultAction: "ask" });
+test("rm -rf x > out → deny (deny beats redirect-aware allow)", decide(denyRmCfg, "bash", { command: "rm -rf x > out" }), "deny");
+
+// ask rules are redirect-agnostic: a broad ask rule forces ask even for redirects
+const askRgCfg = makeCfg({ ask: ["Bash(rg *)"], allow: ["Bash(rg * > *)"], defaultAction: "allow" });
+test("rg x > out → ask (broad ask rule beats redirect allow)", decide(askRgCfg, "bash", { command: "rg x > out" }), "ask");
+
+// bare Bash rule (no pattern) is NOT redirect-aware — won't authorize a redirect
+const bareBashCfg = makeCfg({ allow: ["Bash"], defaultAction: "ask" });
+test("rg x → allow (bare Bash)",                 decide(bareBashCfg, "bash", { command: "rg x" }), "allow");
+test("rg x > out → ask (bare Bash not redirect-aware)", decide(bareBashCfg, "bash", { command: "rg x > out" }), "ask");
+
+// pwsh is out of scope — its redirects are NOT filtered (broad allow still works)
+const pwshCfg = makeCfg({ allow: ["Pwsh(*)"], defaultAction: "ask" });
+test("pwsh with > stays allow (out of scope)",   decide(pwshCfg, "pwsh", { command: "$x > out" }), "allow");
+
+// toolDefaults / defaultAction are NOT gated by the redirect filter
+const tdCfg = makeCfg({ toolDefaults: { bash: "allow" }, defaultAction: "ask" });
+test("rg x > out → allow via toolDefaults (not gated)", decide(tdCfg, "bash", { command: "rg x > out" }), "allow");
+
+section("rulePatternAllowsRedirect");
+
+test("pattern with > → true",          rulePatternAllowsRedirect(parseRule("Bash(rg * > *)")), true);
+test("pattern with >> → true",         rulePatternAllowsRedirect(parseRule("Bash(rg * >> *)")), true);
+test("pattern without > → false",      rulePatternAllowsRedirect(parseRule("Bash(rg *)")), false);
+test("bare rule (no pattern) → false", rulePatternAllowsRedirect(parseRule("Bash")), false);
+
+section("decideCompound — redirect in one subcommand");
+
+const compRedirectCfg = makeCfg({ allow: ["Bash(rg *)"], defaultAction: "ask", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });
+const rgRedirectComp = decideCompound(compRedirectCfg, "bash", { command: "rg x > out.txt && echo hi" });
+test("rg > out && echo → isCompound true",  rgRedirectComp.isCompound, true);
+test("rg > out && echo → action ask",       rgRedirectComp.action, "ask");
+test("rg > out part → ask",                 rgRedirectComp.breakdown[0].action, "ask");
+test("echo hi part → allow",                rgRedirectComp.breakdown[1].action, "allow");
+
+const teeCompCfg = makeCfg({ allow: ["Bash(rg *)"], defaultAction: "ask", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });
+const teeComp = decideCompound(teeCompCfg, "bash", { command: "rg x | tee out.txt" });
+test("rg | tee → isCompound true",  teeComp.isCompound, true);
+test("rg part → allow (no redirect)", teeComp.breakdown[0].action, "allow");
+test("tee part → ask (not on safe list)", teeComp.breakdown[1].action, "ask");
+
+const bothRedirectCfg = makeCfg({ allow: ["Bash(echo *)"], defaultAction: "ask", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });
+const bothRedirect = decideCompound(bothRedirectCfg, "bash", { command: "echo a > x && echo b > y" });
+test("echo>a && echo>b → isCompound true", bothRedirect.isCompound, true);
+test("echo>a part → ask",                  bothRedirect.breakdown[0].action, "ask");
+test("echo>b part → ask",                  bothRedirect.breakdown[1].action, "ask");
 
 process.exit(summary() > 0 ? 1 : 0);

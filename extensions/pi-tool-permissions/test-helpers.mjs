@@ -25,6 +25,8 @@ export {
 	piDocsReadGlobs,
 	isNoopCd,
 	isReadOnlyBashSubcommand,
+	hasTopLevelFileRedirect,
+	rulePatternAllowsRedirect,
 	normalizeToolDefaultsKeys,
 	coerceDefaultAction,
 	compilePattern,

@@ -96,12 +96,26 @@
  *   bashReadOnlyAllowCwd (default: true)
  *     Silently allows a curated set of read-only bash subcommands (pwd, echo, ls,
  *     cat, head, tail, wc, stat, …) when their path arguments resolve inside cwd.
- *     Commands with output redirections (>) are never auto-allowed.
+ *     Commands with top-level *file* output redirections (>, >>, 2>, &>, …) are
+ *     never auto-allowed. Descriptor-to-descriptor dups like `2>&1` / `1>&2` are
+ *     NOT file writes and stay auto-allowable.
  *     Disable with "bashReadOnlyAllowCwd": false.
  *   write → ask (automatic)
  *     Unless toolDefaults.write is explicitly set, Write always prompts regardless
  *     of defaultAction. Override with "toolDefaults": { "write": "allow" }.
  *     Explicit Write(<path>) allow rules still win because allow > toolDefaults.
+ *
+ * Redirected Bash commands (write-risk):
+ *   A Bash command containing a top-level *file* output redirection (>, >>, 2>,
+ *   &>, n>>, …) is treated as a write-risk operation. A broad allow rule whose
+ *   pattern contains no `>` (e.g. `Bash(rg *)`) will NOT auto-allow a redirected
+ *   form like `rg x > out.txt` — it falls through to `ask`/toolDefaults/default.
+ *   To pre-authorize a redirected command, add an explicit redirect-aware rule
+ *   whose pattern includes `>` (e.g. `Bash(rg * > *)`). `deny` and `ask` rules
+ *   are redirect-agnostic and always still apply, so safety rules win over a
+ *   redirected command. Descriptor-to-descriptor redirects (`2>&1`, `1>&2`,
+ *   `>&2`, `>&-`) are NOT file writes and are exempt from this filter. pwsh is
+ *   out of scope (different syntax) and stays redirect-agnostic.
  *
  * Compound bash commands (&&, ||, |, ;):
  *   When a Bash command contains top-level shell operators, each subcommand is
@@ -707,7 +721,7 @@ const READONLY_BASH_WITH_PATHS = new Set([
  *   - Other escape sequences (e.g. `\&`, `\$`) are left untouched.
  *
  * Called once at the bash entry point in `decideCompound` so downstream
- * consumers — rule pattern matching, `tokenizeSimple`, `hasTopLevelOutputRedirect`,
+ * consumers — rule pattern matching, `tokenizeSimple`, `hasTopLevelFileRedirect`,
  * `isNoopCd` — all see the canonical form even when the command is non-compound.
  */
 export function stripLineContinuations(cmd: string): string {
@@ -737,19 +751,123 @@ export function stripLineContinuations(cmd: string): string {
 }
 
 /**
- * Returns true when `cmd` contains a top-level output redirection operator
- * (`>`, `>>`, `2>`, `&>`, etc.) outside of single or double quotes.
- * Used to reject otherwise-safe commands that write to files via redirection.
+ * Returns true when `cmd` contains a top-level *file* output redirection
+ * (`>`, `>>`, `2>`, `&>`, `n>>`, …) outside of single/double quotes, backticks,
+ * command substitution (parens), and heredoc bodies. Descriptor-to-descriptor
+ * redirects (`2>&1`, `1>&2`, `>&2`, `>&-`, `>>&N`) are NOT file writes and
+ * return false — they only rearrange existing streams and are commonly used
+ * for combined output capture/logging.
+ *
+ * Used to flag otherwise-safe commands that write to files via redirection
+ * so that (a) the read-only bash auto-allow short-circuit rejects them, and
+ * (b) broad allow rules (e.g. `Bash(rg *)`) don't silently authorize a
+ * redirected form like `rg x > out.txt`. To pre-allow a redirected command,
+ * add an explicit redirect-aware rule whose pattern contains `>` (e.g.
+ * `Bash(rg * > *)`) — see `rulePatternAllowsRedirect`.
  */
-function hasTopLevelOutputRedirect(cmd: string): boolean {
+export function hasTopLevelFileRedirect(cmd: string): boolean {
 	let inSingle = false;
 	let inDouble = false;
-	for (let i = 0; i < cmd.length; i++) {
+	let inBacktick = false;
+	let parenDepth = 0;
+	// When set, the next top-level newline ends a heredoc opening line and the
+	// body (up to the delimiter line) should be skipped so a `>` inside the
+	// body is ignored. The opening line itself is scanned normally so a real
+	// redirect there (e.g. `cat <<EOF > out.txt`) is still detected.
+	let pendingHeredoc: { delimiter: string; stripTabs: boolean } | null = null;
+	let i = 0;
+	while (i < cmd.length) {
 		const ch = cmd[i];
-		if (ch === "\\" && !inSingle) { i++; continue; }
-		if (ch === "'" && !inDouble) { inSingle = !inSingle; continue; }
-		if (ch === '"' && !inSingle) { inDouble = !inDouble; continue; }
-		if (!inSingle && !inDouble && ch === ">") return true;
+		// Backslash escape — skip next char (not inside single quotes)
+		if (ch === "\\" && !inSingle) { i += 2; continue; }
+		// Quote / backtick toggles
+		if (ch === "'" && !inDouble && !inBacktick) { inSingle = !inSingle; i++; continue; }
+		if (ch === '"' && !inSingle && !inBacktick) { inDouble = !inDouble; i++; continue; }
+		if (ch === "`" && !inSingle && !inDouble) { inBacktick = !inBacktick; i++; continue; }
+		if (!inSingle && !inDouble && !inBacktick) {
+			// Parenthesis depth — command substitution / subshell. A `>` inside
+			// `$(...)` belongs to the inner command, not a top-level redirect.
+			if (ch === "(") { parenDepth++; i++; continue; }
+			if (ch === ")") { if (parenDepth > 0) parenDepth--; i++; continue; }
+			// Heredoc start (`<<` / `<<-`). Parse the delimiter but keep scanning
+			// the rest of the opening line normally — a redirect on the same
+			// line (e.g. `cat <<EOF > out.txt`) is real and must be detected.
+			// The body is skipped at the next top-level newline. `<<<` here-
+			// strings and unparseable delimiters fall through to `i += 2`.
+			if (ch === "<" && cmd[i + 1] === "<") {
+				const stripTabs = cmd[i + 2] === "-";
+				let j = i + (stripTabs ? 3 : 2);
+				while (j < cmd.length && (cmd[j] === " " || cmd[j] === "\t")) j++;
+				let delimiter = "";
+				if (cmd[j] === "'" || cmd[j] === '"') {
+					const q = cmd[j++];
+					while (j < cmd.length && cmd[j] !== q) delimiter += cmd[j++];
+					if (j < cmd.length) j++; // skip closing quote
+				} else {
+					while (j < cmd.length && /[A-Za-z0-9_]/.test(cmd[j])) delimiter += cmd[j++];
+				}
+				if (delimiter) {
+					pendingHeredoc = { delimiter, stripTabs };
+					i = j; // continue scanning the rest of the opening line
+				} else {
+					i += 2; // `<<<` here-string or unparseable — just skip `<<`
+				}
+				continue;
+			}
+			// Newline ending a heredoc opening line — skip the body until the
+			// closing delimiter line so a `>` inside the body is ignored.
+			if (pendingHeredoc && parenDepth === 0 && (ch === "\n" || (ch === "\r" && cmd[i + 1] === "\n"))) {
+				const { delimiter, stripTabs } = pendingHeredoc;
+				pendingHeredoc = null;
+				let k = i + (ch === "\r" ? 2 : 1); // start of body
+				let found = false;
+				while (k < cmd.length) {
+					const lineStart = k;
+					let m = k;
+					if (stripTabs) { while (m < cmd.length && cmd[m] === "\t") m++; }
+					if (cmd.startsWith(delimiter, m)) {
+						const after = m + delimiter.length;
+						if (after >= cmd.length || cmd[after] === "\n" || cmd[after] === "\r") {
+							// closing delimiter line — resume after it (and its newline)
+							i = after;
+							if (i < cmd.length && cmd[i] === "\r") i++;
+							if (i < cmd.length && cmd[i] === "\n") i++;
+							found = true;
+							break;
+						}
+					}
+					// not the delimiter — skip to end of this body line
+					k = lineStart;
+					while (k < cmd.length && cmd[k] !== "\n") k++;
+					if (k < cmd.length) k++; // consume newline
+				}
+				if (!found) i = cmd.length; // unterminated heredoc — consume rest
+				continue;
+			}
+			if (parenDepth === 0 && ch === ">") {
+				const prev = cmd[i - 1];
+				const next = cmd[i + 1];
+				const next2 = cmd[i + 2];
+				const next3 = cmd[i + 3];
+				// `&>` / `&>>` — redirect both stdout+stderr to a file.
+				if (prev === "&") return true;
+				if (next === "&") {
+					// `>&N` / `N>&M` — descriptor dup; `>&-` — close. Not a file write.
+					if (next2 !== undefined && /[0-9]/.test(next2)) { i += 3; continue; }
+					if (next2 === "-") { i += 3; continue; }
+					// `>&<other>` — unusual; treat conservatively as a file write.
+					return true;
+				}
+				if (next === ">") {
+					// `>>` append. `>>&N` (rare) is a descriptor dup, not a file write.
+					if (next2 === "&" && next3 !== undefined && /[0-9]/.test(next3)) { i += 4; continue; }
+					return true;
+				}
+				// `> file` / `N> file` / process substitution `>(...)` — file write.
+				return true;
+			}
+		}
+		i++;
 	}
 	return false;
 }
@@ -789,7 +907,9 @@ function tokenizeSimple(cmd: string): string[] {
  * auto-allow when `bashReadOnlyAllowCwd` is enabled.
  *
  * Rules:
- *  1. Reject if cmd contains a top-level output redirection (>).
+ *  1. Reject if cmd contains a top-level *file* output redirection (>, >>,
+ *     2>, &>, …). Descriptor-to-descriptor dups like `2>&1` are NOT file
+ *     writes and stay auto-allowable.
  *  2. If the first token is in READONLY_BASH_SAFE_ALWAYS → allow.
  *  3. If the first token is in READONLY_BASH_WITH_PATHS → allow only when
  *     every non-flag argument resolves to a path inside (or equal to) cwd.
@@ -798,7 +918,7 @@ function tokenizeSimple(cmd: string): string[] {
 export function isReadOnlyBashSubcommand(cmd: string, cwd: string): boolean {
 	const trimmed = cmd.trim();
 	if (!trimmed) return false;
-	if (hasTopLevelOutputRedirect(trimmed)) return false;
+	if (hasTopLevelFileRedirect(trimmed)) return false;
 	const tokens = tokenizeSimple(trimmed);
 	if (tokens.length === 0) return false;
 	const cmdName = tokens[0].toLowerCase();
@@ -921,6 +1041,24 @@ export function ruleMatches(rule: ParsedRule, toolName: string, input: Record<st
 		if (resolved !== field && rule.regex.test(resolved)) return true;
 	}
 	return rule.regex.test(field);
+}
+
+/**
+ * Returns true when an allow rule is eligible to authorize a Bash command that
+ * contains a top-level *file* output redirection (e.g. `rg x > out.txt`).
+ *
+ * A broad allow rule whose pattern contains no `>` (e.g. `Bash(rg *)`) is
+ * intentionally NOT redirect-aware: it would otherwise silently authorize
+ * writing to arbitrary files via redirection. To pre-allow a redirected form,
+ * the user must add a rule whose pattern explicitly includes the redirect
+ * operator (e.g. `Bash(rg * > *)`). A bare `Bash` rule (no pattern) is treated
+ * as non-redirect-aware for the same reason.
+ *
+ * `deny` and `ask` rules are redirect-agnostic — safety rules must always win
+ * over a redirected command — so this filter applies to the `allow` list only.
+ */
+export function rulePatternAllowsRedirect(rule: ParsedRule): boolean {
+	return typeof rule.pattern === "string" && rule.pattern.includes(">");
 }
 
 // ── Compound command splitting ─────────────────────────────────────────────
@@ -1572,7 +1710,22 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd)) return "allow";
 	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
 	if (check(cfg.ask)) return "ask";
-	if (check(cfg.allow)) return "allow";
+	// Allow rules — redirect-aware for Bash. A Bash command containing a
+	// top-level *file* output redirection (e.g. `rg x > out.txt`) is NOT
+	// covered by a broad allow rule whose pattern lacks `>` (e.g. `Bash(rg *)`);
+	// only an explicit redirect-aware rule (pattern contains `>`, e.g.
+	// `Bash(rg * > *)`) may authorize it. `deny`/`ask` above are redirect-
+	// agnostic so safety rules always win. pwsh is out of scope (different
+	// syntax) and stays redirect-agnostic.
+	const isBashRedirect = normalizeTool(toolName) === "bash" && hasTopLevelFileRedirect(String(input.command ?? ""));
+	if (isBashRedirect) {
+		for (const raw of cfg.allow) {
+			const rule = parseRule(raw);
+			if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, toolName, input, cfg.cwd)) return "allow";
+		}
+	} else if (check(cfg.allow)) {
+		return "allow";
+	}
 	const td = cfg.toolDefaults[normalizeTool(toolName)];
 	if (td !== undefined) return td;
 	// Auto layer: when the session toggle is on, return the "auto" sentinel so the

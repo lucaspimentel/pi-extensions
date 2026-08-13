@@ -313,7 +313,7 @@ Two tiers of safe commands:
 | **Safe always** — no filesystem access | `pwd`, `echo`, `printf`, `date`, `whoami`, `id`, `hostname`, `uname`, `env`, `printenv`, `true`, `false`, `which`, `type`, `command` | Always allowed |
 | **Safe with paths** — read-only filesystem access | `ls`, `cat`, `head`, `tail`, `wc`, `file`, `stat`, `tree`, `du`, `realpath`, `readlink`, `dirname`, `basename` | Allowed when all non-flag arguments resolve inside cwd |
 
-Commands containing output redirections (`>`, `>>`, `2>`, etc.) are **never** auto-allowed, even if the base command is in the safe list — e.g. `echo foo > /tmp/out` is denied.
+Commands containing top-level *file* output redirections (`>`, `>>`, `2>`, `&>`, etc.) are **never** auto-allowed, even if the base command is in the safe list — e.g. `echo foo > /tmp/out` is denied. Descriptor-to-descriptor redirects such as `2>&1` / `1>&2` / `>&2` are **not** file writes (they only rearrange existing streams) and stay auto-allowable, so common combined-output patterns like `cmd 2>&1` are not blocked.
 
 The compound-command splitter applies first, so each subcommand in a `&&` / `||` / `;` chain is evaluated independently. A chain like `ls && pwd` is fully auto-allowed; `ls && rm -rf .` is denied because `rm` is not on the safe list.
 
@@ -323,6 +323,23 @@ Disable per-project:
 ```json
 { "bashReadOnlyAllowCwd": false }
 ```
+
+#### Redirected Bash commands (write-risk)
+
+A Bash command containing a top-level *file* output redirection (`>`, `>>`, `2>`, `&>`, `n>>`, …) is treated as a **write-risk** operation. A broad allow rule whose pattern contains no `>` will **not** auto-allow a redirected form — e.g. with `Bash(rg *)` in `allow`, `rg x > out.txt` falls through to `ask` / `toolDefaults` / `defaultAction` rather than being silently allowed.
+
+To pre-authorize a redirected command, add an explicit **redirect-aware** rule whose pattern includes the `>` operator:
+
+```json
+{ "allow": ["Bash(rg *)", "Bash(rg * > *)"] }
+```
+
+Notes:
+- The `>` in a rule pattern is literal, so `Bash(rg * > *)` covers `rg x > out.txt` but **not** `rg x >> out.txt` — add `Bash(rg * >> *)` separately for the append form.
+- `deny` and `ask` rules are **redirect-agnostic** and always still apply, so safety rules win over a redirected command even when a redirect-aware `allow` rule exists.
+- Descriptor-to-descriptor redirects (`2>&1`, `1>&2`, `>&2`, `>&-`) are **not** file writes and are exempt from this filter — `cmd 2>&1` is still covered by a broad `Bash(cmd *)` rule.
+- `toolDefaults` and `defaultAction` are **not** gated by the redirect filter.
+- `pwsh` is out of scope (different redirection syntax) and stays redirect-agnostic.
 
 #### `allowNoopCd` (default: `true`)
 
