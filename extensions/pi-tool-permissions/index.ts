@@ -355,6 +355,8 @@ export const DEFAULT_AUTO_MODE = {
 		"Read-only Atlassian API call to fetch a Jira issue",
 		"Read-only Atlassian API call to fetch a Confluence page",
 		"Read-only Confluence search query using CQL",
+		"Assigns a string to a variable, no side effects",
+		"Executes a no-op command that does nothing",
 	],
 	soft_deny: [
 		"Force pushing, deleting remote branches",
