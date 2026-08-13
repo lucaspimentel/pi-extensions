@@ -21,6 +21,8 @@ const DEFAULT_ALLOW = [
 	"Read-only Atlassian API call to fetch a Jira issue",
 	"Read-only Atlassian API call to fetch a Confluence page",
 	"Read-only Confluence search query using CQL",
+	"Assigns a string to a variable, no side effects",
+	"Executes a no-op command that does nothing",
 ];
 // Mirror of DEFAULT_AUTO_MODE.soft_deny in index.ts. Keep in sync.
 const DEFAULT_SOFT_DENY = [
