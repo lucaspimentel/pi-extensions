@@ -1,5 +1,7 @@
 # TODO
 
+> See also [`extensions/pi-tool-permissions/TODO.md`](extensions/pi-tool-permissions/TODO.md) for the pi-tool-permissions extension's own task list.
+
 - [x] Expand `DEFAULT_AUTO_MODE.allow` in `extensions/pi-tool-permissions/index.ts` with new NL entries so the auto-mode classifier auto-allows more read-only/reversible actions out of the box (additive on top of user/project config):
 	- `"Editing files in a source-controlled repository (changes are reversible via git)"` — covers `Edit` tool `no_match` prompts (e.g. "Editing a source file is not covered by the listed allow, soft deny, or hard deny rules."). Note: only affects `Edit`; `Write` has an implicit `toolDefaults["write"] = "ask"` guard (`index.ts:446`) that fires before the auto layer, so `Write` calls never reach the classifier. Covering `Write` is a separate change.
 	- `"Read-only inspection commands (pwd, ls, cat, head, tail, wc, stat, file, du, df)"` — covers "Read-only inspection command that does not match any allow or deny rules."
