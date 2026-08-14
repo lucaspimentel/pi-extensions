@@ -89,6 +89,8 @@ When no static rule or `toolDefaults` entry matches and the session toggle is on
 
 **Static precedence invariant**: `deny`/`ask`/`toolDefaults` at the top of `decide()` already win, so the classifier only sees true fallthroughs. Keep it that way — the classifier is never the first thing consulted.
 
+**NL-list precedence**: when an action matches more than one of the `allow`/`soft_deny`/`hard_deny` lists, the more-severe verdict wins — `hard_deny > soft_deny > allow`. The classifier emits a single verdict, so precedence is enforced by the prompt instruction (not by code); this mirrors the static `deny > ask > allow` chain and removes any `allow`-overrides-`deny` escape hatch at the classifier layer.
+
 ## Session toggle
 
 Mirrors the existing allow-all-edits one:

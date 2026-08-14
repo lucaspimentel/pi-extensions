@@ -556,6 +556,8 @@ deny > ask > allow > toolDefaults > auto (if session toggle on) > defaultAction
 - `toolDefaults` (e.g. the implicit `write → ask` guard) win over the classifier — a per-tool deterministic action is never screened by the LLM.
 - The classifier only decides for actions that fall through all of those — true unknowns.
 
+When an action matches more than one NL list, the more-severe verdict wins: **`hard_deny > soft_deny > allow`** (the classifier emits a single verdict, so precedence is enforced by the prompt instruction, not by code). This mirrors the static `deny > ask > allow` chain — there is no `allow`-overrides-`deny` escape hatch at the classifier layer.
+
 **Verdict mapping:**
 
 | Classifier verdict | Result |

@@ -528,6 +528,8 @@ test("describeAction: unknown tool → JSON",
 	test("prompt: contains soft_deny list", p.includes("Force push"), true);
 	test("prompt: contains hard_deny list", p.includes("Exfil data"), true);
 	test("prompt: contains verdict schema",  p.includes("VERDICT:"), true);
+	test("prompt: precedence sentence directs hard_deny first", p.includes("If the action matches a Hard deny rule, verdict is hard_deny"), true);
+	test("prompt: verdict options ordered hard_deny first", p.includes("VERDICT: <hard_deny|soft_deny|allow|no_match>"), true);
 }
 
 // classifyAction with a fake complete seam

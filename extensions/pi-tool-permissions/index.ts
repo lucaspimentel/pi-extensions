@@ -175,7 +175,11 @@
  *   Verdict mapping: `allow` → allow; `hard_deny` → block; `soft_deny` → prompt
  *   (deny in non-interactive modes); `no_match` → fall through to `defaultAction`
  *   (the classifier ran and had no opinion, so the user's terminal default
- *   applies). When the toggle is on but no classifier model is available, the
+ *   applies). When an action matches more than one NL list, the more-severe
+ *   verdict wins: `hard_deny > soft_deny > allow` (the classifier emits a single
+ *   verdict, so precedence is enforced by the prompt instruction, not by code).
+ *   This mirrors the deterministic `deny > ask > allow` chain above. When the
+ *   toggle is on but no classifier model is available, the
  *   auto layer stubs to `ask` (safe) rather than applying `defaultAction` —
  *   screening was requested but couldn't be performed.
  *
@@ -1663,9 +1667,9 @@ export function buildClassifierPrompt(toolName: string, input: Record<string, un
 		hard,
 		"",
 		"Decide which list (if any) the action matches. Respond with exactly two lines:",
-		"VERDICT: <allow|soft_deny|hard_deny|no_match>",
+		"VERDICT: <hard_deny|soft_deny|allow|no_match>",
 		"REASON: <one short sentence>",
-		"If the action matches an Allow rule, verdict is allow. If it matches a Hard deny rule, verdict is hard_deny. If it matches a Soft deny rule, verdict is soft_deny. Otherwise, verdict is no_match.",
+		"If the action matches a Hard deny rule, verdict is hard_deny. If it matches a Soft deny rule, verdict is soft_deny. If it matches an Allow rule, verdict is allow. Otherwise, verdict is no_match.",
 		"The reason should describe what the action does (e.g. 'read-only GitHub API call to fetch a file'). Do not mention whether it matches or fails to match any rules — that is implied by the verdict.",
 	].join("\n");
 }
