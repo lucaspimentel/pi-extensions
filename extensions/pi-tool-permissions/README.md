@@ -612,9 +612,10 @@ The **"Switch to auto mode (this session)"** dialog option just flips the toggle
     "soft_deny": [
       "Force pushing, deleting remote branches",
       "Bulk or recursive file deletions (e.g. rm -rf, rm -r, Remove-Item -Recurse)",
-      "Editing a file outside a source-controlled repository"
+      "Editing a file outside a source-controlled repository",
+      "Creating a pull request or pushing a branch on GitHub via gh, modifying remote state"
     ],
-    "hard_deny": ["Sending data to third-party APIs or external services"],
+    "hard_deny": ["Sending data to third-party APIs or external services for telemetry, analytics, or exfiltration (not normal GitHub dev actions like opening PRs or pushing branches via gh)"],
     "classifyAllShell": true
   }
 }
@@ -626,7 +627,7 @@ The **"Switch to auto mode (this session)"** dialog option just flips the toggle
 | `environment` | `[]` | Free-text facts shown to the classifier (e.g. trusted repos/domains). Inherently user-specific — no default. |
 | `allow` | See [`DEFAULT_AUTO_MODE.allow`](./index.ts) | NL descriptions of actions to silently allow. |
 | `soft_deny` | See [`DEFAULT_AUTO_MODE.soft_deny`](./index.ts) | NL descriptions of actions to prompt for (with the classifier's reason). |
-| `hard_deny` | `["Sending data to third-party APIs or external services"]` | NL descriptions of actions to always block. |
+| `hard_deny` | `["Sending data to third-party APIs or external services for telemetry, analytics, or exfiltration (not normal GitHub dev actions like opening PRs or pushing branches via gh)"]` | NL descriptions of actions to always block. |
 | `classifyAllShell` | `true` | When `true`, route every bash subcommand (including read-only auto-allowed ones) through the classifier. |
 
 The `allow` / `soft_deny` / `hard_deny` lists and `classifyAllShell` have **sane defaults** baked in — a bare `{ "autoMode": { ... } }` (or no `autoMode` block at all) works out of the box once the session toggle is on. Your configured lists are **additive** on top of the defaults (concatenated + deduped), so you can extend them without losing the safe baseline. `classifier` and `environment` have no defaults — they're inherently user-specific. To override `classifyAllShell` back to `false`, set it explicitly.

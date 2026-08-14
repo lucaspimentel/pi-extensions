@@ -48,8 +48,8 @@
  *       "classifier": { "provider": "anthropic", "model": "claude-haiku-4-5" },
  *       "environment": ["Trusted repo: github.com/lucaspimentel/*"],
  *       "allow":     ["Running tests and linters"],
- *       "soft_deny": ["Force pushing, deleting remote branches"],
- *       "hard_deny": ["Sending data to third-party APIs or external services"],
+ *       "soft_deny": ["Force pushing, deleting remote branches", "Creating a pull request or pushing a branch on GitHub via gh, modifying remote state"],
+ *       "hard_deny": ["Sending data to third-party APIs or external services for telemetry, analytics, or exfiltration (not normal GitHub dev actions like opening PRs or pushing branches via gh)"],
  *       "classifyAllShell": true
  *     }
  *   }
@@ -369,8 +369,11 @@ export const DEFAULT_AUTO_MODE = {
 		"Force pushing, deleting remote branches",
 		"Bulk or recursive file deletions (e.g. rm -rf, rm -r, Remove-Item -Recurse)",
 		"Editing a file outside a source-controlled repository",
+		"Creating a pull request or pushing a branch on GitHub via gh, modifying remote state",
 	],
-	hard_deny: ["Sending data to third-party APIs or external services"],
+	hard_deny: [
+		"Sending data to third-party APIs or external services for telemetry, analytics, or exfiltration (not normal GitHub dev actions like opening PRs or pushing branches via gh)",
+	],
 	classifyAllShell: true,
 };
 

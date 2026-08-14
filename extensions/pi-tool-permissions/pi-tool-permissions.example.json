@@ -48,8 +48,8 @@
       "Trusted domains: *.internal.example.com"
     ],
     "allow":     ["Running tests and linters"],
-    "soft_deny": ["Force pushing, deleting remote branches"],
-    "hard_deny": ["Sending data to third-party APIs or external services"],
+    "soft_deny": ["Force pushing, deleting remote branches", "Creating a pull request or pushing a branch on GitHub via gh, modifying remote state"],
+    "hard_deny": ["Sending data to third-party APIs or external services for telemetry, analytics, or exfiltration (not normal GitHub dev actions like opening PRs or pushing branches via gh)"],
     "classifyAllShell": true
   }
 }

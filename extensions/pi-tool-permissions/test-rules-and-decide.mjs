@@ -448,6 +448,14 @@ test("loadConfig: no autoMode → default soft_deny list",  emptyAuto.autoMode.s
 test("loadConfig: no autoMode → default hard_deny list",  emptyAuto.autoMode.hard_deny.join("|"), DEFAULT_AUTO_MODE.hard_deny.join("|"));
 test("loadConfig: no autoMode → classifyAllShell true (default)",  emptyAuto.autoMode.classifyAllShell, true);
 
+// Content assertions guarding the gh-pr-create / git push carve-out intent:
+// the narrowed hard_deny steers the classifier away from normal GitHub dev
+// actions, and the new soft_deny entry routes them to a prompt instead of a block.
+test("DEFAULT_AUTO_MODE.soft_deny includes gh pr create / push carve-out",
+	DEFAULT_AUTO_MODE.soft_deny.includes("Creating a pull request or pushing a branch on GitHub via gh, modifying remote state"), true);
+test("DEFAULT_AUTO_MODE.hard_deny narrowed to telemetry/analytics/exfiltration intent",
+	DEFAULT_AUTO_MODE.hard_deny[0].includes("telemetry, analytics, or exfiltration"), true);
+
 // User/project lists are ADDITIVE on top of the defaults (concatenated + deduped).
 const additiveAuto = loadConfigFromObjects(
 	{ autoMode: { allow: ["Running builds"] } },
