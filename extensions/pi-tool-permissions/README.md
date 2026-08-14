@@ -465,6 +465,8 @@ After you save a rule via **Allow always** / **Deny always**, the remaining subc
 
 **Allow ALL steps once** still wins over any later rule-driven decision: once chosen, every remaining step is silently allowed regardless of newly-saved rules.
 
+> In **auto mode**, a compound with no static `ask`/`deny` sub is instead classified as a single whole command (one verdict for the entire chain) and never enters this per-sub loop. See [Compound Bash in auto mode](#compound-bash-in-auto-mode).
+
 #### Control flow (`for` / `while` / `until` / `if` / `select`)
 
 Structural control-flow keywords are elided from the per-subcommand breakdown so only real commands enter the prompt. Two categories:
@@ -573,6 +575,17 @@ Auto mode is **off by default** and **never persisted** (session-only, like allo
 
 > **Status:** The session toggle, `/permissions auto` subcommand, footer indicator, and the classifier runtime are wired. When the toggle is on and a classifier model is available, fallthroughs are screened by the classifier; if no model is available they prompt (`ask`); if the toggle is off, fallthroughs use `defaultAction`. See [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) for the full design.
 
+#### Compound Bash in auto mode
+
+When a compound Bash command (e.g. `cd foo && npm test && git status`) falls through to the auto layer, the classifier screens the **whole compound as a single command** — it sees the full context and emits one verdict for the entire chain, rather than judging each subcommand in isolation. This applies whenever the compound contains no static `ask` sub and no static `deny` sub (the common case where every sub is an `allow`/`auto` fall-through).
+
+The safety invariants are preserved:
+
+- A static `deny` sub still blocks the whole command up-front (the classifier is never consulted).
+- A static `ask` sub still triggers the per-sub prompt loop, so user-authored "always prompt" rules fire exactly as in manual mode — the whole-compound shortcut never shadows them.
+
+See also [Compound Bash commands](#compound-bash-commands) for the per-sub prompt behavior in manual mode.
+
 ### Ways to toggle
 
 | Method | Action |
@@ -628,7 +641,7 @@ The **"Switch to auto mode (this session)"** dialog option just flips the toggle
 | `allow` | See [`DEFAULT_AUTO_MODE.allow`](./index.ts) | NL descriptions of actions to silently allow. |
 | `soft_deny` | See [`DEFAULT_AUTO_MODE.soft_deny`](./index.ts) | NL descriptions of actions to prompt for (with the classifier's reason). |
 | `hard_deny` | `["Sending data to third-party APIs or external services for telemetry, analytics, or exfiltration (not normal GitHub dev actions like opening PRs or pushing branches via gh)"]` | NL descriptions of actions to always block. |
-| `classifyAllShell` | `true` | When `true`, route every bash subcommand (including read-only auto-allowed ones) through the classifier. |
+| `classifyAllShell` | `true` | When `true`, route every bash command (including read-only auto-allowed ones) through the classifier. Compounds with no static `ask`/`deny` sub are classified as one whole command; compounds containing a static `ask` sub still prompt per-sub. |
 
 The `allow` / `soft_deny` / `hard_deny` lists and `classifyAllShell` have **sane defaults** baked in — a bare `{ "autoMode": { ... } }` (or no `autoMode` block at all) works out of the box once the session toggle is on. Your configured lists are **additive** on top of the defaults (concatenated + deduped), so you can extend them without losing the safe baseline. `classifier` and `environment` have no defaults — they're inherently user-specific. To override `classifyAllShell` back to `false`, set it explicitly.
 

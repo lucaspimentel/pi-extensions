@@ -39,6 +39,7 @@ export {
 	splitTopLevelShell,
 	stripStructuralKeywords,
 	decideCompound,
+	shouldClassifyWholeCompound,
 	decide,
 	actionIcon,
 	formatBreakdownLine,

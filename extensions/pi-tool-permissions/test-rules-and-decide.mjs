@@ -1,7 +1,7 @@
 // run: node test-rules-and-decide.mjs
 
 import {
-	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideCompound, makeCfg,
+	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideCompound, shouldClassifyWholeCompound, makeCfg,
 	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown,
 	loadConfigFromObjects,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
@@ -399,6 +399,9 @@ const dcAutoRead = decideCompound(askCfg, "read", { path: "./outside.txt" }, tru
 test("decideCompound: non-bash autoActive fallthrough → auto sentinel", dcAutoRead.action, "auto");
 
 // Compound with an auto-subcommand: aggregate surfaces "auto" when autoActive.
+// NOTE: the tool_call handler now classifies the *whole* compound as one command
+// when no sub is a static `ask` (see shouldClassifyWholeCompound). decideCompound
+// itself is unchanged — it still splits and surfaces `auto`/`isCompound`/`breakdown`.
 const dcAutoCompound = decideCompound(askCfg, "bash", { command: "npm test && unknown-cmd" }, true);
 test("decideCompound: compound (autoActive) → auto aggregate",
 	dcAutoCompound.action, "auto");
@@ -692,5 +695,36 @@ test("toolDefaults not gated by redirect filter", decide(
 test("pwsh redirect not filtered (out of scope)", decide(
 	makeCfg({ allow: ["Pwsh(*)"], defaultAction: "ask" }),
 	"pwsh", { command: "$x > out" }), "allow");
+
+// ── shouldClassifyWholeCompound ─────────────────────────────────────────────
+// Gates the tool_call handler's whole-compound classify branch (no fake-UI
+// harness exists to test the handler directly). decideCompound is unchanged,
+// so this predicate is the testable surface for the new behavior.
+
+section("shouldClassifyWholeCompound");
+
+test("all allow/auto subs → true (classify whole)",
+	shouldClassifyWholeCompound([
+		{ sub: "npm test", action: "allow" },
+		{ sub: "unknown-cmd", action: "auto" },
+	]), true);
+test("one ask sub → false (per-sub loop)",
+	shouldClassifyWholeCompound([
+		{ sub: "npm test", action: "allow" },
+		{ sub: "git push", action: "ask" },
+	]), false);
+test("one deny sub (defensive — shouldn't reach classifier) → true",
+	shouldClassifyWholeCompound([
+		{ sub: "npm test", action: "allow" },
+		{ sub: "rm -rf .", action: "deny" },
+	]), true);
+test("empty breakdown (single/ambiguous) → true",
+	shouldClassifyWholeCompound([]), true);
+
+test("all ask subs → false",
+	shouldClassifyWholeCompound([
+		{ sub: "git push", action: "ask" },
+		{ sub: "rm x", action: "ask" },
+	]), false);
 
 process.exit(summary() > 0 ? 1 : 0);

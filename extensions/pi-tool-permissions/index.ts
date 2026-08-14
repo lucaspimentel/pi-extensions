@@ -196,7 +196,8 @@
  *
  *   Config (`autoMode` block): `classifier` (optional explicit model pin),
  *   `environment`, `allow`, `soft_deny`, `hard_deny` (NL string lists),
- *   `classifyAllShell` (route every bash subcommand through the classifier).
+ *   `classifyAllShell` (route every bash command through the classifier; compounds
+ *   with no static `ask`/`deny` sub are classified as one whole command).
  *   The `allow`/`soft_deny`/`hard_deny` lists and `classifyAllShell` have sane
  *   defaults baked in (see DEFAULT_AUTO_MODE) — a bare `autoMode` block (or none
  *   at all) works out of the box once the toggle is on. User/project lists are
@@ -256,7 +257,7 @@ interface AutoModeConfig {
 	soft_deny?: string[];
 	/** NL descriptions of actions to always block. */
 	hard_deny?: string[];
-	/** When true, route every bash subcommand (incl. read-only auto-allowed ones) through the classifier. */
+	/** When true, route every bash command (incl. read-only auto-allowed ones) through the classifier. For compounds with no static `ask`/`deny` sub, the *whole* compound is classified as one command; otherwise each sub is classified individually. */
 	classifyAllShell?: boolean;
 }
 
@@ -1462,6 +1463,20 @@ export function decideCompound(
 	return { action, isCompound: true, ambiguous: false, breakdown };
 }
 
+/**
+ * Whether a compound's per-subcommand breakdown is free of any static `ask`
+ * sub. The `tool_call` handler uses this to decide whether to classify the
+ * *whole* compound command at once (true) or fall back to the per-sub prompt
+ * loop (false, so user-authored "always prompt" rules still fire). Static
+ * `deny` already wins inside `decideCompound` before this is consulted.
+ *
+ * Empty breakdowns (single/ambiguous commands) return true, so the same
+ * predicate gates single-command classification.
+ */
+export function shouldClassifyWholeCompound(breakdown: SubcommandDecision[]): boolean {
+	return !breakdown.some((b) => b.action === "ask");
+}
+
 // ── Breakdown rendering ──────────────────────────────────────────────────────
 
 /** Single-character status icon for a per-subcommand action. */
@@ -1763,7 +1778,10 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	if (check(cfg.deny)) return "deny";
 	// Read-only bash auto-allow short-circuit. When the auto layer is engaged
 	// (session toggle on) AND classifyAllShell is set, route read-only bash
-	// subcommands through the classifier instead of silently allowing them.
+	// commands through the classifier instead of silently allowing them. For
+	// compounds, the whole command is classified as one when no sub matched a
+	// static `ask` rule (see the tool_call handler); otherwise each sub is
+	// classified individually.
 	// (No-op `cd` is pure bookkeeping with zero side-effects/data access, so
 	// allowNoopCd stays active regardless of the toggle.)
 	const skipReadOnlyBash = autoActive && cfg.autoMode.classifyAllShell;
@@ -1981,11 +1999,18 @@ export default function (pi: ExtensionAPI) {
 		let classifierReason = "";
 
 		// Resolve a fallthrough "auto" sentinel. For single/ambiguous commands we
-		// classify up front; for compound commands the prompt loop classifies each
-		// auto sub. When the toggle is on but no classifier model is available
+		// classify up front. For compound commands we ALSO classify the whole
+		// command at once when no sub matched a static `ask` rule — this lets the
+		// classifier judge the full compound context instead of each sub in
+		// isolation (the common case where every sub is an `allow`/`auto` fall-
+		// through). Compounds that DO contain a static `ask` sub keep the per-sub
+		// prompt loop below so user-authored "always prompt" rules still fire;
+		// static `deny` already won inside `decideCompound` before we got here.
+		// When the toggle is on but no classifier model is available
 		// (`!autoEngaged`), stub to `ask` (safe) rather than applying `defaultAction`.
 		if (action === "auto") {
-			if (autoEngaged && classifierModel && !isCompound) {
+			const hasAskSub = isCompound && !shouldClassifyWholeCompound(breakdown);
+			if (autoEngaged && classifierModel && (!isCompound || !hasAskSub)) {
 				const result = await classifyAction(
 					(m, c) => ctx.modelRegistry.complete(m, c),
 					classifierModel,
@@ -1996,8 +2021,15 @@ export default function (pi: ExtensionAPI) {
 			);
 				classifierReason = result.reason;
 				action = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
+				// Treat the verdict as a single-command decision: the rest of the
+				// handler renders the single-command prompt for `ask`, blocks for
+				// `deny`, returns for `allow` — instead of entering the per-sub
+				// breakdown loop.
+				isCompound = false;
+				breakdown = [];
 			} else if (!autoEngaged || isCompound) {
-				// Stub (no model) or compound (loop handles per-sub).
+				// Stub (no model) or compound with a static `ask` sub (loop handles
+				// per-sub).
 				action = "ask";
 			}
 		}
@@ -2037,7 +2069,11 @@ export default function (pi: ExtensionAPI) {
 		// ── Compound bash command: confirm each ask subcommand separately ──────
 		// Note: decideCompound() short-circuits any compound containing a `deny`
 		// subcommand before we reach this loop (see the `culprit` block above),
-		// so the loop below only iterates over `ask` items.
+		// so the loop below only iterates over `ask` items. Compounds with no
+		// static `ask`/`deny` sub are classified as a whole up-front and
+		// downgraded to a single-command decision (`isCompound = false` above),
+		// so they also bypass this loop — it now only runs for compounds that
+		// had a static `ask` sub (or auto off / no classifier model).
 		if (isCompound) {
 			const fullCmd = String((event.input as Record<string, unknown>).command ?? "");
 			const truncated = fullCmd.length > 200 ? `${fullCmd.slice(0, 197)}...` : fullCmd;
