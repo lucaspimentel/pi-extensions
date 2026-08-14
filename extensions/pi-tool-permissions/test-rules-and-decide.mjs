@@ -7,29 +7,12 @@ import {
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
 	classifyAction, classifierCacheKey, pickClassifierModel, rankClassifierModels, dedupeModels,
 	getMatchField, suggestRule, mcpPreview,
+	DEFAULT_AUTO_MODE,
 } from "./test-helpers.mjs";
 
-// Mirror of DEFAULT_AUTO_MODE.allow in index.ts. Keep in sync.
-const DEFAULT_ALLOW = [
-	"Running tests and linters",
-	"Editing files in a source-controlled repository (changes are reversible via git)",
-	"Read-only inspection commands (e.g. pwd, ls, cat, head, tail, wc, stat, file, du, df)",
-	"Searching the codebase with grep, rg, find, or glob",
-	"Running git status, git diff, git log, and other read-only git queries",
-	"Read-only GitHub API requests (e.g. fetching files, listing issues, reading repos) via gh or the web API",
-	"Read-only GitHub API call to fetch a file, not sending data or modifying remote state",
-	"Read-only Atlassian API call to fetch a Jira issue",
-	"Read-only Atlassian API call to fetch a Confluence page",
-	"Read-only Confluence search query using CQL",
-	"Assigns a string to a variable, no side effects",
-	"Executes a no-op command that does nothing",
-];
-// Mirror of DEFAULT_AUTO_MODE.soft_deny in index.ts. Keep in sync.
-const DEFAULT_SOFT_DENY = [
-	"Force pushing, deleting remote branches",
-	"Bulk or recursive file deletions (e.g. rm -rf, rm -r, Remove-Item -Recurse)",
-	"Editing a file outside a source-controlled repository",
-];
+// Aliases for the real DEFAULT_AUTO_MODE lists in index.ts — no hand-maintained mirror.
+const DEFAULT_ALLOW = DEFAULT_AUTO_MODE.allow;
+const DEFAULT_SOFT_DENY = DEFAULT_AUTO_MODE.soft_deny;
 
 const { test, section, summary } = makeTestRunner();
 
@@ -462,7 +445,7 @@ test("loadConfig: no autoMode → empty classifier",       emptyAuto.autoMode.cl
 test("loadConfig: no autoMode → empty environment",      emptyAuto.autoMode.environment.length, 0);
 test("loadConfig: no autoMode → default allow list",       emptyAuto.autoMode.allow.join("|"), DEFAULT_ALLOW.join("|"));
 test("loadConfig: no autoMode → default soft_deny list",  emptyAuto.autoMode.soft_deny.join("|"), DEFAULT_SOFT_DENY.join("|"));
-test("loadConfig: no autoMode → default hard_deny list",  emptyAuto.autoMode.hard_deny.join("|"), "Sending data to third-party APIs or external services");
+test("loadConfig: no autoMode → default hard_deny list",  emptyAuto.autoMode.hard_deny.join("|"), DEFAULT_AUTO_MODE.hard_deny.join("|"));
 test("loadConfig: no autoMode → classifyAllShell true (default)",  emptyAuto.autoMode.classifyAllShell, true);
 
 // User/project lists are ADDITIVE on top of the defaults (concatenated + deduped).
