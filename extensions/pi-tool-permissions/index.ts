@@ -365,6 +365,8 @@ export const DEFAULT_AUTO_MODE = {
 		"Read-only Confluence search query using CQL",
 		"Assigns a string to a variable, no side effects",
 		"Executes a no-op command that does nothing",
+		"Read-only HTTP GET request to a public package registry (e.g. crates.io, npm, NuGet, PyPI, Maven Central, pkg.go.dev) to look up published versions or package metadata, not sending data or modifying remote state",
+		"Fetching a public URL with curl or wget and parsing the response locally (e.g. with jq), in a loop or pipeline, without submitting data or writing files",
 	],
 	soft_deny: [
 		"Force pushing, deleting remote branches",

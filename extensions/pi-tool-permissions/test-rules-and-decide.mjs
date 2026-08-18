@@ -459,6 +459,15 @@ test("DEFAULT_AUTO_MODE.soft_deny includes gh pr create / push carve-out",
 test("DEFAULT_AUTO_MODE.hard_deny narrowed to telemetry/analytics/exfiltration intent",
 	DEFAULT_AUTO_MODE.hard_deny[0].includes("telemetry, analytics, or exfiltration"), true);
 
+// Content assertions guarding the package-registry lookup allow entries:
+// read-only GET requests to public package registries (and the shell loop/
+// pipeline shape wrapping them) should be silently allowed, not routed to
+// the telemetry/analytics/exfiltration hard_deny.
+test("DEFAULT_AUTO_MODE.allow includes public package registry lookups",
+	DEFAULT_AUTO_MODE.allow.some((r) => r.includes("public package registry")), true);
+test("DEFAULT_AUTO_MODE.allow includes curl/wget loop-or-pipeline shape",
+	DEFAULT_AUTO_MODE.allow.some((r) => r.includes("curl or wget") && r.includes("loop or pipeline")), true);
+
 // User/project lists are ADDITIVE on top of the defaults (concatenated + deduped).
 const additiveAuto = loadConfigFromObjects(
 	{ autoMode: { allow: ["Running builds"] } },
