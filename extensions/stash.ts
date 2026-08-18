@@ -4,21 +4,22 @@
  * Save & restore editor drafts on a disk-backed LIFO stack, similar in spirit
  * to `git stash`.
  *
- * Commands:
- *   /stash [name]     Save the current editor text onto the stash and clear
- *                      the editor. Optional `name` gives it a slot you can
- *                      pop by name later; unnamed stashes are anonymous.
- *   /pop [name]        Restore the most recent stash (or a named one) into
- *                      the editor. If the editor already has non-blank text,
- *                      that text is pushed onto the stash first (as an
- *                      anonymous entry) so nothing is lost.
- *   /stash-list        List all stashed entries (index, name, age, preview).
- *   /stash-drop <name> Remove a named entry without restoring it.
- *   /stash-clear       Remove all entries (confirms first when UI is available).
- *
- * Shortcuts:
- *   ctrl+alt+s   Stash the editor text (anonymous) and clear the editor.
+ * Primary interaction is the shortcuts (typing a slash command only works
+ * when the editor holds something other than the draft you want to move):
+ *   ctrl+alt+s   Stash the editor text and clear the editor.
  *   ctrl+alt+r   Restore (pop) the most recently stashed entry.
+ *
+ * Commands (index-addressed; run /stash-list to see current indexes):
+ *   /pop [n]           Restore stash entry n (1 = newest, default) into the
+ *                        editor. If the editor already has non-blank text,
+ *                        that text is pushed onto the stash first so nothing
+ *                        is lost — note this shifts indexes.
+ *   /stash-list         List all stashed entries, numbered 1 (newest) upward.
+ *   /stash-drop <n>     Remove entry n without restoring it.
+ *   /stash-clear        Remove all entries (confirms first when UI is available).
+ *
+ * Indexes are positional and only valid until the next stash/pop/drop —
+ * re-run /stash-list after any mutation before addressing by number again.
  *
  * Storage:
  *   ~/.pi/agent/pi-stash.json (override with the PI_STASH_FILE env var, e.g.
@@ -32,7 +33,6 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export interface StashEntry {
-	name?: string;
 	text: string;
 	savedAt: string;
 	cwd?: string;
@@ -76,16 +76,10 @@ export function saveStash(state: StashState, home: string = homedir()): void {
 	renameSync(tmp, path);
 }
 
-/** Cap total entries, dropping the oldest anonymous entries first, then oldest overall. */
+/** Cap total entries, dropping the oldest first. */
 function enforceCap(state: StashState): StashState {
 	if (state.entries.length <= MAX_ENTRIES) return state;
-	const entries = [...state.entries];
-	while (entries.length > MAX_ENTRIES) {
-		let dropIdx = entries.findIndex((e) => !e.name);
-		if (dropIdx === -1) dropIdx = 0;
-		entries.splice(dropIdx, 1);
-	}
-	return { ...state, entries };
+	return { ...state, entries: state.entries.slice(-MAX_ENTRIES) };
 }
 
 function clampText(text: string): string {
@@ -93,32 +87,34 @@ function clampText(text: string): string {
 	return text.slice(0, MAX_TEXT - TRUNCATION_NOTICE.length) + TRUNCATION_NOTICE;
 }
 
-export function pushEntry(state: StashState, text: string, name?: string, cwd?: string): StashState {
-	const entry: StashEntry = { name, text: clampText(text), savedAt: new Date().toISOString(), cwd };
-	let entries = state.entries;
-	if (name) {
-		entries = entries.filter((e) => e.name !== name);
-	}
-	entries = [...entries, entry];
-	return enforceCap({ ...state, entries });
+export function pushEntry(state: StashState, text: string, cwd?: string): StashState {
+	const entry: StashEntry = { text: clampText(text), savedAt: new Date().toISOString(), cwd };
+	return enforceCap({ ...state, entries: [...state.entries, entry] });
 }
 
-export function popEntry(state: StashState, name?: string): { entry: StashEntry; state: StashState } | undefined {
+/**
+ * Convert a 1-based display index (1 = newest, per /stash-list) into a 0-based
+ * array index. Returns undefined for non-numeric, out-of-range, or missing input.
+ */
+export function resolveIndex(state: StashState, displayIndex: string | number | undefined): number | undefined {
+	if (displayIndex === undefined) return state.entries.length > 0 ? state.entries.length - 1 : undefined;
+	const n = typeof displayIndex === "number" ? displayIndex : Number(displayIndex);
+	if (!Number.isInteger(n) || n < 1 || n > state.entries.length) return undefined;
+	return state.entries.length - n;
+}
+
+export function popEntry(state: StashState, arrayIndex?: number): { entry: StashEntry; state: StashState } | undefined {
 	if (state.entries.length === 0) return undefined;
-	let idx: number;
-	if (name) {
-		idx = state.entries.findIndex((e) => e.name === name);
-		if (idx === -1) return undefined;
-	} else {
-		idx = state.entries.length - 1;
-	}
+	const idx = arrayIndex ?? state.entries.length - 1;
+	if (idx < 0 || idx >= state.entries.length) return undefined;
 	const entry = state.entries[idx];
 	const entries = state.entries.slice(0, idx).concat(state.entries.slice(idx + 1));
 	return { entry, state: { ...state, entries } };
 }
 
-export function dropEntry(state: StashState, name: string): StashState {
-	return { ...state, entries: state.entries.filter((e) => e.name !== name) };
+export function dropEntry(state: StashState, arrayIndex: number): StashState {
+	if (arrayIndex < 0 || arrayIndex >= state.entries.length) return state;
+	return { ...state, entries: state.entries.slice(0, arrayIndex).concat(state.entries.slice(arrayIndex + 1)) };
 }
 
 export function clearEntries(state: StashState): StashState {
@@ -145,14 +141,15 @@ function firstLinePreview(text: string, maxLen = 60): string {
 
 export function formatList(state: StashState, now: Date = new Date()): string {
 	if (state.entries.length === 0) return "Stash is empty.";
+	const n = state.entries.length;
 	const lines = state.entries
 		.map((e, i) => {
+			const displayIndex = n - i; // newest entry (last in array) is 1
 			const lineCount = e.text.split("\n").length;
-			const label = e.name ? `"${e.name}"` : "(anon)";
-			return `${i + 1}. ${label} — ${relativeAge(e.savedAt, now)}, ${lineCount} line(s): ${firstLinePreview(e.text)}`;
+			return `${displayIndex}. ${relativeAge(e.savedAt, now)}, ${lineCount} line(s): ${firstLinePreview(e.text)}`;
 		})
-		.reverse(); // newest first
-	return `Stash (${state.entries.length}):\n${lines.join("\n")}`;
+		.reverse(); // newest (displayIndex 1) first
+	return `Stash (${n}):\n${lines.join("\n")}\nUse /pop <n> or /stash-drop <n>.`;
 }
 
 export default function stash(pi: ExtensionAPI) {
@@ -161,7 +158,7 @@ export default function stash(pi: ExtensionAPI) {
 		ctx.ui.setStatus("stash", count > 0 ? ctx.ui.theme.fg("dim", `📥 ${count}`) : undefined);
 	}
 
-	function doStash(ctx: ExtensionContext, name: string | undefined): void {
+	function doStash(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) {
 			ctx.ui.notify("Stash requires an interactive UI.", "warning");
 			return;
@@ -172,23 +169,32 @@ export default function stash(pi: ExtensionAPI) {
 			return;
 		}
 		let state = loadStash();
-		state = pushEntry(state, text, name, ctx.cwd);
+		state = pushEntry(state, text, ctx.cwd);
 		saveStash(state);
 		ctx.ui.setEditorText("");
-		const label = name ? ` as "${name}"` : "";
-		ctx.ui.notify(`Stashed${label} (${state.entries.length} in stash).`, "info");
+		ctx.ui.notify(`Stashed (${state.entries.length} in stash).`, "info");
 		updateStatus(ctx);
 	}
 
-	function doPop(ctx: ExtensionContext, name: string | undefined): void {
+	function doPop(ctx: ExtensionContext, displayIndex: string | undefined): void {
 		if (!ctx.hasUI) {
 			ctx.ui.notify("Pop requires an interactive UI.", "warning");
 			return;
 		}
 		let state = loadStash();
-		const popped = popEntry(state, name);
+		const arrayIndex = resolveIndex(state, displayIndex);
+		if (arrayIndex === undefined) {
+			ctx.ui.notify(
+				state.entries.length === 0
+					? "Stash is empty."
+					: `No stash entry ${displayIndex}. Run /stash-list to see indexes.`,
+				"warning",
+			);
+			return;
+		}
+		const popped = popEntry(state, arrayIndex);
 		if (!popped) {
-			ctx.ui.notify(name ? `No stash named "${name}".` : "Stash is empty.", "warning");
+			ctx.ui.notify("Stash is empty.", "warning");
 			return;
 		}
 		state = popped.state;
@@ -196,36 +202,33 @@ export default function stash(pi: ExtensionAPI) {
 		const current = ctx.ui.getEditorText();
 		let swapNotice = "";
 		if (current.trim()) {
-			state = pushEntry(state, current, undefined, ctx.cwd);
-			swapNotice = " (current editor text was stashed first)";
+			state = pushEntry(state, current, ctx.cwd);
+			swapNotice = " (current editor text was stashed first; indexes have shifted)";
 		}
 
 		saveStash(state);
 		ctx.ui.setEditorText(popped.entry.text);
-		const label = popped.entry.name ? ` "${popped.entry.name}"` : "";
-		ctx.ui.notify(`Restored${label} from stash${swapNotice}.`, "info");
+		ctx.ui.notify(`Restored from stash${swapNotice}.`, "info");
 		updateStatus(ctx);
 	}
 
-	function namedCompletions(prefix: string) {
+	function indexCompletions(prefix: string) {
 		const state = loadStash();
-		const names = state.entries
-			.map((e) => e.name)
-			.filter((n): n is string => !!n && n.startsWith(prefix));
-		if (names.length === 0) return null;
-		return names.map((n) => ({ value: n, label: n }));
+		const n = state.entries.length;
+		if (n === 0) return null;
+		const items = [];
+		for (let i = n; i >= 1; i--) {
+			const value = String(i);
+			if (!value.startsWith(prefix)) continue;
+			const entry = state.entries[n - i];
+			items.push({ value, label: value, description: firstLinePreview(entry.text) });
+		}
+		return items.length > 0 ? items : null;
 	}
 
-	pi.registerCommand("stash", {
-		description: "Save the editor text onto the stash and clear the editor (optionally named)",
-		handler: async (args, ctx) => {
-			doStash(ctx, args.trim() || undefined);
-		},
-	});
-
 	pi.registerCommand("pop", {
-		description: "Restore the most recent (or named) stashed draft into the editor",
-		getArgumentCompletions: (prefix) => namedCompletions(prefix),
+		description: "Restore stash entry n (1 = newest, default) into the editor",
+		getArgumentCompletions: (prefix) => indexCompletions(prefix),
 		handler: async (args, ctx) => {
 			doPop(ctx, args.trim() || undefined);
 		},
@@ -239,21 +242,24 @@ export default function stash(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("stash-drop", {
-		description: "Remove a named stash entry without restoring it",
-		getArgumentCompletions: (prefix) => namedCompletions(prefix),
+		description: "Remove stash entry n without restoring it",
+		getArgumentCompletions: (prefix) => indexCompletions(prefix),
 		handler: async (args, ctx) => {
-			const name = args.trim();
-			if (!name) {
-				ctx.ui.notify("Usage: /stash-drop <name>", "warning");
+			const arg = args.trim();
+			if (!arg) {
+				ctx.ui.notify("Usage: /stash-drop <n> (see /stash-list)", "warning");
 				return;
 			}
 			const state = loadStash();
-			if (!state.entries.some((e) => e.name === name)) {
-				ctx.ui.notify(`No stash named "${name}".`, "warning");
+			const arrayIndex = resolveIndex(state, arg);
+			if (arrayIndex === undefined) {
+				ctx.ui.notify(`No stash entry ${arg}. Run /stash-list to see indexes.`, "warning");
 				return;
 			}
-			saveStash(dropEntry(state, name));
-			ctx.ui.notify(`Dropped "${name}" from stash.`, "info");
+			const preview = firstLinePreview(state.entries[arrayIndex].text);
+			const newState = dropEntry(state, arrayIndex);
+			saveStash(newState);
+			ctx.ui.notify(`Dropped entry ${arg} (${preview}). ${newState.entries.length} left in stash.`, "info");
 			updateStatus(ctx);
 		},
 	});
@@ -284,7 +290,7 @@ export default function stash(pi: ExtensionAPI) {
 
 	pi.registerShortcut("ctrl+alt+s", {
 		description: "Stash editor draft",
-		handler: (ctx) => doStash(ctx, undefined),
+		handler: (ctx) => doStash(ctx),
 	});
 
 	pi.registerShortcut("ctrl+alt+r", {

@@ -35,7 +35,7 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 - **colored-footer** – custom footer styling
 - **idle-summary** – generates a brief summary of the session when pi has been idle for a while
 - **plan** – `/plan <task>` narrows the active tools to a read-only allowlist (with bash gated to safe commands) and sends a planning prompt, then auto-restores your previous tools when the turn ends. It does **not** switch the model or thinking effort — pick your planner model yourself before `/plan` and switch back afterwards (`/plan-cancel` restores early)
-- **stash** – `/stash [name]` and `/pop [name]` save & restore editor drafts on a disk-backed stack under `~/.pi/agent/pi-stash.json`; `ctrl+alt+s` / `ctrl+alt+r` shortcuts; `/stash-list`, `/stash-drop`, `/stash-clear`
+- **stash** – `ctrl+alt+s` / `ctrl+alt+r` stash & restore the editor draft on a disk-backed stack under `~/.pi/agent/pi-stash.json`; `/stash-list` shows numbered entries (1 = newest), `/pop [n]`, `/stash-drop <n>`, `/stash-clear`
 - **questionnaire** – interactive questionnaire tool (copied from the [pi sample](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/extensions/questionnaire.ts) by [@ferologics](https://github.com/ferologics))
 - **web** – fetch & convert web pages (depends on `html-to-text`)
 - **wt-tab-status** – updates the Windows Terminal tab title with the current session status
