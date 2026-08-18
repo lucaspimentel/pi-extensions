@@ -11,6 +11,7 @@
     "extensions": [
       "./extensions/colored-footer.ts",
       "./extensions/plan.ts",
+      "./extensions/stash.ts",
       "./extensions/questionnaire.ts",
       "./extensions/web",
       "./extensions/pi-tool-permissions",
