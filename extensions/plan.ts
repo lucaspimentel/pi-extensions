@@ -26,6 +26,11 @@ const DESTRUCTIVE_BASH = [
 	/\byarn\s+(install|add|remove|publish|run)/i,
 	/\bpip\s+(install|uninstall)/i, /\bcurl\s+[^|]*\|\s*(sh|bash)/i,
 	/\bsudo\b/i, /\bchmod\b/i, /\bchown\b/i, /\bkill\b/i, /\bdocker\s+(run|rm|build|push)/i,
+	// find/fd are on SAFE_BASH for read-only metadata predicates (-mtime, -size, -type, ...),
+	// but their exec/delete flags run arbitrary commands, so block those regardless of
+	// what the inner command is.
+	/\bfind\b.*\s-(fprintf|fprint0|fprint|execdir|exec|okdir|ok|delete|fls)\b/i,
+	/\bfd\b.*(\s-x\b|\s-X\b|\s--exec-batch\b|\s--exec\b)/,
 ];
 const SAFE_BASH = [
 	/^\s*ls\b/, /^\s*pwd\b/, /^\s*cat\b/, /^\s*head\b/, /^\s*tail\b/, /^\s*wc\b/,
