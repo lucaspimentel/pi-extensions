@@ -165,6 +165,15 @@
  *   `environment` fact list, then either allows silently, prompts (with the
  *   classifier's reason), or blocks.
  *
+ *   Alongside the action, the classifier receives a `Context:` block of
+ *   per-call facts (see buildActionContext): the working directory, the
+ *   resolved target path, and whether each sits inside a git working tree
+ *   (fs-only `.git` probe, no subprocess). Without it, a bare relative path
+ *   like `projects.md` gave the model no way to tell the edit was reversible
+ *   via git, so repo-local edits got soft-denied. For bash, a leading
+ *   `cd <dir>` is honoured so the facts describe the repository actually
+ *   being touched rather than the session cwd.
+ *
  *   It is a LAYER in the precedence chain, not a `defaultAction` value:
  *     deny > ask > allow > toolDefaults > auto (if toggle on) > defaultAction
  *   `deny` rules block before the classifier is consulted; `ask` rules always
@@ -358,6 +367,8 @@ export const DEFAULT_AUTO_MODE = {
 		"Read-only inspection commands (e.g. pwd, ls, cat, head, tail, wc, stat, file, du, df)",
 		"Searching the codebase with grep, rg, find, or glob",
 		"Running git status, git diff, git log, and other read-only git queries",
+		"Staging changes and creating a local git commit (e.g. git add, git commit, git stash) — local-only and easily reversible via git reset/git reflog; pushing is handled separately",
+		"Creating or switching local git branches or tags (e.g. git switch -c, git checkout -b, git branch, git tag)",
 		"Read-only GitHub API requests (e.g. fetching files, listing issues, reading repos) via gh or the web API",
 		"Read-only GitHub API call to fetch a file, not sending data or modifying remote state",
 		"Read-only Atlassian API call to fetch a Jira issue",
@@ -370,6 +381,8 @@ export const DEFAULT_AUTO_MODE = {
 	],
 	soft_deny: [
 		"Force pushing, deleting remote branches",
+		"Pushing commits to a remote (e.g. git push), publishing local work to a shared remote",
+		"Rewriting git history or discarding work (e.g. git rebase, git commit --amend, git reset --hard, git filter-branch, git push --force, deleting branches or stashes)",
 		"Bulk or recursive file deletions (e.g. rm -rf, rm -r, Remove-Item -Recurse)",
 		"Editing a file outside a source-controlled repository",
 		"Creating a pull request or pushing a branch on GitHub via gh, modifying remote state",
@@ -1664,7 +1677,120 @@ function safeJson(v: unknown): string {
 	try { return JSON.stringify(v); } catch { return String(v); }
 }
 
-export function buildClassifierPrompt(toolName: string, input: Record<string, unknown>, autoMode: ResolvedAutoModeConfig): string {
+/**
+ * Resolve a possibly-relative path against `cwd` without letting Windows
+ * `resolve()` prepend a drive letter to POSIX-absolute paths (paths reaching
+ * the classifier can come from either platform).
+ */
+export function resolveAgainstCwd(p: string, cwd: string): string {
+	const norm = normalizePathSep(p);
+	const isAbsolute = norm.startsWith("/") || /^[A-Za-z]:/.test(norm);
+	if (isAbsolute) return norm;
+	const base = normalizePathSep(cwd).replace(/\/+$/, "");
+	return `${base}/${norm.replace(/^\.\//, "")}`;
+}
+
+/**
+ * Walk up from `start` looking for a `.git` entry and return the repository
+ * root, or null when the path is not inside a git working tree. Pure fs
+ * probing — no subprocess, so an untracked file inside a repo still counts as
+ * "inside a git repository". `exists` is injected so tests need no real disk.
+ */
+export function findGitRoot(start: string, exists: (p: string) => boolean = existsSync): string | null {
+	let dir = normalizePathSep(start).replace(/\/+$/, "");
+	if (!dir) return null;
+	// Iteration cap guards against pathological input; real trees are far shallower.
+	for (let i = 0; i < 64; i++) {
+		if (exists(`${dir}/.git`)) return dir;
+		if (/^[A-Za-z]:$/.test(dir)) return null;
+		const slash = dir.lastIndexOf("/");
+		if (slash < 0) return null;
+		const parent = dir.slice(0, slash);
+		if (!parent || parent === dir) return null;
+		dir = parent;
+	}
+	return null;
+}
+
+/**
+ * Extract the target directory of a leading `cd <dir>` in a bash command
+ * (e.g. `cd /repo && git commit ...`) so the classifier learns which
+ * repository the rest of the command actually touches. Returns null when the
+ * command does not start with a simple, literal `cd`.
+ */
+export function leadingCdTarget(cmd: string): string | null {
+	const m = stripLineContinuations(cmd).trim().match(/^cd\s+([^\r\n]*?)\s*(?:&&|\|\||;|$)/);
+	if (!m) return null;
+	let arg = m[1].trim();
+	if (
+		arg.length >= 2 &&
+		((arg[0] === "'" && arg[arg.length - 1] === "'") || (arg[0] === '"' && arg[arg.length - 1] === '"'))
+	) {
+		arg = arg.slice(1, -1).trim();
+	}
+	if (!arg) return null;
+	// Reject unresolved shell metacharacters / globs — we cannot know the real target.
+	if (/[`$(){}|&;<>*?]/.test(arg)) return null;
+	return arg;
+}
+
+/**
+ * Build the `Context:` facts handed to the classifier alongside the action.
+ *
+ * Without these, the classifier only sees e.g. `Path: projects.md` and cannot
+ * tell whether the edit is reversible via git — so it soft-denied edits inside
+ * source-controlled repos merely because the path looked bare. We now state the
+ * working directory, the resolved target path, and whether each lives inside a
+ * git working tree (fs-only `.git` probe — fast, no subprocess).
+ */
+export function buildActionContext(
+	toolName: string,
+	input: Record<string, unknown>,
+	cwd: string,
+	exists: (p: string) => boolean = existsSync,
+): string[] {
+	const lines: string[] = [];
+	const inRepo = (label: string, dir: string): void => {
+		const root = findGitRoot(dir, exists);
+		lines.push(
+			root
+				? `${label} is inside a git repository (root: ${root}), so file changes there are source-controlled and reversible`
+				: `${label} is NOT inside a git repository`,
+		);
+	};
+	if (cwd) {
+		const cwdNorm = normalizePathSep(cwd);
+		lines.push(`Working directory: ${cwdNorm}`);
+		inRepo("Working directory", cwdNorm);
+	}
+	const t = normalizeTool(toolName);
+	if ((t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls") && input.path) {
+		const resolved = resolveAgainstCwd(String(input.path), cwd);
+		lines.push(`Resolved target path: ${resolved}`);
+		inRepo("Target path", dirname(resolved));
+	}
+	if (t === "bash" || t === "pwsh") {
+		const raw =
+			t === "bash"
+				? leadingCdTarget(String(input.command ?? ""))
+				: typeof input.cwd === "string" && input.cwd
+					? input.cwd
+					: null;
+		if (raw) {
+			const resolved = resolveAgainstCwd(raw, cwd);
+			lines.push(`Command runs in: ${resolved}`);
+			inRepo("That directory", resolved);
+		}
+	}
+	return lines;
+}
+
+export function buildClassifierPrompt(
+	toolName: string,
+	input: Record<string, unknown>,
+	autoMode: ResolvedAutoModeConfig,
+	context: string[] = [],
+): string {
 	const env = autoMode.environment.length ? autoMode.environment.map((e) => `  - ${e}`).join("\n") : "  (none)";
 	const allow = autoMode.allow.length ? autoMode.allow.map((r) => `  - ${r}`).join("\n") : "  (none)";
 	const soft = autoMode.soft_deny.length ? autoMode.soft_deny.map((r) => `  - ${r}`).join("\n") : "  (none)";
@@ -1674,6 +1800,9 @@ export function buildClassifierPrompt(toolName: string, input: Record<string, un
 		"",
 		"Action:",
 		describeAction(toolName, input),
+		"",
+		"Context (facts about this specific call — trust these over guesses from the paths above):",
+		context.length ? context.map((c) => `  - ${c}`).join("\n") : "  (none)",
 		"",
 		"Environment:",
 		env,
@@ -1721,8 +1850,14 @@ export function verdictToAction(verdict: ClassifierVerdict, nonInteractive: bool
 }
 
 /** Cache key: hash(toolName, input, ruleset). Binds token cost on loops. */
-export function classifierCacheKey(toolName: string, input: Record<string, unknown>, autoMode: ResolvedAutoModeConfig): string {
+export function classifierCacheKey(
+	toolName: string,
+	input: Record<string, unknown>,
+	autoMode: ResolvedAutoModeConfig,
+	context: string[] = [],
+): string {
 	const ruleset = JSON.stringify({
+		x: context,
 		c: autoMode.classifier,
 		e: autoMode.environment,
 		a: autoMode.allow,
@@ -1745,11 +1880,12 @@ export async function classifyAction(
 	input: Record<string, unknown>,
 	autoMode: ResolvedAutoModeConfig,
 	cache: Map<string, ClassifyResult>,
+	context: string[] = [],
 ): Promise<ClassifyResult> {
-	const key = classifierCacheKey(toolName, input, autoMode);
+	const key = classifierCacheKey(toolName, input, autoMode, context);
 	const cached = cache.get(key);
 	if (cached) return cached;
-	const prompt = buildClassifierPrompt(toolName, input, autoMode);
+	const prompt = buildClassifierPrompt(toolName, input, autoMode, context);
 	let result: ClassifyResult;
 	try {
 		const response = await complete(model, {
@@ -2020,6 +2156,7 @@ export default function (pi: ExtensionAPI) {
 				matchInput,
 				cfg.autoMode,
 				verdictCache,
+				buildActionContext(event.toolName, matchInput, cfg.cwd),
 			);
 				classifierReason = result.reason;
 				action = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
@@ -2079,6 +2216,11 @@ export default function (pi: ExtensionAPI) {
 		if (isCompound) {
 			const fullCmd = String((event.input as Record<string, unknown>).command ?? "");
 			const truncated = fullCmd.length > 200 ? `${fullCmd.slice(0, 197)}...` : fullCmd;
+			// A leading `cd <dir>` applies to every later subcommand, so classify each
+			// sub as if it ran there (otherwise the git-repo facts would describe the
+			// session cwd rather than the repository actually being touched).
+			const cdPrefix = leadingCdTarget(fullCmd);
+			const subCwd = cdPrefix ? resolveAgainstCwd(cdPrefix, cfg.cwd) : cfg.cwd;
 
 			// Loop-scoped (this Bash invocation only — not session-wide): when set,
 			// every remaining `ask` step is silently allowed without re-prompting
@@ -2111,6 +2253,7 @@ export default function (pi: ExtensionAPI) {
 							{ command: sub },
 							cfg.autoMode,
 							verdictCache,
+							buildActionContext("bash", { command: sub }, subCwd),
 						);
 						subReason = result.reason;
 						liveAction = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);

@@ -575,6 +575,20 @@ Auto mode is **off by default** and **never persisted** (session-only, like allo
 
 > **Status:** The session toggle, `/permissions auto` subcommand, footer indicator, and the classifier runtime are wired. When the toggle is on and a classifier model is available, fallthroughs are screened by the classifier; if no model is available they prompt (`ask`); if the toggle is off, fallthroughs use `defaultAction`. See [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) for the full design.
 
+#### Call context sent to the classifier
+
+Besides the action itself (tool + command/path/URL) and your `environment` facts, the classifier receives a **`Context:` block of facts about this specific call**:
+
+- `Working directory: <cwd>` and whether it is inside a git working tree (with the repo root).
+- For `read`/`write`/`edit`/`grep`/`glob`/`ls`: the **resolved absolute target path** and whether *it* is inside a git working tree.
+- For `bash`: if the command starts with a literal `cd <dir>`, that directory and its git status — so the facts describe the repository actually being touched rather than the session cwd. For `pwsh`, the `cwd` argument is used the same way.
+
+This exists because the raw action alone is often too thin to judge. A bare `Path: projects.md` gave the model no way to know the edit was reversible via git, so repo-local edits were soft-denied by the "Editing a file outside a source-controlled repository" rule. With the context block, `Editing files in a source-controlled repository` matches and the edit is allowed silently.
+
+Repo detection is a **pure filesystem `.git` probe** walking up from the path — no `git` subprocess, so it stays fast. Consequence: an *untracked* file inside a repo still counts as "inside a git repository".
+
+The context facts are part of the classifier's per-session verdict cache key, so a verdict from one directory is never reused in another.
+
 #### Compound Bash in auto mode
 
 When a compound Bash command (e.g. `cd foo && npm test && git status`) falls through to the auto layer, the classifier screens the **whole compound as a single command** — it sees the full context and emits one verdict for the entire chain, rather than judging each subcommand in isolation. This applies whenever the compound contains no static `ask` sub and no static `deny` sub (the common case where every sub is an `allow`/`auto` fall-through).
@@ -585,6 +599,17 @@ The safety invariants are preserved:
 - A static `ask` sub still triggers the per-sub prompt loop, so user-authored "always prompt" rules fire exactly as in manual mode — the whole-compound shortcut never shadows them.
 
 See also [Compound Bash commands](#compound-bash-commands) for the per-sub prompt behavior in manual mode.
+
+When the per-sub loop *is* used, a leading `cd <dir>` from the full command is applied to each sub's context facts, so `cd /repo && git commit ...` is judged against `/repo`, not the session cwd.
+
+#### Local git commits vs. pushing
+
+The default NL lists split git by reversibility rather than by "writes vs. reads":
+
+- **Allowed:** staging and committing locally (`git add`, `git commit`, `git stash`), creating/switching local branches and tags — all trivially undone via `git reset` / `git reflog`.
+- **Soft-denied (prompt):** `git push` (publishes local work to a shared remote), and history rewrites or work-discarding operations (`git rebase`, `commit --amend`, `reset --hard`, `filter-branch`, `push --force`, deleting branches/stashes).
+
+So `git add -A && git commit -m ...` runs silently, while anything that leaves your machine or destroys recoverable state still asks. Verdict precedence (`hard_deny > soft_deny > allow`) means a chain like `git commit && git push` correctly lands on the prompt.
 
 ### Ways to toggle
 

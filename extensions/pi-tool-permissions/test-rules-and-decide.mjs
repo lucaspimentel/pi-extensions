@@ -6,6 +6,7 @@ import {
 	loadConfigFromObjects,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
 	classifyAction, classifierCacheKey, pickClassifierModel, rankClassifierModels, dedupeModels,
+	buildActionContext, findGitRoot, leadingCdTarget, resolveAgainstCwd,
 	getMatchField, suggestRule, mcpPreview,
 	DEFAULT_AUTO_MODE,
 } from "./test-helpers.mjs";
@@ -543,6 +544,10 @@ test("describeAction: unknown tool → JSON",
 	const am = { environment: ["Trusted repo: a"], allow: ["Running tests"], soft_deny: ["Force push"], hard_deny: ["Exfil data"], classifyAllShell: false };
 	const p = buildClassifierPrompt("bash", { command: "npm test" }, am);
 	test("prompt: contains tool action",   p.includes("Tool: bash\nCommand: npm test"), true);
+	test("prompt: context section empty when no facts", p.includes("Context") && p.includes("(none)"), true);
+	const pc = buildClassifierPrompt("edit", { path: "projects.md" }, am, ["Working directory: /repo", "Target path is inside a git repository (root: /repo), so file changes there are source-controlled and reversible"]);
+	test("prompt: renders context facts", pc.includes("  - Working directory: /repo"), true);
+	test("prompt: renders git-repo fact",  pc.includes("Target path is inside a git repository (root: /repo)"), true);
 	test("prompt: contains environment",    p.includes("Trusted repo: a"), true);
 	test("prompt: contains allow list",     p.includes("Running tests"), true);
 	test("prompt: contains soft_deny list", p.includes("Force push"), true);
@@ -551,6 +556,70 @@ test("describeAction: unknown tool → JSON",
 	test("prompt: precedence sentence directs hard_deny first", p.includes("If the action matches a Hard deny rule, verdict is hard_deny"), true);
 	test("prompt: verdict options ordered hard_deny first", p.includes("VERDICT: <hard_deny|soft_deny|allow|no_match>"), true);
 }
+
+// ── Classifier context: git-root detection + action facts ─────────────────
+section("classifier context");
+
+// Fake filesystem: only these paths "exist".
+const REPO_FS = new Set(["/src/repo/.git", "D:/src/repo/.git"]);
+const fakeExists = (p) => REPO_FS.has(p);
+
+test("findGitRoot: dir is the repo root",        findGitRoot("/src/repo", fakeExists), "/src/repo");
+test("findGitRoot: walks up from nested dir",    findGitRoot("/src/repo/a/b/c", fakeExists), "/src/repo");
+test("findGitRoot: trailing slash tolerated",    findGitRoot("/src/repo/a/", fakeExists), "/src/repo");
+test("findGitRoot: backslashes normalized",      findGitRoot("D:\\src\\repo\\pkg", fakeExists), "D:/src/repo");
+test("findGitRoot: outside any repo → null",     findGitRoot("/tmp/scratch", fakeExists), null);
+test("findGitRoot: stops at windows drive root", findGitRoot("C:/other", fakeExists), null);
+test("findGitRoot: empty input → null",          findGitRoot("", fakeExists), null);
+
+test("resolveAgainstCwd: relative joins cwd",     resolveAgainstCwd("projects.md", "/src/repo"), "/src/repo/projects.md");
+test("resolveAgainstCwd: ./ prefix stripped",     resolveAgainstCwd("./a/b.md", "/src/repo"), "/src/repo/a/b.md");
+test("resolveAgainstCwd: posix absolute kept",    resolveAgainstCwd("/etc/hosts", "D:/src/repo"), "/etc/hosts");
+test("resolveAgainstCwd: windows absolute kept",  resolveAgainstCwd("D:\\x\\y", "/src/repo"), "D:/x/y");
+
+test("leadingCdTarget: cd && command",       leadingCdTarget("cd /src/repo && git commit -m x"), "/src/repo");
+test("leadingCdTarget: quoted path",         leadingCdTarget("cd '/src/my repo' && git status"), "/src/my repo");
+test("leadingCdTarget: bare cd",             leadingCdTarget("cd /src/repo"), "/src/repo");
+test("leadingCdTarget: semicolon separator", leadingCdTarget("cd /src/repo; ls"), "/src/repo");
+test("leadingCdTarget: no cd → null",        leadingCdTarget("git commit -m x"), null);
+test("leadingCdTarget: metachars → null",    leadingCdTarget("cd $(pwd) && ls"), null);
+test("leadingCdTarget: cd with no arg → null", leadingCdTarget("cd && ls"), null);
+
+// The regression from the issue: a bare relative path used to look
+// "not source-controlled" to the classifier.
+{
+	const ctx = buildActionContext("edit", { path: "projects.md" }, "/src/repo/docs", fakeExists);
+	test("context: reports cwd",              ctx.includes("Working directory: /src/repo/docs"), true);
+	test("context: cwd in repo",              ctx.some((l) => l.startsWith("Working directory is inside a git repository (root: /src/repo)")), true);
+	test("context: resolves relative path",   ctx.includes("Resolved target path: /src/repo/docs/projects.md"), true);
+	test("context: target path in repo",      ctx.some((l) => l.startsWith("Target path is inside a git repository (root: /src/repo)")), true);
+}
+{
+	const ctx = buildActionContext("write", { path: "/tmp/out.md" }, "/tmp", fakeExists);
+	test("context: cwd outside repo",         ctx.includes("Working directory is NOT inside a git repository"), true);
+	test("context: target outside repo",      ctx.includes("Target path is NOT inside a git repository"), true);
+}
+{
+	const ctx = buildActionContext("bash", { command: "cd /src/repo && git add -A && git commit -m x" }, "/tmp", fakeExists);
+	test("context: honours leading cd",       ctx.includes("Command runs in: /src/repo"), true);
+	test("context: cd target in repo",        ctx.some((l) => l.startsWith("That directory is inside a git repository (root: /src/repo)")), true);
+}
+{
+	const ctx = buildActionContext("bash", { command: "git status" }, "/src/repo", fakeExists);
+	test("context: no cd → no command-runs-in line", ctx.some((l) => l.startsWith("Command runs in:")), false);
+}
+{
+	const ctx = buildActionContext("pwsh", { command: "Get-ChildItem", cwd: "/src/repo" }, "/tmp", fakeExists);
+	test("context: pwsh cwd arg honoured",    ctx.includes("Command runs in: /src/repo"), true);
+}
+
+// Default NL rules cover the local-commit / push split.
+test("defaults: local git commit allowed",
+	DEFAULT_ALLOW.some((r) => /local git commit/i.test(r)), true);
+test("defaults: git push soft-denied",
+	DEFAULT_SOFT_DENY.some((r) => /git push/i.test(r)), true);
+test("defaults: history rewrite soft-denied",
+	DEFAULT_SOFT_DENY.some((r) => /rebase/i.test(r)), true);
 
 // classifyAction with a fake complete seam
 {
@@ -575,6 +644,11 @@ test("describeAction: unknown tool → JSON",
 	// A different input should miss the cache and call again.
 	await classifyAction(counting, { id: "m" }, "bash", { command: "rm -rf /" }, am, cache);
 	test("classifyAction: different input — complete called twice", calls, 2);
+	// Same tool+input but different context facts must not reuse the verdict.
+	await classifyAction(counting, { id: "m" }, "bash", { command: "rm -rf /" }, am, cache, ["Working directory: /a"]);
+	test("classifyAction: different context — complete called thrice", calls, 3);
+	test("classifierCacheKey: context changes the key",
+		classifierCacheKey("bash", { command: "x" }, am) === classifierCacheKey("bash", { command: "x" }, am, ["fact"]), false);
 }
 
 // classifyAction API error → safe no_match fallback
