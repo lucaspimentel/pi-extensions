@@ -2282,9 +2282,9 @@ export default function (pi: ExtensionAPI) {
 				// in this compound actually needs human approval; with a single
 				// ask sub it's identical to "Allow once", so omit it.
 				const choices = [
+					...(!autoActive ? ["Switch to auto mode (this session)"] : []),
 					"Allow once",
 					...(askSubs.length > 1 ? ["Allow ALL steps once"] : []),
-					...(!autoActive ? ["Switch to auto mode (this session)"] : []),
 					"Allow always (save rule)",
 					"Deny once",
 					"Deny always (save rule)",
@@ -2372,14 +2372,14 @@ export default function (pi: ExtensionAPI) {
 		const autoSwitch = !autoActive ? ["Switch to auto mode (this session)"] : [];
 		const choices = isWriteOrEdit
 			? [
+					...autoSwitch,
 					"Allow once",
 					"Allow all edits this session",
-					...autoSwitch,
 					"Allow always (save rule)",
 					"Deny once",
 					"Deny always (save rule)",
 			  ]
-			: ["Allow once", ...autoSwitch, "Allow always (save rule)", "Deny once", "Deny always (save rule)"];
+			: [...autoSwitch, "Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)"];
 
 		const choice = await ctx.ui.select(title, choices);
 
