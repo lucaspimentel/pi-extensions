@@ -2278,9 +2278,12 @@ export default function (pi: ExtensionAPI) {
 
 				const reasonNote = subReason ? `\n\n  classifier: ${subReason}` : "";
 				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}`;
+				// "Allow ALL steps once" only makes sense when more than one step
+				// in this compound actually needs human approval; with a single
+				// ask sub it's identical to "Allow once", so omit it.
 				const choices = [
 					"Allow once",
-					"Allow ALL steps once",
+					...(askSubs.length > 1 ? ["Allow ALL steps once"] : []),
 					...(!autoActive ? ["Switch to auto mode (this session)"] : []),
 					"Allow always (save rule)",
 					"Deny once",

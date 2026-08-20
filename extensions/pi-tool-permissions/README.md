@@ -457,6 +457,8 @@ When a single `Bash` call chains multiple subcommands (e.g. `cd foo && npm test 
 
 **Allow ALL steps once** silently approves every remaining `ask` subcommand in the *current* Bash invocation without saving any rule and without re-prompting. It is scoped to this one compound command — the next independent Bash call starts from scratch. Compounds that contain a `deny` subcommand are still rejected up-front and never reach this prompt.
 
+This option only appears when **more than one** subcommand in the chain actually needs human approval — with a single `ask` step it's identical to **Allow once**, so it's omitted to keep the dialog uncluttered.
+
 After you save a rule via **Allow always** / **Deny always**, the remaining subcommands of the *same* Bash invocation are re-evaluated against the new rule:
 
 - A saved `allow` rule that matches downstream steps silently allows them — no second prompt. Example: `rg foo && rg bar`, saving `Bash(rg *)` on the first step skips the second.
