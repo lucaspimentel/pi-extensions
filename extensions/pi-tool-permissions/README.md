@@ -430,7 +430,7 @@ Suggested rule: Bash(rm*)
     Deny always (save rule)
 ```
 
-Every permission dialog also offers a **"Switch to auto mode (this session)"** choice (see [Auto mode](#auto-mode) below) when auto mode isn't already active. It appears at the **top** of the choice list — and since pi's selector defaults the cursor to the first item, it's the default action when auto mode is off (press Enter to switch to auto mode, or move down to pick an allow/deny choice).
+Every permission dialog also offers a **"Switch to auto mode (this session)"** choice (see [Auto mode](#auto-mode) below) when auto mode isn't already active. It appears at the **bottom** of the choice list, so **"Allow once"** stays the default (pi's selector starts on the first item).
 
 Choosing **always** opens a second selector asking *where* to save the rule:
 

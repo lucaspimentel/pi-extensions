@@ -2282,12 +2282,12 @@ export default function (pi: ExtensionAPI) {
 				// in this compound actually needs human approval; with a single
 				// ask sub it's identical to "Allow once", so omit it.
 				const choices = [
-					...(!autoActive ? ["Switch to auto mode (this session)"] : []),
 					"Allow once",
 					...(askSubs.length > 1 ? ["Allow ALL steps once"] : []),
 					"Allow always (save rule)",
 					"Deny once",
 					"Deny always (save rule)",
+					...(!autoActive ? ["Switch to auto mode (this session)"] : []),
 				];
 				const choice = await ctx.ui.select(title, choices);
 
@@ -2368,18 +2368,19 @@ export default function (pi: ExtensionAPI) {
 		const title = `${titleHeader}\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
 
 		// Extra "allow all edits" option only for write/edit dialogs; "Switch to
-		// auto mode" appears for every dialog when auto mode isn't already active.
+		// auto mode" appears for every dialog when auto mode isn't already active,
+		// as the last choice (so "Allow once" stays the default cursor position).
 		const autoSwitch = !autoActive ? ["Switch to auto mode (this session)"] : [];
 		const choices = isWriteOrEdit
 			? [
-					...autoSwitch,
 					"Allow once",
 					"Allow all edits this session",
 					"Allow always (save rule)",
 					"Deny once",
 					"Deny always (save rule)",
+					...autoSwitch,
 			  ]
-			: [...autoSwitch, "Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)"];
+			: ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)", ...autoSwitch];
 
 		const choice = await ctx.ui.select(title, choices);
 
