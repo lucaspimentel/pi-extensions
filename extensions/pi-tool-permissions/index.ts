@@ -202,6 +202,10 @@
  *     - /permissions auto [on|off|toggle]
  *     - "Switch to auto mode (this session)" option in any permission dialog
  *       (just flips the toggle — same as the hotkey, but contextual).
+ *   While on, the status line shows the resolved classifier model id
+ *   (`🤖 auto: <model-id>`) so it's visible which model is screening
+ *   fallthroughs; when no model is available it reads
+ *   `🤖 auto (no classifier)` (fallthroughs stub to `ask`).
  *
  *   Config (`autoMode` block): `classifier` (optional explicit model pin),
  *   `environment`, `allow`, `soft_deny`, `hard_deny` (NL string lists),
@@ -1608,6 +1612,35 @@ export function pickClassifierModel(
 	return undefined;
 }
 
+/**
+ * Short status-bar label for auto mode. Shows the resolved classifier model
+ * id (e.g. `claude-haiku-4-5`) so the user can see which model is screening
+ * fallthroughs. When no model is available (toggle on but none authed),
+ * reports `🤖 auto (no classifier)` so it's clear that fallthroughs are
+ * stubbing to `ask` rather than being silently classified.
+ */
+export function autoStatusLabel(model: Pick<Model<Api>, "id"> | undefined): string {
+	return model ? `🤖 auto: ${model.id}` : "🤖 auto (no classifier)";
+}
+
+/**
+ * Attribution core for a classifier verdict, shown in permission prompts so the
+ * user can see *which* model screened the action (mirrors the `🤖 auto: <id>`
+ * status line). Empty when the classifier didn't run for this verdict — in
+ * that case neither a model id nor a reason is set, so the prompt omits the
+ * note entirely (as before). Format: `classifier <modelId>: <reason>` when both
+ * are present, `classifier <modelId>` when the model ran but gave no reason,
+ * `classifier: <reason>` when only a reason is present (defensive — a verdict
+ * implies the model ran, so this only happens if a caller passes a reason
+ * without the id). Exported for unit testing.
+ */
+export function classifierAttribution(modelId: string | undefined, reason: string): string {
+	if (!modelId && !reason) return "";
+	if (modelId && reason) return `classifier ${modelId}: ${reason}`;
+	if (modelId) return `classifier ${modelId}`;
+	return `classifier: ${reason}`;
+}
+
 /** Build a short human-readable description of the action for the classifier. */
 export function describeAction(toolName: string, input: Record<string, unknown>): string {
 	const t = normalizeTool(toolName);
@@ -2046,6 +2079,11 @@ export default function (pi: ExtensionAPI) {
 	// Per-session classifier verdict cache (keyed by toolName+input+ruleset). Bounds
 	// token cost when the same action repeats in a loop. See classifierCacheKey().
 	const verdictCache = new Map<string, ClassifyResult>();
+	// Last model id shown in the auto-mode status line. The auto-select can
+	// resolve differently mid-session (auth changes, scoped models change), and
+	// toggling on when no model is authed yet can resolve later, so the tool_call
+	// handler refreshes the status when the resolved id drifts from this.
+	let lastAutoStatusId: string | undefined = undefined;
 
 	// ── Deny-with-message helper ─────────────────────────────────────────────
 
@@ -2080,12 +2118,32 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Auto-mode helpers ─────────────────────────────────────────────────────
 
+	/**
+	 * Resolve the classifier model from the session ctx (explicit pin, or
+	 * auto-select from the available pool preferring the current model's
+	 * provider). Factored from the `tool_call` handler so `applyAutoMode` can
+	 * resolve at toggle time for the status line. `ExtensionContext` carries
+	 * `modelRegistry` / `model` / `scopedModels` (see pi docs/extensions.md).
+	 */
+	function resolveClassifierModelFromCtx(ctx: ExtensionContext): Model<Api> | undefined {
+		return pickClassifierModel(
+			ctx.scopedModels.length > 0 ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable(),
+			ctx.model?.provider,
+			(m) => ctx.modelRegistry.hasConfiguredAuth(m),
+			cfg.autoMode.classifier,
+			(provider, modelId) => ctx.modelRegistry.find(provider, modelId),
+		);
+	}
+
 	function applyAutoMode(value: boolean, ctx: ExtensionContext, notify = true): void {
 		autoModeEnabled = value;
 		if (value) {
-			ctx.ui.setStatus(STATUS_KEY_AUTO, "🤖 auto mode on");
+			const model = resolveClassifierModelFromCtx(ctx);
+			lastAutoStatusId = model?.id;
+			ctx.ui.setStatus(STATUS_KEY_AUTO, autoStatusLabel(model));
 			if (notify) ctx.ui.notify("Auto mode: ON (this session only)", "info");
 		} else {
+			lastAutoStatusId = undefined;
 			ctx.ui.setStatus(STATUS_KEY_AUTO, "");
 			if (notify) ctx.ui.notify("Auto mode: OFF", "info");
 		}
@@ -2106,6 +2164,7 @@ export default function (pi: ExtensionAPI) {
 		// Always reset allow-all-edits and auto-mode at session start — never persisted.
 		allowAllEdits = false;
 		autoModeEnabled = false;
+		lastAutoStatusId = undefined;
 		ctx.ui.setStatus(STATUS_KEY, "");
 		ctx.ui.setStatus(STATUS_KEY_AUTO, "");
 	});
@@ -2118,15 +2177,18 @@ export default function (pi: ExtensionAPI) {
 		const autoActive = autoModeEnabled;
 		// Pick the classifier model (explicit pin, or auto-select from the pool
 		// preferring the currently selected model's provider). Mirrors idle-summary.
-		const classifierModel = autoActive
-			? pickClassifierModel(
-				ctx.scopedModels.length > 0 ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable(),
-				ctx.model?.provider,
-				(m) => ctx.modelRegistry.hasConfiguredAuth(m),
-				cfg.autoMode.classifier,
-				(provider, modelId) => ctx.modelRegistry.find(provider, modelId),
-			)
-			: undefined;
+		const classifierModel = autoActive ? resolveClassifierModelFromCtx(ctx) : undefined;
+		// Keep the status line in sync with the resolved model. The auto-select
+		// can drift mid-session (auth changes, scoped models change), and the
+		// toggle may have come on when nothing was authed yet, so refresh when
+		// the resolved id (or its absence) differs from what we last showed.
+		if (autoActive && ctx.hasUI) {
+			const currentId = classifierModel?.id;
+			if (currentId !== lastAutoStatusId) {
+				lastAutoStatusId = currentId;
+				ctx.ui.setStatus(STATUS_KEY_AUTO, autoStatusLabel(classifierModel));
+			}
+		}
 		const autoEngaged = autoActive && classifierModel !== undefined;
 		// Pass `autoActive` (session toggle), not `autoEngaged`: the "auto" sentinel
 		// should surface whenever the toggle is on so the loop below can stub it to
@@ -2135,6 +2197,12 @@ export default function (pi: ExtensionAPI) {
 		const compound = decideCompound(cfg, event.toolName, matchInput, autoActive);
 		let { action, isCompound, ambiguous, breakdown } = compound;
 		let classifierReason = "";
+		// Model id of the classifier that produced the verdict for this call.
+		// Undefined when the classifier didn't run for this verdict (a static
+		// rule matched, or the no-model stub), so the model is only surfaced in
+		// the deny block / ask dialogs when the classifier actually screened
+		// the action — not merely because the auto toggle is on.
+		let classifierModelId: string | undefined;
 
 		// Resolve a fallthrough "auto" sentinel. For single/ambiguous commands we
 		// classify up front. For compound commands we ALSO classify the whole
@@ -2159,6 +2227,7 @@ export default function (pi: ExtensionAPI) {
 				buildActionContext(event.toolName, matchInput, cfg.cwd),
 			);
 				classifierReason = result.reason;
+				classifierModelId = classifierModel.id;
 				action = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
 				// Treat the verdict as a single-command decision: the rest of the
 				// handler renders the single-command prompt for `ask`, blocks for
@@ -2181,7 +2250,8 @@ export default function (pi: ExtensionAPI) {
 			const base = culprit
 				? `Blocked ${event.toolName}: '${culprit.sub}' matched a deny rule`
 				: `Blocked ${event.toolName} by tool-permissions deny rule`;
-			const message = classifierReason ? `${base} (classifier: ${classifierReason})` : base;
+			const attr = classifierAttribution(classifierModelId, classifierReason);
+			const message = attr ? `${base} (${attr})` : base;
 			if (ctx.hasUI) {
 				ctx.ui.notify(message, "warning");
 			}
@@ -2243,6 +2313,7 @@ export default function (pi: ExtensionAPI) {
 
 				let liveAction = decide(cfg, "bash", { command: sub }, autoActive);
 				let subReason = "";
+				let subClassifierModelId: string | undefined;
 				// Auto fallthrough: run the classifier for this subcommand.
 				if (liveAction === "auto") {
 					if (autoEngaged && classifierModel) {
@@ -2256,6 +2327,7 @@ export default function (pi: ExtensionAPI) {
 							buildActionContext("bash", { command: sub }, subCwd),
 						);
 						subReason = result.reason;
+						subClassifierModelId = classifierModel.id;
 						liveAction = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
 					} else {
 						liveAction = "ask";
@@ -2265,10 +2337,10 @@ export default function (pi: ExtensionAPI) {
 				if (liveAction === "deny") {
 					// No steer prompt here — this branch is only reached for static deny rules
 					// and classifier hard_deny verdicts (neither is user-initiated). The
-					// classifier's reason is already in the block message; user denies
-					// steer via the Deny-once / Deny-always choice branches below.
-					const reason = subReason
-						? `Blocked by classifier (subcommand: ${sub}): ${subReason}`
+					// classifier's model + reason are already in the block message; user
+					// denies steer via the Deny-once / Deny-always choice branches below.
+					const reason = subClassifierModelId
+						? `Blocked by classifier ${subClassifierModelId} (subcommand: ${sub})${subReason ? `: ${subReason}` : ""}`
 						: `Blocked by tool-permissions deny rule (subcommand: ${sub})`;
 					return { block: true, reason };
 				}
@@ -2276,7 +2348,8 @@ export default function (pi: ExtensionAPI) {
 				const suggested = suggestRule("Bash", { command: sub });
 				const breakdownLines = formatBreakdown(currentBreakdown, sub);
 
-				const reasonNote = subReason ? `\n\n  classifier: ${subReason}` : "";
+				const subAttr = classifierAttribution(subClassifierModelId, subReason);
+				const reasonNote = subAttr ? `\n\n  ${subAttr}` : "";
 				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}`;
 				// "Allow ALL steps once" only makes sense when more than one step
 				// in this compound actually needs human approval; with a single
@@ -2364,7 +2437,8 @@ export default function (pi: ExtensionAPI) {
 			: `Allow ${event.toolName}?`;
 		const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
 		const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
-		const reasonNote = classifierReason ? `\n\n  classifier: ${classifierReason}` : "";
+		const attr = classifierAttribution(classifierModelId, classifierReason);
+		const reasonNote = attr ? `\n\n  ${attr}` : "";
 		const title = `${titleHeader}\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
 
 		// Extra "allow all edits" option only for write/edit dialogs; "Switch to

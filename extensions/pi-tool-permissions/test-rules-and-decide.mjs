@@ -5,7 +5,7 @@ import {
 	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown,
 	loadConfigFromObjects,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
-	classifyAction, classifierCacheKey, pickClassifierModel, rankClassifierModels, dedupeModels,
+	classifyAction, classifierCacheKey, pickClassifierModel, rankClassifierModels, dedupeModels, autoStatusLabel, classifierAttribution,
 	buildActionContext, findGitRoot, leadingCdTarget, resolveAgainstCwd,
 	getMatchField, suggestRule, mcpPreview,
 	DEFAULT_AUTO_MODE,
@@ -708,6 +708,29 @@ test("defaults: history rewrite soft-denied",
 		pickClassifierModel(pool, "anthropic", noneAuth), undefined);
 	test("pick: explicit pin not found → auto-select",
 		pickClassifierModel(pool, "anthropic", allAuth, { provider: "x", model: "y" }, find).id, "haiku");
+}
+
+// autoStatusLabel: surfaces the resolved classifier model id (or a no-model
+// hint) for the status line
+{
+	test("label: model → 🤖 auto: <id>",
+		autoStatusLabel({ id: "claude-haiku-4-5" }), "🤖 auto: claude-haiku-4-5");
+	test("label: no model → 🤖 auto (no classifier)",
+		autoStatusLabel(undefined), "🤖 auto (no classifier)");
+}
+
+// classifierAttribution: prompt attribution core (model id + reason). Empty
+// when the classifier didn't run; model id shown when it did (with optional
+// reason).
+{
+	test("attr: model + reason → `classifier <id>: <reason>`",
+		classifierAttribution("claude-haiku-4-5", "running tests"), "classifier claude-haiku-4-5: running tests");
+	test("attr: model only → `classifier <id>`",
+		classifierAttribution("claude-haiku-4-5", ""), "classifier claude-haiku-4-5");
+	test("attr: reason only → `classifier: <reason>` (defensive)",
+		classifierAttribution(undefined, "running tests"), "classifier: running tests");
+	test("attr: neither → empty (classifier didn't run)",
+		classifierAttribution(undefined, ""), "");
 }
 
 // ── deny/ask-beat-classifier invariant ────────────────────────────────────

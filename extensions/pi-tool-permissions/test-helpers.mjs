@@ -49,6 +49,8 @@ export {
 	dedupeModels,
 	rankClassifierModels,
 	pickClassifierModel,
+	autoStatusLabel,
+	classifierAttribution,
 	describeAction,
 	mcpPreview,
 	buildClassifierPrompt,
