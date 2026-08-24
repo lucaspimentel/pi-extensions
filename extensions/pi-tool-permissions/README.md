@@ -523,6 +523,7 @@ When active, a `✏️ all edits allowed` indicator appears in the footer status
 /permissions reload                     # reload config from disk
 /permissions allowalledits [on|off|toggle]
 /permissions auto [on|off|toggle]       # toggle auto-mode (LLM classifier) for this session
+/permissions auto debug [on|off|toggle] # toggle classifier debug notifications for this session
 ```
 
 All write subcommands (`allow`/`deny`/`ask`/`remove`/`default`) accept `--user` to target the user-global config (`~/.pi/agent/pi-tool-permissions.json`); the default is the project-local `.pi/pi-tool-permissions.local.json`. `/permissions list` tags each rule with its source: `[implicit]`, `[user]`, `[project]`, or `[user+project]` when the same rule lives in both files.
@@ -621,10 +622,23 @@ So `git add -A && git commit -m ...` runs silently, while anything that leaves y
 | Any permission dialog | Choose **"Switch to auto mode (this session)"** |
 | `/permissions auto` | Toggle |
 | `/permissions auto on\|off` | Set explicitly |
+| `/permissions auto debug on\|off\|toggle` | Toggle classifier debug notifications (see below) |
 
 When active, a `🤖 auto mode on` indicator appears in the footer status bar.
 
 The **"Switch to auto mode (this session)"** dialog option just flips the toggle — it's the same as the hotkey, but contextual (available right where you're already being prompted). It only appears when auto mode isn't already active.
+
+### Debugging classifier decisions
+
+By default, a classifier `allow` verdict is silent — the tool call just goes through, with no trace of which model ran or why. `ask`/`deny` verdicts already show the model + reason in the dialog/block message, but `allow` and `no_match` leave nothing.
+
+`/permissions auto debug [on|off|toggle]` is a second **session-only, never-persisted** toggle (independent of the auto-mode toggle itself) that notifies for *every* classifier call, regardless of verdict:
+
+```
+[classifier] claude-haiku-4-5 -> allow: read-only status check (Bash(git status))
+```
+
+Turn it on when you want to see the classifier's reasoning for actions it's silently approving, not just the ones it stops you on. It has no effect when auto mode is off (the classifier never runs).
 
 ### Config
 

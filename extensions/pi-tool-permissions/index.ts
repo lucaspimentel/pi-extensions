@@ -2076,6 +2076,11 @@ export default function (pi: ExtensionAPI) {
 	// `defaultAction`) are screened by the classifier; if no classifier model
 	// is available they fall back to `ask` (safe stub). Mirrors `allowAllEdits`.
 	let autoModeEnabled = false;
+	// Debug session toggle (off by default, never persisted). When on, every
+	// classifier call (not just ones that end in `ask`/`deny`) notifies with the
+	// model id, verdict, and reason — including silent `allow`/`no_match` calls
+	// that otherwise leave no trace. Mirrors `autoModeEnabled`.
+	let classifierDebugEnabled = false;
 	// Per-session classifier verdict cache (keyed by toolName+input+ruleset). Bounds
 	// token cost when the same action repeats in a loop. See classifierCacheKey().
 	const verdictCache = new Map<string, ClassifyResult>();
@@ -2149,6 +2154,29 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function applyClassifierDebug(value: boolean, ctx: ExtensionContext, notify = true): void {
+		classifierDebugEnabled = value;
+		if (notify) ctx.ui.notify(`Classifier debug: ${value ? "ON" : "OFF"} (this session only)`, "info");
+	}
+
+	/**
+	 * Opt-in trace of a single classifier call, fired regardless of verdict —
+	 * including `allow`/`no_match`, which otherwise return silently with no
+	 * indication the classifier ran at all. No-op unless `classifierDebugEnabled`.
+	 */
+	function notifyClassifierDebug(
+		ctx: ExtensionContext,
+		toolName: string,
+		input: Record<string, unknown>,
+		modelId: string,
+		result: ClassifyResult,
+	): void {
+		if (!classifierDebugEnabled || !ctx.hasUI) return;
+		const desc = suggestRule(toolName, input);
+		const reason = result.reason ? `: ${result.reason}` : "";
+		ctx.ui.notify(`[classifier] ${modelId} -> ${result.verdict}${reason} (${desc})`, "info");
+	}
+
 	// ── Session lifecycle ────────────────────────────────────────────────────
 
 	const reload = (cwd: string, ctx?: ExtensionContext) => {
@@ -2164,6 +2192,7 @@ export default function (pi: ExtensionAPI) {
 		// Always reset allow-all-edits and auto-mode at session start — never persisted.
 		allowAllEdits = false;
 		autoModeEnabled = false;
+		classifierDebugEnabled = false;
 		lastAutoStatusId = undefined;
 		ctx.ui.setStatus(STATUS_KEY, "");
 		ctx.ui.setStatus(STATUS_KEY_AUTO, "");
@@ -2228,6 +2257,7 @@ export default function (pi: ExtensionAPI) {
 			);
 				classifierReason = result.reason;
 				classifierModelId = classifierModel.id;
+				notifyClassifierDebug(ctx, event.toolName, matchInput, classifierModel.id, result);
 				action = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
 				// Treat the verdict as a single-command decision: the rest of the
 				// handler renders the single-command prompt for `ask`, blocks for
@@ -2328,6 +2358,7 @@ export default function (pi: ExtensionAPI) {
 						);
 						subReason = result.reason;
 						subClassifierModelId = classifierModel.id;
+						notifyClassifierDebug(ctx, "bash", { command: sub }, classifierModel.id, result);
 						liveAction = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
 					} else {
 						liveAction = "ask";
@@ -2602,6 +2633,7 @@ export default function (pi: ExtensionAPI) {
 					"  /permissions reload           Reload config from disk",
 					"  /permissions allowalledits [on|off|toggle]",
 					"  /permissions auto [on|off|toggle]   Toggle auto-mode (LLM classifier) for this session",
+					"  /permissions auto debug [on|off|toggle]   Toggle classifier debug notifications for this session",
 					"",
 					"Rule syntax:  ToolName  or  ToolName(pattern)",
 					"  Patterns are case-insensitive globs (* = any chars, ? = one char).",
@@ -2614,6 +2646,7 @@ export default function (pi: ExtensionAPI) {
 					"  allow-all-edits  — auto-approve every Write/Edit  (Ctrl+Alt+E)",
 					"  auto mode       — classifier screens fallthroughs   (Ctrl+Alt+A)",
 					"    Only active when defaultAction === \"auto\". See docs/auto-mode-design.md.",
+					"  classifier debug — notify on every classifier call, including silent allows",
 					"",
 					"Config files (project overrides user for defaultAction; lists concat):",
 					"  ~/.pi/agent/pi-tool-permissions.json          (user)",
@@ -2655,6 +2688,7 @@ export default function (pi: ExtensionAPI) {
 					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
 					`allow all edits (this session): ${allowAllEdits ? "ON" : "OFF"}`,
 				`auto mode (this session): ${autoModeEnabled ? "ON" : "OFF"}`,
+				`classifier debug (this session): ${classifierDebugEnabled ? "ON" : "OFF"}`,
 				`autoMode.classifier: ${cfg.autoMode.classifier ? `${cfg.autoMode.classifier.provider}/${cfg.autoMode.classifier.model}` : "(auto-select)"}`,
 				`autoMode.classifyAllShell: ${cfg.autoMode.classifyAllShell}`,
 				`autoMode.environment (${cfg.autoMode.environment.length}):`,
@@ -2723,6 +2757,20 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				case "auto": {
+				const [first, ...debugRest] = value.split(/\s+/);
+				if (first?.toLowerCase() === "debug") {
+					const debugValue = debugRest.join(" ").trim().toLowerCase();
+					if (!debugValue || debugValue === "toggle") {
+						applyClassifierDebug(!classifierDebugEnabled, ctx);
+					} else if (debugValue === "on") {
+						applyClassifierDebug(true, ctx);
+					} else if (debugValue === "off") {
+						applyClassifierDebug(false, ctx);
+					} else {
+						ctx.ui.notify(`Usage: /permissions auto debug [on|off|toggle]`, "warning");
+					}
+					return;
+				}
 				const normalized = value.toLowerCase();
 				if (!normalized || normalized === "toggle") {
 					applyAutoMode(!autoModeEnabled, ctx);
@@ -2731,7 +2779,7 @@ export default function (pi: ExtensionAPI) {
 				} else if (normalized === "off") {
 					applyAutoMode(false, ctx);
 				} else {
-					ctx.ui.notify(`Usage: /permissions auto [on|off|toggle]`, "warning");
+					ctx.ui.notify(`Usage: /permissions auto [on|off|toggle] | auto debug [on|off|toggle]`, "warning");
 				}
 				return;
 			}
