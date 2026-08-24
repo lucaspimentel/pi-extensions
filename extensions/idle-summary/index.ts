@@ -166,9 +166,6 @@ const buildSummaryPrompt = (conversationText: string): string =>
 
 export default function (pi: ExtensionAPI) {
 	let idleTimer: ReturnType<typeof setTimeout> | null = null;
-	// True once /summary has been invoked during the current idle period.
-	// Prevents the idle timer from firing again for the same period.
-	let summaryShownSinceLastTurn = false;
 
 	function clearIdleTimer() {
 		if (idleTimer) {
@@ -242,13 +239,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_start", () => {
 		clearIdleTimer();
-		summaryShownSinceLastTurn = false;
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
 		clearIdleTimer();
-		// If /summary was already called since the last turn, don't auto-fire.
-		if (summaryShownSinceLastTurn) return;
 		// Each agent_end re-arms the timer and agent_start clears it, so the
 		// summary only appears after IDLE_DELAY_MS of true idleness (no further
 		// agent activity). Intermediate retries/compaction just reset the countdown.
@@ -263,7 +257,6 @@ export default function (pi: ExtensionAPI) {
 		description: "Generate a session summary now",
 		handler: async (_args, ctx) => {
 			clearIdleTimer();
-			summaryShownSinceLastTurn = true;
 			await generateAndShowSummary(ctx);
 		},
 	});
