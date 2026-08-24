@@ -9,6 +9,12 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 
 /**
+ * Canonical display label for a model: `provider/modelId`.
+ */
+export const modelLabel = (model: Model<Api>): string =>
+	`${model.provider}/${model.id}`;
+
+/**
  * Cost proxy for both cheapness and speed: smaller/cheaper models generally
  * respond faster. Lower score = preferred. Uses per-million input + output
  * rates. Missing rates are treated as 0.
@@ -66,3 +72,44 @@ export const selectSummaryModel = (
 	}
 	return undefined;
 };
+
+/**
+ * Resolve an explicit model override to a usable model.
+ *
+ * `modelRef` is a user-chosen `provider/modelId` (e.g. `"anthropic/claude-haiku-4-5"`)
+ * or a bare `modelId` (e.g. `"claude-haiku-4-5"`). A `provider/modelId` match wins
+ * over a bare `modelId` match, and the model must have configured auth. Returns
+ * `undefined` when there's no override, no match, or the match lacks auth.
+ */
+export const findConfiguredModel = (
+	pool: Model<Api>[],
+	modelRef: string | undefined,
+	hasAuth: (model: Model<Api>) => boolean,
+): Model<Api> | undefined => {
+	if (!modelRef) return undefined;
+	const ref = modelRef.trim();
+	if (!ref) return undefined;
+
+	const unique = dedupeModels(pool);
+	const byProviderAndId = unique.find(
+		(m) => hasAuth(m) && modelLabel(m) === ref,
+	);
+	if (byProviderAndId) return byProviderAndId;
+	return unique.find((m) => hasAuth(m) && m.id === ref);
+};
+
+/**
+ * Models the user is allowed to pick as a summary model: unique, authed,
+ * sorted by provider then model id for a stable picker list.
+ */
+export const pickableModels = (
+	pool: Model<Api>[],
+	hasAuth: (model: Model<Api>) => boolean,
+): Model<Api>[] =>
+	dedupeModels(pool)
+		.filter((m) => hasAuth(m))
+		.sort((a, b) =>
+			a.provider === b.provider
+				? a.id.localeCompare(b.id)
+				: a.provider.localeCompare(b.provider),
+		);

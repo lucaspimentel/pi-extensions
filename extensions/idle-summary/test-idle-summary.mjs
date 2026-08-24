@@ -9,13 +9,19 @@ import {
 	dedupeModels,
 	rankSummaryModels,
 	selectSummaryModel,
+	modelLabel,
+	findConfiguredModel,
+	pickableModels,
 } from "./idle-summary-models.ts";
 
 // ── Test runner ───────────────────────────────────────────────────────────
 
 let pass = 0, fail = 0;
 function test(desc, actual, expected) {
-	const ok = actual === expected;
+	// Primitives compare by value; arrays/objects compare by structural JSON.
+	const ok =
+		actual === expected ||
+		JSON.stringify(actual) === JSON.stringify(expected);
 	console.log((ok ? "  ✓" : "  ✗") + " " + desc);
 	if (!ok) {
 		console.log(`      got:      ${JSON.stringify(actual)}`);
@@ -181,6 +187,79 @@ test("scoped: openai current → only scoped openai (terra)",
 	idOf(selectSummaryModel(scoped, "openai", () => true)), "openai/gpt-5.6-terra");
 test("scoped: baseten current (not in scope) → cheapest scoped overall",
 	idOf(selectSummaryModel(scoped, "baseten", () => true)), "anthropic/claude-sonnet-5");
+
+// ── modelLabel ────────────────────────────────────────────────
+
+section("modelLabel");
+
+test("joins provider and id with /", modelLabel(anthropicMid), "anthropic/claude-sonnet-5");
+test("joins provider and id with / (openai)", modelLabel(openaiCheap), "openai/gpt-5.6-luna");
+
+// ── findConfiguredModel — provider/modelId override ────────────
+
+section("findConfiguredModel — provider/modelId override");
+
+test("exact provider/modelId match returned",
+	idOf(findConfiguredModel(allModels, "anthropic/claude-sonnet-5", () => true)), "anthropic/claude-sonnet-5");
+test("override can pick a pricey model the heuristic would never choose",
+	idOf(findConfiguredModel(allModels, "anthropic/claude-opus-5", () => true)), "anthropic/claude-opus-5");
+test("override can pick from a different provider than current",
+	idOf(findConfiguredModel(allModels, "openai/gpt-5.6-terra", () => true)), "openai/gpt-5.6-terra");
+
+// ── findConfiguredModel — bare modelId ──────────────────────
+
+section("findConfiguredModel — bare modelId");
+
+test("bare modelId matches when provider not specified",
+	idOf(findConfiguredModel(allModels, "claude-haiku-4-5", () => true)), "anthropic/claude-haiku-4-5");
+test("provider/modelId wins over a bare modelId collision",
+	idOf(findConfiguredModel(allModels, "anthropic/claude-sonnet-5", () => true)), "anthropic/claude-sonnet-5");
+
+// ── findConfiguredModel — auth gating ──────────────────────────
+
+section("findConfiguredModel — auth gating");
+
+test("override skipped when that model has no auth",
+	idOf(findConfiguredModel(allModels, "anthropic/claude-opus-5", (m) => m.id !== "claude-opus-5")), undefined);
+test("override skipped → undefined (no fallback to heuristic here)",
+	findConfiguredModel(allModels, "anthropic/nonexistent", () => true), undefined);
+
+// ── findConfiguredModel — edge cases ──────────────────────
+
+section("findConfiguredModel — edge cases");
+
+test("undefined override → undefined", findConfiguredModel(allModels, undefined, () => true), undefined);
+test("empty string override → undefined", findConfiguredModel(allModels, "   ", () => true), undefined);
+test("whitespace-only override → undefined", findConfiguredModel(allModels, "\t\n", () => true), undefined);
+test("override is trimmed before matching",
+	idOf(findConfiguredModel(allModels, "  anthropic/claude-haiku-4-5  ", () => true)), "anthropic/claude-haiku-4-5");
+test("dedupes pool before matching (no double hit)",
+	findConfiguredModel([anthropicMid, anthropicMid], "anthropic/claude-sonnet-5", () => true) != null, true);
+
+// ── pickableModels — picker list construction ─────────────────
+
+section("pickableModels — filters to authed, sorts by provider then id");
+
+const pickableAll = pickableModels(allModels, () => true).map(idOf);
+test("includes all authed models", pickableAll.length, allModels.length);
+test("sorted by provider first",
+	pickableModels(allModels, () => true).slice(0, 3).every((m) => m.provider === "anthropic"), true);
+test("within provider, sorted by id",
+	pickableModels(allModels, () => true)
+		.filter((m) => m.provider === "anthropic")
+		.map(idOf),
+	["anthropic/claude-haiku-4-5", "anthropic/claude-opus-5", "anthropic/claude-sonnet-5"]);
+test("provider order: anthropic < baseten < openai",
+	pickableAll.slice(0, 3).every((x) => x.startsWith("anthropic"))
+		&& pickableAll[3].startsWith("baseten")
+		&& pickableAll[5].startsWith("openai"),
+	true);
+
+test("excludes models without auth",
+	pickableModels(allModels, (m) => m.provider === "openai").map(idOf),
+	["openai/gpt-5.6-luna", "openai/gpt-5.6-terra"]);
+test("dedupes before filtering", pickableModels([anthropicMid, anthropicMid], () => true).length, 1);
+test("empty pool → empty list", pickableModels([], () => true).length, 0);
 
 // ── Exit ───────────────────────────────────────────────────────────────────
 

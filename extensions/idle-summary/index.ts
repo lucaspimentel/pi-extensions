@@ -13,9 +13,20 @@
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	type ExtensionAPI,
+	type ExtensionContext,
+	getAgentDir,
+} from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { selectSummaryModel } from "./idle-summary-models.ts";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+	findConfiguredModel,
+	modelLabel,
+	pickableModels,
+	selectSummaryModel,
+} from "./idle-summary-models.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -38,20 +49,49 @@ type SessionEntry = {
 
 const IDLE_DELAY_MS = 120_000;
 const CUSTOM_TYPE = "idle-summary";
+const CONFIG_FILE = "idle-summary.json";
+
+// ── Config persistence ──────────────────────────────────────────────────────
+// The user's chosen summary model lives in the global agent dir
+// (`getAgentDir()`), so it applies across all projects and sessions. Stored as
+// `{ "model": "provider/modelId" }`. Missing/corrupt file = no override.
+const configPath = () => join(getAgentDir(), CONFIG_FILE);
+
+const readConfiguredModel = (): string | undefined => {
+	try {
+		const raw = readFileSync(configPath(), "utf8");
+		const parsed = JSON.parse(raw) as { model?: unknown } | null;
+		return typeof parsed?.model === "string" ? parsed.model : undefined;
+	} catch {
+		return undefined;
+	}
+};
+
+const writeConfiguredModel = (ref: string): void => {
+	try {
+		writeFileSync(configPath(), JSON.stringify({ model: ref }, null, 2));
+	} catch {
+		// Best-effort: a failed write just means the choice won't persist.
+	}
+};
 
 // Build the candidate pool from the session's scoped models, or all available
 // models when no scoping is configured (scopedModels is empty in that case).
-// Delegates to the pure `selectSummaryModel` helper (see idle-summary-models.ts)
-// which ranks by: cheapest model from the currently selected model's provider
-// first, then the rest by ascending cost. Returns the first ranked model with
-// configured auth.
+// Resolution order: an explicit user override (from `/summary-model`), then
+// the pure `selectSummaryModel` heuristic (cheapest model from the currently
+// selected model's provider first, then the rest by ascending cost). Each
+// candidate must have configured auth.
+const summaryPool = (ctx: ExtensionContext): Model<Api>[] =>
+	ctx.scopedModels.length > 0
+		? ctx.scopedModels.map((s) => s.model)
+		: ctx.modelRegistry.getAvailable();
+
 const pickSummaryModel = (ctx: ExtensionContext): Model<Api> | undefined => {
-	const pool =
-		ctx.scopedModels.length > 0
-			? ctx.scopedModels.map((s) => s.model)
-			: ctx.modelRegistry.getAvailable();
-	return selectSummaryModel(pool, ctx.model?.provider, (m) =>
-		ctx.modelRegistry.hasConfiguredAuth(m),
+	const pool = summaryPool(ctx);
+	const hasAuth = (m: Model<Api>) => ctx.modelRegistry.hasConfiguredAuth(m);
+	return (
+		findConfiguredModel(pool, readConfiguredModel(), hasAuth) ??
+		selectSummaryModel(pool, ctx.model?.provider, hasAuth)
 	);
 };
 
@@ -225,6 +265,45 @@ export default function (pi: ExtensionAPI) {
 			clearIdleTimer();
 			summaryShownSinceLastTurn = true;
 			await generateAndShowSummary(ctx);
+		},
+	});
+
+	// Pick which model generates summaries. Opens a model picker; the choice is
+	// persisted to the global agent dir and preferred on every future summary.
+	pi.registerCommand("summary-model", {
+		description: "Choose the model used to generate session summaries",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) {
+				ctx.ui.notify(
+					"/summary-model needs an interactive UI; run it in the TUI.",
+					"warning",
+				);
+				return;
+			}
+
+			const pool = summaryPool(ctx);
+			const hasAuth = (m: Model<Api>) => ctx.modelRegistry.hasConfiguredAuth(m);
+			const pickable = pickableModels(pool, hasAuth);
+			if (pickable.length === 0) {
+				ctx.ui.notify("No models with configured auth are available.", "warning");
+				return;
+			}
+
+			const saved = readConfiguredModel();
+			const current = pickSummaryModel(ctx);
+			// Put the effective current model first so it is pre-highlighted.
+			const ordered = current
+				? [current, ...pickable.filter((m) => modelLabel(m) !== modelLabel(current))]
+				: pickable;
+			const labels = ordered.map(modelLabel);
+
+			const choice = await ctx.ui.select("Summary model:", labels, {
+				signal: ctx.signal,
+			});
+			if (!choice) return; // cancelled
+
+			writeConfiguredModel(choice);
+			ctx.ui.notify(`Summary model set to ${choice}`, "info");
 		},
 	});
 
