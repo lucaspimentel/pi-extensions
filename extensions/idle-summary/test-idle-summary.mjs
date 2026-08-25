@@ -8,8 +8,8 @@ import {
 	modelCostScore,
 	hasPrice,
 	dedupeModels,
-	rankSummaryModels,
-	selectSummaryModel,
+	rankModels,
+	selectModel,
 	modelLabel,
 	findConfiguredModel,
 	orderedSummaryCandidates,
@@ -102,11 +102,11 @@ test("preserves first-seen order", idOf(dedupeModels([openaiMid, openaiCheap, an
 test("same id different provider are distinct", dedupeModels([anthropicCheap, mk("openai", "claude-haiku-4-5", 1, 1)]).length, 2);
 test("empty pool stays empty", dedupeModels([]).length, 0);
 
-// ── rankSummaryModels — same-provider-first ordering ───────────────────────
+// ── rankModels — same-provider-first ordering ───────────────────────
 
-section("rankSummaryModels — same provider first");
+section("rankModels — same provider first");
 
-const rankedAnthropic = rankSummaryModels(allModels, "anthropic");
+const rankedAnthropic = rankModels(allModels, "anthropic");
 test("anthropic models take the first 3 slots", rankedAnthropic.slice(0, 3).every((m) => m.provider === "anthropic"), true);
 test("cheapest anthropic is first", idOf(rankedAnthropic[0]), "anthropic/claude-haiku-4-5");
 test("mid anthropic is second", idOf(rankedAnthropic[1]), "anthropic/claude-sonnet-5");
@@ -114,88 +114,88 @@ test("pricey anthropic is third", idOf(rankedAnthropic[2]), "anthropic/claude-op
 test("after anthropic, cheapest non-anthropic is next", idOf(rankedAnthropic[3]), "baseten/zai-org/GLM-5.2");
 test("then next cheapest non-anthropic", idOf(rankedAnthropic[4]), "openai/gpt-5.6-luna");
 
-const rankedOpenai = rankSummaryModels(allModels, "openai");
+const rankedOpenai = rankModels(allModels, "openai");
 test("openai models take the first 2 slots", rankedOpenai.slice(0, 2).every((m) => m.provider === "openai"), true);
 test("cheapest openai is first", idOf(rankedOpenai[0]), "openai/gpt-5.6-luna");
 test("mid openai is second", idOf(rankedOpenai[1]), "openai/gpt-5.6-terra");
 test("after openai, cheapest non-openai is next", idOf(rankedOpenai[2]), "baseten/zai-org/GLM-5.2");
 
-const rankedBaseten = rankSummaryModels(allModels, "baseten");
+const rankedBaseten = rankModels(allModels, "baseten");
 test("baseten models take the first 2 slots", rankedBaseten.slice(0, 2).every((m) => m.provider === "baseten"), true);
 test("cheapest baseten is first", idOf(rankedBaseten[0]), "baseten/zai-org/GLM-5.2");
 
-// ── rankSummaryModels — no current provider ────────────────────────────────
+// ── rankModels — no current provider ────────────────────────────────
 
-section("rankSummaryModels — no current provider");
+section("rankModels — no current provider");
 
-const rankedNone = rankSummaryModels(allModels, undefined);
+const rankedNone = rankModels(allModels, undefined);
 test("no provider → pure cost ascending", idOf(rankedNone[0]), "baseten/zai-org/GLM-5.2");
 test("no provider → second cheapest overall", idOf(rankedNone[1]), "openai/gpt-5.6-luna");
 test("no provider → third is baseten fast (2.5 < haiku 6)", idOf(rankedNone[2]), "baseten/zai-org/GLM-5.2-Fast");
 test("no provider → anthropic haiku is 4th", idOf(rankedNone[3]), "anthropic/claude-haiku-4-5");
 test("no provider → pricey opus is last", idOf(rankedNone[rankedNone.length - 1]), "anthropic/claude-opus-5");
 
-// ── rankSummaryModels — dedupe + stability ─────────────────────────────────
+// ── rankModels — dedupe + stability ─────────────────────────────────
 
-section("rankSummaryModels — dedupe + stability");
+section("rankModels — dedupe + stability");
 
-test("dedupes before ranking", rankSummaryModels([anthropicCheap, anthropicCheap, openaiCheap], "anthropic").length, 2);
+test("dedupes before ranking", rankModels([anthropicCheap, anthropicCheap, openaiCheap], "anthropic").length, 2);
 test("stable tie order: equal costs keep insertion order",
-	idOf(rankSummaryModels([mk("a", "x", 1, 1), mk("b", "y", 1, 1)], undefined)[0]), "a/x");
+	idOf(rankModels([mk("a", "x", 1, 1), mk("b", "y", 1, 1)], undefined)[0]), "a/x");
 
-// ── selectSummaryModel — auth gating ──────────────────────────────────────
+// ── selectModel — auth gating ──────────────────────────────────────
 
-section("selectSummaryModel — picks cheapest same-provider with auth");
+section("selectModel — picks cheapest same-provider with auth");
 
 test("anthropic current, all authed → cheapest anthropic",
-	idOf(selectSummaryModel(allModels, "anthropic", () => true)), "anthropic/claude-haiku-4-5");
+	idOf(selectModel(allModels, "anthropic", () => true)), "anthropic/claude-haiku-4-5");
 test("openai current, all authed → cheapest openai",
-	idOf(selectSummaryModel(allModels, "openai", () => true)), "openai/gpt-5.6-luna");
+	idOf(selectModel(allModels, "openai", () => true)), "openai/gpt-5.6-luna");
 test("baseten current, all authed → cheapest baseten",
-	idOf(selectSummaryModel(allModels, "baseten", () => true)), "baseten/zai-org/GLM-5.2");
+	idOf(selectModel(allModels, "baseten", () => true)), "baseten/zai-org/GLM-5.2");
 test("no current provider, all authed → cheapest overall",
-	idOf(selectSummaryModel(allModels, undefined, () => true)), "baseten/zai-org/GLM-5.2");
+	idOf(selectModel(allModels, undefined, () => true)), "baseten/zai-org/GLM-5.2");
 
-// ── selectSummaryModel — auth fallback ─────────────────────────────────────
+// ── selectModel — auth fallback ─────────────────────────────────────
 
-section("selectSummaryModel — falls back when same-provider lacks auth");
+section("selectModel — falls back when same-provider lacks auth");
 
 const onlyOpenaiAuthed = (m) => m.provider === "openai";
 test("anthropic current but only openai authed → cheapest openai",
-	idOf(selectSummaryModel(allModels, "anthropic", onlyOpenaiAuthed)), "openai/gpt-5.6-luna");
+	idOf(selectModel(allModels, "anthropic", onlyOpenaiAuthed)), "openai/gpt-5.6-luna");
 test("baseten current but only openai authed → cheapest openai",
-	idOf(selectSummaryModel(allModels, "baseten", onlyOpenaiAuthed)), "openai/gpt-5.6-luna");
+	idOf(selectModel(allModels, "baseten", onlyOpenaiAuthed)), "openai/gpt-5.6-luna");
 
 const onlyMidAnthropicAuthed = (m) => m.provider === "anthropic" && m.id === "claude-sonnet-5";
 test("anthropic current, only mid anthropic authed → mid anthropic (cheapest authed same provider)",
-	idOf(selectSummaryModel(allModels, "anthropic", onlyMidAnthropicAuthed)), "anthropic/claude-sonnet-5");
+	idOf(selectModel(allModels, "anthropic", onlyMidAnthropicAuthed)), "anthropic/claude-sonnet-5");
 
 const onlyPriceyAnthropicAuthed = (m) => m.provider === "anthropic" && m.id === "claude-opus-5";
 test("anthropic current, only opus authed → opus (still same provider preferred over cheaper non-anthropic)",
-	idOf(selectSummaryModel(allModels, "anthropic", onlyPriceyAnthropicAuthed)), "anthropic/claude-opus-5");
+	idOf(selectModel(allModels, "anthropic", onlyPriceyAnthropicAuthed)), "anthropic/claude-opus-5");
 
 const onlyBasetenCheapAuthed = (m) => m.provider === "baseten" && m.id === "zai-org/GLM-5.2";
 test("anthropic current, only baseten cheap authed → baseten cheap (no same-provider option)",
-	idOf(selectSummaryModel(allModels, "anthropic", onlyBasetenCheapAuthed)), "baseten/zai-org/GLM-5.2");
+	idOf(selectModel(allModels, "anthropic", onlyBasetenCheapAuthed)), "baseten/zai-org/GLM-5.2");
 
-// ── selectSummaryModel — no auth at all ────────────────────────────────────
+// ── selectModel — no auth at all ────────────────────────────────────
 
-section("selectSummaryModel — no auth");
+section("selectModel — no auth");
 
-test("nothing authed → undefined", selectSummaryModel(allModels, "anthropic", () => false), undefined);
-test("empty pool → undefined", selectSummaryModel([], "anthropic", () => true), undefined);
+test("nothing authed → undefined", selectModel(allModels, "anthropic", () => false), undefined);
+test("empty pool → undefined", selectModel([], "anthropic", () => true), undefined);
 
-// ── selectSummaryModel — scoped subset ────────────────────────────────────
+// ── selectModel — scoped subset ────────────────────────────────────
 
-section("selectSummaryModel — scoped subset");
+section("selectModel — scoped subset");
 
 const scoped = [anthropicMid, anthropicPricey, openaiMid];
 test("scoped: anthropic current → cheapest scoped anthropic (mid, not haiku)",
-	idOf(selectSummaryModel(scoped, "anthropic", () => true)), "anthropic/claude-sonnet-5");
+	idOf(selectModel(scoped, "anthropic", () => true)), "anthropic/claude-sonnet-5");
 test("scoped: openai current → only scoped openai (terra)",
-	idOf(selectSummaryModel(scoped, "openai", () => true)), "openai/gpt-5.6-terra");
+	idOf(selectModel(scoped, "openai", () => true)), "openai/gpt-5.6-terra");
 test("scoped: baseten current (not in scope) → cheapest scoped overall",
-	idOf(selectSummaryModel(scoped, "baseten", () => true)), "anthropic/claude-sonnet-5");
+	idOf(selectModel(scoped, "baseten", () => true)), "anthropic/claude-sonnet-5");
 
 // ── modelLabel ────────────────────────────────────────────────
 
@@ -278,9 +278,9 @@ test("priced model → true", hasPrice(anthropicCheap), true);
 test("zero-cost model (0,0) is still priced → true", hasPrice(mk("x", "free", 0, 0)), true);
 test("unpriced model → false", hasPrice(mkUnpriced("openrouter", "z-ai/glm-5.2:free")), false);
 
-// ── rankSummaryModels — ignores unpriced models ────────────────────────────
+// ── rankModels — ignores unpriced models ────────────────────────────
 
-section("rankSummaryModels — ignores unpriced models");
+section("rankModels — ignores unpriced models");
 
 const unpricedCheap = mkUnpriced("anthropic", "claude-haiku-0");
 const poolWithUnpriced = allModels.concat([
@@ -288,7 +288,7 @@ const poolWithUnpriced = allModels.concat([
 	unpricedCheap,
 ]);
 
-const rankedIgnoreUnpriced = rankSummaryModels(poolWithUnpriced, "anthropic");
+const rankedIgnoreUnpriced = rankModels(poolWithUnpriced, "anthropic");
 test("unpriced models are dropped entirely", rankedIgnoreUnpriced.some((m) => !hasPrice(m)), false);
 test("unpriced near-zero-cost model does not leap to front",
 	idOf(rankedIgnoreUnpriced[0]), "anthropic/claude-haiku-4-5");

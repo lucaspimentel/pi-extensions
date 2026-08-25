@@ -5,7 +5,7 @@ import {
 	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown,
 	loadConfigFromObjects,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
-	classifyAction, classifierCacheKey, pickClassifierModel, rankClassifierModels, dedupeModels, hasPrice, modelLabel, pickableModels, autoStatusLabel, classifierAttribution,
+	classifyAction, classifierCacheKey, pickClassifierModel, rankModels, dedupeModels, hasPrice, modelLabel, pickableModels, autoStatusLabel, classifierAttribution,
 	buildActionContext, findGitRoot, leadingCdTarget, resolveAgainstCwd,
 	getMatchField, suggestRule, mcpPreview,
 	DEFAULT_AUTO_MODE,
@@ -675,7 +675,7 @@ test("defaults: history rewrite soft-denied",
 	test("cacheKey: different toolName → different key", k1 === k5, false);
 }
 
-// Model selection: rankClassifierModels prefers same provider, cheapest first
+// Model selection: rankModels prefers same provider, cheapest first
 {
 	const mk = (provider, id, input, output) => ({ provider, id, cost: { input, output, cacheRead: 0, cacheWrite: 0 } });
 	const pool = [
@@ -684,14 +684,14 @@ test("defaults: history rewrite soft-denied",
 		mk("anthropic", "sonnet",   3, 15),
 		mk("openai", "mini",        1, 2),
 	];
-	const ranked = rankClassifierModels(pool, "anthropic");
+	const ranked = rankModels(pool, "anthropic");
 	test("rank: same-provider models come first",   ranked[0].provider === "anthropic", true);
 	test("rank: cheapest same-provider first",       ranked[0].id, "haiku");
 	test("rank: then other providers ascending cost",  ranked[2].id, "mini"); // openai mini (cost 3) before gpt-4o (cost 20)
 	test("rank: most expensive same-provider last of its kind", ranked[1].id, "sonnet");
 }
 
-// hasPrice / rankClassifierModels: unpriced models are ignored entirely, not
+// hasPrice / rankModels: unpriced models are ignored entirely, not
 // treated as free (they would otherwise leap to the front of the ranking).
 {
 	const mk = (provider, id, input, output) => ({ provider, id, cost: { input, output, cacheRead: 0, cacheWrite: 0 } });
@@ -708,7 +708,7 @@ test("defaults: history rewrite soft-denied",
 		mkUnpriced("openrouter", "z-ai/glm-5.2:free"),
 		mkUnpriced("anthropic", "claude-haiku-0"),
 	];
-	const rankedIgnoreUnpriced = rankClassifierModels(poolWithUnpriced, "anthropic");
+	const rankedIgnoreUnpriced = rankModels(poolWithUnpriced, "anthropic");
 	test("rank: unpriced models are dropped entirely", rankedIgnoreUnpriced.some((m) => !hasPrice(m)), false);
 	test("rank: unpriced near-zero-cost model does not leap to front", rankedIgnoreUnpriced[0].id, "haiku");
 	test("rank: priced models keep their relative ordering", rankedIgnoreUnpriced[1].id, "sonnet");

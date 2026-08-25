@@ -77,7 +77,7 @@ const writeConfiguredModel = (ref: string): void => {
 // Build the candidate pool from the session's scoped models, or all available
 // models when no scoping is configured (scopedModels is empty in that case).
 // Resolution order: an explicit user override (from `/summary-model`), then
-// the pure `selectSummaryModel` heuristic (cheapest model from the currently
+// the pure `selectModel` heuristic (cheapest model from the currently
 // selected model's provider first, then the rest by ascending cost). Each
 // candidate must have configured auth.
 const summaryPool = (

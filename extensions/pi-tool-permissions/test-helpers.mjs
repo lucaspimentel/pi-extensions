@@ -48,7 +48,7 @@ export {
 	modelCostScore,
 	hasPrice,
 	dedupeModels,
-	rankClassifierModels,
+	rankModels,
 	pickClassifierModel,
 	modelLabel,
 	pickableModels,

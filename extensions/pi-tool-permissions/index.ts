@@ -1575,18 +1575,11 @@ type ClassifierComplete = (model: Model<Api>, context: Context) => Promise<Assis
 
 // The generic ranking/dedupe/auth/pricing logic below used to be duplicated
 // verbatim between this file and idle-summary/idle-summary-models.ts; it now
-// lives in extensions/shared/model-selection.ts and is re-exported here under
-// this extension's established names so existing call sites and tests are
-// unaffected. Only `pickClassifierModel`'s explicit-pin resolution (a registry
+// lives in extensions/shared/model-selection.ts and is re-exported here
+// directly. Only `pickClassifierModel`'s explicit-pin resolution (a registry
 // `find` seam, unlike idle-summary's pool-based string-ref lookup) is
 // classifier-specific and stays local.
-export { dedupeModels, hasPrice, modelCostScore, modelLabel, pickableModels };
-
-/**
- * Rank a model pool for the classifier. See `rankModels` (shared/model-selection.ts)
- * for the ordering rules.
- */
-export const rankClassifierModels = rankModels;
+export { dedupeModels, hasPrice, modelCostScore, modelLabel, pickableModels, rankModels };
 
 /**
  * Pick the classifier model. If `explicit` is set, `find` it directly; otherwise

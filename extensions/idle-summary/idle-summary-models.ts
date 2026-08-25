@@ -7,8 +7,7 @@
  *
  * The generic ranking/dedupe/auth logic (shared with pi-tool-permissions'
  * classifier model selection) lives in `../shared/model-selection.ts` and is
- * re-exported here under this extension's established names so existing
- * call sites and tests are unaffected. Only the summary-specific pieces
+ * re-exported here directly. Only the summary-specific pieces
  * (`findConfiguredModel`'s string-ref parsing, `orderedSummaryCandidates`'
  * override-first candidate list) are defined locally.
  */
@@ -24,13 +23,7 @@ import {
 	selectModel,
 } from "../shared/model-selection.ts";
 
-export { modelLabel, hasPrice, modelCostScore, dedupeModels, pickableModels };
-
-/** Rank a model pool for summary generation. See `rankModels` for the ordering rules. */
-export const rankSummaryModels = rankModels;
-
-/** Pick the first ranked model that has configured auth. See `selectModel`. */
-export const selectSummaryModel = selectModel;
+export { modelLabel, hasPrice, modelCostScore, dedupeModels, pickableModels, rankModels, selectModel };
 
 /**
  * Resolve an explicit model override to a usable model.
@@ -64,7 +57,7 @@ export const findConfiguredModel = (
  * as authoritative, even when it is unpriced: it is the user's direct choice.
  * If it errors at request time, the remaining ranked models are tried in order
  * until one actually returns text. The ranked fallback ignores models without
- * pricing information (see `rankSummaryModels`).
+ * pricing information (see `rankModels`).
  *
  * Returns only models with configured auth. The override contributes at most
  * one entry; the ranked list never repeats it.
@@ -78,7 +71,7 @@ export const orderedSummaryCandidates = (
 	const authed = dedupeModels(pool).filter(hasAuth);
 	// Ranked fallback ignores unpriced models; dedupe guards against the case
 	// where the override is also in the ranked pool.
-	const ranked = rankSummaryModels(authed, currentProvider);
+	const ranked = rankModels(authed, currentProvider);
 	const preferred = findConfiguredModel(authed, modelRef, () => true);
 	if (!preferred) return ranked;
 	const label = modelLabel(preferred);
