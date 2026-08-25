@@ -309,7 +309,6 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const saved = readConfiguredModel();
 			const [current] = summaryCandidates(ctx);
 			// Put the effective current model first so it is pre-highlighted.
 			const ordered = current
