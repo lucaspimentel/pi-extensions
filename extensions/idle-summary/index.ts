@@ -169,6 +169,10 @@ const buildSummaryPrompt = (conversationText: string): string =>
 
 export default function (pi: ExtensionAPI) {
 	let idleTimer: ReturnType<typeof setTimeout> | null = null;
+	// Set by session_shutdown (which fires before the runner is invalidated) so an
+	// in-flight generateAndShowSummary can observe it after its model await and
+	// bail before touching the now-stale ctx/pi. Reset on session_start.
+	let shutdown = false;
 
 	function clearIdleTimer() {
 		if (idleTimer) {
@@ -223,6 +227,14 @@ export default function (pi: ExtensionAPI) {
 			lastError = response.errorMessage ?? lastError;
 		}
 
+		// The model awaits above can take several seconds. If a /reload or session
+		// replacement (/new, /resume, /fork) happened during that await, session_shutdown
+		// fired and set `shutdown` before the runner was invalidated. This summary
+		// belongs to a now-dead session, so bail silently before touching the stale
+		// ctx/pi (which would throw and, on the /summary command path, propagate as a
+		// "command:summary" error after the reload finishes).
+		if (shutdown) return;
+
 		if (!summary || !usedModel) {
 			// Every candidate failed. Surface it instead of bailing silently so the
 			// user knows the summary didn't generate (e.g. a rate-limited model).
@@ -236,11 +248,9 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const modelLabelUsed = `${usedModel.provider}/${usedModel.id}`;
-		// The model call above can take several seconds. If a /reload or session
-		// replacement (/new, /resume, /fork) happens during that await, the captured
-		// `pi` and `ctx` are invalidated and pi.sendMessage throws a stale-ctx error.
-		// That means this summary belongs to a now-dead session, so bail silently
-		// instead of propagating (e.g. as a `command:summary` error).
+		// Defense in depth: `shutdown` above is the primary guard, but keep a
+		// try/catch around sendMessage in case of a race where shutdown fires
+		// between the check and the call.
 		try {
 			pi.sendMessage({
 				customType: CUSTOM_TYPE,
@@ -262,6 +272,11 @@ export default function (pi: ExtensionAPI) {
 		const line = model ? `${body}  ${theme.fg("muted", `· ${model}`)}` : body;
 		box.addChild(new Text(line, 0, 0));
 		return box;
+	});
+
+	pi.on("session_start", () => {
+		shutdown = false;
+		clearIdleTimer();
 	});
 
 	pi.on("agent_start", () => {
@@ -327,6 +342,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
+		// Emitted before the runner is invalidated, so an in-flight
+		// generateAndShowSummary can observe `shutdown` after its model await.
+		shutdown = true;
 		clearIdleTimer();
 	});
 }
