@@ -169,10 +169,15 @@ const buildSummaryPrompt = (conversationText: string): string =>
 
 export default function (pi: ExtensionAPI) {
 	let idleTimer: ReturnType<typeof setTimeout> | null = null;
-	// Set by session_shutdown (which fires before the runner is invalidated) so an
-	// in-flight generateAndShowSummary can observe it after its model await and
-	// bail before touching the now-stale ctx/pi. Reset on session_start.
-	let shutdown = false;
+	// Bumped by session_shutdown (which fires before the runner is invalidated).
+	// An in-flight generateAndShowSummary captures the value at entry and compares
+	// it after its model await, so it can bail before touching a now-stale ctx/pi.
+	// A counter (not a boolean) because the extension closure is REUSED across
+	// session replacement (/new, /resume, /fork, /switchSession): pi's resource
+	// loader caches the loaded extension set, so a boolean reset on session_start
+	// would clear the flag out from under an old in-flight run and let it touch
+	// the new session's stale ctx.
+	let generation = 0;
 
 	function clearIdleTimer() {
 		if (idleTimer) {
@@ -182,6 +187,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function generateAndShowSummary(ctx: ExtensionContext) {
+		const runGeneration = generation;
 		const branch = ctx.sessionManager.getBranch();
 		const conversationText = buildConversationText(branch as SessionEntry[]);
 		if (!conversationText.trim()) return;
@@ -229,11 +235,11 @@ export default function (pi: ExtensionAPI) {
 
 		// The model awaits above can take several seconds. If a /reload or session
 		// replacement (/new, /resume, /fork) happened during that await, session_shutdown
-		// fired and set `shutdown` before the runner was invalidated. This summary
+		// fired and bumped `generation` before the runner was invalidated. This summary
 		// belongs to a now-dead session, so bail silently before touching the stale
 		// ctx/pi (which would throw and, on the /summary command path, propagate as a
-		// "command:summary" error after the reload finishes).
-		if (shutdown) return;
+		// "command:summary" error after the reload/replacement finishes).
+		if (generation !== runGeneration) return;
 
 		if (!summary || !usedModel) {
 			// Every candidate failed. Surface it instead of bailing silently so the
@@ -248,8 +254,8 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const modelLabelUsed = `${usedModel.provider}/${usedModel.id}`;
-		// Defense in depth: `shutdown` above is the primary guard, but keep a
-		// try/catch around sendMessage in case of a race where shutdown fires
+		// Defense in depth: the generation check above is the primary guard, but keep
+		// a try/catch around sendMessage in case of a race where shutdown fires
 		// between the check and the call.
 		try {
 			pi.sendMessage({
@@ -275,7 +281,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", () => {
-		shutdown = false;
 		clearIdleTimer();
 	});
 
@@ -343,8 +348,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		// Emitted before the runner is invalidated, so an in-flight
-		// generateAndShowSummary can observe `shutdown` after its model await.
-		shutdown = true;
+		// generateAndShowSummary can observe the bump after its model await.
+		generation++;
 		clearIdleTimer();
 	});
 }
