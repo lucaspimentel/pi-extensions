@@ -217,6 +217,12 @@
  *   additive on top of the defaults. `classifier` and `environment` have no
  *   defaults (user-specific). See docs/auto-mode-design.md for the full design.
  *
+ *   `classifier` can also be picked interactively with
+ *   `/permissions auto model` (see below) instead of hand-editing the config —
+ *   mirrors idle-summary's `/summary-model`. The picker writes
+ *   `autoMode.classifier` into the project or user config (same `--user`/
+ *   `--project` scoping as `/permissions default`) and takes effect immediately.
+ *
  * Slash commands:
  *   /permissions                       - show this help
  *   /permissions help                  - show this help
@@ -229,6 +235,8 @@
  *   /permissions reload                - reload config from disk
  *   /permissions allowalledits [on|off|toggle]
  *   /permissions auto [on|off|toggle]  - toggle auto-mode (LLM classifier) for this session
+ *   /permissions auto model [--user]   - pick the classifier model interactively
+ *   /permissions auto model clear [--user]  - remove the classifier pin (resume auto-select)
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -1576,12 +1584,24 @@ export function dedupeModels(pool: Model<Api>[]): Model<Api>[] {
 }
 
 /**
+ * Whether a model carries pricing information. Models without input and
+ * output rates provide no signal for ordering (they default to a cost score
+ * of 0, i.e. "free", and would otherwise be picked first), so the ranking
+ * ignores them entirely. Mirrors idle-summary's `hasPrice`.
+ */
+export function hasPrice(model: Model<Api>): boolean {
+	return model.cost.input != null && model.cost.output != null;
+}
+
+/**
  * Rank a model pool for the classifier, mirroring idle-summary's rankSummaryModels:
- * models from `currentProvider` come first (cheapest within that provider first),
- * then all other providers in ascending cost order. Ties keep insertion order.
+ * models without pricing information are ignored (they cannot be ordered by
+ * cost), then models from `currentProvider` come first (cheapest within that
+ * provider first), then all other providers in ascending cost order. Ties
+ * keep insertion order.
  */
 export function rankClassifierModels(pool: Model<Api>[], currentProvider: string | undefined): Model<Api>[] {
-	const unique = dedupeModels(pool);
+	const unique = dedupeModels(pool).filter(hasPrice);
 	return [...unique].sort((a, b) => {
 		const aSame = currentProvider !== undefined && a.provider === currentProvider;
 		const bSame = currentProvider !== undefined && b.provider === currentProvider;
@@ -1610,6 +1630,27 @@ export function pickClassifierModel(
 		if (hasAuth(m)) return m;
 	}
 	return undefined;
+}
+
+/**
+ * Canonical display label for a model: `provider/modelId`. Mirrors
+ * idle-summary's `modelLabel` (idle-summary-models.ts).
+ */
+export function modelLabel(model: Model<Api>): string {
+	return `${model.provider}/${model.id}`;
+}
+
+/**
+ * Models the user is allowed to pick as the classifier: unique, authed,
+ * sorted by provider then model id for a stable picker list. Mirrors
+ * idle-summary's `pickableModels`.
+ */
+export function pickableModels(pool: Model<Api>[], hasAuth: HasAuth): Model<Api>[] {
+	return dedupeModels(pool)
+		.filter((m) => hasAuth(m))
+		.sort((a, b) =>
+			a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider),
+		);
 }
 
 /**
@@ -2594,6 +2635,29 @@ export default function (pi: ExtensionAPI) {
 		else saveProjectConfig(cwd, cfg);
 	}
 
+	// Persist an explicit classifier model pin into `autoMode.classifier` for
+	// the given scope (mirrors idle-summary's /summary-model persistence, but
+	// reuses the project/user config files and scoping this extension already
+	// has instead of a separate global file).
+	function setClassifier(scope: Scope, cwd: string, provider: string, model: string): void {
+		const cfg = scope === "user" ? loadUserConfigRaw() : loadProjectConfigRaw(cwd);
+		cfg.autoMode = { ...(cfg.autoMode ?? {}), classifier: { provider, model } };
+		if (scope === "user") saveUserConfig(cfg);
+		else saveProjectConfig(cwd, cfg);
+	}
+
+	// Remove the classifier pin from the given scope's config, if present.
+	// Returns false when there was nothing to remove (no notification needed).
+	function clearClassifier(scope: Scope, cwd: string): boolean {
+		const cfg = scope === "user" ? loadUserConfigRaw() : loadProjectConfigRaw(cwd);
+		if (!cfg.autoMode?.classifier) return false;
+		const { classifier: _classifier, ...restAuto } = cfg.autoMode;
+		cfg.autoMode = restAuto;
+		if (scope === "user") saveUserConfig(cfg);
+		else saveProjectConfig(cwd, cfg);
+		return true;
+	}
+
 	// Interactive scope picker used by Allow/Deny-always prompts. Returns null on Esc.
 	async function promptScope(ctx: ExtensionContext): Promise<Scope | null> {
 		const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
@@ -2634,6 +2698,8 @@ export default function (pi: ExtensionAPI) {
 					"  /permissions allowalledits [on|off|toggle]",
 					"  /permissions auto [on|off|toggle]   Toggle auto-mode (LLM classifier) for this session",
 					"  /permissions auto debug [on|off|toggle]   Toggle classifier debug notifications for this session",
+					"  /permissions auto model [--user]   Pick the classifier model interactively",
+					"  /permissions auto model clear [--user]   Remove the classifier pin (resume auto-select)",
 					"",
 					"Rule syntax:  ToolName  or  ToolName(pattern)",
 					"  Patterns are case-insensitive globs (* = any chars, ? = one char).",
@@ -2757,9 +2823,9 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				case "auto": {
-				const [first, ...debugRest] = value.split(/\s+/);
+				const [first, ...restTokens] = value.split(/\s+/);
 				if (first?.toLowerCase() === "debug") {
-					const debugValue = debugRest.join(" ").trim().toLowerCase();
+					const debugValue = restTokens.join(" ").trim().toLowerCase();
 					if (!debugValue || debugValue === "toggle") {
 						applyClassifierDebug(!classifierDebugEnabled, ctx);
 					} else if (debugValue === "on") {
@@ -2771,6 +2837,61 @@ export default function (pi: ExtensionAPI) {
 					}
 					return;
 				}
+				if (first?.toLowerCase() === "model") {
+					const modelArg = restTokens.join(" ").trim().toLowerCase();
+					if (modelArg && modelArg !== "clear") {
+						ctx.ui.notify(`Usage: /permissions auto model [--user] | auto model clear [--user]`, "warning");
+						return;
+					}
+					if (modelArg === "clear") {
+						const removed = clearClassifier(scope, ctx.cwd);
+						if (!removed) {
+							ctx.ui.notify(`No classifier pin set in ${scope} config.`, "info");
+							return;
+						}
+						reload(ctx.cwd, ctx);
+						if (autoModeEnabled && ctx.hasUI) {
+							const model = resolveClassifierModelFromCtx(ctx);
+							lastAutoStatusId = model?.id;
+							ctx.ui.setStatus(STATUS_KEY_AUTO, autoStatusLabel(model));
+						}
+						ctx.ui.notify(`Classifier pin cleared (${scope}); resuming auto-select.`, "info");
+						return;
+					}
+					if (!ctx.hasUI) {
+						ctx.ui.notify("/permissions auto model needs an interactive UI; run it in the TUI.", "warning");
+						return;
+					}
+					const pool = ctx.scopedModels.length > 0 ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable();
+					const hasAuth = (m: Model<Api>) => ctx.modelRegistry.hasConfiguredAuth(m);
+					const pickable = pickableModels(pool, hasAuth);
+					if (pickable.length === 0) {
+						ctx.ui.notify("No models with configured auth are available.", "warning");
+						return;
+					}
+					// Put the effective current classifier first so it is pre-highlighted.
+					const current = resolveClassifierModelFromCtx(ctx);
+					const ordered = current
+						? [current, ...pickable.filter((m) => modelLabel(m) !== modelLabel(current))]
+						: pickable;
+					const labels = ordered.map(modelLabel);
+
+					const choice = await ctx.ui.select("Classifier model:", labels, { signal: ctx.signal });
+					if (!choice) return; // cancelled
+
+					const slash = choice.indexOf("/");
+					const provider = choice.slice(0, slash);
+					const modelId = choice.slice(slash + 1);
+					setClassifier(scope, ctx.cwd, provider, modelId);
+					reload(ctx.cwd, ctx);
+					if (autoModeEnabled && ctx.hasUI) {
+						const model = resolveClassifierModelFromCtx(ctx);
+						lastAutoStatusId = model?.id;
+						ctx.ui.setStatus(STATUS_KEY_AUTO, autoStatusLabel(model));
+					}
+					ctx.ui.notify(`Classifier model set to ${choice} (${scope})`, "info");
+					return;
+				}
 				const normalized = value.toLowerCase();
 				if (!normalized || normalized === "toggle") {
 					applyAutoMode(!autoModeEnabled, ctx);
@@ -2779,7 +2900,7 @@ export default function (pi: ExtensionAPI) {
 				} else if (normalized === "off") {
 					applyAutoMode(false, ctx);
 				} else {
-					ctx.ui.notify(`Usage: /permissions auto [on|off|toggle] | auto debug [on|off|toggle]`, "warning");
+					ctx.ui.notify(`Usage: /permissions auto [on|off|toggle] | auto debug [on|off|toggle] | auto model [--user] [clear]`, "warning");
 				}
 				return;
 			}

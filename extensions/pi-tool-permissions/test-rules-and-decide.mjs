@@ -5,7 +5,7 @@ import {
 	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown,
 	loadConfigFromObjects,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
-	classifyAction, classifierCacheKey, pickClassifierModel, rankClassifierModels, dedupeModels, autoStatusLabel, classifierAttribution,
+	classifyAction, classifierCacheKey, pickClassifierModel, rankClassifierModels, dedupeModels, hasPrice, modelLabel, pickableModels, autoStatusLabel, classifierAttribution,
 	buildActionContext, findGitRoot, leadingCdTarget, resolveAgainstCwd,
 	getMatchField, suggestRule, mcpPreview,
 	DEFAULT_AUTO_MODE,
@@ -691,6 +691,45 @@ test("defaults: history rewrite soft-denied",
 	test("rank: most expensive same-provider last of its kind", ranked[1].id, "sonnet");
 }
 
+// hasPrice / rankClassifierModels: unpriced models are ignored entirely, not
+// treated as free (they would otherwise leap to the front of the ranking).
+{
+	const mk = (provider, id, input, output) => ({ provider, id, cost: { input, output, cacheRead: 0, cacheWrite: 0 } });
+	const mkUnpriced = (provider, id) => ({ provider, id, cost: { input: null, output: null, cacheRead: 0, cacheWrite: 0 } });
+
+	test("hasPrice: priced model → true", hasPrice(mk("anthropic", "haiku", 1, 5)), true);
+	test("hasPrice: zero-cost model (0,0) is still priced → true", hasPrice(mk("x", "free", 0, 0)), true);
+	test("hasPrice: unpriced model → false", hasPrice(mkUnpriced("openrouter", "z-ai/glm-5.2:free")), false);
+
+	const poolWithUnpriced = [
+		mk("anthropic", "haiku", 1, 5),
+		mk("anthropic", "sonnet", 3, 15),
+		mk("openai", "mini", 1, 2),
+		mkUnpriced("openrouter", "z-ai/glm-5.2:free"),
+		mkUnpriced("anthropic", "claude-haiku-0"),
+	];
+	const rankedIgnoreUnpriced = rankClassifierModels(poolWithUnpriced, "anthropic");
+	test("rank: unpriced models are dropped entirely", rankedIgnoreUnpriced.some((m) => !hasPrice(m)), false);
+	test("rank: unpriced near-zero-cost model does not leap to front", rankedIgnoreUnpriced[0].id, "haiku");
+	test("rank: priced models keep their relative ordering", rankedIgnoreUnpriced[1].id, "sonnet");
+}
+
+// modelLabel / pickableModels: picker list construction (mirrors idle-summary)
+{
+	const mk = (provider, id, input, output) => ({ provider, id, cost: { input, output, cacheRead: 0, cacheWrite: 0 } });
+	const pool = [
+		mk("anthropic", "haiku", 1, 5),
+		mk("anthropic", "opus", 15, 75),
+		mk("openai", "mini", 1, 2),
+	];
+	test("modelLabel: joins provider and id with /", modelLabel(pool[0]), "anthropic/haiku");
+	const pickable = pickableModels(pool, () => true).map(modelLabel);
+	test("pickableModels: sorted by provider then id", JSON.stringify(pickable), JSON.stringify(["anthropic/haiku", "anthropic/opus", "openai/mini"]));
+	test("pickableModels: excludes models without auth",
+		JSON.stringify(pickableModels(pool, (m) => m.provider === "openai").map(modelLabel)), JSON.stringify(["openai/mini"]));
+	test("pickableModels: dedupes before filtering", pickableModels([pool[0], pool[0]], () => true).length, 1);
+}
+
 // pickClassifierModel: explicit pin wins; hasAuth gates; auto-select respects provider
 {
 	const mk = (provider, id, input, output) => ({ provider, id, cost: { input, output, cacheRead: 0, cacheWrite: 0 } });
@@ -708,6 +747,15 @@ test("defaults: history rewrite soft-denied",
 		pickClassifierModel(pool, "anthropic", noneAuth), undefined);
 	test("pick: explicit pin not found → auto-select",
 		pickClassifierModel(pool, "anthropic", allAuth, { provider: "x", model: "y" }, find).id, "haiku");
+
+	// Explicit pin is authoritative even when unpriced — it's the user's direct
+	// choice, unlike the ranked auto-select fallback which ignores unpriced models.
+	const unpriced = { provider: "openrouter", id: "z-ai/glm-5.2:free", cost: { input: null, output: null, cacheRead: 0, cacheWrite: 0 } };
+	const poolWithUnpriced = [...pool, unpriced];
+	const findWithUnpriced = (provider, id) => poolWithUnpriced.find((m) => m.provider === provider && m.id === id);
+	test("pick: explicit unpriced pin is still honored",
+		pickClassifierModel(poolWithUnpriced, "anthropic", allAuth, { provider: "openrouter", model: "z-ai/glm-5.2:free" }, findWithUnpriced).id,
+		"z-ai/glm-5.2:free");
 }
 
 // autoStatusLabel: surfaces the resolved classifier model id (or a no-model
