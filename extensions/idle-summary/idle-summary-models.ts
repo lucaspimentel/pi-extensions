@@ -15,9 +15,18 @@ export const modelLabel = (model: Model<Api>): string =>
 	`${model.provider}/${model.id}`;
 
 /**
+ * Whether a model carries pricing information. Models without input and
+ * output rates provide no signal for ordering, so the ranking ignores them
+ * (they cannot be compared by cost).
+ */
+export const hasPrice = (model: Model<Api>): boolean =>
+	model.cost.input != null && model.cost.output != null;
+
+/**
  * Cost proxy for both cheapness and speed: smaller/cheaper models generally
  * respond faster. Lower score = preferred. Uses per-million input + output
- * rates. Missing rates are treated as 0.
+ * rates. Callers must ensure the model has pricing (see `hasPrice`) before
+ * relying on this score.
  */
 export const modelCostScore = (model: Model<Api>): number =>
 	(model.cost.input ?? 0) + (model.cost.output ?? 0);
@@ -40,15 +49,17 @@ export const dedupeModels = (pool: Model<Api>[]): Model<Api>[] => {
 /**
  * Rank a model pool for summary generation.
  *
- * Ordering: models from `currentProvider` come first (cheapest within that
- * provider first), then all other providers in ascending cost order. Ties keep
- * insertion order (Array.prototype.sort is stable as of ES2019).
+ * Models without pricing information are ignored entirely (they cannot be
+ * ordered by cost). Ordering: models from `currentProvider` come first
+ * (cheapest within that provider first), then all other providers in ascending
+ * cost order. Ties keep insertion order (Array.prototype.sort is stable as of
+ * ES2019).
  */
 export const rankSummaryModels = (
 	pool: Model<Api>[],
 	currentProvider: string | undefined,
 ): Model<Api>[] => {
-	const unique = dedupeModels(pool);
+	const unique = dedupeModels(pool).filter(hasPrice);
 	return [...unique].sort((a, b) => {
 		const aSame = currentProvider !== undefined && a.provider === currentProvider;
 		const bSame = currentProvider !== undefined && b.provider === currentProvider;
@@ -96,6 +107,34 @@ export const findConfiguredModel = (
 	);
 	if (byProviderAndId) return byProviderAndId;
 	return unique.find((m) => hasAuth(m) && m.id === ref);
+};
+
+/**
+ * Ordered model candidates for a summary run.
+ *
+ * An explicit user override (from `/summary-model`) comes first and is treated
+ * as authoritative, even when it is unpriced: it is the user's direct choice.
+ * If it errors at request time, the remaining ranked models are tried in order
+ * until one actually returns text. The ranked fallback ignores models without
+ * pricing information (see `rankSummaryModels`).
+ *
+ * Returns only models with configured auth. The override contributes at most
+ * one entry; the ranked list never repeats it.
+ */
+export const orderedSummaryCandidates = (
+	pool: Model<Api>[],
+	currentProvider: string | undefined,
+	modelRef: string | undefined,
+	hasAuth: (model: Model<Api>) => boolean,
+): Model<Api>[] => {
+	const authed = dedupeModels(pool).filter(hasAuth);
+	// Ranked fallback ignores unpriced models; dedupe guards against the case
+	// where the override is also in the ranked pool.
+	const ranked = rankSummaryModels(authed, currentProvider);
+	const preferred = findConfiguredModel(authed, modelRef, () => true);
+	if (!preferred) return ranked;
+	const label = modelLabel(preferred);
+	return [preferred, ...ranked.filter((m) => modelLabel(m) !== label)];
 };
 
 /**

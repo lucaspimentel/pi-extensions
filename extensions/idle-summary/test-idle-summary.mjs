@@ -6,11 +6,13 @@
 
 import {
 	modelCostScore,
+	hasPrice,
 	dedupeModels,
 	rankSummaryModels,
 	selectSummaryModel,
 	modelLabel,
 	findConfiguredModel,
+	orderedSummaryCandidates,
 	pickableModels,
 } from "./idle-summary-models.ts";
 
@@ -61,6 +63,13 @@ const openaiCheap = mk("openai", "gpt-5.6-luna", 0.2, 1.2);
 const openaiMid = mk("openai", "gpt-5.6-terra", 2, 12);
 const basetenCheap = mk("baseten", "zai-org/GLM-5.2", 0.1, 0.4);
 const basetenPricey = mk("baseten", "zai-org/GLM-5.2-Fast", 0.5, 2);
+
+// Model with no pricing information. `mk` always sets numeric rates, so build
+// one explicitly with null rates to exercise unpriced-model handling.
+const mkUnpriced = (provider, id) => ({
+	...mk(provider, id, 0, 0),
+	cost: { input: null, output: null, cacheRead: 0, cacheWrite: 0 },
+});
 
 const allModels = [
 	anthropicCheap,
@@ -260,6 +269,69 @@ test("excludes models without auth",
 	["openai/gpt-5.6-luna", "openai/gpt-5.6-terra"]);
 test("dedupes before filtering", pickableModels([anthropicMid, anthropicMid], () => true).length, 1);
 test("empty pool → empty list", pickableModels([], () => true).length, 0);
+
+// ── hasPrice ────────────────────────────────────────────────────────────────
+
+section("hasPrice");
+
+test("priced model → true", hasPrice(anthropicCheap), true);
+test("zero-cost model (0,0) is still priced → true", hasPrice(mk("x", "free", 0, 0)), true);
+test("unpriced model → false", hasPrice(mkUnpriced("openrouter", "z-ai/glm-5.2:free")), false);
+
+// ── rankSummaryModels — ignores unpriced models ────────────────────────────
+
+section("rankSummaryModels — ignores unpriced models");
+
+const unpricedCheap = mkUnpriced("anthropic", "claude-haiku-0");
+const poolWithUnpriced = allModels.concat([
+	mkUnpriced("openrouter", "z-ai/glm-5.2:free"),
+	unpricedCheap,
+]);
+
+const rankedIgnoreUnpriced = rankSummaryModels(poolWithUnpriced, "anthropic");
+test("unpriced models are dropped entirely", rankedIgnoreUnpriced.some((m) => !hasPrice(m)), false);
+test("unpriced near-zero-cost model does not leap to front",
+	idOf(rankedIgnoreUnpriced[0]), "anthropic/claude-haiku-4-5");
+test("priced models keep their relative ordering",
+	idOf(rankedIgnoreUnpriced[1]), "anthropic/claude-sonnet-5");
+
+// ── orderedSummaryCandidates — override first, ranked fallback ──────────────
+
+section("orderedSummaryCandidates");
+
+const allAuthed = () => true;
+const candidateList = (pool, provider, ref, auth = allAuthed) =>
+	orderedSummaryCandidates(pool, provider, ref, auth).map(idOf);
+
+test("override is first and ranked fallback follows",
+	candidateList(allModels, "anthropic", "openai/gpt-5.6-luna"),
+	["openai/gpt-5.6-luna", "anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "baseten/zai-org/GLM-5.2", "baseten/zai-org/GLM-5.2-Fast", "openai/gpt-5.6-terra"]);
+
+test("override that is already cheapest does not duplicate",
+	candidateList(allModels, "anthropic", "anthropic/claude-haiku-4-5"),
+	["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "baseten/zai-org/GLM-5.2", "openai/gpt-5.6-luna", "baseten/zai-org/GLM-5.2-Fast", "openai/gpt-5.6-terra"]);
+
+test("unpriced override is still honored (authoritative)",
+	candidateList(poolWithUnpriced, "anthropic", "openrouter/z-ai/glm-5.2:free"),
+	["openrouter/z-ai/glm-5.2:free", "anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "baseten/zai-org/GLM-5.2", "openai/gpt-5.6-luna", "baseten/zai-org/GLM-5.2-Fast", "openai/gpt-5.6-terra"]);
+
+test("ranked fallback after unpriced override skips other unpriced models",
+	!candidateList(poolWithUnpriced, "anthropic", "openrouter/z-ai/glm-5.2:free")
+		.slice(1)
+		.some((l) => l.startsWith("openrouter")),
+	true);
+
+test("no override → ranked list only",
+	candidateList(allModels, "anthropic", undefined),
+	["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "baseten/zai-org/GLM-5.2", "openai/gpt-5.6-luna", "baseten/zai-org/GLM-5.2-Fast", "openai/gpt-5.6-terra"]);
+
+test("only authed models are candidates",
+	candidateList(allModels, "anthropic", undefined, (m) => m.provider === "openai"),
+	["openai/gpt-5.6-luna", "openai/gpt-5.6-terra"]);
+
+test("override lacking auth is dropped in favor of ranked list",
+	candidateList(allModels, "anthropic", "openai/gpt-5.6-luna", (m) => m.provider === "anthropic"),
+	["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5"]);
 
 // ── Exit ───────────────────────────────────────────────────────────────────
 

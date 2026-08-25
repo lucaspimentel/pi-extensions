@@ -22,10 +22,9 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-	findConfiguredModel,
 	modelLabel,
+	orderedSummaryCandidates,
 	pickableModels,
-	selectSummaryModel,
 } from "./idle-summary-models.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -81,19 +80,23 @@ const writeConfiguredModel = (ref: string): void => {
 // the pure `selectSummaryModel` heuristic (cheapest model from the currently
 // selected model's provider first, then the rest by ascending cost). Each
 // candidate must have configured auth.
-const summaryPool = (ctx: ExtensionContext): Model<Api>[] =>
+const summaryPool = (
+	ctx: ExtensionContext,
+): Model<Api>[] =>
 	ctx.scopedModels.length > 0
 		? ctx.scopedModels.map((s) => s.model)
 		: ctx.modelRegistry.getAvailable();
 
-const pickSummaryModel = (ctx: ExtensionContext): Model<Api> | undefined => {
-	const pool = summaryPool(ctx);
-	const hasAuth = (m: Model<Api>) => ctx.modelRegistry.hasConfiguredAuth(m);
-	return (
-		findConfiguredModel(pool, readConfiguredModel(), hasAuth) ??
-		selectSummaryModel(pool, ctx.model?.provider, hasAuth)
+// Ordered models to try for a summary run: the explicit `/summary-model`
+// override first (authoritative), then the remaining ranked, authed models,
+// skipping unpriced models in the fallback ordering.
+const summaryCandidates = (ctx: ExtensionContext): Model<Api>[] =>
+	orderedSummaryCandidates(
+		summaryPool(ctx),
+		ctx.model?.provider,
+		readConfiguredModel(),
+		(m: Model<Api>) => ctx.modelRegistry.hasConfiguredAuth(m),
 	);
-};
 
 // ── Conversation helpers ─────────────────────────────────────────────────────
 
@@ -179,12 +182,6 @@ export default function (pi: ExtensionAPI) {
 		const conversationText = buildConversationText(branch as SessionEntry[]);
 		if (!conversationText.trim()) return;
 
-		// Prefer the cheapest/fastest model from the same provider as the currently
-		// selected model, then fall back through the remaining scoped (or available)
-		// models. hasConfiguredAuth() gates without an async auth round-trip.
-		const selectedModel = pickSummaryModel(ctx);
-		if (!selectedModel) return; // No model available — bail silently
-
 		const messages = [
 			{
 				role: "user" as const,
@@ -193,22 +190,52 @@ export default function (pi: ExtensionAPI) {
 			},
 		];
 
-		let response;
-		try {
-			response = await ctx.modelRegistry.complete(selectedModel, { messages });
-		} catch {
-			return; // Network or API error — bail silently
+		// Try the preferred model first, then fall back through the ranked
+		// candidates. `complete` can also resolve with an error response (empty
+		// content + `errorMessage`) instead of throwing, so an empty summary counts
+		// as a failure that moves to the next candidate.
+		const candidates = summaryCandidates(ctx);
+		if (candidates.length === 0) return; // No authed model available — bail silently
+
+		let lastError: string | undefined;
+		let summary: string | undefined;
+		let usedModel: Model<Api> | undefined;
+
+		for (const candidate of candidates) {
+			let response;
+			try {
+				response = await ctx.modelRegistry.complete(candidate, { messages });
+			} catch (e) {
+				lastError = e instanceof Error ? e.message : String(e);
+				continue;
+			}
+
+			summary = response.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text)
+				.join("\n")
+				.trim();
+
+			if (summary) {
+				usedModel = candidate;
+				break;
+			}
+			lastError = response.errorMessage ?? lastError;
 		}
 
-		const summary = response.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map((c) => c.text)
-			.join("\n")
-			.trim();
+		if (!summary || !usedModel) {
+			// Every candidate failed. Surface it instead of bailing silently so the
+			// user knows the summary didn't generate (e.g. a rate-limited model).
+			if (ctx.hasUI) {
+				ctx.ui.notify(
+					`idle-summary: no model produced a summary.${lastError ? ` ${lastError}` : ""}`,
+					"warning",
+				);
+			}
+			return;
+		}
 
-		if (!summary) return;
-
-		const modelLabel = `${selectedModel.provider}/${selectedModel.id}`;
+		const modelLabelUsed = `${usedModel.provider}/${usedModel.id}`;
 		// The model call above can take several seconds. If a /reload or session
 		// replacement (/new, /resume, /fork) happens during that await, the captured
 		// `pi` and `ctx` are invalidated and pi.sendMessage throws a stale-ctx error.
@@ -218,7 +245,7 @@ export default function (pi: ExtensionAPI) {
 			pi.sendMessage({
 				customType: CUSTOM_TYPE,
 				content: summary,
-				details: { model: modelLabel },
+				details: { model: modelLabelUsed },
 				display: true,
 			});
 		} catch {
@@ -283,7 +310,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const saved = readConfiguredModel();
-			const current = pickSummaryModel(ctx);
+			const [current] = summaryCandidates(ctx);
 			// Put the effective current model first so it is pre-highlighted.
 			const ordered = current
 				? [current, ...pickable.filter((m) => modelLabel(m) !== modelLabel(current))]
