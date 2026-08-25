@@ -42,6 +42,7 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 - **pi-tool-permissions** – Claude Code-style allow/deny/ask permissions
 - **external-editor-fix** – fix Ctrl+G external editor on Windows / Git Bash by adding wait flags for GUI editors
 - **pwsh** – PowerShell tool for Windows-native object pipelines (JSON via `ConvertFrom-Json`, registry, WMI/CIM, .NET, `Get-*` cmdlets). Auto-detects `pwsh` (7+) → `powershell` (5.1). Mirrors the built-in `bash` tool's tail-truncation and temp-file dump for long output.
+- **ollama-models** – auto-discovers locally pulled Ollama models (`/api/tags`) and registers them with pi as an `ollama` provider, so they show up in `/model` without maintaining `models.json`. Reads `OLLAMA_HOST` for a non-default server; registers nothing when Ollama is not running.
 - **slack-via-claude** – read-only Slack tools (`slack_search`, `slack_read_channel`, `slack_read_thread`) backed by the Slack MCP already configured in Claude Code. Spawns `claude --print` with a read-only tool allowlist, so no separate Slack app registration is required.
 
 ### Skills
