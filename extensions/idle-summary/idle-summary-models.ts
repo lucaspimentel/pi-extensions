@@ -4,85 +4,33 @@
  * Extracted from `idle-summary.ts` so they can be unit-tested without pulling
  * in the TUI or extension runtime. This module has only type-only imports —
  * it is safe to import from a plain JS test runner via type-stripping.
+ *
+ * The generic ranking/dedupe/auth logic (shared with pi-tool-permissions'
+ * classifier model selection) lives in `../shared/model-selection.ts` and is
+ * re-exported here under this extension's established names so existing
+ * call sites and tests are unaffected. Only the summary-specific pieces
+ * (`findConfiguredModel`'s string-ref parsing, `orderedSummaryCandidates`'
+ * override-first candidate list) are defined locally.
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
+import {
+	dedupeModels,
+	hasPrice,
+	modelCostScore,
+	modelLabel,
+	pickableModels,
+	rankModels,
+	selectModel,
+} from "../shared/model-selection.ts";
 
-/**
- * Canonical display label for a model: `provider/modelId`.
- */
-export const modelLabel = (model: Model<Api>): string =>
-	`${model.provider}/${model.id}`;
+export { modelLabel, hasPrice, modelCostScore, dedupeModels, pickableModels };
 
-/**
- * Whether a model carries pricing information. Models without input and
- * output rates provide no signal for ordering, so the ranking ignores them
- * (they cannot be compared by cost).
- */
-export const hasPrice = (model: Model<Api>): boolean =>
-	model.cost.input != null && model.cost.output != null;
+/** Rank a model pool for summary generation. See `rankModels` for the ordering rules. */
+export const rankSummaryModels = rankModels;
 
-/**
- * Cost proxy for both cheapness and speed: smaller/cheaper models generally
- * respond faster. Lower score = preferred. Uses per-million input + output
- * rates. Callers must ensure the model has pricing (see `hasPrice`) before
- * relying on this score.
- */
-export const modelCostScore = (model: Model<Api>): number =>
-	(model.cost.input ?? 0) + (model.cost.output ?? 0);
-
-/**
- * Dedupe a model pool by `provider/id`, preserving first-seen order.
- */
-export const dedupeModels = (pool: Model<Api>[]): Model<Api>[] => {
-	const seen = new Set<string>();
-	const out: Model<Api>[] = [];
-	for (const m of pool) {
-		const key = `${m.provider}/${m.id}`;
-		if (seen.has(key)) continue;
-		seen.add(key);
-		out.push(m);
-	}
-	return out;
-};
-
-/**
- * Rank a model pool for summary generation.
- *
- * Models without pricing information are ignored entirely (they cannot be
- * ordered by cost). Ordering: models from `currentProvider` come first
- * (cheapest within that provider first), then all other providers in ascending
- * cost order. Ties keep insertion order (Array.prototype.sort is stable as of
- * ES2019).
- */
-export const rankSummaryModels = (
-	pool: Model<Api>[],
-	currentProvider: string | undefined,
-): Model<Api>[] => {
-	const unique = dedupeModels(pool).filter(hasPrice);
-	return [...unique].sort((a, b) => {
-		const aSame = currentProvider !== undefined && a.provider === currentProvider;
-		const bSame = currentProvider !== undefined && b.provider === currentProvider;
-		if (aSame !== bSame) return aSame ? -1 : 1;
-		return modelCostScore(a) - modelCostScore(b);
-	});
-};
-
-/**
- * Pick the first ranked model that has configured auth.
- *
- * `hasAuth` is injected so tests can stub it without a real ModelRegistry.
- */
-export const selectSummaryModel = (
-	pool: Model<Api>[],
-	currentProvider: string | undefined,
-	hasAuth: (model: Model<Api>) => boolean,
-): Model<Api> | undefined => {
-	for (const model of rankSummaryModels(pool, currentProvider)) {
-		if (hasAuth(model)) return model;
-	}
-	return undefined;
-};
+/** Pick the first ranked model that has configured auth. See `selectModel`. */
+export const selectSummaryModel = selectModel;
 
 /**
  * Resolve an explicit model override to a usable model.
@@ -136,19 +84,3 @@ export const orderedSummaryCandidates = (
 	const label = modelLabel(preferred);
 	return [preferred, ...ranked.filter((m) => modelLabel(m) !== label)];
 };
-
-/**
- * Models the user is allowed to pick as a summary model: unique, authed,
- * sorted by provider then model id for a stable picker list.
- */
-export const pickableModels = (
-	pool: Model<Api>[],
-	hasAuth: (model: Model<Api>) => boolean,
-): Model<Api>[] =>
-	dedupeModels(pool)
-		.filter((m) => hasAuth(m))
-		.sort((a, b) =>
-			a.provider === b.provider
-				? a.id.localeCompare(b.id)
-				: a.provider.localeCompare(b.provider),
-		);

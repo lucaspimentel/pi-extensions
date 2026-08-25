@@ -245,6 +245,16 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
+import {
+	dedupeModels,
+	hasPrice,
+	modelCostScore,
+	modelLabel,
+	pickableModels,
+	rankModels,
+	selectModel,
+	type HasAuth,
+} from "../shared/model-selection.ts";
 
 type Action = "allow" | "deny" | "ask" | "auto";
 
@@ -1563,52 +1573,20 @@ interface ClassifyResult {
 /** Seam type for the model completion call (mirrors ModelRegistry.complete). */
 type ClassifierComplete = (model: Model<Api>, context: Context) => Promise<AssistantMessage>;
 
-/** Auth-gate seam for model selection (mirrors ModelRegistry.hasConfiguredAuth). */
-type HasAuth = (model: Model<Api>) => boolean;
-
-/** Cost proxy: cheaper/faster models first. Lower score = preferred. */
-export function modelCostScore(model: Model<Api>): number {
-	return (model.cost.input ?? 0) + (model.cost.output ?? 0);
-}
-
-export function dedupeModels(pool: Model<Api>[]): Model<Api>[] {
-	const seen = new Set<string>();
-	const out: Model<Api>[] = [];
-	for (const m of pool) {
-		const key = `${m.provider}/${m.id}`;
-		if (seen.has(key)) continue;
-		seen.add(key);
-		out.push(m);
-	}
-	return out;
-}
+// The generic ranking/dedupe/auth/pricing logic below used to be duplicated
+// verbatim between this file and idle-summary/idle-summary-models.ts; it now
+// lives in extensions/shared/model-selection.ts and is re-exported here under
+// this extension's established names so existing call sites and tests are
+// unaffected. Only `pickClassifierModel`'s explicit-pin resolution (a registry
+// `find` seam, unlike idle-summary's pool-based string-ref lookup) is
+// classifier-specific and stays local.
+export { dedupeModels, hasPrice, modelCostScore, modelLabel, pickableModels };
 
 /**
- * Whether a model carries pricing information. Models without input and
- * output rates provide no signal for ordering (they default to a cost score
- * of 0, i.e. "free", and would otherwise be picked first), so the ranking
- * ignores them entirely. Mirrors idle-summary's `hasPrice`.
+ * Rank a model pool for the classifier. See `rankModels` (shared/model-selection.ts)
+ * for the ordering rules.
  */
-export function hasPrice(model: Model<Api>): boolean {
-	return model.cost.input != null && model.cost.output != null;
-}
-
-/**
- * Rank a model pool for the classifier, mirroring idle-summary's rankSummaryModels:
- * models without pricing information are ignored (they cannot be ordered by
- * cost), then models from `currentProvider` come first (cheapest within that
- * provider first), then all other providers in ascending cost order. Ties
- * keep insertion order.
- */
-export function rankClassifierModels(pool: Model<Api>[], currentProvider: string | undefined): Model<Api>[] {
-	const unique = dedupeModels(pool).filter(hasPrice);
-	return [...unique].sort((a, b) => {
-		const aSame = currentProvider !== undefined && a.provider === currentProvider;
-		const bSame = currentProvider !== undefined && b.provider === currentProvider;
-		if (aSame !== bSame) return aSame ? -1 : 1;
-		return modelCostScore(a) - modelCostScore(b);
-	});
-}
+export const rankClassifierModels = rankModels;
 
 /**
  * Pick the classifier model. If `explicit` is set, `find` it directly; otherwise
@@ -1626,31 +1604,7 @@ export function pickClassifierModel(
 		const m = find(explicit.provider, explicit.model);
 		if (m && hasAuth(m)) return m;
 	}
-	for (const m of rankClassifierModels(pool, currentProvider)) {
-		if (hasAuth(m)) return m;
-	}
-	return undefined;
-}
-
-/**
- * Canonical display label for a model: `provider/modelId`. Mirrors
- * idle-summary's `modelLabel` (idle-summary-models.ts).
- */
-export function modelLabel(model: Model<Api>): string {
-	return `${model.provider}/${model.id}`;
-}
-
-/**
- * Models the user is allowed to pick as the classifier: unique, authed,
- * sorted by provider then model id for a stable picker list. Mirrors
- * idle-summary's `pickableModels`.
- */
-export function pickableModels(pool: Model<Api>[], hasAuth: HasAuth): Model<Api>[] {
-	return dedupeModels(pool)
-		.filter((m) => hasAuth(m))
-		.sort((a, b) =>
-			a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider),
-		);
+	return selectModel(pool, currentProvider, hasAuth);
 }
 
 /**
