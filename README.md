@@ -47,8 +47,9 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 
 ### Skills
 
-`add-todo`, `atlassian-cli`, `git-commit`, `review-pr`, `ship`, `update-changelog`,
-`update-docs`, `update-pr-description`, `whats-next`.
+`add-todo`, `address-pr-comments`, `atlassian-cli`, `git-commit`, `review-pr`, `ship`,
+`update-changelog`, `update-docs`, `update-github-actions`, `update-pr-description`,
+`whats-next`.
 
 `atlassian-cli` is authored by [Jakob He](https://github.com/leweii), repackaged from [leweii/atlassian-cli](https://github.com/leweii/atlassian-cli) under the MIT License.
 
