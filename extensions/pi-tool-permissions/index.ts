@@ -2293,236 +2293,244 @@ export default function (pi: ExtensionAPI) {
 			};
 		}
 
-		// ── Compound bash command: confirm each ask subcommand separately ──────
-		// Note: decideCompound() short-circuits any compound containing a `deny`
-		// subcommand before we reach this loop (see the `culprit` block above),
-		// so the loop below only iterates over `ask` items. Compounds with no
-		// static `ask`/`deny` sub are classified as a whole up-front and
-		// downgraded to a single-command decision (`isCompound = false` above),
-		// so they also bypass this loop — it now only runs for compounds that
-		// had a static `ask` sub (or auto off / no classifier model).
-		if (isCompound) {
-			const fullCmd = String((event.input as Record<string, unknown>).command ?? "");
-			const truncated = fullCmd.length > 200 ? `${fullCmd.slice(0, 197)}...` : fullCmd;
-			// A leading `cd <dir>` applies to every later subcommand, so classify each
-			// sub as if it ran there (otherwise the git-repo facts would describe the
-			// session cwd rather than the repository actually being touched).
-			const cdPrefix = leadingCdTarget(fullCmd);
-			const subCwd = cdPrefix ? resolveAgainstCwd(cdPrefix, cfg.cwd) : cfg.cwd;
-
-			// Loop-scoped (this Bash invocation only — not session-wide): when set,
-			// every remaining `ask` step is silently allowed without re-prompting
-			// and without saving any rule. Resets when this handler returns.
-			let allowAllStepsOnce = false;
-
-			// Snapshot of the per-subcommand decisions that the dialog renders.
-			// Mutated after each rule-save so downstream icons reflect the new cfg.
-			let currentBreakdown = breakdown;
-
-			// Iterate over the original `ask`/`auto` subcommands, but re-decide each one
-			// against the current `cfg` right before prompting so newly saved
-			// allow/deny rules apply to the rest of *this* compound command.
-			const askSubs = breakdown.filter((b) => b.action === "ask" || b.action === "auto").map((b) => b.sub);
-
-			for (const sub of askSubs) {
-				// User intent (`Allow ALL steps once`) beats any rule-driven decision:
-				// a freshly saved deny must not override an explicit one-shot allow.
-				if (allowAllStepsOnce) continue;
-
-				let liveAction = decide(cfg, "bash", { command: sub }, autoActive);
-				let subReason = "";
-				let subClassifierModelId: string | undefined;
-				// Auto fallthrough: run the classifier for this subcommand.
-				if (liveAction === "auto") {
-					if (autoEngaged && classifierModel) {
-						const result = await classifyAction(
-							(m, c) => ctx.modelRegistry.complete(m, c),
-							classifierModel,
-							"bash",
-							{ command: sub },
-							cfg.autoMode,
-							verdictCache,
-							buildActionContext("bash", { command: sub }, subCwd),
-						);
-						subReason = result.reason;
-						subClassifierModelId = classifierModel.id;
-						notifyClassifierDebug(ctx, "bash", { command: sub }, classifierModel.id, result);
-						liveAction = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
-					} else {
-						liveAction = "ask";
+		// Hide pi's animated "⠋ Working..." loader while the permission dialog is on
+		// screen. Tall dialogs push the spinner above the visible region, where its
+		// redraws break terminal scrolling. Restored on any return/throw below.
+		ctx.ui.setWorkingVisible(false);
+		try {
+			// ── Compound bash command: confirm each ask subcommand separately ──────
+			// Note: decideCompound() short-circuits any compound containing a `deny`
+			// subcommand before we reach this loop (see the `culprit` block above),
+			// so the loop below only iterates over `ask` items. Compounds with no
+			// static `ask`/`deny` sub are classified as a whole up-front and
+			// downgraded to a single-command decision (`isCompound = false` above),
+			// so they also bypass this loop — it now only runs for compounds that
+			// had a static `ask` sub (or auto off / no classifier model).
+			if (isCompound) {
+				const fullCmd = String((event.input as Record<string, unknown>).command ?? "");
+				const truncated = fullCmd.length > 200 ? `${fullCmd.slice(0, 197)}...` : fullCmd;
+				// A leading `cd <dir>` applies to every later subcommand, so classify each
+				// sub as if it ran there (otherwise the git-repo facts would describe the
+				// session cwd rather than the repository actually being touched).
+				const cdPrefix = leadingCdTarget(fullCmd);
+				const subCwd = cdPrefix ? resolveAgainstCwd(cdPrefix, cfg.cwd) : cfg.cwd;
+	
+				// Loop-scoped (this Bash invocation only — not session-wide): when set,
+				// every remaining `ask` step is silently allowed without re-prompting
+				// and without saving any rule. Resets when this handler returns.
+				let allowAllStepsOnce = false;
+	
+				// Snapshot of the per-subcommand decisions that the dialog renders.
+				// Mutated after each rule-save so downstream icons reflect the new cfg.
+				let currentBreakdown = breakdown;
+	
+				// Iterate over the original `ask`/`auto` subcommands, but re-decide each one
+				// against the current `cfg` right before prompting so newly saved
+				// allow/deny rules apply to the rest of *this* compound command.
+				const askSubs = breakdown.filter((b) => b.action === "ask" || b.action === "auto").map((b) => b.sub);
+	
+				for (const sub of askSubs) {
+					// User intent (`Allow ALL steps once`) beats any rule-driven decision:
+					// a freshly saved deny must not override an explicit one-shot allow.
+					if (allowAllStepsOnce) continue;
+	
+					let liveAction = decide(cfg, "bash", { command: sub }, autoActive);
+					let subReason = "";
+					let subClassifierModelId: string | undefined;
+					// Auto fallthrough: run the classifier for this subcommand.
+					if (liveAction === "auto") {
+						if (autoEngaged && classifierModel) {
+							const result = await classifyAction(
+								(m, c) => ctx.modelRegistry.complete(m, c),
+								classifierModel,
+								"bash",
+								{ command: sub },
+								cfg.autoMode,
+								verdictCache,
+								buildActionContext("bash", { command: sub }, subCwd),
+							);
+							subReason = result.reason;
+							subClassifierModelId = classifierModel.id;
+							notifyClassifierDebug(ctx, "bash", { command: sub }, classifierModel.id, result);
+							liveAction = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
+						} else {
+							liveAction = "ask";
+						}
 					}
-				}
-				if (liveAction === "allow") continue;
-				if (liveAction === "deny") {
-					// No steer prompt here — this branch is only reached for static deny rules
-					// and classifier hard_deny verdicts (neither is user-initiated). The
-					// classifier's model + reason are already in the block message; user
-					// denies steer via the Deny-once / Deny-always choice branches below.
-					const reason = subClassifierModelId
-						? `Blocked by classifier ${subClassifierModelId} (subcommand: ${sub})${subReason ? `: ${subReason}` : ""}`
-						: `Blocked by tool-permissions deny rule (subcommand: ${sub})`;
-					return { block: true, reason };
-				}
-
-				const suggested = suggestRule("Bash", { command: sub });
-				const breakdownLines = formatBreakdown(currentBreakdown, sub);
-
-				const subAttr = classifierAttribution(subClassifierModelId, subReason);
-				const reasonNote = subAttr ? `\n\n  ${subAttr}` : "";
-				const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}`;
-				// "Allow ALL steps once" only makes sense when more than one step
-				// in this compound actually needs human approval; with a single
-				// ask sub it's identical to "Allow once", so omit it.
-				const choices = [
-					"Allow once",
-					...(askSubs.length > 1 ? ["Allow ALL steps once"] : []),
-					"Allow always (save rule)",
-					"Deny once",
-					"Deny always (save rule)",
-					...(!autoActive ? ["Switch to auto mode (this session)"] : []),
-				];
-				const choice = await ctx.ui.select(title, choices);
-
-				if (choice === "Allow once") continue;
-
-				if (choice === "Allow ALL steps once") {
-					allowAllStepsOnce = true;
-					continue;
-				}
-
-				if (choice === "Switch to auto mode (this session)") {
-					applyAutoMode(true, ctx);
-					// Let the rest of this compound finish without re-prompting; future
-					// tool calls go through the classifier. (Any `deny` sub was already
-					// blocked by decideCompound before this loop runs.)
-					allowAllStepsOnce = true;
-					continue;
-				}
-
-				if (choice === "Deny once" || !choice) {
-					if (choice === "Deny once") await promptSteerMessage(ctx);
-					return { block: true, reason: `Denied by user (subcommand: ${sub})` };
-				}
-				if (choice === "Allow always (save rule)") {
-					const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
-					if (!edited) continue;
-					const scope = await promptScope(ctx);
-					// Cancelling scope == cancelling the save (matches editor-cancel above).
-					if (!scope) continue;
-					addRule(scope, ctx.cwd, "allow", edited.trim());
-					cfg = loadConfig(ctx.cwd);
-					currentBreakdown = recomputeBreakdown(breakdown, cfg, autoActive);
-					const autoCount = currentBreakdown.filter(
-						(b) => b.sub !== sub && askSubs.includes(b.sub) && b.action === "allow",
-					).length;
-					const suffix = autoCount > 0 ? ` (auto-allows ${autoCount} remaining step${autoCount === 1 ? "" : "s"})` : "";
-					ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}${suffix}`, "info");
-					continue;
-				}
-				if (choice === "Deny always (save rule)") {
-					const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
-					if (!edited) {
-						await promptSteerMessage(ctx);
+					if (liveAction === "allow") continue;
+					if (liveAction === "deny") {
+						// No steer prompt here — this branch is only reached for static deny rules
+						// and classifier hard_deny verdicts (neither is user-initiated). The
+						// classifier's model + reason are already in the block message; user
+						// denies steer via the Deny-once / Deny-always choice branches below.
+						const reason = subClassifierModelId
+							? `Blocked by classifier ${subClassifierModelId} (subcommand: ${sub})${subReason ? `: ${subReason}` : ""}`
+							: `Blocked by tool-permissions deny rule (subcommand: ${sub})`;
+						return { block: true, reason };
+					}
+	
+					const suggested = suggestRule("Bash", { command: sub });
+					const breakdownLines = formatBreakdown(currentBreakdown, sub);
+	
+					const subAttr = classifierAttribution(subClassifierModelId, subReason);
+					const reasonNote = subAttr ? `\n\n  ${subAttr}` : "";
+					const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}`;
+					// "Allow ALL steps once" only makes sense when more than one step
+					// in this compound actually needs human approval; with a single
+					// ask sub it's identical to "Allow once", so omit it.
+					const choices = [
+						"Allow once",
+						...(askSubs.length > 1 ? ["Allow ALL steps once"] : []),
+						"Allow always (save rule)",
+						"Deny once",
+						"Deny always (save rule)",
+						...(!autoActive ? ["Switch to auto mode (this session)"] : []),
+					];
+					const choice = await ctx.ui.select(title, choices);
+	
+					if (choice === "Allow once") continue;
+	
+					if (choice === "Allow ALL steps once") {
+						allowAllStepsOnce = true;
+						continue;
+					}
+	
+					if (choice === "Switch to auto mode (this session)") {
+						applyAutoMode(true, ctx);
+						// Let the rest of this compound finish without re-prompting; future
+						// tool calls go through the classifier. (Any `deny` sub was already
+						// blocked by decideCompound before this loop runs.)
+						allowAllStepsOnce = true;
+						continue;
+					}
+	
+					if (choice === "Deny once" || !choice) {
+						if (choice === "Deny once") await promptSteerMessage(ctx);
 						return { block: true, reason: `Denied by user (subcommand: ${sub})` };
 					}
-					const scope = await promptScope(ctx);
-					// Cancelling scope == treating as deny-once (no rule saved, but command still blocked).
-					if (!scope) {
-						await promptSteerMessage(ctx);
-						return { block: true, reason: `Denied by user (subcommand: ${sub})` };
+					if (choice === "Allow always (save rule)") {
+						const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+						if (!edited) continue;
+						const scope = await promptScope(ctx);
+						// Cancelling scope == cancelling the save (matches editor-cancel above).
+						if (!scope) continue;
+						addRule(scope, ctx.cwd, "allow", edited.trim());
+						cfg = loadConfig(ctx.cwd);
+						currentBreakdown = recomputeBreakdown(breakdown, cfg, autoActive);
+						const autoCount = currentBreakdown.filter(
+							(b) => b.sub !== sub && askSubs.includes(b.sub) && b.action === "allow",
+						).length;
+						const suffix = autoCount > 0 ? ` (auto-allows ${autoCount} remaining step${autoCount === 1 ? "" : "s"})` : "";
+						ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}${suffix}`, "info");
+						continue;
 					}
-					addRule(scope, ctx.cwd, "deny", edited.trim());
-					cfg = loadConfig(ctx.cwd);
-					currentBreakdown = recomputeBreakdown(breakdown, cfg, autoActive);
-					ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
+					if (choice === "Deny always (save rule)") {
+						const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+						if (!edited) {
+							await promptSteerMessage(ctx);
+							return { block: true, reason: `Denied by user (subcommand: ${sub})` };
+						}
+						const scope = await promptScope(ctx);
+						// Cancelling scope == treating as deny-once (no rule saved, but command still blocked).
+						if (!scope) {
+							await promptSteerMessage(ctx);
+							return { block: true, reason: `Denied by user (subcommand: ${sub})` };
+						}
+						addRule(scope, ctx.cwd, "deny", edited.trim());
+						cfg = loadConfig(ctx.cwd);
+						currentBreakdown = recomputeBreakdown(breakdown, cfg, autoActive);
+						ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
+						await promptSteerMessage(ctx);
+						return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
+					}
+				}
+				return undefined;
+			}
+	
+			// ── Single or ambiguous command ask ────────────────────────────────────
+			const suggested = suggestRule(event.toolName, event.input as Record<string, unknown>);
+			const matchField = getMatchField(event.toolName, event.input as Record<string, unknown>);
+			const isMcp = normalizeTool(event.toolName) === "mcp";
+			// MCP calls arrive as toolName "mcp" with the real tool name in input.tool;
+			// render a human-readable preview of the parsed args instead of raw JSON.
+			const preview = isMcp
+				? mcpPreview(event.input as Record<string, unknown>)
+				: (matchField.length > 200 ? `${matchField.slice(0, 197)}...` : matchField);
+			const titleHeader = isMcp
+				? `Allow MCP tool ${String((event.input as Record<string, unknown>).tool ?? "")}?`
+				: `Allow ${event.toolName}?`;
+			const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
+			const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
+			const attr = classifierAttribution(classifierModelId, classifierReason);
+			const reasonNote = attr ? `\n\n  ${attr}` : "";
+			const title = `${titleHeader}\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
+	
+			// Extra "allow all edits" option only for write/edit dialogs; "Switch to
+			// auto mode" appears for every dialog when auto mode isn't already active,
+			// as the last choice (so "Allow once" stays the default cursor position).
+			const autoSwitch = !autoActive ? ["Switch to auto mode (this session)"] : [];
+			const choices = isWriteOrEdit
+				? [
+						"Allow once",
+						"Allow all edits this session",
+						"Allow always (save rule)",
+						"Deny once",
+						"Deny always (save rule)",
+						...autoSwitch,
+				  ]
+				: ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)", ...autoSwitch];
+	
+			const choice = await ctx.ui.select(title, choices);
+	
+			if (choice === "Allow once") return undefined;
+	
+			if (choice === "Allow all edits this session") {
+				applyAllowAllEdits(true, ctx);
+				return undefined;
+			}
+	
+			if (choice === "Switch to auto mode (this session)") {
+				applyAutoMode(true, ctx);
+				return undefined;
+			}
+	
+			if (choice === "Deny once" || !choice) {
+				if (choice === "Deny once") await promptSteerMessage(ctx);
+				return { block: true, reason: "Denied by user" };
+			}
+			if (choice === "Allow always (save rule)") {
+				const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+				if (!edited) return undefined;
+				const scope = await promptScope(ctx);
+				// Cancelling scope == cancelling the save (matches editor-cancel above).
+				if (!scope) return undefined;
+				addRule(scope, ctx.cwd, "allow", edited.trim());
+				cfg = loadConfig(ctx.cwd);
+				ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}`, "info");
+				return undefined;
+			}
+			if (choice === "Deny always (save rule)") {
+				const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+				if (!edited) {
 					await promptSteerMessage(ctx);
-					return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
+					return { block: true, reason: "Denied by user" };
 				}
+				const scope = await promptScope(ctx);
+				// Cancelling scope == treating as deny-once (no rule saved, but command still blocked).
+				if (!scope) {
+					await promptSteerMessage(ctx);
+					return { block: true, reason: "Denied by user" };
+				}
+				addRule(scope, ctx.cwd, "deny", edited.trim());
+				cfg = loadConfig(ctx.cwd);
+				ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
+				await promptSteerMessage(ctx);
+				return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
 			}
-			return undefined;
-		}
-
-		// ── Single or ambiguous command ask ────────────────────────────────────
-		const suggested = suggestRule(event.toolName, event.input as Record<string, unknown>);
-		const matchField = getMatchField(event.toolName, event.input as Record<string, unknown>);
-		const isMcp = normalizeTool(event.toolName) === "mcp";
-		// MCP calls arrive as toolName "mcp" with the real tool name in input.tool;
-		// render a human-readable preview of the parsed args instead of raw JSON.
-		const preview = isMcp
-			? mcpPreview(event.input as Record<string, unknown>)
-			: (matchField.length > 200 ? `${matchField.slice(0, 197)}...` : matchField);
-		const titleHeader = isMcp
-			? `Allow MCP tool ${String((event.input as Record<string, unknown>).tool ?? "")}?`
-			: `Allow ${event.toolName}?`;
-		const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
-		const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
-		const attr = classifierAttribution(classifierModelId, classifierReason);
-		const reasonNote = attr ? `\n\n  ${attr}` : "";
-		const title = `${titleHeader}\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
-
-		// Extra "allow all edits" option only for write/edit dialogs; "Switch to
-		// auto mode" appears for every dialog when auto mode isn't already active,
-		// as the last choice (so "Allow once" stays the default cursor position).
-		const autoSwitch = !autoActive ? ["Switch to auto mode (this session)"] : [];
-		const choices = isWriteOrEdit
-			? [
-					"Allow once",
-					"Allow all edits this session",
-					"Allow always (save rule)",
-					"Deny once",
-					"Deny always (save rule)",
-					...autoSwitch,
-			  ]
-			: ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)", ...autoSwitch];
-
-		const choice = await ctx.ui.select(title, choices);
-
-		if (choice === "Allow once") return undefined;
-
-		if (choice === "Allow all edits this session") {
-			applyAllowAllEdits(true, ctx);
-			return undefined;
-		}
-
-		if (choice === "Switch to auto mode (this session)") {
-			applyAutoMode(true, ctx);
-			return undefined;
-		}
-
-		if (choice === "Deny once" || !choice) {
-			if (choice === "Deny once") await promptSteerMessage(ctx);
 			return { block: true, reason: "Denied by user" };
+		} finally {
+			ctx.ui.setWorkingVisible(true);
 		}
-		if (choice === "Allow always (save rule)") {
-			const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
-			if (!edited) return undefined;
-			const scope = await promptScope(ctx);
-			// Cancelling scope == cancelling the save (matches editor-cancel above).
-			if (!scope) return undefined;
-			addRule(scope, ctx.cwd, "allow", edited.trim());
-			cfg = loadConfig(ctx.cwd);
-			ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}`, "info");
-			return undefined;
-		}
-		if (choice === "Deny always (save rule)") {
-			const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
-			if (!edited) {
-				await promptSteerMessage(ctx);
-				return { block: true, reason: "Denied by user" };
-			}
-			const scope = await promptScope(ctx);
-			// Cancelling scope == treating as deny-once (no rule saved, but command still blocked).
-			if (!scope) {
-				await promptSteerMessage(ctx);
-				return { block: true, reason: "Denied by user" };
-			}
-			addRule(scope, ctx.cwd, "deny", edited.trim());
-			cfg = loadConfig(ctx.cwd);
-			ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
-			await promptSteerMessage(ctx);
-			return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
-		}
-		return { block: true, reason: "Denied by user" };
 	});
 
 	// ── Hotkey ───────────────────────────────────────────────────────────────
