@@ -176,7 +176,16 @@ export default function (pi: ExtensionAPI) {
 
 	let s = initialState();
 	let lastApplied: State | null = null;
-	let uiWrapped = false;
+	// The ctx most recently handed to us by an event. The ctx.ui dialog wrappers
+	// below must NOT capture a ctx: pi reuses the same ExtensionUIContext object
+	// across /reload (AgentSession.reload keeps _extensionUIContext), while each
+	// reload invalidates the old ctx. A captured ctx would go stale and throw
+	// "This extension ctx is stale..." on the next dialog. Read through this ref
+	// instead so wrappers always use a live ctx.
+	let currentCtx: ExtensionContext | undefined;
+	// Restores the original ctx.ui methods we monkey-patched, so session_shutdown
+	// can leave the shared ui object exactly as we found it.
+	let unwrapUiDialogs: (() => void) | undefined;
 
 	function apply(ctx: ExtensionContext) {
 		if (!ctx.hasUI) return;
@@ -192,54 +201,86 @@ export default function (pi: ExtensionAPI) {
 		apply(ctx);
 	}
 
-	function wrapUiDialogs(ctx: ExtensionContext) {
-		if (uiWrapped || !ctx.hasUI) return;
-		uiWrapped = true;
+	// Dispatch using whatever ctx is currently live. Called from the ctx.ui
+	// wrappers, which can fire long after the ctx that installed them died.
+	function dispatchCurrent(ev: ReducerEvent) {
+		const ctx = currentCtx;
+		if (!ctx) {
+			// No live ctx (e.g. a dialog resolving after session_shutdown): keep the
+			// reducer honest but skip apply(), which would touch a dead ctx.
+			s = reduce(s, ev);
+			return;
+		}
+		dispatch(ctx, ev);
+	}
 
+	function wrapUiDialogs(ctx: ExtensionContext) {
+		if (unwrapUiDialogs || !ctx.hasUI) return;
+
+		// pi reuses one ExtensionUIContext object across reloads, so without the
+		// session_shutdown unwrap below each reload would stack another wrapper on
+		// top of the previous one.
 		const ui = ctx.ui as unknown as Record<string, unknown>;
+		const originals: Array<[string, unknown]> = [];
 		for (const method of WRAPPED_UI_METHODS) {
 			const orig = ui[method];
 			if (typeof orig !== "function") continue;
 			const fn = orig as (...args: unknown[]) => unknown;
+			originals.push([method, orig]);
 			ui[method] = (...args: unknown[]) => {
-				dispatch(ctx, { type: "dialog_open" });
+				dispatchCurrent({ type: "dialog_open" });
 				let result: unknown;
 				try {
-					result = fn.apply(ctx.ui, args);
+					result = fn.apply(ui, args);
 				} catch (err) {
-					dispatch(ctx, { type: "dialog_close" });
+					dispatchCurrent({ type: "dialog_close" });
 					throw err;
 				}
 				if (result && typeof (result as Promise<unknown>).then === "function") {
 					return (result as Promise<unknown>).finally(() => {
-						dispatch(ctx, { type: "dialog_close" });
+						dispatchCurrent({ type: "dialog_close" });
 					});
 				}
-				dispatch(ctx, { type: "dialog_close" });
+				dispatchCurrent({ type: "dialog_close" });
 				return result;
 			};
 		}
+
+		unwrapUiDialogs = () => {
+			for (const [method, orig] of originals) ui[method] = orig;
+			unwrapUiDialogs = undefined;
+		};
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		currentCtx = ctx;
 		wrapUiDialogs(ctx);
 		apply(ctx);
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
+		currentCtx = ctx;
 		wrapUiDialogs(ctx);
 		dispatch(ctx, { type: "agent_start" });
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
+		currentCtx = ctx;
 		dispatch(ctx, { type: "agent_end" });
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
+		currentCtx = ctx;
 		dispatch(ctx, { type: event.isError ? "tool_error" : "tool_success" });
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		currentCtx = ctx;
 		dispatch(ctx, { type: "session_shutdown" });
+		// Fires before the runner is invalidated, so restore the original ctx.ui
+		// methods now. This leaves no stale wrapper on the shared ui object and
+		// prevents wrappers from stacking on the next reload.
+		unwrapUiDialogs?.();
+		currentCtx = undefined;
 	});
 }
