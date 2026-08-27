@@ -148,12 +148,17 @@ export default function (pi: ExtensionAPI) {
 					// ── Accumulate token/cost stats from current branch ─────────────
 					let totalInput = 0, totalOutput = 0, totalCost = 0;
 
+					// Routed model for the most recent turn (e.g. OpenRouter auto router picks one each turn).
+					// Take it from the last assistant message so it clears when the latest turn had none.
+					let routedModel: string | undefined;
+
 					for (const e of ctx.sessionManager.getBranch() as SessionEntry[]) {
 						if (e.type === "message" && e.message.role === "assistant") {
 							const m = e.message as AssistantMessage;
 							totalInput  += m.usage.input;
 							totalOutput += m.usage.output;
 							totalCost   += m.usage.cost.total;
+							routedModel = m.responseModel;
 						}
 					}
 
@@ -211,6 +216,9 @@ export default function (pi: ExtensionAPI) {
 						if (model.reasoning) {
 							const lvl = (pi as any).getThinkingLevel?.() ?? "off";
 							modelLabel += ` \u2022 ${lvl} effort`;
+						}
+						if (routedModel) {
+							modelLabel += ` \u2192 ${routedModel}`;
 						}
 						line3Parts.push(`${C_BLUE}${ICON_MODEL}  ${modelLabel}${C_RESET}`);
 					}
