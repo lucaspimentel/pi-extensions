@@ -151,6 +151,10 @@ export default function (pi: ExtensionAPI) {
 					// Routed model for the most recent turn (e.g. OpenRouter auto router picks one each turn).
 					// Take it from the last assistant message so it clears when the latest turn had none.
 					let routedModel: string | undefined;
+					// The model id the last turn actually requested. When this matches the current model,
+					// routedModel is a routing/gateway-alias of the current model; when it differs, the user
+					// has switched models and routedModel is stale context from the previous model.
+					let lastRequestedModel: string | undefined;
 
 					for (const e of ctx.sessionManager.getBranch() as SessionEntry[]) {
 						if (e.type === "message" && e.message.role === "assistant") {
@@ -159,6 +163,7 @@ export default function (pi: ExtensionAPI) {
 							totalOutput += m.usage.output;
 							totalCost   += m.usage.cost.total;
 							routedModel = m.responseModel;
+							lastRequestedModel = m.model;
 						}
 					}
 
@@ -217,10 +222,17 @@ export default function (pi: ExtensionAPI) {
 							const lvl = (pi as any).getThinkingLevel?.() ?? "off";
 							modelLabel += ` \u2022 ${lvl} effort`;
 						}
-						if (routedModel) {
+						if (routedModel && lastRequestedModel === model.id) {
+							// Last turn used the current model and the provider reported a different
+							// underlying model id (router like openrouter/auto, or a gateway alias).
 							modelLabel += ` \u2192 ${routedModel}`;
 						}
 						line3Parts.push(`${C_BLUE}${ICON_MODEL}  ${modelLabel}${C_RESET}`);
+						if (routedModel && lastRequestedModel !== model.id) {
+							// Last turn ran on a different model than the current one (user switched).
+							// Show it as a separate dim segment so it is not read as a routing of the current model.
+							line3Parts.push(theme.fg("dim", `last turn: ${routedModel}`));
+						}
 					}
 
 					const statsParts: string[] = [];

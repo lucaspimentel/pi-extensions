@@ -64,18 +64,24 @@ const ctx: any = {
 	cwd,
 	sessionManager: {
 		// Two assistant messages with usage so token/cost stats appear.
+		// The last one reports a different responseModel (router/gateway alias) so the
+		// footer's routed-model suffix is exercised.
 		getBranch: () => [
 			{
 				type: "message",
 				message: {
 					role: "assistant",
+					model: "claude-sonnet-4",
+					responseModel: "anthropic/claude-sonnet-4",
 					usage: { input: 8000, output: 3200, cost: { total: 0.18 } },
 				},
 			},
 			{
 				type: "message",
-				message: {
+					message: {
 					role: "assistant",
+					model: "claude-sonnet-4",
+					responseModel: "anthropic/claude-sonnet-4",
 					usage: { input: 2234, output: 2221, cost: { total: 0.105 } },
 				},
 			},
@@ -115,6 +121,13 @@ async function main() {
 	console.log(`\n(requestRender called ${renderCount - before} time(s) after async lookups)`);
 
 	console.log("\n── render #2 (after async git/PR lookups resolve) ──");
+	for (const line of footer.render(WIDTH)) console.log(line);
+
+	// 5. Simulate switching to a different model. The last assistant message still
+	//    records the old model, so the footer should show 'last turn: <old model>'
+	//    as a dim segment instead of '-> <model>'.
+	ctx.model = { id: "claude-opus-5", name: "Claude Opus 5 (AI Gateway, 1M)", reasoning: true };
+	console.log("\n── render #3 (after switching to a different model) ──");
 	for (const line of footer.render(WIDTH)) console.log(line);
 
 	footer.dispose?.();
