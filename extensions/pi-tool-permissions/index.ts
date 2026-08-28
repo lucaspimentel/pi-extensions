@@ -139,6 +139,9 @@
  *     `select VAR in ...`, bare `select VAR`
  *   Pure structural tokens (elided entirely):
  *     `do`, `done`, `then`, `else`, `fi`
+ *     A trailing harmless redirect on these (e.g. `done 2>/dev/null`, `fi 2>&1`)
+ *     is stripped before the check, so it is still elided. File-target redirects
+ *     (`done > out.txt`) are preserved so write-detection still fires.
  *   Prefix keywords (stripped — command after keyword is evaluated):
  *     `while CMD`, `until CMD`, `if CMD`, `elif CMD`
  *     `do CMD`, `then CMD`, `else CMD`
@@ -1403,15 +1406,46 @@ export function splitTopLevelShell(cmd: string): SplitResult {
  * Risk note: binaries literally named after these keywords would also be elided.
  * That is vanishingly rare in practice and accepted as a trade-off.
  */
+/**
+ * Strip trailing redirect clauses that are harmless for permission purposes:
+ * redirects to `/dev/null` (any fd: `2>/dev/null`, `>/dev/null`, `&>/dev/null`,
+ * with `>>` append variants, target optionally quoted) and descriptor-to-
+ * descriptor dups (`2>&1`, `>&2`, `1>&-`). File-target redirects (`>file`,
+ * `>>file`) are left intact so write-detection still fires.
+ *
+ * Used by `stripStructuralKeywords` so a structural keyword carrying a trailing
+ * `2>/dev/null` (e.g. `done 2>/dev/null`) is still recognized as structural
+ * rather than prompting as if `done` were a command. Only `/dev/null` (and
+ * pure descriptor dups) are treated as harmless; a `done > out.txt` keeps the
+ * redirect and still prompts, preserving file-write screening.
+ */
+function stripTrailingHarmlessRedirects(s: string): string {
+	let r = s.replace(/\s+$/, "");
+	for (;;) {
+		// Descriptor dup: [N]>&M  or  [N]>&-   (e.g. 2>&1, >&2, 1>&-)
+		let m = r.match(/(\s+\d*>&(?:\d+|-))$/);
+		if (m) { r = r.slice(0, r.length - m[1].length).replace(/\s+$/, ""); continue; }
+		// Redirect to /dev/null: [N|&]>>? /dev/null  (target optionally quoted)
+		m = r.match(/(\s+(?:\d+|&)?>>?\s*(?:"\/dev\/null"|'\/dev\/null'|\/dev\/null))$/);
+		if (m) { r = r.slice(0, r.length - m[1].length).replace(/\s+$/, ""); continue; }
+		break;
+	}
+	return r;
+}
+
 export function stripStructuralKeywords(part: string): string | null {
 	let s = part.trim();
 	while (s.length > 0) {
+		// Trailing harmless redirects (e.g. `2>/dev/null`, `2>&1`) on a structural
+		// keyword must not turn it into a "command". Strip them for the structural
+		// checks only; real commands keep their redirects (file writes preserved).
+		const core = stripTrailingHarmlessRedirects(s);
 		// Pure structural keyword tokens — bare, no arguments
-		if (s === "do" || s === "done" || s === "then" || s === "else" || s === "fi") return null;
+		if (core === "do" || core === "done" || core === "then" || core === "else" || core === "fi") return null;
 		// Iteration / case heads — the head itself runs no user command.
 		// `for` and `select` share the same `VAR in ARGS` / `VAR` / `((...))` shapes.
 		// \S+ greedily eats the C-style `((i=0;i<10;i++))` (no whitespace inside).
-		if (/^(for|select)\s+\S+(\s+in\b[^\n]*)?$/.test(s)) return null;
+		if (/^(for|select)\s+\S+(\s+in\b[^\n]*)?$/.test(core)) return null;
 		// Prefix keywords — a command follows; strip the keyword and re-test the
 		// residue. Covers: do, then, else (when followed by a command), and the
 		// control-condition keywords while, until, if, elif.

@@ -522,6 +522,22 @@ test("'selectable b' → unchanged",              stripStructuralKeywords("selec
 test("'fifo' → unchanged",                      stripStructuralKeywords("fifo"),                 "fifo");
 test("'elseif a b' → unchanged",                stripStructuralKeywords("elseif a b"),            "elseif a b");
 
+// Trailing harmless redirects on a structural keyword must not turn it into a
+// command. Only /dev/null targets (and descriptor dups) are stripped; a
+// file-target redirect is preserved so write-detection still fires.
+test("'done 2>/dev/null' → null",               stripStructuralKeywords("done 2>/dev/null"),         null);
+test("'fi 2>/dev/null' → null",                 stripStructuralKeywords("fi 2>/dev/null"),           null);
+test("'done >/dev/null 2>&1' → null",           stripStructuralKeywords("done >/dev/null 2>&1"),   null);
+test("'done 2>&1' → null (dup only)",           stripStructuralKeywords("done 2>&1"),               null);
+test("'then 2>/dev/null' → null",               stripStructuralKeywords("then 2>/dev/null"),        null);
+test("'else 2>/dev/null' → null",               stripStructuralKeywords("else 2>/dev/null"),        null);
+test("'do 2>/dev/null' → null",                 stripStructuralKeywords("do 2>/dev/null"),          null);
+test("'for x in a b c 2>/dev/null' → null",     stripStructuralKeywords("for x in a b c 2>/dev/null"), null);
+// File-target redirect preserved: still prompts so write-detection runs.
+test("'done > out.txt' → 'done > out.txt'",      stripStructuralKeywords("done > out.txt"),          "done > out.txt");
+// Real command after a prefix keyword keeps its (harmless) redirect.
+test("'do echo hi 2>/dev/null' → 'echo hi 2>/dev/null'", stripStructuralKeywords("do echo hi 2>/dev/null"), "echo hi 2>/dev/null");
+
 section("decideCompound — control flow");
 
 // Single-line for loop: only the body command enters the breakdown.
@@ -553,6 +569,13 @@ test("nested for → isCompound false (1 command after strip)", forNested.isComp
 const forCStyle = decideCompound(forCfg, "bash", { command: "for ((i=0;i<10;i++)); do echo $i; done" });
 test("C-style for → allow",                      forCStyle.action, "allow");
 test("C-style for → isCompound false",          forCStyle.isCompound, false);
+
+// Loop terminator with a trailing `2>/dev/null` must be elided, not prompted.
+// Regression for the real-world command: `for f in *.md; do ...; done 2>/dev/null`.
+const forDoneRedirect = decideCompound(forCfg, "bash", { command: "for f in *.md; do echo $f; done 2>/dev/null" });
+test("for ... done 2>/dev/null → allow",        forDoneRedirect.action, "allow");
+test("for ... done 2>/dev/null → isCompound false", forDoneRedirect.isCompound, false);
+test("for ... done 2>/dev/null → empty breakdown (single-row downgrade)", forDoneRedirect.breakdown.length, 0);
 
 // Loop body with an `ask` action: final action is ask, single-command downgrade applies.
 const forAskCfg = makeCfg({ defaultAction: "ask" });
