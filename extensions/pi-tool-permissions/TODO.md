@@ -17,7 +17,7 @@
   - Detect Git Bash via env (`MSYSTEM` is `MINGW64`/`MINGW32`/`MSYS`, or `OSTYPE=msys`). Since the extension runs in Node, prefer a pure-JS normalizer (handle `/c/...` → `C:/...`, `~` → home, forward/back slashes, drive-letter casing) rather than shelling out to `cygpath` on every check; fall back to `cygpath` only if needed.
   - Add tests covering: `/c/Users/...` style args, `~`-prefixed paths, mixed slash directions, and drive-letter case differences. Extend `test-bash.mjs` and `test-rules-and-decide.mjs`.
 
-- [ ] Auto-allow reading `AGENTS.md` / `CLAUDE.md` in parent directories by default
+- [x] Auto-allow reading `AGENTS.md` / `CLAUDE.md` in parent directories by default
   - Allow `Read` calls for `AGENTS.md` and `CLAUDE.md` in the current working directory and every ancestor directory up to the filesystem root, even when the file is outside the recursive `Read(<cwd>/**)` implicit allow.
   - Likely implement in `loadConfig()` in `index.ts` alongside the existing implicit `Read(${cwdGlobPattern(cwd)})` injection; add exact-path implicit allow rules for each ancestor's `AGENTS.md` and `CLAUDE.md` rather than broad parent-directory globs.
   - Consider an opt-out config flag if needed, and document the behavior in the header docs, `README.md`, and `pi-tool-permissions.example.json`.
