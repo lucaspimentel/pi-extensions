@@ -17,7 +17,8 @@
  *
  * The extension no longer switches the model or thinking effort — switch to
  * your preferred planner model (and thinking level) yourself before calling
- * `/plan`, and switch back afterwards. `/plan-cancel` restores your tools early.
+ * `/plan`, and switch back afterwards. `/plan cancel` restores your tools early;
+ * the flat `/plan-cancel` name still works as a deprecated alias.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -370,7 +371,7 @@ export default function plan(pi: ExtensionAPI) {
 			return;
 		}
 		if (!task.trim()) {
-			ctx.ui.notify("Usage: /plan <what you want planned>", "warning");
+			ctx.ui.notify("Usage: /plan <what you want planned>, or /plan cancel to exit planning early", "warning");
 			return;
 		}
 
@@ -400,6 +401,15 @@ export default function plan(pi: ExtensionAPI) {
 		updateStatus(ctx);
 	}
 
+	// Shared cancellation for /plan cancel and the deprecated /plan-cancel alias.
+	async function cancelPlanning(ctx: ExtensionContext): Promise<void> {
+		if (!planning) {
+			ctx.ui.notify("Not in planning mode.", "info");
+			return;
+		}
+		await restoreTools(ctx);
+	}
+
 	// Block non-readonly bash while planning.
 	pi.on("tool_call", async (event) => {
 		if (!planning) return;
@@ -415,20 +425,26 @@ export default function plan(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("plan", {
-		description: "Plan with the current model using a read-only tool allowlist",
+		description: "Plan with the current model using a read-only tool allowlist; /plan cancel exits early",
+		getArgumentCompletions: (prefix: string) => {
+			const items = [{ value: "cancel", label: "cancel" }];
+			const filtered = items.filter((i) => i.value.startsWith(prefix));
+			return filtered.length > 0 ? filtered : null;
+		},
 		handler: async (args, ctx) => {
+			if ((args ?? "").trim() === "cancel") {
+				await cancelPlanning(ctx);
+				return;
+			}
 			await startPlanning(args ?? "", ctx);
 		},
 	});
 
+	// Deprecated alias for the old flat name, kept during the migration window.
 	pi.registerCommand("plan-cancel", {
-		description: "Cancel planning mode and restore your previous tools immediately",
+		description: "(Deprecated: use /plan cancel) Cancel planning mode and restore your tools immediately",
 		handler: async (_args, ctx) => {
-			if (!planning) {
-				ctx.ui.notify("Not in planning mode.", "info");
-				return;
-			}
-			await restoreTools(ctx);
+			await cancelPlanning(ctx);
 		},
 	});
 

@@ -6,7 +6,7 @@
 //
 // Run: node tests/plan.test.mts
 import assert from "node:assert/strict";
-import { isSafeBash, splitTopLevelShell } from "../extensions/plan.ts";
+import planExtension, { isSafeBash, splitTopLevelShell } from "../extensions/plan.ts";
 
 function assertSafe(cmd: string, msg?: string) {
 	assert.equal(isSafeBash(cmd), true, msg ?? `expected safe: ${cmd}`);
@@ -126,6 +126,71 @@ async function main() {
 	// quotes/backticks/parens containing operators are not split points
 	assert.deepEqual(splitTopLevelShell("echo 'a && b'"), { kind: "single" });
 	assert.deepEqual(splitTopLevelShell("echo (a && b)"), { kind: "single" });
+
+	// ── Slash-command surface: /plan <task> + /plan cancel ─────────────────────
+	{
+		const commands: Record<string, any> = {};
+		const sent: string[] = [];
+		let activeTools: string[] = [];
+		const notifications: { msg: string; level: string }[] = [];
+		const pi: any = {
+			registerCommand(name: string, opts: any) { commands[name] = opts; },
+			registerShortcut() {},
+			on() {},
+			getActiveTools: () => ["read", "edit", "bash"],
+			getAllTools: () => ["read", "edit", "bash", "grep", "find", "ls"].map((name) => ({ name })),
+			setActiveTools(tools: string[]) { activeTools = tools.slice(); },
+			sendUserMessage(msg: string) { sent.push(msg); },
+		};
+		const ctx: any = {
+			ui: {
+				notify(msg: string, level: string) { notifications.push({ msg, level }); },
+				setStatus() {},
+				theme: { fg: (_: string, s: string) => s },
+			},
+		};
+
+		planExtension(pi);
+		assert.ok(commands["plan"], "expected /plan to be registered");
+		assert.ok(commands["plan-cancel"], "expected the deprecated /plan-cancel alias to be registered");
+
+		// Argument completion offers the cancel subcommand only.
+		assert.deepEqual(commands["plan"].getArgumentCompletions("c"), [{ value: "cancel", label: "cancel" }]);
+		assert.deepEqual(commands["plan"].getArgumentCompletions(""), [{ value: "cancel", label: "cancel" }]);
+		assert.equal(commands["plan"].getArgumentCompletions("x"), null);
+
+		// /plan <task> narrows the tool set and sends the planning prompt.
+		await commands["plan"].handler("do a thing", ctx);
+		assert.deepEqual(activeTools, ["read", "bash", "grep", "find", "ls"]);
+		assert.equal(sent.length, 1);
+		assert.ok(sent[0].includes("Produce a clear, numbered implementation plan."));
+		assert.ok(sent[0].includes("do a thing"));
+
+		// /plan cancel restores the previous tool set without sending a new prompt.
+		await commands["plan"].handler("cancel", ctx);
+		assert.deepEqual(activeTools, ["read", "edit", "bash"]);
+		assert.equal(sent.length, 1, "cancel must not send a new planning prompt");
+
+		// Cancelling while not planning is a no-op notification.
+		notifications.length = 0;
+		await commands["plan"].handler("cancel", ctx);
+		assert.equal(notifications.length, 1);
+		assert.equal(notifications[0].msg, "Not in planning mode.");
+		assert.deepEqual(activeTools, ["read", "edit", "bash"]);
+
+		// The deprecated flat alias still routes to the same cancellation.
+		await commands["plan"].handler("another task", ctx);
+		assert.equal(sent.length, 2);
+		await commands["plan-cancel"].handler("", ctx);
+		assert.deepEqual(activeTools, ["read", "edit", "bash"]);
+
+		// A task that merely starts with the word cancel is still a task.
+		await commands["plan"].handler("cancel the migration plan in two phases", ctx);
+		assert.equal(sent.length, 3);
+		assert.ok(sent[2].includes("cancel the migration plan in two phases"));
+		await commands["plan"].handler("cancel", ctx);
+		assert.deepEqual(activeTools, ["read", "edit", "bash"]);
+	}
 
 	console.log("All plan tests passed.");
 }
