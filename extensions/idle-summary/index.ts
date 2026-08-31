@@ -4,7 +4,9 @@
  * After the agent has been idle for ~2 minutes, generates a session summary
  * and displays it inline in the chat history (no modal — no dismiss required).
  * Use the `/summary` command to trigger it immediately; doing so suppresses the
- * pending idle timer for the current idle period.
+ * pending idle timer for the current idle period. `/summary model` opens a
+ * picker for the model used to generate summaries; the flat `/summary-model`
+ * still works as a deprecated alias during the migration window.
  *
  * Model selection: prefers the cheapest/fastest model from the same provider as
  * the currently selected model, then falls back through the remaining scoped (or
@@ -76,7 +78,7 @@ const writeConfiguredModel = (ref: string): void => {
 
 // Build the candidate pool from the session's scoped models, or all available
 // models when no scoping is configured (scopedModels is empty in that case).
-// Resolution order: an explicit user override (from `/summary-model`), then
+// Resolution order: an explicit user override (from `/summary model`), then
 // the pure `selectModel` heuristic (cheapest model from the currently
 // selected model's provider first, then the rest by ascending cost). Each
 // candidate must have configured auth.
@@ -87,7 +89,7 @@ const summaryPool = (
 		? ctx.scopedModels.map((s) => s.model)
 		: ctx.modelRegistry.getAvailable();
 
-// Ordered models to try for a summary run: the explicit `/summary-model`
+// Ordered models to try for a summary run: the explicit `/summary model`
 // override first (authoritative), then the remaining ranked, authed models,
 // skipping unpriced models in the fallback ordering.
 const summaryCandidates = (ctx: ExtensionContext): Model<Api>[] =>
@@ -299,50 +301,69 @@ export default function (pi: ExtensionAPI) {
 		}, IDLE_DELAY_MS);
 	});
 
+	// Shared model picker for `/summary model` and the deprecated
+	// `/summary-model` alias. Opens a picker; the choice is persisted to the
+	// global agent dir and preferred on every future summary.
+	async function pickSummaryModel(ctx: ExtensionContext): Promise<void> {
+		if (!ctx.hasUI) {
+			ctx.ui.notify(
+				"/summary model needs an interactive UI; run it in the TUI.",
+				"warning",
+			);
+			return;
+		}
+
+		const pool = summaryPool(ctx);
+		const hasAuth = (m: Model<Api>) => ctx.modelRegistry.hasConfiguredAuth(m);
+		const pickable = pickableModels(pool, hasAuth);
+		if (pickable.length === 0) {
+			ctx.ui.notify("No models with configured auth are available.", "warning");
+			return;
+		}
+
+		const [current] = summaryCandidates(ctx);
+		// Put the effective current model first so it is pre-highlighted.
+		const ordered = current
+			? [current, ...pickable.filter((m) => modelLabel(m) !== modelLabel(current))]
+			: pickable;
+		const labels = ordered.map(modelLabel);
+
+		const choice = await ctx.ui.select("Summary model:", labels, {
+			signal: ctx.signal,
+		});
+		if (!choice) return; // cancelled
+
+		writeConfiguredModel(choice);
+		ctx.ui.notify(`Summary model set to ${choice}`, "info");
+	}
+
 	// Trigger a summary immediately, and suppress the pending idle timer.
+	// `/summary model` opens the model picker instead, leaving the idle timer
+	// armed, exactly like the old flat /summary-model behavior.
 	pi.registerCommand("summary", {
-		description: "Generate a session summary now",
-		handler: async (_args, ctx) => {
+		description: "Generate a session summary now; /summary model picks the summary model",
+		getArgumentCompletions: (prefix: string) => {
+			const items = [
+				{ value: "model", label: "model", description: "Choose the model used to generate session summaries" },
+			];
+			const filtered = items.filter((i) => i.value.startsWith(prefix));
+			return filtered.length > 0 ? filtered : null;
+		},
+		handler: async (args, ctx) => {
+			if ((args ?? "").trim() === "model") {
+				await pickSummaryModel(ctx);
+				return;
+			}
 			clearIdleTimer();
 			await generateAndShowSummary(ctx);
 		},
 	});
 
-	// Pick which model generates summaries. Opens a model picker; the choice is
-	// persisted to the global agent dir and preferred on every future summary.
+	// Deprecated alias for the old flat name, kept during the migration window.
 	pi.registerCommand("summary-model", {
-		description: "Choose the model used to generate session summaries",
+		description: "(Deprecated: use /summary model) Choose the model used to generate session summaries",
 		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify(
-					"/summary-model needs an interactive UI; run it in the TUI.",
-					"warning",
-				);
-				return;
-			}
-
-			const pool = summaryPool(ctx);
-			const hasAuth = (m: Model<Api>) => ctx.modelRegistry.hasConfiguredAuth(m);
-			const pickable = pickableModels(pool, hasAuth);
-			if (pickable.length === 0) {
-				ctx.ui.notify("No models with configured auth are available.", "warning");
-				return;
-			}
-
-			const [current] = summaryCandidates(ctx);
-			// Put the effective current model first so it is pre-highlighted.
-			const ordered = current
-				? [current, ...pickable.filter((m) => modelLabel(m) !== modelLabel(current))]
-				: pickable;
-			const labels = ordered.map(modelLabel);
-
-			const choice = await ctx.ui.select("Summary model:", labels, {
-				signal: ctx.signal,
-			});
-			if (!choice) return; // cancelled
-
-			writeConfiguredModel(choice);
-			ctx.ui.notify(`Summary model set to ${choice}`, "info");
+			await pickSummaryModel(ctx);
 		},
 	});
 

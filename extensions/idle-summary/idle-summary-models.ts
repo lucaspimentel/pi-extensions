@@ -53,7 +53,7 @@ export const findConfiguredModel = (
 /**
  * Ordered model candidates for a summary run.
  *
- * An explicit user override (from `/summary-model`) comes first and is treated
+ * An explicit user override (from `/summary model`) comes first and is treated
  * as authoritative, even when it is unpriced: it is the user's direct choice.
  * If it errors at request time, the remaining ranked models are tried in order
  * until one actually returns text. The ranked fallback ignores models without

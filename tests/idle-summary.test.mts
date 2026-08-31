@@ -22,6 +22,7 @@ const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
 const commands: Record<string, any> = {};
 let sendMessageCalls: any[] = [];
 let notifyCalls: Array<{ message: string; type?: string }> = [];
+let selectCalls = 0;
 
 const pi: any = {
 	on(event: string, handler: any) {
@@ -42,6 +43,7 @@ const pi: any = {
 idleSummary(pi);
 
 assert.ok(commands.summary, "/summary command should be registered");
+assert.ok(commands["summary-model"], "deprecated /summary-model alias should be registered");
 assert.ok(handlers.session_start, "session_start handler should be registered");
 assert.ok(handlers.session_shutdown, "session_shutdown handler should be registered");
 
@@ -91,7 +93,7 @@ const pool = [
 	},
 ];
 
-function makeCtx(): any {
+function makeCtx(overrides: Partial<any> = {}): any {
 	return {
 		get hasUI() {
 			if (stale) throw STALE_ERR;
@@ -118,7 +120,14 @@ function makeCtx(): any {
 				if (stale) throw STALE_ERR;
 				notifyCalls.push({ message, type });
 			},
+			// Cancelled picker: proves the model path was taken without ever
+			// writing the (real, global) summary-model config.
+			select: async (_title: string, _items: string[], _opts: any) => {
+				selectCalls++;
+				return undefined;
+			},
 		},
+		...overrides,
 	};
 }
 
@@ -126,6 +135,7 @@ function resetScenario() {
 	stale = false;
 	sendMessageCalls = [];
 	notifyCalls = [];
+	selectCalls = 0;
 	completePromise = new Promise<any>((r) => {
 		resolveComplete = r;
 	});
@@ -197,7 +207,39 @@ async function main() {
 	assert.equal(sendMessageCalls.length, 0, "session replacement must suppress sendMessage");
 	assert.equal(notifyCalls.length, 0, "session replacement must bail before ctx.hasUI/notify");
 
+	// 5. /summary model routes to the model picker, not summary generation.
+	resetScenario();
+	await commands.summary.handler("model", makeCtx());
+	assert.equal(selectCalls, 1, "/summary model should open the model picker");
+	assert.equal(sendMessageCalls.length, 0, "/summary model should not generate a summary");
+	assert.equal(notifyCalls.length, 0, "cancelled picker should notify nothing");
+
+	// 5b. The deprecated /summary-model alias routes to the same picker.
+	await commands["summary-model"].handler("", makeCtx());
+	assert.equal(selectCalls, 2, "deprecated /summary-model should open the same picker");
+	assert.equal(sendMessageCalls.length, 0);
+
+	// 5c. Root argument completion offers the `model` subcommand.
+	const modelCompletions = commands.summary.getArgumentCompletions("");
+	assert.ok(modelCompletions, "expected completion for empty prefix");
+	assert.deepEqual(
+		modelCompletions.map((i: any) => i.value),
+		["model"],
+	);
+	assert.equal(commands.summary.getArgumentCompletions("mo")?.[0]?.value, "model");
+	assert.equal(commands.summary.getArgumentCompletions("zzz"), null);
+
+	// 5d. Non-interactive ctx: the picker path warns instead of generating.
+	resetScenario();
+	const headlessCtx = makeCtx({ hasUI: false });
+	await commands.summary.handler("model", headlessCtx);
+	assert.equal(selectCalls, 0, "no picker without a UI");
+	assert.match(notifyCalls[notifyCalls.length - 1]?.message ?? "", /needs an interactive UI/);
+	assert.equal(notifyCalls[notifyCalls.length - 1]?.type, "warning");
+	assert.equal(sendMessageCalls.length, 0);
+
 	console.log("  ✓ idle-summary stale-ctx regression: 4 scenarios passed");
+	console.log("  ✓ idle-summary /summary model dispatch: 4 checks passed");
 }
 
 main().catch((err) => {

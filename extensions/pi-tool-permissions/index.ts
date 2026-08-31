@@ -230,7 +230,7 @@
  *
  *   `classifier` can also be picked interactively with
  *   `/permissions auto model` (see below) instead of hand-editing the config —
- *   mirrors idle-summary's `/summary-model`. The picker writes
+ *   mirrors idle-summary's `/summary model`. The picker writes
  *   `autoMode.classifier` into the project or user config (same `--user`/
  *   `--project` scoping as `/permissions default`) and takes effect immediately.
  *
@@ -2773,7 +2773,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// Persist an explicit classifier model pin into `autoMode.classifier` for
-	// the given scope (mirrors idle-summary's /summary-model persistence, but
+	// the given scope (mirrors idle-summary's /summary model persistence, but
 	// reuses the project/user config files and scoping this extension already
 	// has instead of a separate global file).
 	function setClassifier(scope: Scope, cwd: string, provider: string, model: string): void {

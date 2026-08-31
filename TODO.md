@@ -2,15 +2,16 @@
 
 > See also [`extensions/pi-tool-permissions/TODO.md`](extensions/pi-tool-permissions/TODO.md) for the pi-tool-permissions extension's own task list.
 
-- [ ] Make slash-command style consistent across extensions.
+- [x] Make slash-command style consistent across extensions.
 	- Current state (audit via `registerCommand` calls):
 	  - `pi-tool-permissions` uses a single root `/permissions` with subcommands: `/permissions list`, `/permissions allow <rule>`, `/permissions auto`, `/permissions auto model`, etc. (`extensions/pi-tool-permissions/index.ts:2811`).
 	  - `stash` used flat prefixed siblings: `/pop`, `/stash-list`, `/stash-drop`, `/stash-clear` (note `/pop` lacked the prefix entirely, and there was no `/stash` parent command). Now migrated, see Migration progress below.
-	  - `idle-summary` uses flat siblings `/summary` and `/summary-model` (`extensions/idle-summary/index.ts:303,313`) rather than `/summary model`.
+	  - `idle-summary` used flat siblings `/summary` and `/summary-model`. Now migrated, see Migration progress below.
 	  - `plan` used flat siblings `/plan` and `/plan-cancel` rather than `/plan cancel` (now migrated, see Migration progress below).
 	- Decide on one convention (likely the hierarchical `/root <subcommand>` style used by `permissions`, since it scales best and keeps the command namespace clean), then migrate the other three extensions.
 	- Migration touches: `registerCommand` names + their `getArgumentCompletions`/`handler` argument parsing, help text strings, README references, and any skills/tests that invoke the old names. Keep backward-compatible aliases for the old flat names during a deprecation window if practical.
-	- Migration progress: `plan` and `stash` migrated.
+	- Migration progress: all three migrated (`plan`, `stash`, `idle-summary`).
+	  - `idle-summary`: canonical `/summary` now dispatches `/summary model` to a shared model-picker helper (with argument completion); bare `/summary` (or any other argument, as before) still generates a summary immediately and suppresses the idle timer, and the picker path leaves the timer armed exactly like the old flat behavior. The flat `/summary-model` is kept as a deprecated alias routed to the same helper; header/README docs and cross-extension comments (`idle-summary-models.ts`, `pi-tool-permissions/index.ts`) updated; command-level coverage added to `tests/idle-summary.test.mts`.
 	  - `plan`: `/plan cancel` now cancels (exact-match subcommand, with argument completion), the flat `/plan-cancel` is kept as a deprecated alias routed to the same cancellation, header/README docs updated, and command-level tests added to `tests/plan.test.mts` via a mocked `ExtensionAPI`.
 	  - `stash`: canonical root `/stash` with `list`, `pop [n]`, `drop <n>`, `clear`, and `help` subcommands, plus hierarchical argument completion (subcommands first, then entry indexes for pop/drop, values carrying the subcommand since completion replaces the whole argument text). Flat `/pop`, `/stash-list`, `/stash-drop`, `/stash-clear` kept as deprecated aliases routed to shared handlers; header/README docs and user-facing messages updated; `tests/stash.test.mts` migrated to the canonical names with alias compatibility checks. Remaining: `idle-summary`.
 
