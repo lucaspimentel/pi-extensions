@@ -425,6 +425,10 @@ test("wc -l ./src/index.ts → true",          isReadOnlyBashSubcommand("wc -l .
 test("stat ./package.json → true",           isReadOnlyBashSubcommand("stat ./package.json", WIN_CWD), true);
 test("quoted path inside cwd → true",        isReadOnlyBashSubcommand(`cat "./has space.md"`, WIN_CWD), true);
 test("tail -f ./app.log → true",             isReadOnlyBashSubcommand("tail -f ./app.log", WIN_CWD), true);
+test("cut -d, -f1 ./data.csv → true",       isReadOnlyBashSubcommand("cut -d, -f1 ./data.csv", WIN_CWD), true);
+test("jq '.foo' ./in.json → true",          isReadOnlyBashSubcommand("jq '.foo' ./in.json", WIN_CWD), true);
+test("nl ./file.txt → true",                isReadOnlyBashSubcommand("nl ./file.txt", WIN_CWD), true);
+test("jq -n '1+1' → true (no file args)",   isReadOnlyBashSubcommand("jq -n '1+1'", WIN_CWD), true);
 
 section("isReadOnlyBashSubcommand — rejected cases");
 
@@ -432,6 +436,8 @@ test("rm → not in safe lists",               isReadOnlyBashSubcommand("rm -rf 
 test("git → not in safe lists",              isReadOnlyBashSubcommand("git status", WIN_CWD), false);
 test("curl → not in safe lists",             isReadOnlyBashSubcommand("curl http://x.com", WIN_CWD), false);
 test("cat /etc/passwd → path outside cwd",   isReadOnlyBashSubcommand("cat /etc/passwd", WIN_CWD), false);
+test("jq . /etc/passwd → path outside cwd", isReadOnlyBashSubcommand("jq . /etc/passwd", WIN_CWD), false);
+test("nl /etc/passwd → path outside cwd",   isReadOnlyBashSubcommand("nl /etc/passwd", WIN_CWD), false);
 test("ls .. → parent dir not inside cwd",    isReadOnlyBashSubcommand("ls ..", WIN_CWD), false);
 test("ls C:/Windows → path outside cwd",     isReadOnlyBashSubcommand("ls C:/Windows", WIN_CWD), false);
 test("echo foo > /tmp/out → redirect",       isReadOnlyBashSubcommand("echo foo > /tmp/out", WIN_CWD), false);

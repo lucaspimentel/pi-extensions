@@ -776,6 +776,7 @@ const READONLY_BASH_SAFE_ALWAYS = new Set([
 const READONLY_BASH_WITH_PATHS = new Set([
 	"ls", "cat", "head", "tail", "wc", "file", "stat", "tree",
 	"du", "realpath", "readlink", "dirname", "basename",
+	"cut", "jq", "nl",
 ]);
 
 /**
