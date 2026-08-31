@@ -2,7 +2,7 @@
 //
 // Runs all extension-level test suites with `node --experimental-strip-types`
 // (Node >= 22.6) because the suites import test-helpers.mjs, which imports the
-// real TypeScript module (./index.ts) so tests exercise the actual code, not a
+// real TypeScript module (./rules.ts) so tests exercise the actual code, not a
 // mirror.
 
 import { spawnSync } from "node:child_process";

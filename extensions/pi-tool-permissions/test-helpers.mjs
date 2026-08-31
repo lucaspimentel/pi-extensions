@@ -1,7 +1,7 @@
 // Shared helpers for all test files.
 //
 // The pure logic (rule matching, decide, suggestRule, config merge, classifier
-// helpers, etc.) lives in index.ts and is re-exported here so the tests exercise
+// helpers, etc.) lives in rules.ts and is re-exported here so the tests exercise
 // the REAL code, not a hand-maintained mirror. Run the suites with
 // `node --experimental-strip-types` (Node >= 22.6) so the .mjs tests can import
 // the .ts module — see run-all.mjs.
@@ -13,9 +13,9 @@ import {
 	normalizeToolDefaultsKeys,
 	coerceDefaultAction,
 	saveUserConfig,
-} from "./index.ts";
+} from "./rules.ts";
 
-// ── Re-export the real pure functions from index.ts ──────────────────────
+// ── Re-export the real pure functions from rules.ts ──────────────────────
 export {
 	normalizeTool,
 	normalizePathSep,
@@ -81,7 +81,7 @@ export {
 	legacyUserConfigPath,
 	loadUserConfigRaw as loadUserConfigFromDisk,
 	DEFAULT_AUTO_MODE,
-} from "./index.ts";
+} from "./rules.ts";
 
 // saveUserConfigToDisk(home, cfg) — index.ts's saveUserConfig takes (cfg, home).
 export function saveUserConfigToDisk(home, cfg) {
