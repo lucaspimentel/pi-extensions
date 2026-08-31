@@ -8,7 +8,11 @@
 	- Update `test-helpers.mjs` to re-export from `./rules.ts` instead of `./index.ts`.
 	- Verify: `node extensions/pi-tool-permissions/run-all.mjs` (expect all 6 suites pass, 782 passed, 0 failed) and `npx tsc --noEmit` (clean).
 
-- [ ] Normalize Windows paths when running Bash under Git Bash / MSYS / Cygwin
+- [x] Normalize Windows paths when running Bash under Git Bash / MSYS / Cygwin
+  - Done: added an environment-aware pure-JavaScript normalizer that detects Git Bash, MSYS, and Cygwin; converts `/c/...` and `/cygdrive/c/...` to canonical Windows drive paths; expands `~`; normalizes separators and drive-letter casing; and resolves dot segments with host-independent Windows or POSIX semantics. No `cygpath` subprocess is needed.
+  - Applied consistently to cwd globs, permission matching, no-op `cd` detection, and read-only Bash path containment. Added boundary-safe containment for drive roots and preserved POSIX `/c/...` paths outside MSYS-like environments.
+  - Tests cover MSYS/Cygwin paths, tilde paths, mixed separators, drive-letter case, dot-segment traversal, inside/outside cwd checks, drive-root containment, and end-to-end rule matching in `test-bash.mjs` and `test-rules-and-decide.mjs`.
+  - Verified: `node extensions/pi-tool-permissions/run-all.mjs` (all 6 suites pass, 1,101 passed, 0 failed) and `npx tsc --noEmit` (clean).
   - Affects path comparisons in `rules.ts`: `normalizePathSep` (~401), `normalizeMatchPath` (~410), `cwdGlobPattern` (~421), `isNoopCd` (~536–572), and bash subcommand path extraction.
   - Under Git Bash, paths can appear as `/c/Users/...`, `/d/source/...`, `~`, or mixed `C:/...` vs `C:\...`. The current `normalizePathSep` only swaps separators — it doesn't unify drive prefixes, so cwd `C:\Users\foo` won't match a bash arg like `/c/Users/foo`.
   - Reference implementation patterns (use `cygpath` to canonicalize):

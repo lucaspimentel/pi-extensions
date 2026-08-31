@@ -16,7 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
 import {
 	dedupeModels,
@@ -397,29 +397,92 @@ const READONLY_PATH_TOOLS = ["Read", "Ls", "Glob", "Grep"] as const;
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
-/** Replace all backslashes with forward slashes. */
-export function normalizePathSep(p: string): string {
-	return p.replace(/\\/g, "/");
+export interface PathNormalizationOptions {
+	/** Environment used to detect Git Bash, MSYS, or Cygwin. Defaults to process.env. */
+	env?: Readonly<Record<string, string | undefined>>;
+	/** Home directory used to expand bare `~` and `~/...`. Defaults to HOME or homedir(). */
+	home?: string;
+}
+
+function isWindowsPosixShell(env: Readonly<Record<string, string | undefined>>): boolean {
+	const msystem = (env.MSYSTEM ?? "").toUpperCase();
+	const ostype = (env.OSTYPE ?? "").toLowerCase();
+	return msystem === "MSYS"
+		|| msystem.startsWith("MINGW")
+		|| msystem.startsWith("UCRT")
+		|| msystem.startsWith("CLANG")
+		|| msystem.startsWith("CYGWIN")
+		|| ostype.startsWith("msys")
+		|| ostype.startsWith("cygwin");
+}
+
+function normalizeDrivePrefix(p: string, windowsPosixShell: boolean): string {
+	let normalized = p;
+	if (windowsPosixShell) {
+		const cygwinDrive = normalized.match(/^\/cygdrive\/([A-Za-z])(?:\/(.*))?$/i);
+		const msysDrive = normalized.match(/^\/([A-Za-z])(?:\/(.*))?$/);
+		const match = cygwinDrive ?? msysDrive;
+		if (match) normalized = `${match[1].toUpperCase()}:/${match[2] ?? ""}`;
+	}
+	return normalized.replace(/^([A-Za-z]):(?=\/|$)/, (_, drive: string) => `${drive.toUpperCase()}:`);
+}
+
+function trimTrailingPathSeparators(p: string): string {
+	if (p === "/" || /^[A-Za-z]:\/$/.test(p)) return p;
+	return p.replace(/\/+$/, "");
+}
+
+function isWindowsAbsolutePath(p: string): boolean {
+	return /^[A-Za-z]:\//.test(p) || p.startsWith("//");
+}
+
+function canonicalizeAbsolutePath(p: string): string {
+	if (isWindowsAbsolutePath(p)) return trimTrailingPathSeparators(win32.normalize(p).replace(/\\/g, "/"));
+	if (p.startsWith("/")) return trimTrailingPathSeparators(posix.normalize(p));
+	return trimTrailingPathSeparators(p);
 }
 
 /**
- * Normalize a path for permission matching only — never used for actual tool execution.
- * Replaces backslashes with forward slashes, and resolves relative paths against cwd
- * so they can be compared against absolute patterns like the injected cwd glob.
+ * Normalize path spelling for permission comparisons and saved rules.
+ * In Git Bash, MSYS, or Cygwin, this also expands `~` and converts POSIX drive
+ * prefixes such as `/c/...` and `/cygdrive/c/...` to `C:/...` without spawning
+ * `cygpath`. Outside those environments, POSIX paths such as `/c/...` are kept.
  */
-export function normalizeMatchPath(p: string, cwd: string): string {
-	if (!p) return p;
-	const sep = normalizePathSep(p);
-	// Relative: doesn't start with / or a Windows drive letter (e.g. C:)
-	if (!sep.startsWith("/") && !/^[A-Za-z]:/.test(sep)) {
-		return normalizePathSep(resolve(cwd, p));
+export function normalizePathSep(p: string, options: PathNormalizationOptions = {}): string {
+	const env = options.env ?? process.env;
+	const windowsPosixShell = isWindowsPosixShell(env);
+	let normalized = p.replace(/\\/g, "/");
+	if (windowsPosixShell && (normalized === "~" || normalized.startsWith("~/"))) {
+		const rawHome = options.home ?? env.HOME ?? homedir();
+		const home = normalizeDrivePrefix(rawHome.replace(/\\/g, "/"), true).replace(/\/+$/, "");
+		normalized = home + normalized.slice(1);
 	}
-	return sep;
+	return normalizeDrivePrefix(normalized, windowsPosixShell);
+}
+
+/**
+ * Normalize a path for permission matching only, never for actual tool execution.
+ * Resolves relative paths against cwd with Windows semantics for drive paths and
+ * POSIX semantics otherwise, then removes dot segments for safe containment checks.
+ */
+export function normalizeMatchPath(p: string, cwd: string, options: PathNormalizationOptions = {}): string {
+	if (!p) return p;
+	const normalized = normalizePathSep(p, options);
+	const cwdNormalized = normalizePathSep(cwd, options);
+	if (isWindowsAbsolutePath(normalized) || normalized.startsWith("/")) {
+		return canonicalizeAbsolutePath(normalized);
+	}
+	const resolved = isWindowsAbsolutePath(cwdNormalized)
+		? win32.resolve(cwdNormalized, normalized).replace(/\\/g, "/")
+		: posix.resolve(cwdNormalized, normalized);
+	return canonicalizeAbsolutePath(normalizePathSep(resolved, options));
 }
 
 /** Returns the glob pattern that matches cwd and all its descendants. */
-export function cwdGlobPattern(cwd: string): string {
-	return normalizePathSep(cwd) + "/**";
+export function cwdGlobPattern(cwd: string, options: PathNormalizationOptions = {}): string {
+	const normalized = canonicalizeAbsolutePath(normalizePathSep(cwd, options));
+	const base = normalized === "/" ? "" : normalized.replace(/\/+$/, "");
+	return `${base}/**`;
 }
 
 /**
@@ -533,7 +596,7 @@ export function piDocsReadGlobs(home: string): string[] {
  * Bare `cd` (no argument) navigates to $HOME, not cwd, so it is NOT matched.
  * Arguments containing unrecognised shell metacharacters are rejected for safety.
  */
-export function isNoopCd(cmd: string, cwd: string): boolean {
+export function isNoopCd(cmd: string, cwd: string, options: PathNormalizationOptions = {}): boolean {
 	const trimmed = cmd.trim();
 	if (!/^cd(\s|$)/.test(trimmed)) return false;
 
@@ -557,15 +620,15 @@ export function isNoopCd(cmd: string, cwd: string): boolean {
 	// Reject if the argument contains shell metacharacters not already handled above
 	if (/[`$(){}|&;<>]/.test(arg)) return false;
 
-	// Check whether the path (absolute or relative) resolves to cwd.
-	// For absolute paths we compare directly to avoid OS-specific resolve() quirks
-	// (e.g. on Windows, resolve('/unix/path') prepends the current drive).
+	// Resolve the destination and cwd through the same canonicalizer so Windows,
+	// MSYS, Cygwin, tilde, and mixed-separator spellings compare consistently.
 	try {
-		const stripped = arg.replace(/\/+$/, "");
-		const argNorm = normalizePathSep(stripped);
-		const isAbsolute = argNorm.startsWith("/") || /^[A-Za-z]:/.test(argNorm);
-		const resolved = isAbsolute ? argNorm : normalizePathSep(resolve(cwd, stripped));
-		return resolved.toLowerCase() === normalizePathSep(cwd).toLowerCase();
+		const resolved = normalizeMatchPath(arg, cwd, options);
+		const cwdNormalized = normalizeMatchPath(".", cwd, options);
+		if (isWindowsAbsolutePath(cwdNormalized)) {
+			return resolved.toLowerCase() === cwdNormalized.toLowerCase();
+		}
+		return resolved === cwdNormalized;
 	} catch {
 		return false;
 	}
@@ -843,7 +906,7 @@ function tokenizeSimple(cmd: string): string[] {
  *     every non-flag argument resolves to a path inside (or equal to) cwd.
  *  4. Anything else → false.
  */
-export function isReadOnlyBashSubcommand(cmd: string, cwd: string): boolean {
+export function isReadOnlyBashSubcommand(cmd: string, cwd: string, options: PathNormalizationOptions = {}): boolean {
 	const trimmed = cmd.trim();
 	if (!trimmed) return false;
 	if (hasTopLevelFileRedirect(trimmed)) return false;
@@ -855,10 +918,14 @@ export function isReadOnlyBashSubcommand(cmd: string, cwd: string): boolean {
 		const pathArgs = tokens.slice(1).filter((t) => t.length > 0 && !t.startsWith("-"));
 		// No path args — command implicitly uses cwd, safe
 		if (pathArgs.length === 0) return true;
-		const cwdNorm = normalizePathSep(cwd).toLowerCase();
+		const cwdNorm = normalizeMatchPath(".", cwd, options);
+		const caseInsensitive = isWindowsAbsolutePath(cwdNorm);
+		const comparableCwd = caseInsensitive ? cwdNorm.toLowerCase() : cwdNorm;
+		const cwdPrefix = comparableCwd.endsWith("/") ? comparableCwd : comparableCwd + "/";
 		return pathArgs.every((arg) => {
-			const norm = normalizeMatchPath(arg, cwd).toLowerCase();
-			return norm === cwdNorm || norm.startsWith(cwdNorm + "/");
+			const normalized = normalizeMatchPath(arg, cwd, options);
+			const comparable = caseInsensitive ? normalized.toLowerCase() : normalized;
+			return comparable === comparableCwd || comparable.startsWith(cwdPrefix);
 		});
 	}
 	return false;

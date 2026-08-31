@@ -2,7 +2,7 @@
 
 import {
 	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideCompound, shouldClassifyWholeCompound, makeCfg,
-	cwdGlobPattern, normalizePathSep, inputForMatching, recomputeBreakdown,
+	cwdGlobPattern, normalizePathSep, normalizeMatchPath, inputForMatching, recomputeBreakdown,
 	loadConfigFromObjects,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
 	classifyAction, classifierCacheKey, pickClassifierModel, rankModels, dedupeModels, hasPrice, modelLabel, pickableModels, autoStatusLabel, classifierAttribution,
@@ -172,6 +172,52 @@ test("non-bash: empty breakdown",        dcRead.breakdown.length, 0);
 
 const dcWrite = decideCompound(makeCfg({ toolDefaults: { write: "ask" } }), "write", { path: "./f.ts" });
 test("non-bash write: uses toolDefaults", dcWrite.action, "ask");
+
+section("path normalization: Git Bash / MSYS / Cygwin");
+
+const MSYS_PATHS = { env: { MSYSTEM: "MINGW64", OSTYPE: "msys" }, home: "C:\\Users\\alice" };
+const CYGWIN_PATHS = { env: { OSTYPE: "cygwin" }, home: "C:/Users/alice" };
+const POSIX_PATHS = { env: { OSTYPE: "linux-gnu" }, home: "/home/alice" };
+const MSYS_CWD = "D:\\source\\project";
+
+test("MSYS drive path → canonical Windows path",
+	normalizePathSep("/d/source/project/src", MSYS_PATHS), "D:/source/project/src");
+test("Cygwin drive path → canonical Windows path",
+	normalizePathSep("/cygdrive/c/Users/alice/project", CYGWIN_PATHS), "C:/Users/alice/project");
+test("bare MSYS drive root → canonical Windows root",
+	normalizePathSep("/d", MSYS_PATHS), "D:/");
+test("tilde path → canonical home path",
+	normalizePathSep("~/project/src", MSYS_PATHS), "C:/Users/alice/project/src");
+test("bare tilde → canonical home directory",
+	normalizePathSep("~", MSYS_PATHS), "C:/Users/alice");
+test("mixed separators and lower-case drive → canonical path",
+	normalizePathSep("d:\\source/project\\src", MSYS_PATHS), "D:/source/project/src");
+test("POSIX /c path is unchanged outside MSYS/Cygwin",
+	normalizePathSep("/c/source/project", POSIX_PATHS), "/c/source/project");
+test("relative MSYS path resolves against Windows cwd",
+	normalizeMatchPath(".\\src/../README.md", MSYS_CWD, MSYS_PATHS), "D:/source/project/README.md");
+test("absolute MSYS path resolves dot segments with Windows semantics",
+	normalizeMatchPath("/d/source/project/src/../README.md", MSYS_CWD, MSYS_PATHS), "D:/source/project/README.md");
+test("UNC path preserves its server and share root",
+	normalizeMatchPath("\\\\server\\share\\project\\src\\..\\README.md", "\\\\server\\share\\project", POSIX_PATHS), "//server/share/project/README.md");
+test("MSYS cwd glob has one separator before wildcard",
+	cwdGlobPattern("d:\\source\\project\\", MSYS_PATHS), "D:/source/project/**");
+
+const msysReadRule = parseRule(`Read(${cwdGlobPattern(MSYS_CWD, MSYS_PATHS)})`);
+function withMsysEnvironment(action) {
+	const previous = process.env.MSYSTEM;
+	process.env.MSYSTEM = "MINGW64";
+	try {
+		return action();
+	} finally {
+		if (previous === undefined) delete process.env.MSYSTEM;
+		else process.env.MSYSTEM = previous;
+	}
+}
+test("ruleMatches accepts an MSYS path inside a Windows cwd",
+	withMsysEnvironment(() => ruleMatches(msysReadRule, "read", { path: "/d/source/project/README.md" }, MSYS_CWD)), true);
+test("ruleMatches rejects an MSYS path outside a Windows cwd",
+	withMsysEnvironment(() => ruleMatches(msysReadRule, "read", { path: "/d/source/other/README.md" }, MSYS_CWD)), false);
 
 section("ruleMatches — cwd-resolved candidate");
 

@@ -280,9 +280,16 @@ test("cdx  → false (not cd command)",        isNoopCd("cdx .", CWD), false);
 section("isNoopCd — absolute cwd (Windows-style path)");
 
 const WIN_CWD = "C:/Users/alice/proj";
+const MSYS_PATHS = { env: { MSYSTEM: "MINGW64", OSTYPE: "msys" }, home: "C:\\Users\\alice" };
+const CYGWIN_PATHS = { env: { OSTYPE: "cygwin" }, home: "C:/Users/alice" };
 test("Windows: cd C:/Users/alice/proj  → no-op",  isNoopCd("cd C:/Users/alice/proj",  WIN_CWD), true);
 test("Windows: cd C:/Users/alice/proj/  → no-op", isNoopCd("cd C:/Users/alice/proj/", WIN_CWD), true);
 test("Windows: case-insensitive match",            isNoopCd("cd c:/users/alice/proj",  WIN_CWD), true);
+test("Windows: mixed separators → no-op",          isNoopCd("cd c:\\Users/alice\\proj", WIN_CWD, MSYS_PATHS), true);
+test("MSYS: cd /c/Users/alice/proj → no-op",       isNoopCd("cd /c/Users/alice/proj", WIN_CWD, MSYS_PATHS), true);
+test("Cygwin: cd /cygdrive/c/Users/alice/proj → no-op", isNoopCd("cd /cygdrive/c/Users/alice/proj", WIN_CWD, CYGWIN_PATHS), true);
+test("MSYS: cd ~/proj → no-op",                    isNoopCd("cd ~/proj", WIN_CWD, MSYS_PATHS), true);
+test("MSYS: cd /c/Users/alice/other → not no-op", isNoopCd("cd /c/Users/alice/other", WIN_CWD, MSYS_PATHS), false);
 test("Windows: cd C:/Users/bob  → not no-op",     isNoopCd("cd C:/Users/bob",         WIN_CWD), false);
 
 section("isPureVariableAssignment — pure forms");
@@ -411,8 +418,8 @@ test("env → safe always",          isReadOnlyBashSubcommand("env", CWD), true)
 test("printf hi → safe always",    isReadOnlyBashSubcommand("printf hi", CWD), true);
 test("true → safe always",          isReadOnlyBashSubcommand("true", CWD), true);
 
-// Use WIN_CWD (C:/...) for WITH_PATHS tests: resolve() on Windows prepends a
-// drive letter to Unix-style paths (/home/...) which breaks cwd-prefix comparisons.
+// Use WIN_CWD (C:/...) for WITH_PATHS tests and verify that Windows-native,
+// MSYS, and Cygwin spellings all compare against the same canonical cwd.
 section("isReadOnlyBashSubcommand — WITH_PATHS (paths inside cwd)");
 
 test("ls (bare) → true",                     isReadOnlyBashSubcommand("ls", WIN_CWD), true);
@@ -429,6 +436,11 @@ test("cut -d, -f1 ./data.csv → true",       isReadOnlyBashSubcommand("cut -d, 
 test("jq '.foo' ./in.json → true",          isReadOnlyBashSubcommand("jq '.foo' ./in.json", WIN_CWD), true);
 test("nl ./file.txt → true",                isReadOnlyBashSubcommand("nl ./file.txt", WIN_CWD), true);
 test("jq -n '1+1' → true (no file args)",   isReadOnlyBashSubcommand("jq -n '1+1'", WIN_CWD), true);
+test("MSYS absolute path inside cwd → true",       isReadOnlyBashSubcommand("cat /c/Users/alice/proj/README.md", WIN_CWD, MSYS_PATHS), true);
+test("Cygwin absolute path inside cwd → true",     isReadOnlyBashSubcommand("cat /cygdrive/c/Users/alice/proj/README.md", WIN_CWD, CYGWIN_PATHS), true);
+test("MSYS tilde path inside cwd → true",          isReadOnlyBashSubcommand("cat ~/proj/README.md", WIN_CWD, MSYS_PATHS), true);
+test("MSYS path with dot segments inside cwd → true", isReadOnlyBashSubcommand("cat /c/Users/alice/proj/src/../README.md", WIN_CWD, MSYS_PATHS), true);
+test("MSYS path under drive-root cwd → true",         isReadOnlyBashSubcommand("cat /c/Windows/System32/drivers/etc/hosts", "C:/", MSYS_PATHS), true);
 
 section("isReadOnlyBashSubcommand — rejected cases");
 
@@ -440,6 +452,9 @@ test("jq . /etc/passwd → path outside cwd", isReadOnlyBashSubcommand("jq . /et
 test("nl /etc/passwd → path outside cwd",   isReadOnlyBashSubcommand("nl /etc/passwd", WIN_CWD), false);
 test("ls .. → parent dir not inside cwd",    isReadOnlyBashSubcommand("ls ..", WIN_CWD), false);
 test("ls C:/Windows → path outside cwd",     isReadOnlyBashSubcommand("ls C:/Windows", WIN_CWD), false);
+test("MSYS path outside cwd → false",         isReadOnlyBashSubcommand("cat /c/Users/alice/other/secrets", WIN_CWD, MSYS_PATHS), false);
+test("MSYS path on another drive → false",    isReadOnlyBashSubcommand("cat /d/secrets", WIN_CWD, MSYS_PATHS), false);
+test("MSYS traversal outside cwd → false",    isReadOnlyBashSubcommand("cat /c/Users/alice/proj/../other/secrets", WIN_CWD, MSYS_PATHS), false);
 test("echo foo > /tmp/out → redirect",       isReadOnlyBashSubcommand("echo foo > /tmp/out", WIN_CWD), false);
 test("cat secrets >> log → redirect",        isReadOnlyBashSubcommand("cat secrets >> log", WIN_CWD), false);
 test("empty string → false",                 isReadOnlyBashSubcommand("", WIN_CWD), false);
