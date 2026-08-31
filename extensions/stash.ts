@@ -9,17 +9,20 @@
  *   ctrl+alt+s   Stash the editor text and clear the editor.
  *   ctrl+alt+r   Restore (pop) the most recently stashed entry.
  *
- * Commands (index-addressed; run /stash-list to see current indexes):
- *   /pop [n]           Restore stash entry n (1 = newest, default) into the
+ * Commands (index-addressed; run /stash list to see current indexes):
+ *   /stash pop [n]      Restore stash entry n (1 = newest, default) into the
  *                        editor. If the editor already has non-blank text,
  *                        that text is pushed onto the stash first so nothing
  *                        is lost — note this shifts indexes.
- *   /stash-list         List all stashed entries, numbered 1 (newest) upward.
- *   /stash-drop <n>     Remove entry n without restoring it.
- *   /stash-clear        Remove all entries (confirms first when UI is available).
+ *   /stash list         List all stashed entries, numbered 1 (newest) upward.
+ *   /stash drop <n>     Remove entry n without restoring it.
+ *   /stash clear        Remove all entries (confirms first when UI is available).
+ *   /stash help         Show command usage.
+ * The old flat names (/pop, /stash-list, /stash-drop, /stash-clear) still
+ * work as deprecated aliases during the migration window.
  *
  * Indexes are positional and only valid until the next stash/pop/drop —
- * re-run /stash-list after any mutation before addressing by number again.
+ * re-run /stash list after any mutation before addressing by number again.
  *
  * Storage:
  *   ~/.pi/agent/pi-stash.json (override with the PI_STASH_FILE env var, e.g.
@@ -93,7 +96,7 @@ export function pushEntry(state: StashState, text: string, cwd?: string): StashS
 }
 
 /**
- * Convert a 1-based display index (1 = newest, per /stash-list) into a 0-based
+ * Convert a 1-based display index (1 = newest, per /stash list) into a 0-based
  * array index. Returns undefined for non-numeric, out-of-range, or missing input.
  */
 export function resolveIndex(state: StashState, displayIndex: string | number | undefined): number | undefined {
@@ -149,7 +152,7 @@ export function formatList(state: StashState, now: Date = new Date()): string {
 			return `${displayIndex}. ${relativeAge(e.savedAt, now)}, ${lineCount} line(s): ${firstLinePreview(e.text)}`;
 		})
 		.reverse(); // newest (displayIndex 1) first
-	return `Stash (${n}):\n${lines.join("\n")}\nUse /pop <n> or /stash-drop <n>.`;
+	return `Stash (${n}):\n${lines.join("\n")}\nUse /stash pop <n> or /stash drop <n>.`;
 }
 
 export default function stash(pi: ExtensionAPI) {
@@ -187,7 +190,7 @@ export default function stash(pi: ExtensionAPI) {
 			ctx.ui.notify(
 				state.entries.length === 0
 					? "Stash is empty."
-					: `No stash entry ${displayIndex}. Run /stash-list to see indexes.`,
+					: `No stash entry ${displayIndex}. Run /stash list to see indexes.`,
 				"warning",
 			);
 			return;
@@ -226,53 +229,55 @@ export default function stash(pi: ExtensionAPI) {
 		return items.length > 0 ? items : null;
 	}
 
-	pi.registerCommand("pop", {
-		description: "Restore stash entry n (1 = newest, default) into the editor",
-		getArgumentCompletions: (prefix) => indexCompletions(prefix),
-		handler: async (args, ctx) => {
-			doPop(ctx, args.trim() || undefined);
-		},
-	});
+	function usageText(): string {
+		const lines = [
+			"stash: usage",
+			"",
+			"  /stash list          List all stashed entries (1 = newest)",
+			"  /stash pop [n]       Restore entry n (default: newest) into the editor",
+			"  /stash drop <n>      Remove entry n without restoring it",
+			"  /stash clear         Remove all entries (confirms first)",
+			"  /stash help          Show this help",
+			"",
+			"Stash the current editor draft with ctrl+alt+s, restore it with ctrl+alt+r.",
+			"Indexes are positional: re-run /stash list after any mutation before",
+			"addressing entries by number again.",
+			"The old flat names (/pop, /stash-list, /stash-drop, /stash-clear) still",
+			"work as deprecated aliases.",
+		];
+		return lines.join("\n");
+	}
 
-	pi.registerCommand("stash-list", {
-		description: "List stashed drafts",
-		handler: async (_args, ctx) => {
-			ctx.ui.notify(formatList(loadStash()), "info");
-		},
-	});
+	function doList(ctx: ExtensionContext): void {
+		ctx.ui.notify(formatList(loadStash()), "info");
+	}
 
-	pi.registerCommand("stash-drop", {
-		description: "Remove stash entry n without restoring it",
-		getArgumentCompletions: (prefix) => indexCompletions(prefix),
-		handler: async (args, ctx) => {
-			const arg = args.trim();
-			if (!arg) {
-				ctx.ui.notify("Usage: /stash-drop <n> (see /stash-list)", "warning");
+	function doDrop(ctx: ExtensionContext, arg: string): void {
+		const trimmed = arg.trim();
+		if (!trimmed) {
+			ctx.ui.notify("Usage: /stash drop <n> (see /stash list)", "warning");
+			return;
+		}
+		const state = loadStash();
+		const arrayIndex = resolveIndex(state, trimmed);
+		if (arrayIndex === undefined) {
+			ctx.ui.notify(`No stash entry ${trimmed}. Run /stash list to see indexes.`, "warning");
+			return;
+		}
+		const preview = firstLinePreview(state.entries[arrayIndex].text);
+		const newState = dropEntry(state, arrayIndex);
+		saveStash(newState);
+		ctx.ui.notify(`Dropped entry ${trimmed} (${preview}). ${newState.entries.length} left in stash.`, "info");
+		updateStatus(ctx);
+	}
+
+	async function doClear(ctx: ExtensionContext): Promise<void> {
+		const state = loadStash();
+		if (state.entries.length === 0) {
+			ctx.ui.notify("Stash is already empty.", "info");
 				return;
 			}
-			const state = loadStash();
-			const arrayIndex = resolveIndex(state, arg);
-			if (arrayIndex === undefined) {
-				ctx.ui.notify(`No stash entry ${arg}. Run /stash-list to see indexes.`, "warning");
-				return;
-			}
-			const preview = firstLinePreview(state.entries[arrayIndex].text);
-			const newState = dropEntry(state, arrayIndex);
-			saveStash(newState);
-			ctx.ui.notify(`Dropped entry ${arg} (${preview}). ${newState.entries.length} left in stash.`, "info");
-			updateStatus(ctx);
-		},
-	});
-
-	pi.registerCommand("stash-clear", {
-		description: "Remove all stashed drafts",
-		handler: async (_args, ctx) => {
-			const state = loadStash();
-			if (state.entries.length === 0) {
-				ctx.ui.notify("Stash is already empty.", "info");
-				return;
-			}
-			if (ctx.hasUI) {
+		if (ctx.hasUI) {
 				const ok = await ctx.ui.confirm(
 					"Clear stash",
 					`Remove all ${state.entries.length} stashed entries? This cannot be undone.`,
@@ -282,9 +287,96 @@ export default function stash(pi: ExtensionAPI) {
 					return;
 				}
 			}
-			saveStash(clearEntries(state));
-			ctx.ui.notify("Stash cleared.", "info");
-			updateStatus(ctx);
+		saveStash(clearEntries(state));
+		ctx.ui.notify("Stash cleared.", "info");
+		updateStatus(ctx);
+	}
+
+	// Root command with subcommands, mirroring the /permissions pattern.
+	// Bare /stash (or /stash help) shows usage; slash commands cannot stash the
+	// editor draft itself (typing one replaces the draft), so use ctrl+alt+s.
+	pi.registerCommand("stash", {
+		description: "Manage stashed editor drafts (list, pop, drop, clear, help)",
+		getArgumentCompletions: (prefix: string) => {
+			// First word: complete subcommands. After pop/drop: complete entry
+			// indexes. Index values include the subcommand, because completion
+			// replaces the entire argument text after /stash.
+			if (!prefix.includes(" ")) {
+				const items = [
+					{ value: "list", label: "list", description: "List all stashed entries (1 = newest)" },
+					{ value: "pop", label: "pop", description: "Restore an entry into the editor" },
+					{ value: "drop", label: "drop", description: "Remove an entry without restoring it" },
+					{ value: "clear", label: "clear", description: "Remove all entries" },
+					{ value: "help", label: "help", description: "Show stash usage" },
+			];
+				const filtered = items.filter((i) => i.value.startsWith(prefix));
+				return filtered.length > 0 ? filtered : null;
+			}
+			const parts = prefix.split(/\s+/);
+			const sub = parts[0];
+			if (sub !== "pop" && sub !== "drop") return null;
+			const indexItems = indexCompletions(parts.slice(1).join(" "));
+			if (!indexItems) return null;
+			return indexItems.map((i: { value: string; label: string; description?: string }) => ({
+				value: `${sub} ${i.value}`,
+				label: i.label,
+				description: i.description,
+			}));
+		},
+		handler: async (args, ctx) => {
+			const [sub, ...rest] = args.trim().split(/\s+/);
+			const value = rest.join(" ").trim();
+			switch (sub) {
+				case "":
+				case "help":
+					ctx.ui.notify(usageText(), "info");
+					return;
+				case "list":
+					doList(ctx);
+					return;
+				case "pop":
+					doPop(ctx, value || undefined);
+					return;
+				case "drop":
+					doDrop(ctx, value);
+					return;
+				case "clear":
+					await doClear(ctx);
+					return;
+				default:
+					ctx.ui.notify(`Unknown stash subcommand: ${sub}\n\n${usageText()}`, "warning");
+			}
+		},
+	});
+
+	// Deprecated flat aliases, kept during the migration window.
+	pi.registerCommand("pop", {
+		description: "(Deprecated: use /stash pop) Restore stash entry n (1 = newest, default) into the editor",
+		getArgumentCompletions: (prefix) => indexCompletions(prefix),
+		handler: async (args, ctx) => {
+			doPop(ctx, args.trim() || undefined);
+		},
+	});
+
+	pi.registerCommand("stash-list", {
+		description: "(Deprecated: use /stash list) List stashed drafts",
+		handler: async (_args, ctx) => {
+			doList(ctx);
+		},
+	});
+
+	pi.registerCommand("stash-drop", {
+		description: "(Deprecated: use /stash drop) Remove stash entry n without restoring it",
+		getArgumentCompletions: (prefix) => indexCompletions(prefix),
+		handler: async (args, ctx) => {
+			doDrop(ctx, args);
+		},
+	});
+
+	pi.registerCommand("stash-clear", {
+		description: "(Deprecated: use /stash clear) Remove all stashed drafts",
+		handler: async (_args, ctx) => {
+			await doClear(ctx);
 		},
 	});
 

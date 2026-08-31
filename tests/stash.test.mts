@@ -4,6 +4,10 @@
 // captures registered commands/shortcuts via a mock `pi`, and drives a mock
 // `ctx` whose ui.getEditorText/setEditorText read/write a local variable.
 //
+// Scenarios run through the canonical /stash <subcommand> surface; the
+// deprecated flat aliases (/pop, /stash-list, /stash-drop, /stash-clear)
+// get dedicated compatibility checks.
+//
 // Run: node tests/stash.test.mts
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -71,22 +75,46 @@ async function stashDraft(text: string) {
 	await shortcuts["ctrl+alt+s"].handler(makeCtx());
 }
 
+// Invoke the canonical root command with fresh notifications.
+async function stashCmd(args: string) {
+	notifications.length = 0;
+	await commands.stash.handler(args, makeCtx());
+}
+
 async function main() {
-	assert.ok(commands.pop, "should register /pop");
-	assert.ok(commands["stash-list"], "should register /stash-list");
-	assert.ok(commands["stash-drop"], "should register /stash-drop");
-	assert.ok(commands["stash-clear"], "should register /stash-clear");
+	assert.ok(commands.stash, "should register canonical /stash");
+	assert.ok(commands.pop, "should register deprecated /pop alias");
+	assert.ok(commands["stash-list"], "should register deprecated /stash-list alias");
+	assert.ok(commands["stash-drop"], "should register deprecated /stash-drop alias");
+	assert.ok(commands["stash-clear"], "should register deprecated /stash-clear alias");
 	assert.ok(shortcuts["ctrl+alt+s"], "should register ctrl+alt+s");
 	assert.ok(shortcuts["ctrl+alt+r"], "should register ctrl+alt+r");
-	assert.equal(commands.stash, undefined, "/stash should no longer be registered");
 
 	// session_start should not throw
 	sessionStartHandler?.({}, makeCtx());
 
-	// 1. /pop on empty stash warns
+	// 0. Bare /stash and /stash help show usage; unknown subcommands warn.
+	await stashCmd("");
+	assert.match(lastNotification(), /usage/i);
+	await stashCmd("help");
+	assert.match(lastNotification(), /usage/i);
+	await stashCmd("bogus");
+	assert.match(lastNotification(), /Unknown stash subcommand: bogus/);
+	assert.equal(notifications[notifications.length - 1].type, "warning");
+
+	// 0b. Root argument completion offers subcommands for the first word.
+	const subCompletions = commands.stash.getArgumentCompletions("");
+	assert.deepEqual(
+		subCompletions.map((i: any) => i.value).sort(),
+		["clear", "drop", "help", "list", "pop"],
+	);
+	assert.equal(commands.stash.getArgumentCompletions("li")?.length, 1);
+	assert.equal(commands.stash.getArgumentCompletions("li")[0].value, "list");
+	assert.equal(commands.stash.getArgumentCompletions("zzz"), null);
+
+	// 1. /stash pop on empty stash warns
 	editorText = "";
-	notifications.length = 0;
-	await commands.pop.handler("", makeCtx());
+	await stashCmd("pop");
 	assert.match(lastNotification(), /empty/i);
 
 	// 2. ctrl+alt+s with empty editor warns, does not stash
@@ -100,94 +128,125 @@ async function main() {
 	assert.equal(editorText, "", "stash should clear editor");
 	assert.match(lastNotification(), /Stashed/);
 
-	// 4. /pop restores it (bare, defaults to newest = index 1)
+	// 3b. Index completion after pop/drop carries the subcommand in the value,
+	// since completion replaces the whole argument text after /stash.
+	const popCompletions = commands.stash.getArgumentCompletions("pop ");
+	assert.ok(popCompletions, "expected index completions for 'pop '");
+	assert.deepEqual(
+		popCompletions.map((i: any) => i.value),
+		["pop 1"],
+	);
+	assert.equal(commands.stash.getArgumentCompletions("drop 1")?.[0]?.value, "drop 1");
+	assert.equal(commands.stash.getArgumentCompletions("clear 1"), null, "clear takes no index");
+
+	// 4. /stash pop restores it (bare, defaults to newest = index 1)
 	editorText = "";
-	notifications.length = 0;
-	await commands.pop.handler("", makeCtx());
+	await stashCmd("pop");
 	assert.equal(editorText, "hello world\nsecond line", "pop should restore text");
 	assert.match(lastNotification(), /Restored/);
 
-	// 5. /stash-list numbers entries newest-first, 1 = newest
+	// 5. /stash list numbers entries newest-first, 1 = newest
 	await stashDraft("oldest");
 	await stashDraft("middle");
 	await stashDraft("newest");
-	notifications.length = 0;
-	await commands["stash-list"].handler("", makeCtx());
+	await stashCmd("list");
 	const listing = lastNotification();
 	const lines = listing.split("\n");
 	assert.match(lines[1], /^1\./);
 	assert.match(lines[2], /^2\./);
 	assert.match(lines[3], /^3\./);
+	assert.match(listing, /\/stash pop <n> or \/stash drop <n>/);
 
-	// 6. /pop 2 restores the middle one, leaving the other two
+	// 6. /stash pop 2 restores the middle one, leaving the other two
 	editorText = "";
-	notifications.length = 0;
-	await commands.pop.handler("2", makeCtx());
-	assert.equal(editorText, "middle", "/pop 2 should restore the middle entry");
+	await stashCmd("pop 2");
+	assert.equal(editorText, "middle", "/stash pop 2 should restore the middle entry");
 
-	// 7. /pop 1 (bare index) matches bare /pop (newest = "newest")
+	// 7. /stash pop 1 (bare index) matches bare /stash pop (newest = "newest")
 	editorText = "";
-	await commands.pop.handler("1", makeCtx());
+	await stashCmd("pop 1");
 	assert.equal(editorText, "newest");
 
 	// remaining: "oldest" only
 	editorText = "";
-	await commands.pop.handler("1", makeCtx());
+	await stashCmd("pop 1");
 	assert.equal(editorText, "oldest");
 
 	// 8. out-of-range / non-numeric args warn without mutating state
 	await stashDraft("a");
 	await stashDraft("b");
-	notifications.length = 0;
 	editorText = "unsaved";
-	await commands.pop.handler("99", makeCtx());
+	await stashCmd("pop 99");
 	assert.match(lastNotification(), /No stash entry 99/);
 	assert.equal(editorText, "unsaved", "editor should be untouched on bad index");
 
-	notifications.length = 0;
-	await commands.pop.handler("nope", makeCtx());
+	await stashCmd("pop nope");
 	assert.match(lastNotification(), /No stash entry nope/);
 
-	notifications.length = 0;
-	await commands["stash-drop"].handler("0", makeCtx());
+	await stashCmd("drop 0");
 	assert.match(lastNotification(), /No stash entry 0/);
+
+	// missing index for drop shows canonical usage
+	await stashCmd("drop");
+	assert.match(lastNotification(), /Usage: \/stash drop <n>/);
 
 	// drain stash from prior step ("a", "b")
 	editorText = "";
-	await commands.pop.handler("", makeCtx());
+	await stashCmd("pop");
 	editorText = "";
-	await commands.pop.handler("", makeCtx());
+	await stashCmd("pop");
 
-	// 9. Drop an anonymous entry by index (the gap that motivated this change).
+	// 9. Drop an entry by index.
 	await stashDraft("keep me");
 	await stashDraft("drop me");
-	notifications.length = 0;
-	await commands["stash-drop"].handler("1", makeCtx()); // "drop me" is newest -> index 1
+	await stashCmd("drop 1"); // "drop me" is newest -> index 1
 	assert.match(lastNotification(), /Dropped entry 1/);
 	editorText = "";
-	notifications.length = 0;
-	await commands.pop.handler("", makeCtx());
+	await stashCmd("pop");
 	assert.equal(editorText, "keep me", "the dropped entry should be gone, leaving the other");
 
 	// 10. pop with non-empty editor swaps rather than clobbers
 	await stashDraft("first draft");
 	editorText = "second draft (unsaved)";
-	notifications.length = 0;
-	await commands.pop.handler("1", makeCtx());
+	await stashCmd("pop 1");
 	assert.equal(editorText, "first draft", "should restore the stashed entry");
 	assert.match(lastNotification(), /stashed first/i);
-	// The swapped-out text should now be poppable (anonymous, newest).
+	// The swapped-out text should now be poppable (newest).
 	editorText = "";
-	await commands.pop.handler("", makeCtx());
+	await stashCmd("pop");
 	assert.equal(editorText, "second draft (unsaved)", "swapped text should be recoverable");
 
-	// 11. /stash-clear empties everything (with confirm)
+	// 11. /stash clear empties everything (with confirm)
 	await stashDraft("one more");
 	confirmResult = true;
-	await commands["stash-clear"].handler("", makeCtx());
-	notifications.length = 0;
+	await stashCmd("clear");
 	editorText = "";
+	await stashCmd("pop");
+	assert.match(lastNotification(), /empty/i);
+
+	// 11b. Deprecated flat aliases still route to the same operations.
+	await stashDraft("alias entry"); // entries: [alias entry]
+	assert.deepEqual(
+		commands.pop.getArgumentCompletions("1").map((i: any) => i.value),
+		["1"],
+		"alias /pop still completes bare indexes",
+	);
+	editorText = "";
+	notifications.length = 0;
 	await commands.pop.handler("", makeCtx());
+	assert.equal(editorText, "alias entry", "/pop alias should restore");
+	await stashDraft("alias drop");
+	await stashDraft("alias list");
+	notifications.length = 0;
+	await commands["stash-drop"].handler("1", makeCtx());
+	assert.match(lastNotification(), /Dropped entry 1/);
+	notifications.length = 0;
+	await commands["stash-list"].handler("", makeCtx());
+	assert.match(lastNotification(), /Stash \(1\)/);
+	confirmResult = true;
+	await commands["stash-clear"].handler("", makeCtx());
+	editorText = "";
+	await stashCmd("pop");
 	assert.match(lastNotification(), /empty/i);
 
 	// 12. State survives a fresh extension instance (disk-backed).
@@ -202,7 +261,7 @@ async function main() {
 	};
 	stash(pi2);
 	editorText = "";
-	await commands2.pop.handler("1", makeCtx());
+	await commands2.stash.handler("pop 1", makeCtx());
 	assert.equal(editorText, "persisted", "fresh instance should see disk-backed state");
 
 	// 13. Legacy on-disk entries with a stale `name` field still load and pop fine.
@@ -213,14 +272,14 @@ async function main() {
 	);
 	editorText = "";
 	notifications.length = 0;
-	await commands.pop.handler("", makeCtx());
+	await commands2.stash.handler("pop", makeCtx());
 	assert.equal(editorText, "legacy text", "legacy named entry should still pop by index");
 
 	// 14. Corrupt JSON degrades to empty stash, no throw.
 	writeFileSync(stashFile, "{ not valid json", "utf8");
 	notifications.length = 0;
 	editorText = "";
-	await commands.pop.handler("", makeCtx());
+	await commands2.stash.handler("pop", makeCtx());
 	assert.match(lastNotification(), /empty/i);
 
 	// 15. MAX_ENTRIES cap holds (oldest entries dropped first).
