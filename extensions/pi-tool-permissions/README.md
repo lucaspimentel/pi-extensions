@@ -716,8 +716,8 @@ Turn it on when you want to see the classifier's reasoning for actions it's sile
 | ----- | ------- | ------- |
 | `classifier` | _(auto-select)_ | Optional explicit model pin (`{ provider, model }`). If omitted, a haiku-tier model is auto-selected from the available pool, preferring the currently selected model's provider. |
 | `environment` | `[]` | Free-text facts shown to the classifier (e.g. trusted repos/domains). Inherently user-specific — no default. |
-| `allow` | See [`DEFAULT_AUTO_MODE.allow`](./index.ts) | NL descriptions of actions to silently allow. |
-| `soft_deny` | See [`DEFAULT_AUTO_MODE.soft_deny`](./index.ts) | NL descriptions of actions to prompt for (with the classifier's reason). |
+| `allow` | See [`DEFAULT_AUTO_MODE.allow`](./rules.ts) | NL descriptions of actions to silently allow. |
+| `soft_deny` | See [`DEFAULT_AUTO_MODE.soft_deny`](./rules.ts) | NL descriptions of actions to prompt for (with the classifier's reason). |
 | `hard_deny` | `["Sending data to third-party APIs or external services for telemetry, analytics, or exfiltration (not normal GitHub dev actions like opening PRs or pushing branches via gh)"]` | NL descriptions of actions to always block. |
 | `classifyAllShell` | `true` | When `true`, route every bash command (including read-only auto-allowed ones) through the classifier. Compounds with no static `ask`/`deny` sub are classified as one whole command; compounds containing a static `ask` sub still prompt per-sub. |
 

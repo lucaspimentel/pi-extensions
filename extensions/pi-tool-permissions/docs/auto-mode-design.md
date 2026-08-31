@@ -4,6 +4,7 @@
 
 ## Status
 
+- **2026-08-31** — The pure helpers this doc cites as living in `index.ts` (config types, `mergeConfig`/`loadConfig`, the classifier helpers, `decide()`) moved to `rules.ts` in a pure-move refactor; `index.ts` now holds only the pi-runtime glue and imports from `rules.ts`. Line references below are to the pre-move `index.ts` and are kept as historical record.
 - **2026-08-11** — Updated auto-mode TODO for pi-ai 0.84 `modelRegistry` migration (commit `ee68d35`). TODO entry in `TODO.md` now points at `ctx.modelRegistry.find()` / `hasConfiguredAuth()` / `complete()` and the current `extensions/idle-summary/index.ts` template, not the removed `@earendil-works/pi-ai` main-entry `complete()`/`getModel()`.
 - **2026-08-12** — Simplified auto mode from a `defaultAction: "auto"` value into a **session-toggle layer** between `toolDefaults` and `defaultAction`. `defaultAction` is back to `allow | deny | ask`; legacy `"auto"` coerces to `"ask"`. The `/permissions auto` toggle alone now engages the classifier — no on-disk `defaultAction: "auto"` requirement. `no_match` verdicts fall through to `defaultAction`; "classifier unavailable" stubs to `ask`. Removed `effectiveAction` / `sessionDefaultAction` / `resolveConfig` / `switchToAutoMode`.
 - **Next** — Implement type/config spine for `"auto"` `defaultAction`, then classifier runtime.
