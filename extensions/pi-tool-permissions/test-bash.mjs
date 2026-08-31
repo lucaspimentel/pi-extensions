@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import {
 	makeTestRunner, getMatchField, suggestRule,
 	splitTopLevelShell, decideCompound, decide, makeCfg, isNoopCd,
-	isReadOnlyBashSubcommand, hasTopLevelFileRedirect, rulePatternAllowsRedirect,
+	isReadOnlyBashSubcommand, isPureVariableAssignment, hasTopLevelFileRedirect, rulePatternAllowsRedirect,
 	parseRule,
 	actionIcon, formatBreakdownLine, formatBreakdown,
 	stripLineContinuations, stripStructuralKeywords,
@@ -285,6 +285,40 @@ test("Windows: cd C:/Users/alice/proj/  → no-op", isNoopCd("cd C:/Users/alice/
 test("Windows: case-insensitive match",            isNoopCd("cd c:/users/alice/proj",  WIN_CWD), true);
 test("Windows: cd C:/Users/bob  → not no-op",     isNoopCd("cd C:/Users/bob",         WIN_CWD), false);
 
+section("isPureVariableAssignment — pure forms");
+
+test('SKILL_DIR="..." → pure',         isPureVariableAssignment('SKILL_DIR="/home/lucas/.pi/agent/git/github.com/ddoghq-sandbox/lucas-pimentel-coding-agent-tools/skills/gitlab-status"'), true);
+test("SKILL_DIR=/home/x → pure",        isPureVariableAssignment("SKILL_DIR=/home/lucas/x"), true);
+test("PID=130847101 → pure",            isPureVariableAssignment("PID=130847101"), true);
+test("SKILL_DIR=$OTHER → pure",         isPureVariableAssignment("SKILL_DIR=$OTHER"), true);
+test("SKILL_DIR= → pure (empty value)", isPureVariableAssignment("SKILL_DIR="), true);
+test("A=1 B=2 → pure (multi)",          isPureVariableAssignment("A=1 B=2"), true);
+test('export SKILL_DIR="..." → pure',   isPureVariableAssignment('export SKILL_DIR="/home/lucas/x"'), true);
+test("readonly X=1 → pure",             isPureVariableAssignment("readonly X=1"), true);
+test("declare -r X=1 → pure",           isPureVariableAssignment("declare -r X=1"), true);
+test('X+=" appended" → pure (append)', isPureVariableAssignment('X+=" appended"'), true);
+test('X="a ) b" → pure (literal ) in quotes)', isPureVariableAssignment('X="a ) b"'), true);
+test('X="a;b" → pure (quoted ; is a literal)', isPureVariableAssignment('X="a;b"'), true);
+
+section("isPureVariableAssignment — impure / rejected");
+
+test("TOKEN=$(ddtool auth) → impure",   isPureVariableAssignment("TOKEN=$(ddtool auth gitlab token)"), false);
+test("X=`pwd` → impure (backtick)",     isPureVariableAssignment("X=`pwd`"), false);
+test("A=1 echo hi → impure (trailing cmd)", isPureVariableAssignment("A=1 echo hi"), false);
+test("A=1 B=2 cmd → impure",            isPureVariableAssignment("A=1 B=2 cmd"), false);
+test("X=$((1+2)) → impure (arith)",     isPureVariableAssignment("X=$((1+2))"), false);
+test("X=1;reboot → impure (separator)",  isPureVariableAssignment("X=1;reboot"), false);
+test("X=1&&reboot → impure (separator)", isPureVariableAssignment("X=1&&reboot"), false);
+test("X=1|reboot → impure (separator)",  isPureVariableAssignment("X=1|reboot"), false);
+test("X=1\nreboot → impure (newline)",   isPureVariableAssignment("X=1\nreboot"), false);
+test("X=1&reboot → impure (background)", isPureVariableAssignment("X=1&reboot"), false);
+test("A=1 > out → impure (redirect)",  isPureVariableAssignment("A=1 > out"), false);
+test("echo hi → not an assignment",     isPureVariableAssignment("echo hi"), false);
+test("cd . → not an assignment",        isPureVariableAssignment("cd ."), false);
+test("empty string → false",            isPureVariableAssignment(""), false);
+test("declare -p X → not an assignment", isPureVariableAssignment("declare -p X"), false);
+test("bare export → not an assignment", isPureVariableAssignment("export"), false);
+
 section("decide — no-op cd is auto-allowed");
 
 // Even with a very restrictive defaultAction: deny and no allow rules the no-op forms go through
@@ -310,6 +344,45 @@ section("decide — allowNoopCd: false disables the behaviour");
 const noNoopCfg = makeCfg({ defaultAction: "deny", allowNoopCd: false, cwd: CWD });
 test("cd .  denied when allowNoopCd: false",  decide(noNoopCfg, "bash", { command: "cd ." }),    "deny");
 test("cd $PWD  denied when allowNoopCd: false",decide(noNoopCfg, "bash", { command: "cd $PWD" }), "deny");
+
+section("decide — bashAllowPureVarAssign auto-allow");
+
+// Even with a very restrictive defaultAction: deny and no allow rules, pure
+// assignments go through.
+const pvaStrictCfg = makeCfg({ defaultAction: "deny", cwd: CWD });
+test('SKILL_DIR="..." allowed with deny default', decide(pvaStrictCfg, "bash", { command: 'SKILL_DIR="/home/lucas/.pi/agent/git/github.com/ddoghq-sandbox/lucas-pimentel-coding-agent-tools/skills/gitlab-status"' }), "allow");
+test("PID=130847101 allowed with deny default",   decide(pvaStrictCfg, "bash", { command: "PID=130847101" }), "allow");
+test('export FOO="bar" allowed',                  decide(pvaStrictCfg, "bash", { command: 'export FOO="bar"' }), "allow");
+test("A=1 B=2 allowed (multi)",                   decide(pvaStrictCfg, "bash", { command: "A=1 B=2" }), "allow");
+test("TOKEN=$(evil) falls through to deny",       decide(pvaStrictCfg, "bash", { command: "TOKEN=$(evil)" }), "deny");
+test("A=1 echo hi falls through to deny",         decide(pvaStrictCfg, "bash", { command: "A=1 echo hi" }), "deny");
+test("X=$((1+2)) falls through to deny",          decide(pvaStrictCfg, "bash", { command: "X=$((1+2))" }), "deny");
+
+section("decide — bashAllowPureVarAssign: false disables it");
+
+const pvaOffCfg = makeCfg({ defaultAction: "deny", bashAllowPureVarAssign: false, cwd: CWD });
+test('SKILL_DIR="..." denied when flag off', decide(pvaOffCfg, "bash", { command: 'SKILL_DIR="/home/x"' }), "deny");
+test("PID=1 denied when flag off",          decide(pvaOffCfg, "bash", { command: "PID=1" }), "deny");
+
+section("decide — explicit deny beats pure-assignment allow");
+
+const pvaDenyCfg = makeCfg({ deny: ["Bash(SKILL_DIR=*)"], defaultAction: "allow", cwd: CWD });
+test('Bash(SKILL_DIR=*) deny wins', decide(pvaDenyCfg, "bash", { command: 'SKILL_DIR="/home/x"' }), "deny");
+
+section("decideCompound — pure-assignment subcommands");
+
+const pvaCompCfg = makeCfg({ defaultAction: "deny", bashAllowPureVarAssign: true, cwd: CWD });
+const twoAssign = decideCompound(pvaCompCfg, "bash", { command: 'SKILL_DIR="/home/x"\nPID=1' });
+test("two pure assigns → allow",         twoAssign.action, "allow");
+test("two pure assigns → isCompound true", twoAssign.isCompound, true);
+test("two pure assigns → 2 parts",        twoAssign.breakdown.length, 2);
+test("first assign part → allow",         twoAssign.breakdown[0].action, "allow");
+test("second assign part → allow",        twoAssign.breakdown[1].action, "allow");
+
+const mixedAssign = decideCompound(pvaCompCfg, "bash", { command: 'SKILL_DIR="/home/x"\nTOKEN=$(evil)' });
+test("pure + impure assigns → deny",      mixedAssign.action, "deny");
+test("pure part → allow",                 mixedAssign.breakdown[0].action, "allow");
+test("impure part → deny (defaultAction)", mixedAssign.breakdown[1].action, "deny");
 
 section("decideCompound — no-op cd inside compound command");
 

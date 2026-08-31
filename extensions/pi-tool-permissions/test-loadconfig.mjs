@@ -33,6 +33,7 @@ test("implicit.grepAllowCwd is true",           empty.implicit.grepAllowCwd, tru
 test("implicit.globAllowCwd is true",           empty.implicit.globAllowCwd, true);
 test("implicit.lsAllowCwd is true",             empty.implicit.lsAllowCwd, true);
 test("implicit.bashReadOnlyAllowCwd is true",   empty.implicit.bashReadOnlyAllowCwd, true);
+test("implicit.bashAllowPureVarAssign is true", empty.implicit.bashAllowPureVarAssign, true);
 test("implicit.allow has 4 entries (Read+Grep+Glob+Ls)", empty.implicit.allow.length, 4);
 test("implicit.allow[0] is Read(<cwd>/**)",     empty.implicit.allow[0], IMPLICIT_READ);
 test("implicit.allow[1] is Grep(<cwd>/**)",     empty.implicit.allow[1], IMPLICIT_GREP);
@@ -52,6 +53,15 @@ test("Ls still in allow when readAllowCwd:false",   noAutoRead.implicit.allow.in
 test("implicit.readAllowCwd is false",          noAutoRead.implicit.readAllowCwd, false);
 test("implicit.allow has 3 entries (Grep+Glob+Ls)", noAutoRead.implicit.allow.length, 3);
 test("write default still injected",            noAutoRead.toolDefaults["write"], "ask");
+
+section("bashAllowPureVarAssign: false");
+
+const noPva = loadConfigFromObjects({}, { bashAllowPureVarAssign: false }, CWD);
+test("implicit.bashAllowPureVarAssign is false", noPva.implicit.bashAllowPureVarAssign, false);
+test("top-level bashAllowPureVarAssign is false", noPva.bashAllowPureVarAssign, false);
+// Other implicit flags unaffected
+test("bashReadOnlyAllowCwd still true",          noPva.implicit.bashReadOnlyAllowCwd, true);
+test("allowNoopCd still true",                   noPva.implicit.allowNoopCd, true);
 
 section("lsAllowCwd: false");
 

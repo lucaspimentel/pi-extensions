@@ -102,6 +102,14 @@
  *     Unix null device — writes are discarded) are likewise NOT file writes and
  *     stay auto-allowable, so `cmd 2>/dev/null` is not blocked.
  *     Disable with "bashReadOnlyAllowCwd": false.
+ *   bashAllowPureVarAssign (default: true)
+ *     Silently allows pure shell variable assignments (e.g. `SKILL_DIR="/path"`,
+ *     `PID=130847101`, `export FOO="bar"`) whose RHS contains no command,
+ *     process, or arithmetic substitution. Impure forms (`TOKEN=$(ddtool ...)`,
+ *     `` X=`pwd` ``, `A=1 echo hi`, `X=$((1+2))`) still fall through to normal
+ *     rules. Exempt from auto-mode classifyAllShell (pure assignments are
+ *     statically allowed even in auto mode). Explicit deny rules win.
+ *     Disable with "bashAllowPureVarAssign": false.
  *   write → ask (automatic)
  *     Unless toolDefaults.write is explicitly set, Write always prompts regardless
  *     of defaultAction. Override with "toolDefaults": { "write": "allow" }.
@@ -327,6 +335,8 @@ interface PermissionsConfig {
 	readAllowPiDocs?: boolean;
 	/** When false, disables the implicit allow for read-only bash commands in cwd. Default: true. */
 	bashReadOnlyAllowCwd?: boolean;
+	/** When false, disables the implicit allow for pure shell variable assignments. Default: true. */
+	bashAllowPureVarAssign?: boolean;
 	/** When false, disables the implicit allow for no-op `cd` commands. Default: true. */
 	allowNoopCd?: boolean;
 }
@@ -344,6 +354,8 @@ interface ResolvedConfig {
 	allowNoopCd: boolean;
 	/** When true, read-only bash subcommands with paths inside cwd are silently allowed. */
 	bashReadOnlyAllowCwd: boolean;
+	/** When true, pure shell variable assignments (no command/process/arithmetic substitution) are silently allowed. */
+	bashAllowPureVarAssign: boolean;
 	/** Resolved auto-mode config (merged user + project). Always present; used when the session auto toggle is on. */
 	autoMode: ResolvedAutoModeConfig;
 	/** Tracks synthetically injected rules/defaults (never written to disk). */
@@ -357,6 +369,7 @@ interface ResolvedConfig {
 		readAllowSkills: boolean;
 		readAllowPiDocs: boolean;
 		bashReadOnlyAllowCwd: boolean;
+		bashAllowPureVarAssign: boolean;
 		allowNoopCd: boolean;
 	};
 }
@@ -495,6 +508,7 @@ export function mergeConfig(
 	const readAllowSkills = project.readAllowSkills ?? user.readAllowSkills ?? true;
 	const readAllowPiDocs = project.readAllowPiDocs ?? user.readAllowPiDocs ?? true;
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
+	const bashAllowPureVarAssign = project.bashAllowPureVarAssign ?? user.bashAllowPureVarAssign ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
 	const implicitAllow: string[] = [];
 	if (readAllowCwd) {
@@ -553,8 +567,9 @@ export function mergeConfig(
 		cwd,
 		allowNoopCd,
 		bashReadOnlyAllowCwd,
+		bashAllowPureVarAssign,
 		autoMode,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, readAllowPiDocs, bashReadOnlyAllowCwd, allowNoopCd },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, readAllowPiDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd },
 	};
 }
 
@@ -1033,6 +1048,133 @@ export function isReadOnlyBashSubcommand(cmd: string, cwd: string): boolean {
 			const norm = normalizeMatchPath(arg, cwd).toLowerCase();
 			return norm === cwdNorm || norm.startsWith(cwdNorm + "/");
 		});
+	}
+	return false;
+}
+
+/**
+ * Bash builtin keywords that may prefix a pure variable assignment without
+ * introducing side-effects (e.g. `export FOO=bar`, `declare -r X=1`). They are
+ * pure bookkeeping when the RHS is a literal/expansion, so they are recognized
+ * as optional leading keywords by `isPureVariableAssignment`.
+ */
+const ASSIGN_PREFIX_BUILTINS = new Set([
+	"export", "local", "readonly", "declare", "typeset",
+]);
+
+/**
+ * Returns true when `cmd` is a *pure* shell variable assignment — one that
+ * performs no command, process, or arithmetic substitution and runs no other
+ * command. Pure assignments are no-ops from the system's perspective (pi runs
+ * each Bash call in a fresh shell, so a bare assignment does nothing
+ * observable), so they are safe to auto-allow under `bashAllowPureVarAssign`.
+ *
+ * Detection (operates on the RAW command string, not `tokenizeSimple` tokens,
+ * because quote-stripping would conflate `FOO="a b"` with `FOO=a b`):
+ *  1. Reject if `cmd` contains a top-level *file* output redirection.
+ *  2. Quote-aware scan splits `cmd` into top-level whitespace-delimited tokens,
+ *     preserving each token's original substring (quotes intact) so RHS
+ *     screening sees `$(` etc. Unmatched quotes → false (fall through to ask).
+ *  3. Strip an optional leading prefix builtin (`export`/`local`/`readonly`/
+ *     `declare`/`typeset`) and any of its flags (e.g. `-r`, `-x`, `-i`).
+ *  4. Every remaining token must match `^[A-Za-z_][A-Za-z0-9_]*(\+?=)(.*)$`
+ *     (covers `=`, `+=`, and empty value `FOO=`). A non-assignment token means
+ *     a trailing command runs (e.g. `A=1 echo hi`) → false.
+ *  5. For each assignment's raw RHS (before quote-stripping), reject if it
+ *     contains an unquoted command separator (`;`, `|`, `&`, newline) —
+ *     e.g. `X=1;reboot` hides a trailing command inside the assignment token.
+ *  6. For each assignment's RHS (surrounding quotes stripped for screening),
+ *     reject if it contains any side-effect vector: backtick command
+ *     substitution, `$(...)`, `$((...))`, or process substitution `<(...)` /
+ *     `>(...)`. Bare `$VAR` / `${VAR}` expansions are allowed (no command
+ *     runs). A literal `)` inside a quoted RHS (e.g. `X="a ) b"`) is fine
+ *     because the screen keys on `$(`, not bare `)`. Quoted separators are
+ *     fine too (`X="a;b"` is a literal value), so the separator scan runs on
+ *     the raw RHS, quote-aware.
+ */
+export function isPureVariableAssignment(cmd: string): boolean {
+	const s = cmd.trim();
+	if (!s) return false;
+	if (hasTopLevelFileRedirect(s)) return false;
+
+	// Quote-aware top-level tokenization that preserves each token's original
+	// substring (quotes included) so RHS screening can detect `$(` etc.
+	const tokens: string[] = [];
+	let cur = "";
+	let inSingle = false;
+	let inDouble = false;
+	let i = 0;
+	while (i < s.length) {
+		const ch = s[i];
+		if (ch === "\\" && !inSingle) {
+			// Preserve the escape and the escaped char in the token.
+			cur += ch + (s[i + 1] ?? "");
+			i += 2;
+			continue;
+		}
+		if (ch === "'" && !inDouble) { inSingle = !inSingle; cur += ch; i++; continue; }
+		if (ch === '"' && !inSingle) { inDouble = !inDouble; cur += ch; i++; continue; }
+		if ((ch === " " || ch === "\t") && !inSingle && !inDouble) {
+			if (cur) { tokens.push(cur); cur = ""; }
+			i++;
+			continue;
+		}
+		cur += ch;
+		i++;
+	}
+	if (inSingle || inDouble) return false; // unmatched quote — don't guess
+	if (cur) tokens.push(cur);
+	if (tokens.length === 0) return false;
+
+	// Strip an optional leading prefix builtin and its flags.
+	let start = 0;
+	if (ASSIGN_PREFIX_BUILTINS.has(tokens[0])) {
+		start = 1;
+		while (start < tokens.length && tokens[start].startsWith("-")) start++;
+	}
+	if (start >= tokens.length) return false; // e.g. bare `declare -p` — not an assignment
+
+	const assignRe = /^[A-Za-z_][A-Za-z0-9_]*\+?=(.*)$/s;
+	for (let j = start; j < tokens.length; j++) {
+		const tok = tokens[j];
+		const m = tok.match(assignRe);
+		if (!m) return false; // a non-assignment token means a command runs
+		// Reject unquoted command separators in the raw RHS: a token like
+		// `X=1;reboot` hides a trailing command inside the assignment (this
+		// function is also unit-tested directly, so don't rely on
+		// splitTopLevelShell having split on separators already).
+		if (hasUnquotedSeparator(m[1])) return false;
+		// Strip surrounding quotes from the RHS for side-effect screening.
+		let rhs = m[1];
+		if (rhs.length >= 2 && ((rhs[0] === '"' && rhs[rhs.length - 1] === '"') || (rhs[0] === "'" && rhs[rhs.length - 1] === "'"))) {
+			rhs = rhs.slice(1, -1);
+		}
+		// Reject any side-effect vector: backtick command substitution,
+		// `$(...)` command substitution (also covers `$((...))` arithmetic),
+		// or process substitution `>(...)` / `<(...)`.
+		if (/`|\$\(|>\(|<\(/.test(rhs)) return false;
+	}
+	return true;
+}
+
+/**
+ * Returns true when `s` contains a shell command separator (`;`, `|`, `&`,
+ * or a newline) outside single/double quotes (backslash escapes respected).
+ * Quoted separators are literal values (e.g. `X="a;b"`), not commands.
+ * Complements `isPureVariableAssignment`, which must not mistake a token
+ * like `X=1;reboot` for a single pure assignment.
+ */
+function hasUnquotedSeparator(s: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+	let i = 0;
+	while (i < s.length) {
+		const ch = s[i];
+		if (ch === "\\" && !inSingle) { i += 2; continue; }
+		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
+		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
+		if (!inSingle && !inDouble && (ch === ";" || ch === "|" || ch === "&" || ch === "\n" || ch === "\r")) return true;
+		i++;
 	}
 	return false;
 }
@@ -1980,6 +2122,12 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	const skipReadOnlyBash = autoActive && cfg.autoMode.classifyAllShell;
 	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd)) return "allow";
 	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
+	// Pure shell variable assignments (no command/process/arithmetic substitution)
+	// are no-ops in pi's fresh-shell model. Exempt from `skipReadOnlyBash` (auto
+	// mode's classifyAllShell) so they are statically allowed even in auto mode —
+	// matching allowNoopCd, and avoiding a wasteful classifier call that could
+	// mis-allow an impure `$(...)` form. Impure assignments still fall through.
+	if (cfg.bashAllowPureVarAssign && normalizeTool(toolName) === "bash" && isPureVariableAssignment(String(input.command ?? ""))) return "allow";
 	if (check(cfg.ask)) return "ask";
 	// Allow rules — redirect-aware for Bash. A Bash command containing a
 	// top-level *file* output redirection (e.g. `rg x > out.txt`) is NOT
@@ -2740,6 +2888,7 @@ export default function (pi: ExtensionAPI) {
 					`readAllowSkills: ${cfg.implicit.readAllowSkills}`,
 					`readAllowPiDocs: ${cfg.implicit.readAllowPiDocs}`,
 					`bashReadOnlyAllowCwd: ${cfg.implicit.bashReadOnlyAllowCwd}`,
+					`bashAllowPureVarAssign: ${cfg.implicit.bashAllowPureVarAssign}`,
 					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
 					`allow all edits (this session): ${allowAllEdits ? "ON" : "OFF"}`,
 				`auto mode (this session): ${autoModeEnabled ? "ON" : "OFF"}`,

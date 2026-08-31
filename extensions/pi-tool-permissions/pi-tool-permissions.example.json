@@ -7,6 +7,7 @@
   "readAllowSkills": true,
   "readAllowPiDocs": true,
   "bashReadOnlyAllowCwd": true,
+  "bashAllowPureVarAssign": true,
   "toolDefaults": {
     "write": "ask",
     "mcp": "ask"

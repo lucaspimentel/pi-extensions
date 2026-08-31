@@ -25,6 +25,7 @@ export {
 	piDocsReadGlobs,
 	isNoopCd,
 	isReadOnlyBashSubcommand,
+	isPureVariableAssignment,
 	hasTopLevelFileRedirect,
 	rulePatternAllowsRedirect,
 	normalizeToolDefaultsKeys,
@@ -92,10 +93,10 @@ export function saveUserConfigToDisk(home, cfg) {
  * Note: bashReadOnlyAllowCwd defaults to false here to preserve existing test
  * semantics. Pass bashReadOnlyAllowCwd: true explicitly when testing that feature.
  */
-export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, cwd = process.cwd(), autoMode } = {}) {
+export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, bashAllowPureVarAssign = true, cwd = process.cwd(), autoMode } = {}) {
 	// Normalize toolDefault keys so decide() can look them up via normalizeTool()
 	// Coerce legacy `defaultAction: "auto"` → "ask" (auto mode is now a session toggle).
-	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction: coerceDefaultAction(defaultAction), allowNoopCd, bashReadOnlyAllowCwd, cwd, autoMode: autoMode ?? { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false }, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, allowNoopCd } };
+	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction: coerceDefaultAction(defaultAction), allowNoopCd, bashReadOnlyAllowCwd, bashAllowPureVarAssign, cwd, autoMode: autoMode ?? { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false }, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd } };
 }
 
 // ── Test runner ───────────────────────────────────────────────────────────

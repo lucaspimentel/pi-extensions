@@ -370,6 +370,27 @@ Disable per-project:
 { "allowNoopCd": false }
 ```
 
+#### `bashAllowPureVarAssign` (default: `true`)
+
+Silently allows **pure shell variable assignments** — assignments whose right-hand side contains no command, process, or arithmetic substitution. In pi's fresh-shell model a bare assignment does nothing observable, so it's a no-op like `cd .`.
+
+| Allowed (pure) | Still prompts (impure) |
+| -------------- | --------------------- |
+| `SKILL_DIR="/path"` | `TOKEN=$(ddtool auth)` |
+| `PID=130847101` | `` X=`pwd` `` |
+| `export FOO="bar"` | `A=1 echo hi` |
+| `A=1 B=2` | `X=$((1+2))` |
+| `SKILL_DIR=$OTHER` | `A=1 > out` |
+
+Recognised prefix builtins (`export`, `local`, `readonly`, `declare`, `typeset`) are allowed when the RHS is pure. Bare `$VAR` / `${VAR}` expansions are allowed (no command runs); `$(`, backticks, `$((`, and process substitution `>(` / `<(` are the side-effect vectors that trigger a prompt. A non-assignment token after the assignments (e.g. `A=1 echo hi`) means a command runs, so it falls through.
+
+Like `allowNoopCd`, this check is **exempt from auto-mode `classifyAllShell`** — pure assignments are statically allowed even in auto mode (skipping a wasteful classifier call that could mis-allow an impure `$(...)` form). Impure assignments still reach the classifier. Explicit `deny` rules always win.
+
+Disable per-project:
+```json
+{ "bashAllowPureVarAssign": false }
+```
+
 #### `write` → `ask` (automatic)
 
 Unless you explicitly set `toolDefaults.write`, every `Write` call triggers a confirmation
