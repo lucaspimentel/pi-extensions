@@ -23,6 +23,7 @@ export {
 	cwdGlobPattern,
 	skillReadGlobs,
 	piDocsReadGlobs,
+	agentDocsReadRules,
 	isNoopCd,
 	isReadOnlyBashSubcommand,
 	isPureVariableAssignment,

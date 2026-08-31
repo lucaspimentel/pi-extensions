@@ -4,7 +4,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
-	makeTestRunner, normalizePathSep, cwdGlobPattern, skillReadGlobs, piDocsReadGlobs,
+	makeTestRunner, normalizePathSep, cwdGlobPattern, skillReadGlobs, piDocsReadGlobs, agentDocsReadRules,
 	loadConfigFromObjects, decide,
 	PROJECT_CONFIG_REL, LEGACY_PROJECT_CONFIG_REL, LEGACY2_PROJECT_CONFIG_REL,
 	loadProjectConfigFromDisk, saveProjectConfigToDisk,
@@ -34,7 +34,8 @@ test("implicit.globAllowCwd is true",           empty.implicit.globAllowCwd, tru
 test("implicit.lsAllowCwd is true",             empty.implicit.lsAllowCwd, true);
 test("implicit.bashReadOnlyAllowCwd is true",   empty.implicit.bashReadOnlyAllowCwd, true);
 test("implicit.bashAllowPureVarAssign is true", empty.implicit.bashAllowPureVarAssign, true);
-test("implicit.allow has 4 entries (Read+Grep+Glob+Ls)", empty.implicit.allow.length, 4);
+// 4 cwd + 4 ancestor dirs × 2 agent docs (8) = 12
+test("implicit.allow has 4 cwd + 8 agent-doc rules", empty.implicit.allow.length, 12);
 test("implicit.allow[0] is Read(<cwd>/**)",     empty.implicit.allow[0], IMPLICIT_READ);
 test("implicit.allow[1] is Grep(<cwd>/**)",     empty.implicit.allow[1], IMPLICIT_GREP);
 test("implicit.allow[2] is Glob(<cwd>/**)",     empty.implicit.allow[2], IMPLICIT_GLOB);
@@ -46,12 +47,13 @@ test("no other implicit toolDefaults",          Object.keys(empty.implicit.toolD
 section("readAllowCwd: false");
 
 const noAutoRead = loadConfigFromObjects({}, { readAllowCwd: false }, CWD);
-test("no Read in allow when readAllowCwd:false", noAutoRead.implicit.allow.some(r => r.startsWith("Read(")), false);
+test("no cwd-glob Read in allow when readAllowCwd:false", noAutoRead.implicit.allow.includes(IMPLICIT_READ), false);
 test("Grep still in allow when readAllowCwd:false", noAutoRead.implicit.allow.includes(IMPLICIT_GREP), true);
 test("Glob still in allow when readAllowCwd:false", noAutoRead.implicit.allow.includes(IMPLICIT_GLOB), true);
 test("Ls still in allow when readAllowCwd:false",   noAutoRead.implicit.allow.includes(IMPLICIT_LS), true);
 test("implicit.readAllowCwd is false",          noAutoRead.implicit.readAllowCwd, false);
-test("implicit.allow has 3 entries (Grep+Glob+Ls)", noAutoRead.implicit.allow.length, 3);
+// 3 cwd (Grep+Glob+Ls) + 8 agent-doc rules = 11
+test("implicit.allow has 3 cwd + 8 agent-doc rules", noAutoRead.implicit.allow.length, 11);
 test("write default still injected",            noAutoRead.toolDefaults["write"], "ask");
 
 section("bashAllowPureVarAssign: false");
@@ -71,7 +73,8 @@ test("Read still in allow when lsAllowCwd:false", noAutoLs.implicit.allow.includ
 test("Grep still in allow when lsAllowCwd:false", noAutoLs.implicit.allow.includes(IMPLICIT_GREP), true);
 test("Glob still in allow when lsAllowCwd:false", noAutoLs.implicit.allow.includes(IMPLICIT_GLOB), true);
 test("implicit.lsAllowCwd is false",            noAutoLs.implicit.lsAllowCwd, false);
-test("implicit.allow has 3 entries (Read+Grep+Glob)", noAutoLs.implicit.allow.length, 3);
+// 3 cwd (Read+Grep+Glob) + 8 agent-doc rules = 11
+test("implicit.allow has 3 cwd + 8 agent-doc rules", noAutoLs.implicit.allow.length, 11);
 
 section("explicit toolDefaults.write suppresses implicit");
 
@@ -142,6 +145,86 @@ test("Ls outside cwd → defaultAction ask",      decide(cfg, "ls", { path: "/et
 const noLsCfg = loadConfigFromObjects({}, { lsAllowCwd: false, defaultAction: "ask" }, CWD);
 test("Ls inside cwd → ask when lsAllowCwd:false", decide(noLsCfg, "ls", { path: NORM_CWD + "/src/" }), "ask");
 
+section("readAllowAgentDocs");
+
+const DEEP_CWD = "C:/work/proj/sub";
+const DEEP_RULES = agentDocsReadRules(DEEP_CWD);
+test("agentDocsReadRules covers cwd AGENTS.md",      DEEP_RULES.includes("Read(C:/work/proj/sub/AGENTS.md)"), true);
+test("agentDocsReadRules covers cwd CLAUDE.md",      DEEP_RULES.includes("Read(C:/work/proj/sub/CLAUDE.md)"), true);
+test("agentDocsReadRules covers parent AGENTS.md",   DEEP_RULES.includes("Read(C:/work/proj/AGENTS.md)"), true);
+test("agentDocsReadRules covers grandparent AGENTS.md", DEEP_RULES.includes("Read(C:/work/AGENTS.md)"), true);
+test("agentDocsReadRules covers drive-root AGENTS.md",  DEEP_RULES.includes("Read(C:/AGENTS.md)"), true);
+test("agentDocsReadRules covers drive-root CLAUDE.md",  DEEP_RULES.includes("Read(C:/CLAUDE.md)"), true);
+test("agentDocsReadRules length (4 dirs × 2 files)", DEEP_RULES.length, 8);
+test("agentDocsReadRules emits no bare-drive entry", DEEP_RULES.some((r) => r.startsWith("Read(C:")) && !DEEP_RULES.includes("Read(C:"), true);
+test("agentDocsReadRules uses forward slashes",      DEEP_RULES.every((r) => !r.includes("\\")), true);
+
+// POSIX-style paths work identically (pure string walk, no node:path)
+test("agentDocsReadRules POSIX deep cwd", JSON.stringify(agentDocsReadRules("/tmp/a/b")),
+	JSON.stringify([
+		"Read(/tmp/a/b/AGENTS.md)", "Read(/tmp/a/b/CLAUDE.md)",
+		"Read(/tmp/a/AGENTS.md)", "Read(/tmp/a/CLAUDE.md)",
+		"Read(/tmp/AGENTS.md)", "Read(/tmp/CLAUDE.md)",
+		"Read(/AGENTS.md)", "Read(/CLAUDE.md)",
+	]));
+
+// Root boundaries
+const driveRootRules = agentDocsReadRules("C:/");
+test("drive-root cwd: exactly 2 rules",           driveRootRules.length, 2);
+test("drive-root cwd: AGENTS.md rule",            driveRootRules.includes("Read(C:/AGENTS.md)"), true);
+test("drive-root cwd: CLAUDE.md rule",            driveRootRules.includes("Read(C:/CLAUDE.md)"), true);
+const posixRootRules = agentDocsReadRules("/");
+test("POSIX root cwd: exactly 2 rules",           posixRootRules.length, 2);
+test("POSIX root cwd: AGENTS.md rule",            posixRootRules.includes("Read(/AGENTS.md)"), true);
+test("POSIX root cwd: CLAUDE.md rule",            posixRootRules.includes("Read(/CLAUDE.md)"), true);
+// Trailing slash on a non-root dir is handled
+test("trailing slash input normalized",           agentDocsReadRules("/tmp/a/").length, 6);
+
+// mergeConfig: default on, injected into implicit.allow for CWD + ancestors
+const withAgent = loadConfigFromObjects({}, {}, CWD);
+test("implicit.readAllowAgentDocs is true by default", withAgent.implicit.readAllowAgentDocs, true);
+test("implicit.allow includes Read(<cwd>/AGENTS.md)",  withAgent.implicit.allow.includes(`Read(${NORM_CWD}/AGENTS.md)`), true);
+test("implicit.allow includes Read(<cwd>/CLAUDE.md)",  withAgent.implicit.allow.includes(`Read(${NORM_CWD}/CLAUDE.md)`), true);
+test("implicit.allow includes Read(<parent>/AGENTS.md)", withAgent.implicit.allow.includes("Read(C:/Users/Lucas.Pimentel/AGENTS.md)"), true);
+test("implicit.allow includes Read(<drive-root>/CLAUDE.md)", withAgent.implicit.allow.includes("Read(C:/CLAUDE.md)"), true);
+
+// Opt-out: readAllowAgentDocs: false removes all agent-doc rules
+const noAgent = loadConfigFromObjects({}, { readAllowAgentDocs: false }, CWD);
+test("implicit.readAllowAgentDocs is false when disabled", noAgent.implicit.readAllowAgentDocs, false);
+test("no AGENTS.md rules when disabled",  noAgent.implicit.allow.some((r) => r.includes("AGENTS.md") && !r.includes("/**")), false);
+test("no CLAUDE.md rules when disabled",  noAgent.implicit.allow.some((r) => r.includes("CLAUDE.md")), false);
+test("cwd glob still present when readAllowAgentDocs:false", noAgent.implicit.allow.includes(IMPLICIT_READ), true);
+
+// User-level opt-out also works
+const noAgentUser = loadConfigFromObjects({ readAllowAgentDocs: false }, {}, CWD);
+test("user-level readAllowAgentDocs:false honored", noAgentUser.implicit.readAllowAgentDocs, false);
+
+// Project overrides user
+const agentProjectWins = loadConfigFromObjects({ readAllowAgentDocs: false }, { readAllowAgentDocs: true }, CWD);
+test("project readAllowAgentDocs:true overrides user false", agentProjectWins.implicit.readAllowAgentDocs, true);
+
+// End-to-end decide(): ancestor agent docs → allow, sibling files → ask
+const agentCfg = loadConfigFromObjects({}, { defaultAction: "ask" }, DEEP_CWD);
+test("Read parent AGENTS.md → allow",          decide(agentCfg, "read", { path: "C:/work/proj/AGENTS.md" }), "allow");
+test("Read grandparent CLAUDE.md → allow",     decide(agentCfg, "read", { path: "C:/work/CLAUDE.md" }), "allow");
+test("Read drive-root AGENTS.md → allow",      decide(agentCfg, "read", { path: "C:/AGENTS.md" }), "allow");
+test("Read unrelated parent file → ask",       decide(agentCfg, "read", { path: "C:/work/proj/notes.txt" }), "ask");
+test("Read sibling dir AGENTS.md → ask",       decide(agentCfg, "read", { path: "C:/work/other/AGENTS.md" }), "ask");
+// Case-insensitive matching (pattern matching is case-insensitive)
+test("Read parent agents.md (lowercase) → allow", decide(agentCfg, "read", { path: "C:/work/proj/agents.md" }), "allow");
+// Write/Edit still go through the normal flow
+const writeCfg = loadConfigFromObjects({}, {}, DEEP_CWD);
+test("Write parent AGENTS.md → ask (write toolDefault unaffected)", decide(writeCfg, "write", { path: "C:/work/proj/AGENTS.md" }), "ask");
+
+// Explicit ask rule takes priority over the implicit allow (deny > ask > allow)
+const askAgentCfg = loadConfigFromObjects({}, { ask: ["Read(*AGENTS.md)"] }, DEEP_CWD);
+test("explicit ask rule wins over implicit agent-doc allow", decide(askAgentCfg, "read", { path: "C:/work/proj/AGENTS.md" }), "ask");
+
+// Child-directory coverage needs no extra rules: Read(<cwd>/**) covers them
+const childCfg = loadConfigFromObjects({}, { defaultAction: "ask" }, DEEP_CWD);
+test("Read child-dir AGENTS.md → allow via cwd glob", decide(childCfg, "read", { path: "C:/work/proj/sub/docs/AGENTS.md" }), "allow");
+test("no per-child agent-doc rules injected", childCfg.implicit.allow.some((r) => r.includes("/docs/AGENTS.md")), false);
+
 section("readAllowSkills");
 
 const HOME = "C:/Users/Test";
@@ -161,13 +244,15 @@ test("implicit.allow includes Ls(~/.pi/agent/skills/**) rule",          withSkil
 test("implicit.allow includes Glob(~/.pi/agent/skills/**) rule",        withSkills.implicit.allow.includes(SKILL_GLOB_RULES[0]), true);
 test("implicit.allow includes Grep(~/.pi/agent/skills/**) rule",        withSkills.implicit.allow.includes(SKILL_GREP_RULES[0]), true);
 // 4 cwd + 3 skill globs × 4 read-only tools (12) + 6 pi-docs globs × 4 tools (24) = 40
-test("implicit.allow has 4 cwd + 12 skill + 24 pi-docs rules",          withSkills.implicit.allow.length, 40);
+// 4 cwd + 8 agent-doc + 12 skill + 24 pi-docs = 48
+test("implicit.allow has 4 cwd + 8 agent-doc + 12 skill + 24 pi-docs rules",          withSkills.implicit.allow.length, 48);
 
 // Opt-out: readAllowSkills: false removes all skill rules (Read/Ls/Glob/Grep)
 const noSkills = loadConfigFromObjects({}, { readAllowSkills: false }, CWD, HOME);
 test("implicit.readAllowSkills is false when disabled", noSkills.implicit.readAllowSkills, false);
 test("no skill rules when disabled",                    noSkills.implicit.allow.some((r) => ALL_SKILL_RULES.includes(r)), false);
-test("cwd + pi-docs rules still present when readAllowSkills:false",  noSkills.implicit.allow.length, 28);
+// 4 cwd + 8 agent-doc + 24 pi-docs = 36
+test("cwd + agent-doc + pi-docs rules still present when readAllowSkills:false",  noSkills.implicit.allow.length, 36);
 
 // End-to-end decide(): in-scope skill paths → allow
 const skillCfg = loadConfigFromObjects({}, { defaultAction: "ask" }, CWD, HOME);
@@ -226,13 +311,15 @@ test("implicit.allow includes Ls(Windows AppData npm) rule",              withPi
 test("implicit.allow includes Glob(Windows AppData npm) rule",            withPiDocs.implicit.allow.includes(PI_DOCS_GLOB_RULES[0]), true);
 test("implicit.allow includes Grep(Windows AppData npm) rule",            withPiDocs.implicit.allow.includes(PI_DOCS_GREP_RULES[0]), true);
 // 4 cwd + 3 skill globs × 4 read-only tools (12) + 6 pi-docs globs × 4 tools (24) = 40
-test("implicit.allow has 4 cwd + 12 skill + 24 pi-docs rules",            withPiDocs.implicit.allow.length, 40);
+// 4 cwd + 8 agent-doc + 12 skill + 24 pi-docs = 48
+test("implicit.allow has 4 cwd + 8 agent-doc + 12 skill + 24 pi-docs rules",            withPiDocs.implicit.allow.length, 48);
 
 // Opt-out: readAllowPiDocs: false removes all pi-docs rules (Read/Ls/Glob/Grep)
 const noPiDocs = loadConfigFromObjects({}, { readAllowPiDocs: false }, CWD, HOME);
 test("implicit.readAllowPiDocs is false when disabled",  noPiDocs.implicit.readAllowPiDocs, false);
 test("no pi-docs rules when disabled",                   noPiDocs.implicit.allow.some((r) => ALL_PI_DOCS_RULES.includes(r)), false);
-test("cwd + skill rules still present when readAllowPiDocs:false", noPiDocs.implicit.allow.length, 16);
+// 4 cwd + 8 agent-doc + 12 skill = 24
+test("cwd + agent-doc + skill rules still present when readAllowPiDocs:false", noPiDocs.implicit.allow.length, 24);
 
 // Independence: toggling one flag does not affect the other
 const skillsOffPiDocsOn = loadConfigFromObjects({}, { readAllowSkills: false }, CWD, HOME);

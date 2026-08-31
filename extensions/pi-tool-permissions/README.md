@@ -52,6 +52,7 @@ See [`pi-tool-permissions.example.json`](./pi-tool-permissions.example.json) for
   "lsAllowCwd": true,
   "readAllowSkills": true,
   "readAllowPiDocs": true,
+  "readAllowAgentDocs": true,
   "bashReadOnlyAllowCwd": true
 }
 ```
@@ -259,6 +260,17 @@ Silently allows any `Ls` call whose listed directory is inside the current worki
 Disable it per-project:
 ```json
 { "lsAllowCwd": false }
+```
+
+#### `readAllowAgentDocs` (default: `true`)
+
+Silently allows `Read` calls targeting `AGENTS.md` and `CLAUDE.md` in the current working directory and every ancestor directory up to the filesystem root, so the agent can read project instruction files that live above cwd without prompting (they fall outside the `Read(<cwd>/**)` glob). Exact paths only: `Read(<dir>/AGENTS.md)` and `Read(<dir>/CLAUDE.md)` per directory.
+
+Copies in child directories need no extra rules: `Read(<cwd>/**)` already covers them. Other files in parent directories are unaffected, and `Write`/`Edit` to these files still go through the normal permission flow. Explicit `ask`/`deny` rules always take priority over this implicit allow.
+
+Disable it per-project:
+```json
+{ "readAllowAgentDocs": false }
 ```
 
 #### `readAllowSkills` (default: `true`)

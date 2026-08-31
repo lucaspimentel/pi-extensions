@@ -43,6 +43,7 @@
  *     "lsAllowCwd": true,
  *     "readAllowSkills": true,
  *     "readAllowPiDocs": true,
+ *     "readAllowAgentDocs": true,
  *     "bashReadOnlyAllowCwd": true,
  *     "autoMode": {                       // used when the session auto toggle is on
  *       "classifier": { "provider": "anthropic", "model": "claude-haiku-4-5" },
@@ -71,6 +72,15 @@
  *     Injects Ls(<cwd>/**) so every ls inside the working directory (and ls calls
  *     that omit `path`, which default to cwd) are silently permitted. Disable with
  *     "lsAllowCwd": false.
+ *   readAllowAgentDocs (default: true)
+ *     Injects exact-path Read rules for AGENTS.md and CLAUDE.md in the working
+ *     directory and every ancestor directory up to the filesystem root, so the
+ *     agent can read project instruction files that live above cwd without
+ *     prompting (they fall outside the Read(<cwd>/**) glob). Exact paths only:
+ *     Read(<dir>/AGENTS.md) and Read(<dir>/CLAUDE.md) per directory. Copies in
+ *     child directories need no extra rules: Read(<cwd>/**) already covers
+ *     them. Other files in parent directories are unaffected; Write/Edit to
+ *     these files is unaffected. Disable with "readAllowAgentDocs": false.
  *   readAllowSkills (default: true)
  *     Injects Read/Ls/Glob/Grep rules covering pi's known skill roots so reading,
  *     listing, globbing, or grepping SKILL.md and related files outside cwd doesn't
@@ -333,6 +343,8 @@ interface PermissionsConfig {
 	readAllowSkills?: boolean;
 	/** When false, disables the implicit Read/Ls/Glob/Grep rules covering pi's bundled docs package. Default: true. */
 	readAllowPiDocs?: boolean;
+	/** When false, disables the implicit exact-path Read rules for AGENTS.md / CLAUDE.md in cwd and ancestor directories. Default: true. */
+	readAllowAgentDocs?: boolean;
 	/** When false, disables the implicit allow for read-only bash commands in cwd. Default: true. */
 	bashReadOnlyAllowCwd?: boolean;
 	/** When false, disables the implicit allow for pure shell variable assignments. Default: true. */
@@ -368,6 +380,7 @@ interface ResolvedConfig {
 		lsAllowCwd: boolean;
 		readAllowSkills: boolean;
 		readAllowPiDocs: boolean;
+		readAllowAgentDocs: boolean;
 		bashReadOnlyAllowCwd: boolean;
 		bashAllowPureVarAssign: boolean;
 		allowNoopCd: boolean;
@@ -507,6 +520,7 @@ export function mergeConfig(
 	const lsAllowCwd = project.lsAllowCwd ?? user.lsAllowCwd ?? true;
 	const readAllowSkills = project.readAllowSkills ?? user.readAllowSkills ?? true;
 	const readAllowPiDocs = project.readAllowPiDocs ?? user.readAllowPiDocs ?? true;
+	const readAllowAgentDocs = project.readAllowAgentDocs ?? user.readAllowAgentDocs ?? true;
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const bashAllowPureVarAssign = project.bashAllowPureVarAssign ?? user.bashAllowPureVarAssign ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
@@ -536,6 +550,9 @@ export function mergeConfig(
 				implicitAllow.push(`${tool}(${glob})`);
 			}
 		}
+	}
+	if (readAllowAgentDocs) {
+		implicitAllow.push(...agentDocsReadRules(cwd));
 	}
 
 	// Inject write→ask unless the user has explicitly set toolDefaults.write
@@ -569,7 +586,7 @@ export function mergeConfig(
 		bashReadOnlyAllowCwd,
 		bashAllowPureVarAssign,
 		autoMode,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, readAllowPiDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, readAllowPiDocs, readAllowAgentDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd },
 	};
 }
 
@@ -660,6 +677,57 @@ export function normalizeMatchPath(p: string, cwd: string): string {
 /** Returns the glob pattern that matches cwd and all its descendants. */
 export function cwdGlobPattern(cwd: string): string {
 	return normalizePathSep(cwd) + "/**";
+}
+
+/**
+ * Returns the exact-path Read rules for AGENTS.md and CLAUDE.md in cwd and every
+ * ancestor directory up to the filesystem root. Used by the readAllowAgentDocs
+ * implicit default so the agent can read project instruction files that live
+ * above cwd without prompting (they fall outside the Read(<cwd>/**) glob).
+ * Copies in child directories need no extra rules: Read(<cwd>/**) already covers
+ * them. Exact paths only (no globs), so unrelated files in parent directories
+ * are unaffected. Rules are Read-only: Write/Edit still go through the normal
+ * permission flow.
+ *
+ * Purely string-based (no node:path resolve/dirname) so it behaves identically
+ * on Windows and POSIX and accepts synthetic absolute paths in tests. Handles
+ * Windows drive roots ("C:/"), the POSIX root ("/"), trailing-slash inputs, and
+ * backslash separators. A relative cwd degrades gracefully: string ancestors
+ * are walked until none remain. Drive roots are normalized to the slashed form
+ * ("C:" → "C:/") so no bare-drive or malformed entries are emitted.
+ */
+export function agentDocsReadRules(cwd: string): string[] {
+	const rules: string[] = [];
+	const seen = new Set<string>();
+	// Emit both doc rules for a directory given WITHOUT a trailing slash, so
+	// the POSIX root is "" (→ Read(/AGENTS.md)) and a drive root is "C:"
+	// (→ Read(C:/AGENTS.md)) with no doubled slashes.
+	const pushDir = (dir: string) => {
+		for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+			const rule = `Read(${dir}/${name})`;
+			if (!seen.has(rule)) {
+				seen.add(rule);
+				rules.push(rule);
+			}
+		}
+	};
+	let dir = normalizePathSep(cwd);
+	while (true) {
+		if (dir === "/") {
+			pushDir("");
+			break;
+		}
+		if (/^[A-Za-z]:$/.test(dir) || /^[A-Za-z]:\/$/.test(dir)) {
+			pushDir(dir.replace(/\/$/, ""));
+			break;
+		}
+		dir = dir.replace(/\/+$/, "");
+		pushDir(dir);
+		const idx = dir.lastIndexOf("/");
+		if (idx < 0) break; // relative path with no further string ancestors
+		dir = dir.slice(0, idx) || "/";
+	}
+	return rules;
 }
 
 /**
@@ -2888,6 +2956,7 @@ export default function (pi: ExtensionAPI) {
 					`lsAllowCwd: ${cfg.implicit.lsAllowCwd}`,
 					`readAllowSkills: ${cfg.implicit.readAllowSkills}`,
 					`readAllowPiDocs: ${cfg.implicit.readAllowPiDocs}`,
+					`readAllowAgentDocs: ${cfg.implicit.readAllowAgentDocs}`,
 					`bashReadOnlyAllowCwd: ${cfg.implicit.bashReadOnlyAllowCwd}`,
 					`bashAllowPureVarAssign: ${cfg.implicit.bashAllowPureVarAssign}`,
 					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,

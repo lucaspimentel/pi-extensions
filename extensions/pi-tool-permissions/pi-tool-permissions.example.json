@@ -6,6 +6,7 @@
   "lsAllowCwd": true,
   "readAllowSkills": true,
   "readAllowPiDocs": true,
+  "readAllowAgentDocs": true,
   "bashReadOnlyAllowCwd": true,
   "bashAllowPureVarAssign": true,
   "toolDefaults": {
