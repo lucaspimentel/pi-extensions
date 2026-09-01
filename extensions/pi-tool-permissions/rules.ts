@@ -639,6 +639,7 @@ export function isNoopCd(cmd: string, cwd: string, options: PathNormalizationOpt
  * meaningfully — safe to auto-allow regardless of arguments.
  */
 const READONLY_BASH_SAFE_ALWAYS = new Set([
+	"test", "[", "[[",
 	"pwd", "echo", "printf", "date", "whoami", "id", "hostname",
 	"uname", "env", "printenv", "true", "false", "which", "type", "command",
 ]);

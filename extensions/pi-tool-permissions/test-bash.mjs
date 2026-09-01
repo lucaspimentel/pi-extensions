@@ -417,6 +417,13 @@ test("which node → safe always",   isReadOnlyBashSubcommand("which node", CWD)
 test("env → safe always",          isReadOnlyBashSubcommand("env", CWD), true);
 test("printf hi → safe always",    isReadOnlyBashSubcommand("printf hi", CWD), true);
 test("true → safe always",          isReadOnlyBashSubcommand("true", CWD), true);
+// Read-only condition evaluators: at most a stat()/access(), never mutate
+// state or read file contents. Safe to auto-allow regardless of arguments.
+test("test -f x → safe always",       isReadOnlyBashSubcommand("test -f x", CWD), true);
+test("[ -f x ] → safe always",        isReadOnlyBashSubcommand("[ -f x ]", CWD), true);
+test("[[ -f x ]] → safe always",      isReadOnlyBashSubcommand("[[ -f x ]]", CWD), true);
+test("[ -d /tmp ] → safe always",     isReadOnlyBashSubcommand("[ -d /tmp ]", CWD), true);
+test("test -r secrets → safe always", isReadOnlyBashSubcommand("test -r secrets", CWD), true);
 
 // Use WIN_CWD (C:/...) for WITH_PATHS tests and verify that Windows-native,
 // MSYS, and Cygwin spellings all compare against the same canonical cwd.
@@ -787,6 +794,38 @@ test("deny in if body → deny",                   ifBodyDeny.action, "deny");
 const ifLs = decideCompound(ifCfg, "bash", { command: "if ls; then ls; fi" });
 test("if ls; then ls; fi → allow",               ifLs.action, "allow");
 test("if ls; then ls; fi → isCompound true",     ifLs.isCompound, true);
+
+// ── read-only condition evaluators ([/[[/test) auto-allow ────────────────
+// Production configs default bashReadOnlyAllowCwd to true (loadConfig), so a
+// bare `[ -f x ]` / `test -f x` / `[[ -f x ]]` condition must auto-allow
+// instead of prompting — same treatment `true` already gets. Bodies still
+// screen normally against allow/deny.
+const condCfg = makeCfg({ allow: ["Bash(echo*)", "Bash(sleep*)"], defaultAction: "ask", bashReadOnlyAllowCwd: true });
+
+const ifBracket = decideCompound(condCfg, "bash", { command: "if [ -f CLAUDE_PERSONAL.md ]; then echo found; fi" });
+test("if [ -f x ]; then echo → allow",          ifBracket.action, "allow");
+test("if [ -f x ] → isCompound true",           ifBracket.isCompound, true);
+test("if [ -f x ] breakdown[0] = '[ -f CLAUDE_PERSONAL.md]'", ifBracket.breakdown[0].sub, "[ -f CLAUDE_PERSONAL.md ]");
+test("if [ -f x ] breakdown[0] → allow",       ifBracket.breakdown[0].action, "allow");
+test("if [ -f x ] breakdown[1] = 'echo found'", ifBracket.breakdown[1].sub, "echo found");
+
+const whileBracket = decideCompound(condCfg, "bash", { command: "while [ -d /tmp ]; do sleep 1; done" });
+test("while [ -d /tmp ]; do sleep → allow",    whileBracket.action, "allow");
+test("while [ -d /tmp ] breakdown[0] → allow", whileBracket.breakdown[0].action, "allow");
+
+const untilDouble = decideCompound(condCfg, "bash", { command: "until [[ -f x ]]; do sleep 1; done" });
+test("until [[ -f x ]]; do sleep → allow",     untilDouble.action, "allow");
+test("until [[ -f x ]] breakdown[0] → allow", untilDouble.breakdown[0].action, "allow");
+
+const ifTest = decideCompound(condCfg, "bash", { command: "if test -f x; then echo y; fi" });
+test("if test -f x; then echo → allow",        ifTest.action, "allow");
+test("if test -f x breakdown[0] → allow",      ifTest.breakdown[0].action, "allow");
+
+// Deny still wins on a condition: an explicit deny rule must block even when
+// the command name is in READONLY_BASH_SAFE_ALWAYS.
+const condDenyCfg = makeCfg({ deny: ["Bash(test*)"], defaultAction: "allow", bashReadOnlyAllowCwd: true });
+const ifTestDeny = decideCompound(condDenyCfg, "bash", { command: "if test -f x; then echo y; fi" });
+test("deny on test condition → deny",          ifTestDeny.action, "deny");
 
 // ── select ────────────────────────────────────────────────────────────────
 const selCfg = makeCfg({ allow: ["Bash(echo*)"], defaultAction: "deny" });
