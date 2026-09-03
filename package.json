@@ -10,6 +10,7 @@
   "pi": {
     "extensions": [
       "./extensions/colored-footer.ts",
+      "./extensions/herdr-ask-user-bridge.ts",
       "./extensions/plan.ts",
       "./extensions/stash.ts",
       "./extensions/questionnaire.ts",

@@ -33,6 +33,7 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 ### Extensions
 
 - **colored-footer** – custom footer styling
+- **herdr-ask-user-bridge** – reports "waiting for user to answer question" to [herdr](https://herdr.dev) while the `ask_user_question` tool is awaiting input, so herdr panes show blocked state with a reason (requires the `@juicesharp/rpiv-ask-user-question` extension and herdr's pi integration)
 - **idle-summary** – generates a brief summary of the session when pi has been idle for a while; `/summary` triggers one immediately, `/summary model` picks the model used for summaries (the old flat `/summary-model` still works as a deprecated alias)
 - **plan** – `/plan <task>` disables the `write` and `edit` tools (everything else stays active, including unrestricted bash and MCP tools) and sends a planning prompt, then auto-restores your previous tools when the turn ends. It does **not** switch the model or thinking effort — pick your planner model yourself before `/plan` and switch back afterwards (`/plan cancel` restores early; the old `/plan-cancel` still works as a deprecated alias)
 - **stash** – `ctrl+alt+s` / `ctrl+alt+r` stash & restore the editor draft on a disk-backed stack under `~/.pi/agent/pi-stash.json`; `/stash list` shows numbered entries (1 = newest), `/stash pop [n]`, `/stash drop <n>`, `/stash clear` (the old flat names `/pop`, `/stash-list`, `/stash-drop`, `/stash-clear` still work as deprecated aliases)
