@@ -8,6 +8,8 @@ Every time the LLM tries to call a tool, this extension checks the call against 
 - **denies** it (returns a block reason to the model), or
 - **asks** you interactively, with the option to remember your choice as a new rule.
 
+While an ask dialog is on screen, the extension reports `blocked` ("awaiting permission: <tool>") to [herdr](https://herdr.dev), so herdr panes show the agent as blocked instead of working. No-op outside herdr.
+
 ## Install
 
 Install via the [pi-extensions](https://github.com/lucaspimentel/pi-extensions) package (includes all extensions and skills):

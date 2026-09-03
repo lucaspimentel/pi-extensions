@@ -565,6 +565,12 @@ export default function (pi: ExtensionAPI) {
 		// screen. Tall dialogs push the spinner above the visible region, where its
 		// redraws break terminal scrolling. Restored on any return/throw below.
 		ctx.ui.setWorkingVisible(false);
+		// Report blocked to herdr while the dialog is up (pane would otherwise show
+		// "working"). Ignored outside herdr; released in the finally below.
+		pi.events.emit("herdr:blocked", {
+			active: true,
+			label: `awaiting permission: ${event.toolName}`,
+		});
 		try {
 			// ── Compound bash command: confirm each ask subcommand separately ──────
 			// Note: decideCompound() short-circuits any compound containing a `deny`
@@ -798,6 +804,7 @@ export default function (pi: ExtensionAPI) {
 			return { block: true, reason: "Denied by user" };
 		} finally {
 			ctx.ui.setWorkingVisible(true);
+			pi.events.emit("herdr:blocked", { active: false });
 		}
 	});
 
