@@ -559,6 +559,8 @@ When active, a `✏️ all edits allowed` indicator appears in the footer status
 /permissions allowalledits [on|off|toggle]
 /permissions auto [on|off|toggle]       # toggle auto-mode (LLM classifier) for this session
 /permissions auto debug [on|off|toggle] # toggle classifier debug notifications for this session
+/permissions auto model [--user]        # pick the classifier model interactively
+/permissions auto model clear [--user]  # remove the classifier pin (resume auto-select)
 ```
 
 All write subcommands (`allow`/`deny`/`ask`/`remove`/`default`) accept `--user` to target the user-global config (`~/.pi/agent/pi-tool-permissions.json`); the default is the project-local `.pi/pi-tool-permissions.local.json`. `/permissions list` tags each rule with its source: `[implicit]`, `[user]`, `[project]`, or `[user+project]` when the same rule lives in both files.

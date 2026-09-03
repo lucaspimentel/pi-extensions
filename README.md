@@ -37,7 +37,6 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 - **idle-summary** – generates a brief summary of the session when pi has been idle for a while; `/summary` triggers one immediately, `/summary model` picks the model used for summaries (the old flat `/summary-model` still works as a deprecated alias)
 - **plan** – `/plan <task>` disables the `write` and `edit` tools (everything else stays active, including unrestricted bash and MCP tools) and sends a planning prompt, then auto-restores your previous tools when the turn ends. It does **not** switch the model or thinking effort — pick your planner model yourself before `/plan` and switch back afterwards (`/plan cancel` restores early; the old `/plan-cancel` still works as a deprecated alias)
 - **stash** – `ctrl+alt+s` / `ctrl+alt+r` stash & restore the editor draft on a disk-backed stack under `~/.pi/agent/pi-stash.json`; `/stash list` shows numbered entries (1 = newest), `/stash pop [n]`, `/stash drop <n>`, `/stash clear` (the old flat names `/pop`, `/stash-list`, `/stash-drop`, `/stash-clear` still work as deprecated aliases)
-- **questionnaire** – interactive questionnaire tool (copied from the [pi sample](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/extensions/questionnaire.ts) by [@ferologics](https://github.com/ferologics))
 - **web** – fetch & convert web pages (depends on `html-to-text`)
 - **wt-tab-status** – updates the Windows Terminal tab title with the current session status
 - **pi-tool-permissions** – Claude Code-style allow/deny/ask permissions
@@ -61,8 +60,7 @@ pi-extensions/
 ├── package.json          # pi manifest
 ├── extensions/
 │   ├── *.ts              # single-file extensions
-│   ├── web/              # multi-file extension
-│   └── pi-tool-permissions/
+│   └── */                # multi-file extensions (web, pi-tool-permissions, idle-summary, ...)
 ├── skills/
 │   └── <skill>/SKILL.md
 └── tests/                # node-runnable test harnesses (*.test.mts)
