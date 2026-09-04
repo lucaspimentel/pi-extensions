@@ -896,6 +896,38 @@ test("pwsh redirect not filtered (out of scope)", decide(
 	makeCfg({ allow: ["Pwsh(*)"], defaultAction: "ask" }),
 	"pwsh", { command: "$x > out" }), "allow");
 
+section("decide — trailing harmless redirects stripped before allow matching");
+
+// Exact allow rule covers trailing descriptor dups and /dev/null redirects.
+const exactCfg = makeCfg({ allow: ["Bash(gh auth status)"], defaultAction: "ask", cwd });
+test("exact rule: gh auth status 2>&1 → allow",   decide(exactCfg, "bash", { command: "gh auth status 2>&1" }), "allow");
+test("exact rule: gh auth status 2>/dev/null → allow", decide(exactCfg, "bash", { command: "gh auth status 2>/dev/null" }), "allow");
+test("exact rule: gh auth status >/dev/null 2>&1 → allow", decide(exactCfg, "bash", { command: "gh auth status >/dev/null 2>&1" }), "allow");
+test("exact rule: quoted '/dev/null' target → allow", decide(exactCfg, "bash", { command: "gh auth status 2>'/dev/null'" }), "allow");
+test("exact rule: gh auth status x → ask (unrelated args not covered)", decide(exactCfg, "bash", { command: "gh auth status x" }), "ask");
+
+// File-target redirect still requires a `>`-containing rule, even with a
+// trailing harmless dup attached.
+test("exact rule: cmd > out 2>&1 → ask (file write preserved)", decide(
+	makeCfg({ allow: ["Bash(cmd)"], defaultAction: "ask", cwd }),
+	"bash", { command: "cmd > out 2>&1" }), "ask");
+test("redirect-aware rule matches stripped form: Bash(cmd > out) covers cmd > out 2>&1", decide(
+	makeCfg({ allow: ["Bash(cmd > out)"], defaultAction: "ask", cwd }),
+	"bash", { command: "cmd > out 2>&1" }), "allow");
+
+// deny/ask still match the RAW (unstripped) command string.
+test("deny matches raw redirected form", decide(
+	makeCfg({ deny: ["Bash(rg * 2>&1)"], allow: ["Bash(rg *)"], defaultAction: "allow", cwd }),
+	"bash", { command: "rg x 2>&1" }), "deny");
+test("ask matches raw redirected form", decide(
+	makeCfg({ ask: ["Bash(rg * 2>&1)"], allow: ["Bash(rg *)"], defaultAction: "allow", cwd }),
+	"bash", { command: "rg x 2>&1" }), "ask");
+
+// pwsh commands are matched raw: no harmless-redirect stripping.
+test("pwsh not stripped: Pwsh($x) does not cover $x 2>&1", decide(
+	makeCfg({ allow: ["Pwsh($x)"], defaultAction: "ask" }),
+	"pwsh", { command: "$x 2>&1" }), "ask");
+
 // ── shouldClassifyWholeCompound ─────────────────────────────────────────────
 // Gates the tool_call handler's whole-compound classify branch (no fake-UI
 // harness exists to test the handler directly). decideCompound is unchanged,

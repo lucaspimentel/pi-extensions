@@ -1437,11 +1437,13 @@ export function splitTopLevelShell(cmd: string): SplitResult {
  *
  * Used by `stripStructuralKeywords` so a structural keyword carrying a trailing
  * `2>/dev/null` (e.g. `done 2>/dev/null`) is still recognized as structural
- * rather than prompting as if `done` were a command. Only `/dev/null` (and
- * pure descriptor dups) are treated as harmless; a `done > out.txt` keeps the
- * redirect and still prompts, preserving file-write screening.
+ * rather than prompting as if `done` were a command. Also used by `decide()`
+ * before allow-list matching, so an exact rule like `Bash(cmd)` covers
+ * `cmd 2>&1` and `cmd >/dev/null`. Only `/dev/null` (and pure descriptor dups)
+ * are treated as harmless; a `done > out.txt` keeps the redirect and still
+ * prompts, preserving file-write screening.
  */
-function stripTrailingHarmlessRedirects(s: string): string {
+export function stripTrailingHarmlessRedirects(s: string): string {
 	let r = s.replace(/\s+$/, "");
 	for (;;) {
 		// Descriptor dup: [N]>&M  or  [N]>&-   (e.g. 2>&1, >&2, 1>&-)
@@ -1990,6 +1992,14 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 		}
 		return false;
 	};
+	// Same as `check(cfg.allow)` but against a (possibly redirect-stripped) input.
+	const checkAllow = (matchInput: Record<string, unknown>): boolean => {
+		for (const raw of cfg.allow) {
+			const rule = parseRule(raw);
+			if (rule && ruleMatches(rule, toolName, matchInput, cfg.cwd)) return true;
+		}
+		return false;
+	};
 	if (check(cfg.deny)) return "deny";
 	// Read-only bash auto-allow short-circuit. When the auto layer is engaged
 	// (session toggle on) AND classifyAllShell is set, route read-only bash
@@ -2016,13 +2026,24 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	// `Bash(rg * > *)`) may authorize it. `deny`/`ask` above are redirect-
 	// agnostic so safety rules always win. pwsh is out of scope (different
 	// syntax) and stays redirect-agnostic.
-	const isBashRedirect = normalizeTool(toolName) === "bash" && hasTopLevelFileRedirect(String(input.command ?? ""));
+	//
+	// Trailing *harmless* redirects (descriptor dups like `2>&1`, `/dev/null`
+	// targets) are stripped before allow-rule matching so an exact rule like
+	// `Bash(gh auth status)` also covers `gh auth status 2>&1`. The strip runs
+	// only for Bash and only on the allow path: deny/ask matching and the
+	// file-write screen above still see the raw command string, so
+	// `rg x > out 2>&1` still requires a `>`-containing rule and a deny rule
+	// naming the redirected form still fires.
+	const rawCommand = String(input.command ?? "");
+	const isBash = normalizeTool(toolName) === "bash";
+	const isBashRedirect = isBash && hasTopLevelFileRedirect(rawCommand);
+	const allowInput = isBash ? { ...input, command: stripTrailingHarmlessRedirects(rawCommand) } : input;
 	if (isBashRedirect) {
 		for (const raw of cfg.allow) {
 			const rule = parseRule(raw);
-			if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, toolName, input, cfg.cwd)) return "allow";
+			if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, toolName, allowInput, cfg.cwd)) return "allow";
 		}
-	} else if (check(cfg.allow)) {
+	} else if (checkAllow(allowInput)) {
 		return "allow";
 	}
 	const td = cfg.toolDefaults[normalizeTool(toolName)];

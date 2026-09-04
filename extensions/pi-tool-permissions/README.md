@@ -353,6 +353,7 @@ Notes:
 - `deny` and `ask` rules are **redirect-agnostic** and always still apply, so safety rules win over a redirected command even when a redirect-aware `allow` rule exists.
 - Descriptor-to-descriptor redirects (`2>&1`, `1>&2`, `>&2`, `>&-`) are **not** file writes and are exempt from this filter — `cmd 2>&1` is still covered by a broad `Bash(cmd *)` rule.
 - Redirects to `/dev/null` (the Unix null device) are **not** file writes either — `cmd 2>/dev/null` and `cmd >/dev/null 2>&1` stay auto-allowable and covered by broad rules. Only an *exact* `/dev/null` target is exempted; subpaths like `/dev/null/x` stay write-risk. Process substitution `>(...)` still counts as a write.
+- Trailing harmless redirects are **stripped before allow-rule matching** (Bash only), so an exact rule like `Bash(gh auth status)` also covers `gh auth status 2>&1` and `gh auth status >/dev/null`. The strip applies after the write-risk screen, so `cmd > out 2>&1` still requires a `>`-containing rule, and `deny`/`ask` rules still match the full unstripped command.
 - `toolDefaults` and `defaultAction` are **not** gated by the redirect filter.
 - `pwsh` is out of scope (different redirection syntax) and stays redirect-agnostic.
 
