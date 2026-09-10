@@ -41,6 +41,7 @@
  *     "grepAllowCwd": true,
  *     "globAllowCwd": true,
  *     "lsAllowCwd": true,
+ *     "findAllowCwd": true,
  *     "readAllowSkills": true,
  *     "readAllowPiDocs": true,
  *     "readAllowAgentDocs": true,
@@ -72,6 +73,10 @@
  *     Injects Ls(<cwd>/**) so every ls inside the working directory (and ls calls
  *     that omit `path`, which default to cwd) are silently permitted. Disable with
  *     "lsAllowCwd": false.
+ *   findAllowCwd (default: true)
+ *     Injects Find(<cwd>/**) so every find inside the working directory (and find
+ *     calls that omit `path`, which default to cwd) is silently permitted. Disable
+ *     with "findAllowCwd": false.
  *   readAllowAgentDocs (default: true)
  *     Injects exact-path Read rules for AGENTS.md and CLAUDE.md in the working
  *     directory and every ancestor directory up to the filesystem root, so the
@@ -1014,6 +1019,7 @@ export default function (pi: ExtensionAPI) {
 					`grepAllowCwd: ${cfg.implicit.grepAllowCwd}`,
 					`globAllowCwd: ${cfg.implicit.globAllowCwd}`,
 					`lsAllowCwd: ${cfg.implicit.lsAllowCwd}`,
+					`findAllowCwd: ${cfg.implicit.findAllowCwd}`,
 					`readAllowSkills: ${cfg.implicit.readAllowSkills}`,
 					`readAllowPiDocs: ${cfg.implicit.readAllowPiDocs}`,
 					`readAllowAgentDocs: ${cfg.implicit.readAllowAgentDocs}`,

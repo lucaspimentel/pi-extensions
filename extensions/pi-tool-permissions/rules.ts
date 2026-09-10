@@ -102,7 +102,9 @@ export interface PermissionsConfig {
 	globAllowCwd?: boolean;
 	/** When false, disables the implicit Ls(<cwd>/**) allow rule. Default: true. */
 	lsAllowCwd?: boolean;
-	/** When false, disables the implicit Read/Ls/Glob/Grep rules covering pi's skill roots. Default: true. */
+	/** When false, disables the implicit Find(<cwd>/**) allow rule. Default: true. */
+	findAllowCwd?: boolean;
+	/** When false, disables the implicit Read/Ls/Glob/Grep/Find rules covering pi's skill roots. Default: true. */
 	readAllowSkills?: boolean;
 	/** When false, disables the implicit Read/Ls/Glob/Grep rules covering pi's bundled docs package. Default: true. */
 	readAllowPiDocs?: boolean;
@@ -148,6 +150,7 @@ export interface ResolvedConfig {
 		grepAllowCwd: boolean;
 		globAllowCwd: boolean;
 		lsAllowCwd: boolean;
+		findAllowCwd: boolean;
 		readAllowSkills: boolean;
 		readAllowPiDocs: boolean;
 		readAllowAgentDocs: boolean;
@@ -279,6 +282,7 @@ export function mergeConfig(
 	const grepAllowCwd = project.grepAllowCwd ?? user.grepAllowCwd ?? true;
 	const globAllowCwd = project.globAllowCwd ?? user.globAllowCwd ?? true;
 	const lsAllowCwd = project.lsAllowCwd ?? user.lsAllowCwd ?? true;
+	const findAllowCwd = project.findAllowCwd ?? user.findAllowCwd ?? true;
 	const readAllowSkills = project.readAllowSkills ?? user.readAllowSkills ?? true;
 	const readAllowPiDocs = project.readAllowPiDocs ?? user.readAllowPiDocs ?? true;
 	const readAllowAgentDocs = project.readAllowAgentDocs ?? user.readAllowAgentDocs ?? true;
@@ -297,6 +301,9 @@ export function mergeConfig(
 	}
 	if (lsAllowCwd) {
 		implicitAllow.push(`Ls(${cwdGlobPattern(cwd)})`);
+	}
+	if (findAllowCwd) {
+		implicitAllow.push(`Find(${cwdGlobPattern(cwd)})`);
 	}
 	if (home && readAllowSkills) {
 		for (const glob of skillReadGlobs(home)) {
@@ -348,7 +355,7 @@ export function mergeConfig(
 		bashReadOnlyAllowCwd,
 		bashAllowPureVarAssign,
 		autoMode,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, readAllowSkills, readAllowPiDocs, readAllowAgentDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, findAllowCwd, readAllowSkills, readAllowPiDocs, readAllowAgentDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd },
 	};
 }
 
@@ -409,10 +416,10 @@ export function saveProjectConfig(cwd: string, cfg: PermissionsConfig): void {
 /**
  * Read-only path-based tools that benefit from the readAllowSkills / readAllowPiDocs
  * implicit allow rules. When the agent has read-only access to a docs/skills tree
- * it also needs to list, glob, and grep that tree to navigate it, so all four tools
- * receive matching implicit rules. Write/Edit are deliberately excluded.
+ * it also needs to list, glob, grep, and find that tree to navigate it, so all five
+ * tools receive matching implicit rules. Write/Edit are deliberately excluded.
  */
-const READONLY_PATH_TOOLS = ["Read", "Ls", "Glob", "Grep"] as const;
+const READONLY_PATH_TOOLS = ["Read", "Ls", "Glob", "Grep", "Find"] as const;
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -1188,7 +1195,7 @@ export function getMatchField(toolName: string, input: Record<string, unknown>):
 	const t = normalizeTool(toolName);
 	if (t === "bash" || t === "pwsh") return String(input.command ?? "");
 	if (t === "read" || t === "write" || t === "edit") return String(input.path ?? "");
-	if (t === "grep" || t === "glob" || t === "ls") return String(input.path ?? "");
+	if (t === "grep" || t === "glob" || t === "ls" || t === "find") return String(input.path ?? "");
 	if (t === "webfetch") return String(input.url ?? "");
 	// MCP: every MCP call arrives as toolName "mcp" with the real tool name in
 	// input.tool (conventionally "<server>_<tool>"). Match against that so rules
@@ -1204,7 +1211,7 @@ export function getMatchField(toolName: string, input: Record<string, unknown>):
 
 function isPathTool(toolName: string): boolean {
 	const t = normalizeTool(toolName);
-	return t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls";
+	return t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls" || t === "find";
 }
 
 export function ruleMatches(rule: ParsedRule, toolName: string, input: Record<string, unknown>, cwd?: string): boolean {
@@ -1746,7 +1753,7 @@ export function classifierAttribution(modelId: string | undefined, reason: strin
 export function describeAction(toolName: string, input: Record<string, unknown>): string {
 	const t = normalizeTool(toolName);
 	if (t === "bash" || t === "pwsh") return `Tool: ${toolName}\nCommand: ${String(input.command ?? "")}`;
-	if (t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls")
+	if (t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls" || t === "find")
 		return `Tool: ${toolName}\nPath: ${String(input.path ?? "")}`;
 	if (t === "webfetch") return `Tool: ${toolName}\nURL: ${String(input.url ?? "")}`;
 	if (t === "mcp") {
@@ -1898,7 +1905,7 @@ export function buildActionContext(
 		inRepo("Working directory", cwdNorm);
 	}
 	const t = normalizeTool(toolName);
-	if ((t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls") && input.path) {
+	if ((t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls" || t === "find") && input.path) {
 		const resolved = resolveAgainstCwd(String(input.path), cwd);
 		lines.push(`Resolved target path: ${resolved}`);
 		inRepo("Target path", dirname(resolved));
@@ -2152,7 +2159,7 @@ export function suggestRule(toolName: string, input: Record<string, unknown>): s
 		// Normalize path separators so saved rules work on Windows
 		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
 	}
-	if (t === "grep" || t === "glob" || t === "ls") {
+	if (t === "grep" || t === "glob" || t === "ls" || t === "find") {
 		const p = String(input.path ?? "");
 		return p ? `${toolName}(${normalizePathSep(p)})` : toolName;
 	}
@@ -2196,8 +2203,8 @@ export function inputForMatching(
 		const p = String(input.path ?? "");
 		return p ? { ...input, path: normalizePathSep(p) } : input;
 	}
-	if (t === "grep" || t === "glob" || t === "ls") {
-		// Default missing path to cwd so rules like Grep(<cwd>/**) / Ls(<cwd>/**) match
+	if (t === "grep" || t === "glob" || t === "ls" || t === "find") {
+		// Default missing path to cwd so rules like Grep(<cwd>/**) / Ls(<cwd>/**) / Find(<cwd>/**) match
 		// implicit-cwd calls. Append a trailing "/" so directory paths match patterns
 		// like /etc/* (regex ^/etc/.*$ requires something after the slash; "" satisfies
 		// .* so /etc/ matches correctly).

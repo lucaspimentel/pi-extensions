@@ -21,6 +21,7 @@ const IMPLICIT_READ = `Read(${CWD_GLOB})`;
 const IMPLICIT_GREP = `Grep(${CWD_GLOB})`;
 const IMPLICIT_GLOB = `Glob(${CWD_GLOB})`;
 const IMPLICIT_LS   = `Ls(${CWD_GLOB})`;
+const IMPLICIT_FIND = `Find(${CWD_GLOB})`;
 
 section("implicit defaults (empty config)");
 
@@ -32,14 +33,16 @@ test("implicit.readAllowCwd is true",           empty.implicit.readAllowCwd, tru
 test("implicit.grepAllowCwd is true",           empty.implicit.grepAllowCwd, true);
 test("implicit.globAllowCwd is true",           empty.implicit.globAllowCwd, true);
 test("implicit.lsAllowCwd is true",             empty.implicit.lsAllowCwd, true);
+test("implicit.findAllowCwd is true",           empty.implicit.findAllowCwd, true);
 test("implicit.bashReadOnlyAllowCwd is true",   empty.implicit.bashReadOnlyAllowCwd, true);
 test("implicit.bashAllowPureVarAssign is true", empty.implicit.bashAllowPureVarAssign, true);
-// 4 cwd + 4 ancestor dirs × 2 agent docs (8) = 12
-test("implicit.allow has 4 cwd + 8 agent-doc rules", empty.implicit.allow.length, 12);
+// 5 cwd + 4 ancestor dirs × 2 agent docs (8) = 13
+test("implicit.allow has 5 cwd + 8 agent-doc rules", empty.implicit.allow.length, 13);
 test("implicit.allow[0] is Read(<cwd>/**)",     empty.implicit.allow[0], IMPLICIT_READ);
 test("implicit.allow[1] is Grep(<cwd>/**)",     empty.implicit.allow[1], IMPLICIT_GREP);
 test("implicit.allow[2] is Glob(<cwd>/**)",     empty.implicit.allow[2], IMPLICIT_GLOB);
 test("implicit.allow[3] is Ls(<cwd>/**)",       empty.implicit.allow[3], IMPLICIT_LS);
+test("implicit.allow[4] is Find(<cwd>/**)",     empty.implicit.allow[4], IMPLICIT_FIND);
 test("implicit.allow[0] matches allow[0]",      empty.implicit.allow[0] === empty.allow[0], true);
 test("implicit.toolDefaults has write key",     "write" in empty.implicit.toolDefaults, true);
 test("no other implicit toolDefaults",          Object.keys(empty.implicit.toolDefaults).length, 1);
@@ -51,9 +54,10 @@ test("no cwd-glob Read in allow when readAllowCwd:false", noAutoRead.implicit.al
 test("Grep still in allow when readAllowCwd:false", noAutoRead.implicit.allow.includes(IMPLICIT_GREP), true);
 test("Glob still in allow when readAllowCwd:false", noAutoRead.implicit.allow.includes(IMPLICIT_GLOB), true);
 test("Ls still in allow when readAllowCwd:false",   noAutoRead.implicit.allow.includes(IMPLICIT_LS), true);
+test("Find still in allow when readAllowCwd:false", noAutoRead.implicit.allow.includes(IMPLICIT_FIND), true);
 test("implicit.readAllowCwd is false",          noAutoRead.implicit.readAllowCwd, false);
-// 3 cwd (Grep+Glob+Ls) + 8 agent-doc rules = 11
-test("implicit.allow has 3 cwd + 8 agent-doc rules", noAutoRead.implicit.allow.length, 11);
+// 4 cwd (Grep+Glob+Ls+Find) + 8 agent-doc rules = 12
+test("implicit.allow has 4 cwd + 8 agent-doc rules", noAutoRead.implicit.allow.length, 12);
 test("write default still injected",            noAutoRead.toolDefaults["write"], "ask");
 
 section("bashAllowPureVarAssign: false");
@@ -73,8 +77,20 @@ test("Read still in allow when lsAllowCwd:false", noAutoLs.implicit.allow.includ
 test("Grep still in allow when lsAllowCwd:false", noAutoLs.implicit.allow.includes(IMPLICIT_GREP), true);
 test("Glob still in allow when lsAllowCwd:false", noAutoLs.implicit.allow.includes(IMPLICIT_GLOB), true);
 test("implicit.lsAllowCwd is false",            noAutoLs.implicit.lsAllowCwd, false);
-// 3 cwd (Read+Grep+Glob) + 8 agent-doc rules = 11
-test("implicit.allow has 3 cwd + 8 agent-doc rules", noAutoLs.implicit.allow.length, 11);
+// 4 cwd (Read+Grep+Glob+Find) + 8 agent-doc rules = 12
+test("implicit.allow has 4 cwd + 8 agent-doc rules", noAutoLs.implicit.allow.length, 12);
+
+section("findAllowCwd: false");
+
+const noAutoFind = loadConfigFromObjects({}, { findAllowCwd: false }, CWD);
+test("no Find in allow when findAllowCwd:false", noAutoFind.implicit.allow.some(r => r.startsWith("Find(")), false);
+test("Read still in allow when findAllowCwd:false", noAutoFind.implicit.allow.includes(IMPLICIT_READ), true);
+test("Grep still in allow when findAllowCwd:false", noAutoFind.implicit.allow.includes(IMPLICIT_GREP), true);
+test("Glob still in allow when findAllowCwd:false", noAutoFind.implicit.allow.includes(IMPLICIT_GLOB), true);
+test("Ls still in allow when findAllowCwd:false",   noAutoFind.implicit.allow.includes(IMPLICIT_LS), true);
+test("implicit.findAllowCwd is false",          noAutoFind.implicit.findAllowCwd, false);
+// 4 cwd (Read+Grep+Glob+Ls) + 8 agent-doc rules = 12
+test("implicit.allow has 4 cwd + 8 agent-doc rules", noAutoFind.implicit.allow.length, 12);
 
 section("explicit toolDefaults.write suppresses implicit");
 
@@ -233,7 +249,8 @@ const SKILL_RULES = SKILL_GLOBS.map((g) => `Read(${g})`);
 const SKILL_LS_RULES   = SKILL_GLOBS.map((g) => `Ls(${g})`);
 const SKILL_GLOB_RULES = SKILL_GLOBS.map((g) => `Glob(${g})`);
 const SKILL_GREP_RULES = SKILL_GLOBS.map((g) => `Grep(${g})`);
-const ALL_SKILL_RULES  = [...SKILL_RULES, ...SKILL_LS_RULES, ...SKILL_GLOB_RULES, ...SKILL_GREP_RULES];
+const SKILL_FIND_RULES = SKILL_GLOBS.map((g) => `Find(${g})`);
+const ALL_SKILL_RULES  = [...SKILL_RULES, ...SKILL_LS_RULES, ...SKILL_GLOB_RULES, ...SKILL_GREP_RULES, ...SKILL_FIND_RULES];
 
 const withSkills = loadConfigFromObjects({}, {}, CWD, HOME);
 test("implicit.readAllowSkills is true by default", withSkills.implicit.readAllowSkills, true);
@@ -243,16 +260,17 @@ test("implicit.allow includes Read(~/.agents/skills/**) rule",          withSkil
 test("implicit.allow includes Ls(~/.pi/agent/skills/**) rule",          withSkills.implicit.allow.includes(SKILL_LS_RULES[0]), true);
 test("implicit.allow includes Glob(~/.pi/agent/skills/**) rule",        withSkills.implicit.allow.includes(SKILL_GLOB_RULES[0]), true);
 test("implicit.allow includes Grep(~/.pi/agent/skills/**) rule",        withSkills.implicit.allow.includes(SKILL_GREP_RULES[0]), true);
-// 4 cwd + 3 skill globs × 4 read-only tools (12) + 6 pi-docs globs × 4 tools (24) = 40
-// 4 cwd + 8 agent-doc + 12 skill + 24 pi-docs = 48
-test("implicit.allow has 4 cwd + 8 agent-doc + 12 skill + 24 pi-docs rules",          withSkills.implicit.allow.length, 48);
+test("implicit.allow includes Find(~/.pi/agent/skills/**) rule",        withSkills.implicit.allow.includes(SKILL_FIND_RULES[0]), true);
+// 5 cwd + 3 skill globs × 5 read-only tools (15) + 6 pi-docs globs × 5 tools (30) = 50
+// 5 cwd + 8 agent-doc + 15 skill + 30 pi-docs = 58
+test("implicit.allow has 5 cwd + 8 agent-doc + 15 skill + 30 pi-docs rules",          withSkills.implicit.allow.length, 58);
 
-// Opt-out: readAllowSkills: false removes all skill rules (Read/Ls/Glob/Grep)
+// Opt-out: readAllowSkills: false removes all skill rules (Read/Ls/Glob/Grep/Find)
 const noSkills = loadConfigFromObjects({}, { readAllowSkills: false }, CWD, HOME);
 test("implicit.readAllowSkills is false when disabled", noSkills.implicit.readAllowSkills, false);
 test("no skill rules when disabled",                    noSkills.implicit.allow.some((r) => ALL_SKILL_RULES.includes(r)), false);
-// 4 cwd + 8 agent-doc + 24 pi-docs = 36
-test("cwd + agent-doc + pi-docs rules still present when readAllowSkills:false",  noSkills.implicit.allow.length, 36);
+// 5 cwd + 8 agent-doc + 30 pi-docs = 43
+test("cwd + agent-doc + pi-docs rules still present when readAllowSkills:false",  noSkills.implicit.allow.length, 43);
 
 // End-to-end decide(): in-scope skill paths → allow
 const skillCfg = loadConfigFromObjects({}, { defaultAction: "ask" }, CWD, HOME);
@@ -268,6 +286,8 @@ test("Read helper script inside skill dir → allow",
 // End-to-end decide(): Ls/Glob/Grep on skill paths → allow
 test("Ls ~/.pi/agent/skills/foo/ → allow",
 	decide(skillCfg, "ls", { path: HOME + "/.pi/agent/skills/foo/" }), "allow");
+test("Find ~/.pi/agent/skills/foo → allow",
+	decide(skillCfg, "find", { path: HOME + "/.pi/agent/skills/foo/" }), "allow");
 test("Glob ~/.agents/skills/baz/**/*.md → allow",
 	decide(skillCfg, "glob", { path: HOME + "/.agents/skills/baz/" }), "allow");
 test("Grep ~/.pi/agent/skills/foo → allow",
@@ -297,7 +317,8 @@ const PI_DOCS_RULES     = PI_DOCS_GLOBS.map((g) => `Read(${g})`);
 const PI_DOCS_LS_RULES   = PI_DOCS_GLOBS.map((g) => `Ls(${g})`);
 const PI_DOCS_GLOB_RULES = PI_DOCS_GLOBS.map((g) => `Glob(${g})`);
 const PI_DOCS_GREP_RULES = PI_DOCS_GLOBS.map((g) => `Grep(${g})`);
-const ALL_PI_DOCS_RULES  = [...PI_DOCS_RULES, ...PI_DOCS_LS_RULES, ...PI_DOCS_GLOB_RULES, ...PI_DOCS_GREP_RULES];
+const PI_DOCS_FIND_RULES = PI_DOCS_GLOBS.map((g) => `Find(${g})`);
+const ALL_PI_DOCS_RULES  = [...PI_DOCS_RULES, ...PI_DOCS_LS_RULES, ...PI_DOCS_GLOB_RULES, ...PI_DOCS_GREP_RULES, ...PI_DOCS_FIND_RULES];
 
 const withPiDocs = loadConfigFromObjects({}, {}, CWD, HOME);
 test("implicit.readAllowPiDocs is true by default",                       withPiDocs.implicit.readAllowPiDocs, true);
@@ -310,16 +331,17 @@ test("implicit.allow includes Read(Library/Application Support) rule",    withPi
 test("implicit.allow includes Ls(Windows AppData npm) rule",              withPiDocs.implicit.allow.includes(PI_DOCS_LS_RULES[0]), true);
 test("implicit.allow includes Glob(Windows AppData npm) rule",            withPiDocs.implicit.allow.includes(PI_DOCS_GLOB_RULES[0]), true);
 test("implicit.allow includes Grep(Windows AppData npm) rule",            withPiDocs.implicit.allow.includes(PI_DOCS_GREP_RULES[0]), true);
-// 4 cwd + 3 skill globs × 4 read-only tools (12) + 6 pi-docs globs × 4 tools (24) = 40
-// 4 cwd + 8 agent-doc + 12 skill + 24 pi-docs = 48
-test("implicit.allow has 4 cwd + 8 agent-doc + 12 skill + 24 pi-docs rules",            withPiDocs.implicit.allow.length, 48);
+test("implicit.allow includes Find(Windows AppData npm) rule",            withPiDocs.implicit.allow.includes(PI_DOCS_FIND_RULES[0]), true);
+// 5 cwd + 3 skill globs × 5 read-only tools (15) + 6 pi-docs globs × 5 tools (30) = 50
+// 5 cwd + 8 agent-doc + 15 skill + 30 pi-docs = 58
+test("implicit.allow has 5 cwd + 8 agent-doc + 15 skill + 30 pi-docs rules",            withPiDocs.implicit.allow.length, 58);
 
-// Opt-out: readAllowPiDocs: false removes all pi-docs rules (Read/Ls/Glob/Grep)
+// Opt-out: readAllowPiDocs: false removes all pi-docs rules (Read/Ls/Glob/Grep/Find)
 const noPiDocs = loadConfigFromObjects({}, { readAllowPiDocs: false }, CWD, HOME);
 test("implicit.readAllowPiDocs is false when disabled",  noPiDocs.implicit.readAllowPiDocs, false);
 test("no pi-docs rules when disabled",                   noPiDocs.implicit.allow.some((r) => ALL_PI_DOCS_RULES.includes(r)), false);
-// 4 cwd + 8 agent-doc + 12 skill = 24
-test("cwd + agent-doc + skill rules still present when readAllowPiDocs:false", noPiDocs.implicit.allow.length, 24);
+// 5 cwd + 8 agent-doc + 15 skill = 28
+test("cwd + agent-doc + skill rules still present when readAllowPiDocs:false", noPiDocs.implicit.allow.length, 28);
 
 // Independence: toggling one flag does not affect the other
 const skillsOffPiDocsOn = loadConfigFromObjects({}, { readAllowSkills: false }, CWD, HOME);
@@ -345,6 +367,8 @@ test("Glob pi-coding-agent/examples/ (Windows AppData) → allow",
 	decide(piDocsCfg, "glob", { path: HOME + "/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/examples/" }), "allow");
 test("Grep pi-coding-agent/docs/ (Windows AppData) → allow",
 	decide(piDocsCfg, "grep", { path: HOME + "/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/docs/" }), "allow");
+test("Find pi-coding-agent/docs/ (Windows AppData) → allow",
+	decide(piDocsCfg, "find", { path: HOME + "/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/docs/" }), "allow");
 test("Ls pi-coding-agent (.nvm layout) → allow",
 	decide(piDocsCfg, "ls", { path: HOME + "/.nvm/versions/node/v20.0.0/lib/node_modules/@earendil-works/pi-coding-agent/examples/" }), "allow");
 

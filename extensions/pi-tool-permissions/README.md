@@ -52,6 +52,7 @@ See [`pi-tool-permissions.example.json`](./pi-tool-permissions.example.json) for
   "grepAllowCwd": true,
   "globAllowCwd": true,
   "lsAllowCwd": true,
+  "findAllowCwd": true,
   "readAllowSkills": true,
   "readAllowPiDocs": true,
   "readAllowAgentDocs": true,
@@ -262,6 +263,15 @@ Silently allows any `Ls` call whose listed directory is inside the current worki
 Disable it per-project:
 ```json
 { "lsAllowCwd": false }
+```
+
+#### `findAllowCwd` (default: `true`)
+
+Silently allows any `Find` call whose search directory is inside the current working directory (recursively). When the model calls `find` without a `path`, the permission system treats it as if `path` were the current working directory, so bare `Find` calls are also auto-allowed.
+
+Disable it per-project:
+```json
+{ "findAllowCwd": false }
 ```
 
 #### `readAllowAgentDocs` (default: `true`)
