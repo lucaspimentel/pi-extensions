@@ -2101,35 +2101,39 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	} else if (checkAllow(allowInput)) {
 		return "allow";
 	}
-	const td = cfg.toolDefaults[normalizeTool(toolName)];
+	const tool = normalizeTool(toolName);
+	// Explicit toolDefaults win in every mode (including yolo): a user-authored
+	// per-tool action is a deliberate config choice and is never overridden by
+	// a mode strategy or screened by the classifier. Only the explicit map is
+	// consulted here; the merged cfg.toolDefaults view also contains the
+	// implicit write guard, which must NOT short-circuit the mode strategy.
+	const td = cfg.explicitToolDefaults[tool];
 	if (td !== undefined) return td;
 	// Mode strategy for the non-explicit remainder. Layering rationale (see
 	// docs/permission-modes-design.md):
 	//
-	// 1. Explicit toolDefaults were already consulted above via the merged view
-	//    and returned in every mode (including yolo): a user-authored per-tool
-	//    action is a deliberate config choice and is never overridden by a mode
-	//    strategy or screened by the classifier.
-	// 2. yolo allows everything else without any classifier involvement, so it
+	// 1. yolo allows everything else without any classifier involvement, so it
 	//    must be checked before the implicit write guard: the guard is implicit
 	//    config, not an explicit rule, and yolo means "stop asking".
+	// 2. In edits mode write/edit calls are the point of the mode, so they
+	//    resolve to "allow" directly, before the implicit toolDefault map is
+	//    consulted (Edit has no implicit entry, but the allow must not depend
+	//    on one).
 	// 3. The implicit write guard (cfg.implicit.toolDefaults, currently only the
 	//    injected write -> ask) is a deterministic fallback, but not explicit
 	//    config: in auto mode it is demoted BELOW the classifier so writes fall
 	//    through to the "auto" sentinel (repo edits silently allow via the
 	//    default NL allow list; out-of-repo writes soft-deny to a prompt). In
-	//    edits mode write/edit calls are the point of the mode, so the guard
-	//    resolves to "allow". In manual mode it behaves exactly as before.
+	//    manual mode it behaves exactly as before. Other implicit entries (not
+	//    relaxed by edits mode) return their action unchanged.
 	// 4. Plain fallthrough: auto returns the "auto" sentinel (handler screens
 	//    with the classifier, or stubs to ask when no model is available);
 	//    manual/edits return the terminal `defaultAction`.
-	const tool = normalizeTool(toolName);
 	if (mode === "yolo") return "allow";
+	if (mode === "edits" && (tool === "write" || tool === "edit")) return "allow";
 	const implicitTd = cfg.implicit.toolDefaults[tool];
 	if (implicitTd !== undefined) {
 		if (mode === "auto") return "auto";
-		const isWriteLike = tool === "write" || tool === "edit";
-		if (mode === "edits" && isWriteLike) return "allow";
 		return implicitTd;
 	}
 	if (mode === "auto") return "auto";

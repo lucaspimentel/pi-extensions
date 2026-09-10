@@ -897,17 +897,44 @@ for (const m of ALL_MODES) {
 		decide(makeCfg({ toolDefaults: { bash: "ask" }, defaultAction: "allow" }), "bash", { command: "x" }, m), "ask");
 }
 
-// Implicit write guard per mode. Build a cfg with the guard the way mergeConfig
-// injects it (implicit.toolDefaults.write = "ask"); makeCfg leaves it empty.
-const guardCfg = makeCfg({ defaultAction: "ask" });
-guardCfg.implicit.toolDefaults = { write: "ask" };
+// Implicit write guard per mode. Build the cfg through the real mergeConfig
+// (loadConfigFromObjects) so toolDefaults, explicitToolDefaults and
+// implicit.toolDefaults have the same relationship as production: the implicit
+// write → ask guard lands in BOTH toolDefaults and implicit.toolDefaults, and
+// explicitToolDefaults stays empty. makeCfg leaves all of these empty, which
+// does not exercise the guard at all.
+const guardCfg = loadConfigFromObjects({}, {}, process.cwd());
+test("matrix: guardCfg is production-shaped (implicit write in merged + implicit maps)",
+	guardCfg.toolDefaults["write"] === "ask" && guardCfg.implicit.toolDefaults["write"] === "ask", true);
+test("matrix: guardCfg explicitToolDefaults is empty", Object.keys(guardCfg.explicitToolDefaults).length, 0);
 test("matrix: implicit write guard, mode=manual → ask", decide(guardCfg, "write", { path: "./f.ts" }, "manual"), "ask");
 test("matrix: implicit write guard, mode=edits → allow", decide(guardCfg, "write", { path: "./f.ts" }, "edits"), "allow");
 test("matrix: implicit write guard, mode=auto → auto sentinel (demoted below classifier)", decide(guardCfg, "write", { path: "./f.ts" }, "auto"), "auto");
 test("matrix: implicit write guard, mode=yolo → allow", decide(guardCfg, "write", { path: "./f.ts" }, "yolo"), "allow");
-// Non-write implicit guard entries are NOT relaxed by edits mode.
-guardCfg.implicit.toolDefaults = { web_search: "ask" };
-test("matrix: implicit non-write guard, mode=edits → ask (unchanged)", decide(guardCfg, "websearch", {}, "edits"), "ask");
+
+// Edit has no implicit toolDefault entry at all; edits mode still allows it,
+// auto returns the sentinel, and manual falls through to defaultAction (ask).
+test("matrix: Edit with no implicit guard, mode=manual → defaultAction (ask)", decide(guardCfg, "edit", { path: "./f.ts" }, "manual"), "ask");
+test("matrix: Edit with no implicit guard, mode=edits → allow", decide(guardCfg, "edit", { path: "./f.ts" }, "edits"), "allow");
+test("matrix: Edit with no implicit guard, mode=auto → auto sentinel", decide(guardCfg, "edit", { path: "./f.ts" }, "auto"), "auto");
+test("matrix: Edit with no implicit guard, mode=yolo → allow", decide(guardCfg, "edit", { path: "./f.ts" }, "yolo"), "allow");
+
+// Explicit toolDefaults override the implicit write guard in every mode.
+const writeAllowCfg = loadConfigFromObjects({}, { toolDefaults: { write: "allow" } }, process.cwd());
+const writeDenyCfg = loadConfigFromObjects({}, { toolDefaults: { write: "deny" } }, process.cwd());
+for (const m of ALL_MODES) {
+	test(`matrix: explicit toolDefaults.write overrides implicit guard, mode=${m} → allow`,
+		decide(writeAllowCfg, "write", { path: "./f.ts" }, m), "allow");
+	test(`matrix: explicit toolDefaults.write overrides implicit guard, mode=${m} → deny`,
+		decide(writeDenyCfg, "write", { path: "./f.ts" }, m), "deny");
+}
+
+// Non-write implicit guard entries are NOT relaxed by edits mode. This shape
+// (implicit.toolDefaults without a merged toolDefaults entry) does not occur
+// in production, but decide() must still honor the implicit map.
+const nonWriteGuardCfg = loadConfigFromObjects({}, {}, process.cwd());
+nonWriteGuardCfg.implicit.toolDefaults = { web_search: "ask" };
+test("matrix: implicit non-write guard, mode=edits → ask (unchanged)", decide(nonWriteGuardCfg, "websearch", {}, "edits"), "ask");
 
 // Plain fallthrough per mode (no rules, no toolDefaults, no implicit guard).
 const fallCfg = makeCfg({ defaultAction: "ask" });
