@@ -425,6 +425,22 @@ test("[[ -f x ]] → safe always",      isReadOnlyBashSubcommand("[[ -f x ]]", C
 test("[ -d /tmp ] → safe always",     isReadOnlyBashSubcommand("[ -d /tmp ]", CWD), true);
 test("test -r secrets → safe always", isReadOnlyBashSubcommand("test -r secrets", CWD), true);
 
+section("isReadOnlyBashSubcommand — set with shell options");
+
+test("set (bare) → true",                       isReadOnlyBashSubcommand("set", CWD), true);
+test("set -e → true",                           isReadOnlyBashSubcommand("set -e", CWD), true);
+test("set -euo pipefail → true",                isReadOnlyBashSubcommand("set -euo pipefail", CWD), true);
+test("set -u → true",                           isReadOnlyBashSubcommand("set -u", CWD), true);
+test("set +e → true",                           isReadOnlyBashSubcommand("set +e", CWD), true);
+test("set -o pipefail → true",                  isReadOnlyBashSubcommand("set -o pipefail", CWD), true);
+test("set -o errexit -o nounset → true",        isReadOnlyBashSubcommand("set -o errexit -o nounset", CWD), true);
+test("set +o histexpand → true",                isReadOnlyBashSubcommand("set +o histexpand", CWD), true);
+test("set -- → true",                           isReadOnlyBashSubcommand("set --", CWD), true);
+test("set foo → false (positional arg)",        isReadOnlyBashSubcommand("set foo", CWD), false);
+test("set -- foo → false (positional after --)", isReadOnlyBashSubcommand("set -- foo", CWD), false);
+test("set $1 → false (positional arg)",         isReadOnlyBashSubcommand("set $1", CWD), false);
+test("set -e > out.txt → false (redirect)",     isReadOnlyBashSubcommand("set -e > out.txt", CWD), false);
+
 // Use WIN_CWD (C:/...) for WITH_PATHS tests and verify that Windows-native,
 // MSYS, and Cygwin spellings all compare against the same canonical cwd.
 section("isReadOnlyBashSubcommand — WITH_PATHS (paths inside cwd)");
@@ -510,6 +526,17 @@ test("rm subpart → deny (falls to defaultAction)", lsAndRm.breakdown[1].action
 
 const lsAndGit = decideCompound(roCompCfg, "bash", { command: "ls && git status" });
 test("ls && git status → deny (git not in safe list)", lsAndGit.action, "deny");
+
+const setAndCat = decideCompound(roCompCfg, "bash", { command: "set -euo pipefail && cat README.md" });
+test("set -euo pipefail && cat README.md → allow",  setAndCat.action, "allow");
+test("set part → allow",                            setAndCat.breakdown[0].action, "allow");
+test("cat part → allow",                            setAndCat.breakdown[1].action, "allow");
+
+const setOnly = decideCompound(roCompCfg, "bash", { command: "set -euo pipefail" });
+test("set -euo pipefail (single) → allow", setOnly.action, "allow");
+
+const setFooAndCat = decideCompound(roCompCfg, "bash", { command: "set foo && cat README.md" });
+test("set foo && cat README.md → not auto-allowed", setFooAndCat.action !== "allow", true);
 
 section("formatBreakdown — rendering");
 

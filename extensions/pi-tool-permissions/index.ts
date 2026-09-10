@@ -106,6 +106,10 @@
  *   bashReadOnlyAllowCwd (default: true)
  *     Silently allows a curated set of read-only bash subcommands (pwd, echo, ls,
  *     cat, head, tail, wc, stat, …) when their path arguments resolve inside cwd.
+ *     `set` with only shell options (`set -e`, `set -euo pipefail`,
+ *     `set -o pipefail`, `set +x`, bare `set`) is also allowed since pi runs
+ *     each Bash call in a fresh shell; `set` with any positional argument
+ *     (e.g. `set foo`, `set -- foo`) still prompts.
  *     Commands with top-level *file* output redirections (>, >>, 2>, &>, …) are
  *     never auto-allowed. Descriptor-to-descriptor dups like `2>&1` / `1>&2` are
  *     NOT file writes and stay auto-allowable. Redirects to `/dev/null` (the

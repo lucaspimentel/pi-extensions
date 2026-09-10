@@ -894,6 +894,38 @@ function tokenizeSimple(cmd: string): string[] {
 }
 
 /**
+ * Returns true when the tokens represent a `set` invocation whose arguments
+ * are only shell options: short flags (`-e`), clustered flags (`-euo`), plus
+ * forms (`+x`), long options with their values (`-o pipefail`, `+o histexpand`),
+ * and an optional trailing `--` end-of-options marker. A bare `set` (no
+ * arguments, prints shell variables) is also allowed.
+ *
+ * Any positional argument (e.g. `set foo`, `set -- foo`, `set $1`) returns
+ * false so the command falls through to ask: reject on doubt.
+ */
+function isSetOptionsOnly(tokens: string[]): boolean {
+	const args = tokens.slice(1);
+	let prevTakesValue = false;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--") {
+			// `--` ends option parsing; anything after it is a positional argument
+			return i === args.length - 1;
+		}
+		if (arg.startsWith("-") || arg.startsWith("+")) {
+			// Option (or a value of a preceding `-o`/`+o`, also fine either way).
+			// An option ending in `o` consumes the next token as its value.
+			prevTakesValue = arg.endsWith("o");
+			continue;
+		}
+		// Bare token: only acceptable as the value of a preceding `-o`/`+o`
+		if (prevTakesValue) { prevTakesValue = false; continue; }
+		return false;
+	}
+	return true;
+}
+
+/**
  * Returns true when `cmd` is a read-only bash subcommand that is safe to
  * auto-allow when `bashReadOnlyAllowCwd` is enabled.
  *
@@ -903,6 +935,9 @@ function tokenizeSimple(cmd: string): string[] {
  *     writes and stay auto-allowable. Redirects to `/dev/null` (null device,
  *     no persistence) are likewise NOT file writes and stay auto-allowable.
  *  2. If the first token is in READONLY_BASH_SAFE_ALWAYS → allow.
+ *  2b. If the first token is `set` and every remaining token is a shell
+ *      option (short flags, clustered flags, plus forms, `-o`/`+o` option
+ *      values, or a trailing `--`) → allow. Any positional argument → false.
  *  3. If the first token is in READONLY_BASH_WITH_PATHS → allow only when
  *     every non-flag argument resolves to a path inside (or equal to) cwd.
  *  4. Anything else → false.
@@ -914,6 +949,7 @@ export function isReadOnlyBashSubcommand(cmd: string, cwd: string, options: Path
 	const tokens = tokenizeSimple(trimmed);
 	if (tokens.length === 0) return false;
 	const cmdName = tokens[0].toLowerCase();
+	if (cmdName === "set") return isSetOptionsOnly(tokens);
 	if (READONLY_BASH_SAFE_ALWAYS.has(cmdName)) return true;
 	if (READONLY_BASH_WITH_PATHS.has(cmdName)) {
 		const pathArgs = tokens.slice(1).filter((t) => t.length > 0 && !t.startsWith("-"));
