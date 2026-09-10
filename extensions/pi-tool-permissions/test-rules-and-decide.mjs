@@ -961,6 +961,24 @@ test("matrix: fallthrough with defaultAction=deny, mode=yolo → allow", decide(
 const editsCfg = makeCfg({ ask: ["Bash(git push*)"] });
 test("matrix: edits mode keeps explicit ask rules", decide(editsCfg, "bash", { command: "git push" }, "edits"), "ask");
 
+// Compound where every subcommand matches an explicit `ask` rule: the subs
+// must stay `ask` in every mode (including auto and yolo) so the runtime
+// handler stays in the per-subcommand prompt loop. This is the pure-logic
+// counterpart of the mode-switch fix in the handler: selecting a mode switch
+// while approving one sub must not behave like "Allow ALL steps once" for the
+// remaining subs, because decide() still returns `ask` for them under the new
+// mode and the loop keeps prompting.
+{
+	const pushCfg = makeCfg({ ask: ["Bash(git push*)"] });
+	const compoundPushCmd = "git push origin first && git push origin second";
+	for (const m of ALL_MODES) {
+		const dc = decideCompound(pushCfg, "bash", { command: compoundPushCmd }, m);
+		test(`matrix: compound explicit-ask subs, mode=${m} aggregate → ask`, dc.action, "ask");
+		test(`matrix: compound explicit-ask subs, mode=${m} is compound with both subs ask`,
+			dc.isCompound && dc.breakdown.length === 2 && dc.breakdown.every((b) => b.action === "ask"), true);
+	}
+}
+
 // yolo allows the redirect fallthrough that the redirect-aware allow filter
 // would otherwise gate to ask (documented sharp edge: rg x > out.txt).
 {

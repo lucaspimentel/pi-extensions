@@ -692,16 +692,17 @@ export default function (pi: ExtensionAPI) {
 	
 					if (choice === "Switch to auto mode (this session)") {
 						applyMode("auto", ctx);
-						// Let the rest of this compound finish without re-prompting; future
-						// tool calls go through the classifier. (Any `deny` sub was already
-						// blocked by decideCompound before this loop runs.)
-						allowAllStepsOnce = true;
+						// The mode switch authorizes only the current prompted subcommand.
+						// Later subcommands must be re-evaluated under the new mode so explicit
+						// `ask` rules still prompt; non-explicit fallthroughs will be classified.
 						continue;
 					}
 
 					if (choice === "Switch to yolo mode (this session)") {
 						applyMode("yolo", ctx);
-						allowAllStepsOnce = true;
+						// The mode switch authorizes only the current prompted subcommand.
+						// Later subcommands must be re-evaluated under the new mode so explicit
+						// `ask` rules still prompt; only non-explicit fallthroughs are allowed.
 						continue;
 					}
 	
