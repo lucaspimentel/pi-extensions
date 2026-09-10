@@ -467,7 +467,7 @@ Suggested rule: Bash(rm*)
     Deny always (save rule)
 ```
 
-Every permission dialog also offers a **"Switch to auto mode (this session)"** choice (see [Auto mode](#auto-mode) below) when auto mode isn't already active. It appears at the **bottom** of the choice list, so **"Allow once"** stays the default (pi's selector starts on the first item).
+Every permission dialog also offers mode-switch choices: **"Switch to edits mode (this session)"** (Write/Edit dialogs only), **"Switch to auto mode (this session)"**, and **"Switch to yolo mode (this session)"** (see [Permission modes](#permission-modes) below). Each appears only when its mode isn't already active, at the **bottom** of the choice list, so **"Allow once"** stays the default (pi's selector starts on the first item).
 
 Choosing **always** opens a second selector asking *where* to save the rule:
 
@@ -529,40 +529,47 @@ Nested constructs collapse in one pass (e.g. `do while true` → `true`). When f
 
 In non-interactive modes (`-p`, JSON mode), `ask` falls back to **deny** so nothing dangerous slips through automation.
 
-## Allow-all-edits mode
+## Permission modes
 
-A session-only toggle that auto-approves every `Write` and `Edit` tool call without prompting. It is **never** written to disk and always starts disabled — enabling it only applies to the current session.
+The two former independent session toggles (allow-all-edits, auto mode) are consolidated into a single **permission mode** enum: `manual | edits | auto | yolo`. The mode is **session-only**: it always starts at `manual`, is never persisted, and only changes the strategy for the *non-explicit* remainder of the precedence chain. Explicit `deny` rules, explicit `ask` rules, and explicit `toolDefaults` win identically in every mode.
 
-Explicit `deny` rules still win even when the mode is on.
+| Mode | Non-explicit strategy | Footer indicator |
+| ---- | --------------------- | ---------------- |
+| `manual` | Fallthroughs use `defaultAction`; the implicit `write → ask` guard prompts for Write/Edit | *(blank)* |
+| `edits` | Write/Edit silently allowed (the implicit guard resolves to allow); everything else like `manual` | `✏️ edits` |
+| `auto` | An LLM classifier screens fallthroughs, including Write/Edit (the implicit guard is demoted below the classifier) | `🤖 auto: <model-id>` |
+| `yolo` | Allow everything not explicitly denied/asked/configured; the classifier never runs | `💀 yolo` |
 
-### Ways to toggle
+### Ways to switch
 
 | Method | Action |
 | ------ | ------ |
-| **Ctrl+Alt+E** | Toggle on/off |
-| Permission dialog (Write/Edit only) | Choose **"Allow all edits this session"** |
-| `/permissions allowalledits` | Toggle |
-| `/permissions allowalledits on\|off` | Set explicitly |
+| **Ctrl+Alt+M** | Cycle manual → edits → auto → yolo → manual |
+| Any permission dialog | Choose **"Switch to edits / auto / yolo mode (this session)"** |
+| `/permissions mode [manual\|edits\|auto\|yolo]` | Show or set the mode |
+| `/permissions auto` | Alias for `/permissions mode auto` |
+| `/permissions allowalledits` | Deprecated alias for `/permissions mode edits` |
 
-When active, a `✏️ all edits allowed` indicator appears in the footer status bar.
+The full design (precedence, invariants, sharp edges) lives in [`docs/permission-modes-design.md`](./docs/permission-modes-design.md). The `auto` rung's classifier layer is detailed in [Auto mode](#auto-mode) below.
 
 ## Slash command
 
 ```
 /permissions                            # show this help
 /permissions help                       # show this help
-/permissions list                       # show current rules + allow-all-edits + auto-mode state
+/permissions list                       # show current rules + permission-mode state
 /permissions allow <rule> [--user]      # add an allow rule (default: project-local)
 /permissions deny  <rule> [--user]      # add a deny rule
 /permissions ask   <rule> [--user]      # add an ask rule
 /permissions remove <rule> [--user]     # remove a rule (searches project by default; --user searches user config)
-/permissions default <allow|deny|ask|auto> [--user]
+/permissions default <allow|deny|ask> [--user]
 /permissions reload                     # reload config from disk
-/permissions allowalledits [on|off|toggle]
-/permissions auto [on|off|toggle]       # toggle auto-mode (LLM classifier) for this session
+/permissions mode [manual|edits|auto|yolo]  # show or set the session permission mode
+/permissions auto                       # alias for /permissions mode auto
 /permissions auto debug [on|off|toggle] # toggle classifier debug notifications for this session
 /permissions auto model [--user]        # pick the classifier model interactively
 /permissions auto model clear [--user]  # remove the classifier pin (resume auto-select)
+/permissions allowalledits              # deprecated alias for /permissions mode edits
 ```
 
 All write subcommands (`allow`/`deny`/`ask`/`remove`/`default`) accept `--user` to target the user-global config (`~/.pi/agent/pi-tool-permissions.json`); the default is the project-local `.pi/pi-tool-permissions.local.json`. `/permissions list` tags each rule with its source: `[implicit]`, `[user]`, `[project]`, or `[user+project]` when the same rule lives in both files.
@@ -581,24 +588,25 @@ Examples:
 /permissions ask   Mcp(atlassian_*)
 /permissions default deny
 /permissions default deny --user
-/permissions allowalledits on
-/permissions auto on
+/permissions mode edits
+/permissions mode yolo
+/permissions auto
 ```
 
 ## Auto mode
 
-Auto mode is a **session-toggle layer between `toolDefaults` and `defaultAction`** — a middle ground between Manual (prompt for everything) and `bypassPermissions` (prompt for nothing). Turn on the session toggle, and before each tool call that **falls through the static rules AND any `toolDefaults`**, a cheap/fast LLM **classifier** screens the action against natural-language `allow` / `soft_deny` / `hard_deny` lists plus an `environment` fact list, then either allows silently, prompts (with the classifier's reason), or blocks.
+Auto mode is the `auto` rung of the **permission mode** enum (see [Permission modes](#permission-modes)): a middle ground between Manual (prompt for everything) and `bypassPermissions` (prompt for nothing). In auto mode, before each tool call that **falls through the static rules AND any `toolDefaults`**, a cheap/fast LLM **classifier** screens the action against natural-language `allow` / `soft_deny` / `hard_deny` lists plus an `environment` fact list, then either allows silently, prompts (with the classifier's reason), or blocks.
 
 It is a **layer in the precedence chain**, not a `defaultAction` value:
 
 ```
-deny > ask > allow > toolDefaults > auto (if session toggle on) > defaultAction
+deny > ask > allow > toolDefaults > mode strategy (auto → classifier) > defaultAction
 ```
 
 - `deny` rules block *before* the classifier is consulted (neither the classifier nor user intent can override).
 - `ask` rules always prompt (the classifier cannot auto-approve a matching action).
-- `toolDefaults` (e.g. the implicit `write → ask` guard) win over the classifier — a per-tool deterministic action is never screened by the LLM.
-- The classifier only decides for actions that fall through all of those — true unknowns.
+- Explicit `toolDefaults` win over the classifier: a per-tool deterministic action from config is never screened by the LLM. (The *implicit* `write → ask` guard is different: in auto mode it is demoted below the classifier so Write/Edit calls are screened, repo edits silently allow via the default NL allow list, and out-of-repo writes soft-deny to a prompt.)
+- The classifier only decides for actions that fall through all of those: true unknowns.
 
 When an action matches more than one NL list, the more-severe verdict wins: **`hard_deny > soft_deny > allow`** (the classifier emits a single verdict, so precedence is enforced by the prompt instruction, not by code). This mirrors the static `deny > ask > allow` chain — there is no `allow`-overrides-`deny` escape hatch at the classifier layer.
 
@@ -611,11 +619,11 @@ When an action matches more than one NL list, the more-severe verdict wins: **`h
 | `soft_deny` | prompt with reason (deny in non-interactive modes — can't prompt) |
 | `no_match` | fall through to `defaultAction` (the classifier ran and had no opinion, so the user's terminal default applies) |
 
-When the toggle is on but **no classifier model is available**, the auto layer stubs to `ask` (safe) rather than applying `defaultAction` — screening was requested but couldn't be performed, so prompt instead.
+When mode is `auto` but **no classifier model is available**, the auto layer stubs to `ask` (safe) rather than applying `defaultAction` — screening was requested but couldn't be performed, so prompt instead.
 
-Auto mode is **off by default** and **never persisted** (session-only, like allow-all-edits). `defaultAction` is never `"auto"` — legacy configs that still set it are coerced to `"ask"` with a warning. Explicit `deny` rules always win.
+Auto mode is **off by default** (the mode starts at `manual` every session) and **never persisted**. `defaultAction` is never `"auto"` — legacy configs that still set it are coerced to `"ask"` with a warning. Explicit `deny` rules always win.
 
-> **Status:** The session toggle, `/permissions auto` subcommand, footer indicator, and the classifier runtime are wired. When the toggle is on and a classifier model is available, fallthroughs are screened by the classifier; if no model is available they prompt (`ask`); if the toggle is off, fallthroughs use `defaultAction`. See [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) for the full design.
+> **Status:** The permission-mode enum, `/permissions mode` subcommand, footer indicator, and the classifier runtime are wired. When the mode is `auto` and a classifier model is available, fallthroughs are screened by the classifier; if no model is available they prompt (`ask`); in `manual`/`edits` mode, fallthroughs use `defaultAction`. See [`docs/permission-modes-design.md`](./docs/permission-modes-design.md) and [`docs/auto-mode-design.md`](./docs/auto-mode-design.md) for the full design.
 
 #### Call context sent to the classifier
 
@@ -653,31 +661,31 @@ The default NL lists split git by reversibility rather than by "writes vs. reads
 
 So `git add -A && git commit -m ...` runs silently, while anything that leaves your machine or destroys recoverable state still asks. Verdict precedence (`hard_deny > soft_deny > allow`) means a chain like `git commit && git push` correctly lands on the prompt.
 
-### Ways to toggle
+### Selecting auto mode
 
 | Method | Action |
 | ------ | ------ |
-| **Ctrl+Alt+A** | Toggle on/off |
+| **Ctrl+Alt+M** | Cycle through the modes (auto is the third stop) |
 | Any permission dialog | Choose **"Switch to auto mode (this session)"** |
-| `/permissions auto` | Toggle |
-| `/permissions auto on\|off` | Set explicitly |
+| `/permissions mode auto` | Set the mode |
+| `/permissions auto` | Alias for `/permissions mode auto` |
 | `/permissions auto debug on\|off\|toggle` | Toggle classifier debug notifications (see below) |
 
-When active, a `🤖 auto mode on` indicator appears in the footer status bar.
+When active, a `🤖 auto: <model-id>` indicator appears in the footer status bar (or `🤖 auto (no classifier)` when no model is available).
 
-The **"Switch to auto mode (this session)"** dialog option just flips the toggle — it's the same as the hotkey, but contextual (available right where you're already being prompted). It only appears when auto mode isn't already active.
+The **"Switch to auto mode (this session)"** dialog option just sets the mode — it's the same as `/permissions mode auto`, but contextual (available right where you're already being prompted). It only appears when auto mode isn't already active.
 
 ### Debugging classifier decisions
 
 By default, a classifier `allow` verdict is silent — the tool call just goes through, with no trace of which model ran or why. `ask`/`deny` verdicts already show the model + reason in the dialog/block message, but `allow` and `no_match` leave nothing.
 
-`/permissions auto debug [on|off|toggle]` is a second **session-only, never-persisted** toggle (independent of the auto-mode toggle itself) that notifies for *every* classifier call, regardless of verdict:
+`/permissions auto debug [on|off|toggle]` is a second **session-only, never-persisted** toggle (independent of the permission mode itself) that notifies for *every* classifier call, regardless of verdict:
 
 ```
 [classifier] claude-haiku-4-5 -> allow: read-only status check (Bash(git status))
 ```
 
-Turn it on when you want to see the classifier's reasoning for actions it's silently approving, not just the ones it stops you on. It has no effect when auto mode is off (the classifier never runs).
+Turn it on when you want to see the classifier's reasoning for actions it's silently approving, not just the ones it stops you on. It has no effect unless the mode is `auto` (the classifier never runs otherwise).
 
 ### Config
 
@@ -729,7 +737,7 @@ Turn it on when you want to see the classifier's reasoning for actions it's sile
 
 The `allow` / `soft_deny` / `hard_deny` lists and `classifyAllShell` have **sane defaults** baked in — a bare `{ "autoMode": { ... } }` (or no `autoMode` block at all) works out of the box once the session toggle is on. Your configured lists are **additive** on top of the defaults (concatenated + deduped), so you can extend them without losing the safe baseline. `classifier` and `environment` have no defaults — they're inherently user-specific. To override `classifyAllShell` back to `false`, set it explicitly.
 
-`defaultAction` is independent of auto mode: it's the terminal fallback (`allow` / `deny` / `ask`) used when the classifier returns `no_match` (or when the toggle is off). The `autoMode` block configures the classifier itself.
+`defaultAction` is independent of the permission mode: it's the terminal fallback (`allow` / `deny` / `ask`) used when the classifier returns `no_match`, and the direct fallthrough in `manual`/`edits` mode. The `autoMode` block configures the classifier itself.
 
 In non-interactive modes (`-p`, JSON mode), classifier `soft_deny` verdicts fall back to **deny** (can't prompt); `no_match` falls through to `defaultAction` (so automation respects the user's terminal default).
 

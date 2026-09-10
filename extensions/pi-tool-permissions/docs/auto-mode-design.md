@@ -2,6 +2,8 @@
 
 > Claude Code–style `"auto"` `defaultAction` for `pi-tool-permissions`, backed by an LLM safety classifier.
 
+> **Note (2026-02-14):** the session toggle described here has been replaced by the `auto` rung of the [`PermissionMode` enum](./permission-modes-design.md) (`manual | edits | auto | yolo`, switched via Ctrl+Alt+M or `/permissions mode auto`). The classifier layer, verdict mapping, NL lists, and context-block design below are unchanged; only the on/off switch around them is different.
+
 ## Status
 
 - **2026-08-31** — The pure helpers this doc cites as living in `index.ts` (config types, `mergeConfig`/`loadConfig`, the classifier helpers, `decide()`) moved to `rules.ts` in a pure-move refactor; `index.ts` now holds only the pi-runtime glue and imports from `rules.ts`. Line references below are to the pre-move `index.ts` and are kept as historical record.

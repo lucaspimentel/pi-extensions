@@ -96,8 +96,13 @@ export function saveUserConfigToDisk(home, cfg) {
  */
 export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, bashAllowPureVarAssign = true, cwd = process.cwd(), autoMode } = {}) {
 	// Normalize toolDefault keys so decide() can look them up via normalizeTool()
-	// Coerce legacy `defaultAction: "auto"` → "ask" (auto mode is now a session toggle).
-	return { allow, deny, ask, toolDefaults: normalizeToolDefaultsKeys(toolDefaults), defaultAction: coerceDefaultAction(defaultAction), allowNoopCd, bashReadOnlyAllowCwd, bashAllowPureVarAssign, cwd, autoMode: autoMode ?? { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false }, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd } };
+	// Coerce legacy `defaultAction: "auto"` → "ask" (auto is now a mode rung, not a default).
+	// explicitToolDefaults mirrors what mergeConfig computes so tests exercise the
+	// "explicit toolDefaults win in every mode" invariant (mergeConfig sets it from
+	// the config's own toolDefaults; the implicit write → ask guard lives in
+	// implicit.toolDefaults and never lands here).
+	const normalizedDefaults = normalizeToolDefaultsKeys(toolDefaults);
+	return { allow, deny, ask, toolDefaults: normalizedDefaults, explicitToolDefaults: normalizedDefaults, defaultAction: coerceDefaultAction(defaultAction), allowNoopCd, bashReadOnlyAllowCwd, bashAllowPureVarAssign, cwd, autoMode: autoMode ?? { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false }, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd } };
 }
 
 // ── Test runner ───────────────────────────────────────────────────────────

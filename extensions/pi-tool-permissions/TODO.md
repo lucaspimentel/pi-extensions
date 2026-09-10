@@ -1,5 +1,11 @@
 # TODO
 
+- [x] Consolidate allow-all-edits + auto mode into a single permission-mode enum (2026-02-14)
+  - Done: `PermissionMode = "manual" | "edits" | "auto" | "yolo"` session-only enum replaces the two independent toggles (`allowAllEdits`, `autoModeEnabled`). Starts at `manual` every session, never persisted.
+  - Precedence is now `deny > ask > allow > explicit toolDefaults > mode strategy > defaultAction`; explicit `toolDefaults` were split from the implicit write guard (`implicit.toolDefaults`) so config-authored per-tool actions win in every mode while the write guard is demoted below the classifier in auto mode.
+  - UI: single **Ctrl+Alt+M** cycle hotkey (ctrl+alt+e / ctrl+alt+a removed), `/permissions mode [manual|edits|auto|yolo]` subcommand, bare `/permissions auto` aliases `mode auto`, `/permissions allowalledits` is a deprecated alias for `mode edits`, Write/Edit dialogs offer "Switch to edits mode", all dialogs offer "Switch to yolo mode", footer shows one status key (`✏️ edits` / `🤖 auto: <model-id>` / `💀 yolo`, blank for manual).
+  - Design doc: [`docs/permission-modes-design.md`](docs/permission-modes-design.md); auto-mode classifier internals remain in [`docs/auto-mode-design.md`](docs/auto-mode-design.md).
+
 - [ ] Evaluate switching multi-step Bash breakdown indicators to emoji
   - Follow-up to the breakdown marker-placement task. The current rendering uses ASCII-safe action glyphs (`[✓]` / `[✗]` / `[?]`) plus a leading `»` (U+00BB) for the active step — see `actionIcon` / `formatBreakdownLine` / `formatBreakdown` in `rules.ts` (re-exported via `test-helpers.mjs`).
   - Consider replacing the glyphs with emoji for readability: e.g. `✅` (allow), `❌` or `🚫` (deny), `❓` (ask), `👉` (current step). The `actionIcon` indirection was added specifically so this swap is local to that helper.

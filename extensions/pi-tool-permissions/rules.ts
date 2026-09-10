@@ -31,6 +31,17 @@ import {
 
 export type Action = "allow" | "deny" | "ask" | "auto";
 
+/**
+ * Session-only permission mode. Replaces the former independent allow-all-edits
+ * and auto-mode toggles (and the planned separate yolo toggle) with a single
+ * enum threaded through `decide()` / `decideCompound()`. Always starts at
+ * `"manual"` each session and is never persisted. The mode only changes the
+ * strategy for the non-explicit remainder of the precedence chain: explicit
+ * `deny`/`ask` rules and explicit `toolDefaults` win identically in every mode.
+ * See `docs/permission-modes-design.md`.
+ */
+export type PermissionMode = "manual" | "edits" | "auto" | "yolo";
+
 /** The three persistable rule-list actions (auto is not a rule list). */
 export type ListAction = "allow" | "deny" | "ask";
 
@@ -110,8 +121,15 @@ export interface ResolvedConfig {
 	allow: string[];
 	deny: string[];
 	ask: string[];
-	/** Per-tool fallback actions, checked after allow and before defaultAction. */
+	/** Per-tool fallback actions, checked after allow and before defaultAction. Merged view: implicit guards overridden by explicit entries. */
 	toolDefaults: Record<string, Action>;
+	/**
+	 * Explicit (user/project-authored) toolDefaults only, without the implicit
+	 * write guard. `decide()` consults this record so explicit entries can win
+	 * in every mode (including `yolo`) while the implicit guard is demoted below
+	 * the mode strategy. See `docs/permission-modes-design.md`.
+	 */
+	explicitToolDefaults: Record<string, Action>;
 	/** The working directory this config was loaded for. */
 	cwd: string;
 	/** When true, no-op `cd` commands (cd to cwd) are silently allowed. */
@@ -324,6 +342,7 @@ export function mergeConfig(
 		deny,
 		ask,
 		toolDefaults: { ...implicitToolDefaults, ...explicitToolDefaults },
+		explicitToolDefaults,
 		cwd,
 		allowNoopCd,
 		bashReadOnlyAllowCwd,
@@ -1535,13 +1554,13 @@ export function decideCompound(
 	cfg: ResolvedConfig,
 	toolName: string,
 	input: Record<string, unknown>,
-	autoActive = false,
+	mode: PermissionMode = "manual",
 ): CompoundDecision {
-	// `autoActive` is the session-toggle state. When on, `decide()` returns an
-	// "auto" sentinel for fallthroughs (the handler runs the classifier); when
-	// off, `decide()` returns the terminal `defaultAction` directly.
+	// `mode` is the session permission mode. In `"auto"`, `decide()` returns an
+	// "auto" sentinel for fallthroughs (the handler runs the classifier); in the
+	// other modes, `decide()` returns a terminal action directly.
 	if (normalizeTool(toolName) !== "bash") {
-		return { action: decide(cfg, toolName, input, autoActive), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: decide(cfg, toolName, input, mode), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	const rawCmd = String(input.command ?? "");
@@ -1559,7 +1578,7 @@ export function decideCompound(
 		const effectiveInput = split.effectiveCmd != null
 			? { ...normalizedInput, command: split.effectiveCmd }
 			: normalizedInput;
-		return { action: decide(cfg, "bash", effectiveInput, autoActive), isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: decide(cfg, "bash", effectiveInput, mode), isCompound: false, ambiguous: false, breakdown: [] };
 	}
 
 	// compound — strip structural shell keywords (`for`, `do`, `done`) so
@@ -1568,7 +1587,7 @@ export function decideCompound(
 	for (const rawSub of split.parts) {
 		const stripped = stripStructuralKeywords(rawSub);
 		if (stripped === null) continue;
-		breakdown.push({ sub: stripped, action: decide(cfg, "bash", { command: stripped }, autoActive) });
+		breakdown.push({ sub: stripped, action: decide(cfg, "bash", { command: stripped }, mode) });
 	}
 
 	// Entirely structural (e.g. empty-body `for x in a; do; done`) — no commands
@@ -1646,8 +1665,8 @@ export function formatBreakdown(breakdown: SubcommandDecision[], currentSub: str
  * prompt loop after a rule is saved mid-loop so the dialog’s breakdown
  * block and the per-step decisions reflect the freshly loaded config.
  */
-export function recomputeBreakdown(breakdown: SubcommandDecision[], cfg: ResolvedConfig, autoActive = false): SubcommandDecision[] {
-	return breakdown.map((b) => ({ sub: b.sub, action: decide(cfg, "bash", { command: b.sub }, autoActive) }));
+export function recomputeBreakdown(breakdown: SubcommandDecision[], cfg: ResolvedConfig, mode: PermissionMode = "manual"): SubcommandDecision[] {
+	return breakdown.map((b) => ({ sub: b.sub, action: decide(cfg, "bash", { command: b.sub }, mode) }));
 }
 
 // ── Auto-mode classifier (Step 2) ─────────────────────────────────────────
@@ -2020,7 +2039,7 @@ export async function classifyAction(
 	return result;
 }
 
-export function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>, autoActive = false): Action {
+export function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>, mode: PermissionMode = "manual"): Action {
 	const check = (list: string[]): boolean => {
 		for (const raw of list) {
 			const rule = parseRule(raw);
@@ -2038,14 +2057,14 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	};
 	if (check(cfg.deny)) return "deny";
 	// Read-only bash auto-allow short-circuit. When the auto layer is engaged
-	// (session toggle on) AND classifyAllShell is set, route read-only bash
+	// (auto mode) AND classifyAllShell is set, route read-only bash
 	// commands through the classifier instead of silently allowing them. For
 	// compounds, the whole command is classified as one when no sub matched a
 	// static `ask` rule (see the tool_call handler); otherwise each sub is
 	// classified individually.
 	// (No-op `cd` is pure bookkeeping with zero side-effects/data access, so
-	// allowNoopCd stays active regardless of the toggle.)
-	const skipReadOnlyBash = autoActive && cfg.autoMode.classifyAllShell;
+	// allowNoopCd stays active regardless of the mode.)
+	const skipReadOnlyBash = mode === "auto" && cfg.autoMode.classifyAllShell;
 	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd)) return "allow";
 	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
 	// Pure shell variable assignments (no command/process/arithmetic substitution)
@@ -2084,10 +2103,36 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	}
 	const td = cfg.toolDefaults[normalizeTool(toolName)];
 	if (td !== undefined) return td;
-	// Auto layer: when the session toggle is on, return the "auto" sentinel so the
-	// `tool_call` handler can run the classifier (or stub to `ask` if no model is
-	// available). When the toggle is off, fall through to `defaultAction`.
-	if (autoActive) return "auto";
+	// Mode strategy for the non-explicit remainder. Layering rationale (see
+	// docs/permission-modes-design.md):
+	//
+	// 1. Explicit toolDefaults were already consulted above via the merged view
+	//    and returned in every mode (including yolo): a user-authored per-tool
+	//    action is a deliberate config choice and is never overridden by a mode
+	//    strategy or screened by the classifier.
+	// 2. yolo allows everything else without any classifier involvement, so it
+	//    must be checked before the implicit write guard: the guard is implicit
+	//    config, not an explicit rule, and yolo means "stop asking".
+	// 3. The implicit write guard (cfg.implicit.toolDefaults, currently only the
+	//    injected write -> ask) is a deterministic fallback, but not explicit
+	//    config: in auto mode it is demoted BELOW the classifier so writes fall
+	//    through to the "auto" sentinel (repo edits silently allow via the
+	//    default NL allow list; out-of-repo writes soft-deny to a prompt). In
+	//    edits mode write/edit calls are the point of the mode, so the guard
+	//    resolves to "allow". In manual mode it behaves exactly as before.
+	// 4. Plain fallthrough: auto returns the "auto" sentinel (handler screens
+	//    with the classifier, or stubs to ask when no model is available);
+	//    manual/edits return the terminal `defaultAction`.
+	const tool = normalizeTool(toolName);
+	if (mode === "yolo") return "allow";
+	const implicitTd = cfg.implicit.toolDefaults[tool];
+	if (implicitTd !== undefined) {
+		if (mode === "auto") return "auto";
+		const isWriteLike = tool === "write" || tool === "edit";
+		if (mode === "edits" && isWriteLike) return "allow";
+		return implicitTd;
+	}
+	if (mode === "auto") return "auto";
 	return cfg.defaultAction;
 }
 

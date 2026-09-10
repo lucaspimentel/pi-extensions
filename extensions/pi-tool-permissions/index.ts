@@ -56,7 +56,7 @@
  *   }
  *
  * Precedence (first match wins):
- *   deny > ask > allow > toolDefaults > auto (if session toggle on) > defaultAction.
+ *   deny > ask > allow > toolDefaults > mode strategy > defaultAction.
  *
  * Implicit defaults (session-only, never persisted to disk):
  *   readAllowCwd (default: true)
@@ -172,20 +172,40 @@
  *   Example: `if grep foo f; then echo found; fi` prompts on `grep foo f` and `echo found`.
  *   `case` statements are not yet supported (require splitter changes; see TODO.md).
  *
- * Allow-all-edits mode:
- *   A session-only toggle that auto-allows all Write and Edit tool calls without
- *   prompting. Never persisted to disk. Always starts disabled. Explicit deny rules
- *   still take priority even when this mode is on.
+ * Permission modes (session-only, never persisted):
+ *   The two former independent toggles (allow-all-edits, auto mode) are
+ *   consolidated into a single mode enum that starts at "manual" every session:
  *
- *   Toggle via:
- *     - Ctrl+Alt+E hotkey
- *     - "Allow all edits this session" option in the Write/Edit permission dialog
- *     - /permissions allowalledits [on|off|toggle]
+ *     manual  default. Unknown calls fall through to defaultAction; the
+ *               implicit write → ask guard prompts for Write/Edit.
+ *     edits   Write/Edit calls are silently allowed (the implicit guard
+ *               resolves to allow). Everything else behaves like manual.
+ *     auto    an LLM classifier screens the non-explicit remainder, including
+ *               Write/Edit (the implicit guard is demoted below the classifier:
+ *               repo edits silently allow via the default NL allow list,
+ *               out-of-repo writes soft-deny to a prompt). Unknown fallthroughs
+ *               are classified; no_match falls through to defaultAction.
+ *     yolo    allow everything that is not explicitly denied/asked/configured.
  *
- * Auto mode (session toggle, layered between toolDefaults and defaultAction):
+ *   Invariants in every mode: explicit deny rules win before anything else;
+ *   explicit ask rules always prompt; explicit toolDefaults always win and are
+ *   never screened by the classifier; the classifier's
+ *   hard_deny > soft_deny > allow verdict ordering is unchanged. See
+ *   docs/permission-modes-design.md.
+ *
+ *   Switch via:
+ *     - Ctrl+Alt+M hotkey (cycles manual → edits → auto → yolo → manual)
+ *     - /permissions mode [manual|edits|auto|yolo]
+ *     - "Switch to edits mode (this session)" in Write/Edit dialogs
+ *     - "Switch to auto mode" / "Switch to yolo mode" in any permission dialog
+ *
+ *   Footer status key (blank for manual): `✏️ edits`, `🤖 auto: <model-id>`
+ *   (or `🤖 auto (no classifier)`), `💀 yolo`.
+ *
+ * Auto mode internals (the classifier layer behind mode = auto):
  *   A middle ground between Manual (prompt for everything) and bypassPermissions
  *   (prompt for nothing). Before each tool call that falls through the static-rule
- *   layer AND any toolDefaults, a cheap/fast LLM classifier screens the action
+ *   layer AND any explicit toolDefaults, a cheap/fast LLM classifier screens the action
  *   against natural-language `allow` / `soft_deny` / `hard_deny` lists and an
  *   `environment` fact list, then either allows silently, prompts (with the
  *   classifier's reason), or blocks.
@@ -200,11 +220,12 @@
  *   being touched rather than the session cwd.
  *
  *   It is a LAYER in the precedence chain, not a `defaultAction` value:
- *     deny > ask > allow > toolDefaults > auto (if toggle on) > defaultAction
+ *     deny > ask > allow > toolDefaults > mode strategy > defaultAction
  *   `deny` rules block before the classifier is consulted; `ask` rules always
- *   prompt; `toolDefaults` (e.g. the implicit `write → ask` guard) win over the
- *   classifier. The classifier only decides for actions that fall through all of
- *   those — true unknowns.
+ *   prompt; explicit `toolDefaults` win over the classifier. The classifier only
+ *   decides for actions that fall through all of those: true unknowns. Note
+ *   the implicit `write → ask` guard is NOT explicit config: in auto mode it is
+ *   demoted below the classifier so Write/Edit calls are screened by the LLM.
  *
  *   Verdict mapping: `allow` → allow; `hard_deny` → block; `soft_deny` → prompt
  *   (deny in non-interactive modes); `no_match` → fall through to `defaultAction`
@@ -212,21 +233,22 @@
  *   applies). When an action matches more than one NL list, the more-severe
  *   verdict wins: `hard_deny > soft_deny > allow` (the classifier emits a single
  *   verdict, so precedence is enforced by the prompt instruction, not by code).
- *   This mirrors the deterministic `deny > ask > allow` chain above. When the
- *   toggle is on but no classifier model is available, the
- *   auto layer stubs to `ask` (safe) rather than applying `defaultAction` —
- *   screening was requested but couldn't be performed.
+ *   This mirrors the deterministic `deny > ask > allow` chain above. When no
+ *   classifier model is available, the auto layer stubs to `ask` (safe) rather
+ *   than applying `defaultAction`: screening was requested but couldn't be
+ *   performed.
  *
- *   Auto mode is OFF by default and NEVER persisted — it is a session-only toggle
- *   mirroring allow-all-edits. `defaultAction` is never `"auto"` (legacy configs
- *   that set it are coerced to `"ask"` with a warning). Explicit `deny` rules
- *   always win.
+ *   Auto mode is one rung of the permission-mode enum: it is OFF by default
+ *   (mode starts at "manual") and NEVER persisted. `defaultAction` is never
+ *   `"auto"` (legacy configs that set it are coerced to `"ask"` with a warning).
+ *   Explicit `deny` rules always win.
  *
- *   Toggle via:
- *     - Ctrl+Alt+A hotkey
- *     - /permissions auto [on|off|toggle]
+ *   Select via:
+ *     - Ctrl+Alt+M hotkey (cycle) or /permissions mode auto
+ *     - /permissions auto (alias for mode auto; /permissions auto model and
+ *       /permissions auto debug keep their dedicated subcommands)
  *     - "Switch to auto mode (this session)" option in any permission dialog
- *       (just flips the toggle — same as the hotkey, but contextual).
+ *       (same as the hotkey, but contextual).
  *   While on, the status line shows the resolved classifier model id
  *   (`🤖 auto: <model-id>`) so it's visible which model is screening
  *   fallthroughs; when no model is available it reads
@@ -251,17 +273,18 @@
  * Slash commands:
  *   /permissions                       - show this help
  *   /permissions help                  - show this help
- *   /permissions list                  - show current rules + allow-all-edits / auto state
+ *   /permissions list                  - show current rules + permission-mode state
  *   /permissions allow <rule>          - add an allow rule (project)
  *   /permissions deny  <rule>          - add a deny rule (project)
  *   /permissions ask   <rule>          - add an ask rule (project)
  *   /permissions remove <rule>         - remove a rule from any list
  *   /permissions default <allow|deny|ask>
  *   /permissions reload                - reload config from disk
- *   /permissions allowalledits [on|off|toggle]
- *   /permissions auto [on|off|toggle]  - toggle auto-mode (LLM classifier) for this session
+ *   /permissions mode [manual|edits|auto|yolo]  - show or set the session mode
+ *   /permissions auto                  - alias for /permissions mode auto
  *   /permissions auto model [--user]   - pick the classifier model interactively
  *   /permissions auto model clear [--user]  - remove the classifier pin (resume auto-select)
+ *   /permissions allowalledits         - deprecated alias for /permissions mode edits
  */
 
 import { homedir } from "node:os";
@@ -298,10 +321,9 @@ import {
 	userConfigPath,
 	verdictToAction,
 } from "./rules.ts";
-import type { ClassifyResult, DefaultAction, ListAction, ResolvedConfig } from "./rules.ts";
+import type { ClassifyResult, DefaultAction, ListAction, PermissionMode, ResolvedConfig } from "./rules.ts";
 
 const STATUS_KEY = "tool-permissions";
-const STATUS_KEY_AUTO = "tool-permissions-auto";
 
 type Scope = "project" | "user";
 
@@ -330,16 +352,17 @@ function pwshExtraInfo(toolName: string, input: Record<string, unknown>): string
 
 export default function (pi: ExtensionAPI) {
 	let cfg: ResolvedConfig = loadConfig(process.cwd());
-	let allowAllEdits = false;
-	// Auto-mode session toggle (off by default, never persisted). When on,
-	// fallthroughs that reach the auto layer (between `toolDefaults` and
-	// `defaultAction`) are screened by the classifier; if no classifier model
-	// is available they fall back to `ask` (safe stub). Mirrors `allowAllEdits`.
-	let autoModeEnabled = false;
+	// Session-only permission mode. Consolidates the former allow-all-edits and
+	// auto-mode toggles (plus the yolo rung) into a single enum. Always starts at
+	// "manual" and is never persisted: the mode only changes the strategy for the
+	// non-explicit remainder of the precedence chain, while explicit deny/ask
+	// rules and explicit toolDefaults win identically in every mode. See
+	// docs/permission-modes-design.md.
+	let mode: PermissionMode = "manual";
 	// Debug session toggle (off by default, never persisted). When on, every
 	// classifier call (not just ones that end in `ask`/`deny`) notifies with the
 	// model id, verdict, and reason — including silent `allow`/`no_match` calls
-	// that otherwise leave no trace. Mirrors `autoModeEnabled`.
+	// that otherwise leave no trace. Mirrors the `auto` permission mode.
 	let classifierDebugEnabled = false;
 	// Per-session classifier verdict cache (keyed by toolName+input+ruleset). Bounds
 	// token cost when the same action repeats in a loop. See classifierCacheKey().
@@ -368,26 +391,39 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// ── Allow-all-edits helpers ──────────────────────────────────────────────
+	// ── Mode helpers ────────────────────────────────────────────────────────
 
-	function applyAllowAllEdits(value: boolean, ctx: ExtensionContext, notify = true): void {
-		allowAllEdits = value;
-		if (value) {
-			ctx.ui.setStatus(STATUS_KEY, "✏️ all edits allowed");
-			if (notify) ctx.ui.notify("Allow all edits: ON (this session only)", "info");
-		} else {
-			ctx.ui.setStatus(STATUS_KEY, "");
-			if (notify) ctx.ui.notify("Allow all edits: OFF", "info");
+	/**
+	 * Footer indicator for the current mode. Blank for `manual` (the default:
+	 * no need to announce the absence of a special mode). `auto` resolves the
+	 * classifier model so the label shows which model is screening fallthroughs.
+	 */
+	function modeStatusLabel(value: PermissionMode, ctx: ExtensionContext): string {
+		if (value === "edits") return "✏️ edits";
+		if (value === "yolo") return "💀 yolo";
+		if (value === "auto") return autoStatusLabel(resolveClassifierModelFromCtx(ctx));
+		return "";
+	}
+
+	/**
+	 * Set the session permission mode and refresh the single footer status key.
+	 * Session-only: never persisted; a new session starts at `manual` again.
+	 */
+	function applyMode(value: PermissionMode, ctx: ExtensionContext, notify = true): void {
+		mode = value;
+		ctx.ui.setStatus(STATUS_KEY, modeStatusLabel(value, ctx));
+		if (notify) {
+			ctx.ui.notify(`Mode: ${value} (this session only)`, "info");
 		}
 	}
 
-	// ── Auto-mode helpers ─────────────────────────────────────────────────────
+	// ── Auto-mode helpers ────────────────────────────────────────────────────
 
 	/**
 	 * Resolve the classifier model from the session ctx (explicit pin, or
 	 * auto-select from the available pool preferring the current model's
-	 * provider). Factored from the `tool_call` handler so `applyAutoMode` can
-	 * resolve at toggle time for the status line. `ExtensionContext` carries
+	 * provider). Factored from the `tool_call` handler so `applyMode` can
+	 * resolve at mode-switch time for the status line. `ExtensionContext` carries
 	 * `modelRegistry` / `model` / `scopedModels` (see pi docs/extensions.md).
 	 */
 	function resolveClassifierModelFromCtx(ctx: ExtensionContext): Model<Api> | undefined {
@@ -398,20 +434,6 @@ export default function (pi: ExtensionAPI) {
 			cfg.autoMode.classifier,
 			(provider, modelId) => ctx.modelRegistry.find(provider, modelId),
 		);
-	}
-
-	function applyAutoMode(value: boolean, ctx: ExtensionContext, notify = true): void {
-		autoModeEnabled = value;
-		if (value) {
-			const model = resolveClassifierModelFromCtx(ctx);
-			lastAutoStatusId = model?.id;
-			ctx.ui.setStatus(STATUS_KEY_AUTO, autoStatusLabel(model));
-			if (notify) ctx.ui.notify("Auto mode: ON (this session only)", "info");
-		} else {
-			lastAutoStatusId = undefined;
-			ctx.ui.setStatus(STATUS_KEY_AUTO, "");
-			if (notify) ctx.ui.notify("Auto mode: OFF", "info");
-		}
 	}
 
 	function applyClassifierDebug(value: boolean, ctx: ExtensionContext, notify = true): void {
@@ -449,13 +471,11 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		cfg = loadConfig(ctx.cwd);
-		// Always reset allow-all-edits and auto-mode at session start — never persisted.
-		allowAllEdits = false;
-		autoModeEnabled = false;
+		// Always reset the permission mode at session start. Never persisted.
+		mode = "manual";
 		classifierDebugEnabled = false;
 		lastAutoStatusId = undefined;
 		ctx.ui.setStatus(STATUS_KEY, "");
-		ctx.ui.setStatus(STATUS_KEY_AUTO, "");
 	});
 
 	// ── Tool call gating ─────────────────────────────────────────────────────
@@ -463,27 +483,28 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		const matchInput = inputForMatching(event.toolName, event.input as Record<string, unknown>, ctx.cwd);
 		const nonInteractive = ctx.mode === "print" || ctx.mode === "json";
-		const autoActive = autoModeEnabled;
 		// Pick the classifier model (explicit pin, or auto-select from the pool
 		// preferring the currently selected model's provider). Mirrors idle-summary.
-		const classifierModel = autoActive ? resolveClassifierModelFromCtx(ctx) : undefined;
+		const classifierModel = mode === "auto" ? resolveClassifierModelFromCtx(ctx) : undefined;
 		// Keep the status line in sync with the resolved model. The auto-select
-		// can drift mid-session (auth changes, scoped models change), and the
-		// toggle may have come on when nothing was authed yet, so refresh when
+		// can drift mid-session (auth changes, scoped models change), and auto
+		// mode may have come on when nothing was authed yet, so refresh when
 		// the resolved id (or its absence) differs from what we last showed.
-		if (autoActive && ctx.hasUI) {
+		if (mode === "auto" && ctx.hasUI) {
 			const currentId = classifierModel?.id;
 			if (currentId !== lastAutoStatusId) {
 				lastAutoStatusId = currentId;
-				ctx.ui.setStatus(STATUS_KEY_AUTO, autoStatusLabel(classifierModel));
+				ctx.ui.setStatus(STATUS_KEY, autoStatusLabel(classifierModel));
 			}
 		}
-		const autoEngaged = autoActive && classifierModel !== undefined;
-		// Pass `autoActive` (session toggle), not `autoEngaged`: the "auto" sentinel
-		// should surface whenever the toggle is on so the loop below can stub it to
-		// `ask` when no classifier model is available (rather than silently applying
-		// `defaultAction`).
-		const compound = decideCompound(cfg, event.toolName, matchInput, autoActive);
+		const autoEngaged = mode === "auto" && classifierModel !== undefined;
+		// Pass `mode` (the session permission mode), not `autoEngaged`: the "auto"
+		// sentinel should surface whenever mode is "auto" so the loop below can
+		// stub it to `ask` when no classifier model is available (rather than
+		// silently applying `defaultAction`). In `edits`/`yolo` mode `decide()`
+		// resolves the implicit write guard and fallthroughs itself, so no
+		// post-decide short-circuit is needed here anymore.
+		const compound = decideCompound(cfg, event.toolName, matchInput, mode);
 		let { action, isCompound, ambiguous, breakdown } = compound;
 		let classifierReason = "";
 		// Model id of the classifier that produced the verdict for this call.
@@ -534,7 +555,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (action === "allow") return undefined;
 
-		// Explicit deny rules always win, even over allow-all-edits
+		// Explicit deny rules always win, even over the session permission mode
 		if (action === "deny") {
 			const culprit = isCompound ? breakdown.find((b) => b.action === "deny") : null;
 			const base = culprit
@@ -552,11 +573,6 @@ export default function (pi: ExtensionAPI) {
 
 		const toolNorm = normalizeTool(event.toolName);
 		const isWriteOrEdit = toolNorm === "write" || toolNorm === "edit";
-
-		// Allow-all-edits short-circuits the ask for write/edit tools only
-		if (allowAllEdits && isWriteOrEdit) {
-			return undefined;
-		}
 
 		if (!ctx.hasUI) {
 			return {
@@ -612,7 +628,7 @@ export default function (pi: ExtensionAPI) {
 					// a freshly saved deny must not override an explicit one-shot allow.
 					if (allowAllStepsOnce) continue;
 	
-					let liveAction = decide(cfg, "bash", { command: sub }, autoActive);
+					let liveAction = decide(cfg, "bash", { command: sub }, mode);
 					let subReason = "";
 					let subClassifierModelId: string | undefined;
 					// Auto fallthrough: run the classifier for this subcommand.
@@ -662,7 +678,8 @@ export default function (pi: ExtensionAPI) {
 						"Allow always (save rule)",
 						"Deny once",
 						"Deny always (save rule)",
-						...(!autoActive ? ["Switch to auto mode (this session)"] : []),
+						...(mode !== "auto" ? ["Switch to auto mode (this session)"] : []),
+						...(mode !== "yolo" ? ["Switch to yolo mode (this session)"] : []),
 					];
 					const choice = await ctx.ui.select(title, choices);
 	
@@ -674,10 +691,16 @@ export default function (pi: ExtensionAPI) {
 					}
 	
 					if (choice === "Switch to auto mode (this session)") {
-						applyAutoMode(true, ctx);
+						applyMode("auto", ctx);
 						// Let the rest of this compound finish without re-prompting; future
 						// tool calls go through the classifier. (Any `deny` sub was already
 						// blocked by decideCompound before this loop runs.)
+						allowAllStepsOnce = true;
+						continue;
+					}
+
+					if (choice === "Switch to yolo mode (this session)") {
+						applyMode("yolo", ctx);
 						allowAllStepsOnce = true;
 						continue;
 					}
@@ -694,7 +717,7 @@ export default function (pi: ExtensionAPI) {
 						if (!scope) continue;
 						addRule(scope, ctx.cwd, "allow", edited.trim());
 						cfg = loadConfig(ctx.cwd);
-						currentBreakdown = recomputeBreakdown(breakdown, cfg, autoActive);
+						currentBreakdown = recomputeBreakdown(breakdown, cfg, mode);
 						const autoCount = currentBreakdown.filter(
 							(b) => b.sub !== sub && askSubs.includes(b.sub) && b.action === "allow",
 						).length;
@@ -716,7 +739,7 @@ export default function (pi: ExtensionAPI) {
 						}
 						addRule(scope, ctx.cwd, "deny", edited.trim());
 						cfg = loadConfig(ctx.cwd);
-						currentBreakdown = recomputeBreakdown(breakdown, cfg, autoActive);
+						currentBreakdown = recomputeBreakdown(breakdown, cfg, mode);
 						ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
 						await promptSteerMessage(ctx);
 						return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
@@ -743,32 +766,41 @@ export default function (pi: ExtensionAPI) {
 			const reasonNote = attr ? `\n\n  ${attr}` : "";
 			const title = `${titleHeader}\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
 	
-			// Extra "allow all edits" option only for write/edit dialogs; "Switch to
-			// auto mode" appears for every dialog when auto mode isn't already active,
-			// as the last choice (so "Allow once" stays the default cursor position).
-			const autoSwitch = !autoActive ? ["Switch to auto mode (this session)"] : [];
+			// Mode-switch options for every dialog; write/edit dialogs additionally
+			// get "Switch to edits mode" (replaces the old "Allow all edits this
+			// session" toggle). Each option is hidden when its mode is already
+			// active, so "Allow once" stays the default cursor position.
+			const autoSwitch = mode !== "auto" ? ["Switch to auto mode (this session)"] : [];
+			const yoloSwitch = mode !== "yolo" ? ["Switch to yolo mode (this session)"] : [];
+			const editsSwitch = isWriteOrEdit && mode !== "edits" ? ["Switch to edits mode (this session)"] : [];
 			const choices = isWriteOrEdit
 				? [
 						"Allow once",
-						"Allow all edits this session",
+						...editsSwitch,
 						"Allow always (save rule)",
 						"Deny once",
 						"Deny always (save rule)",
 						...autoSwitch,
+						...yoloSwitch,
 				  ]
-				: ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)", ...autoSwitch];
-	
+				: ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)", ...autoSwitch, ...yoloSwitch];
+
 			const choice = await ctx.ui.select(title, choices);
-	
+
 			if (choice === "Allow once") return undefined;
-	
-			if (choice === "Allow all edits this session") {
-				applyAllowAllEdits(true, ctx);
+
+			if (choice === "Switch to edits mode (this session)") {
+				applyMode("edits", ctx);
 				return undefined;
 			}
-	
+
 			if (choice === "Switch to auto mode (this session)") {
-				applyAutoMode(true, ctx);
+				applyMode("auto", ctx);
+				return undefined;
+			}
+
+			if (choice === "Switch to yolo mode (this session)") {
+				applyMode("yolo", ctx);
 				return undefined;
 			}
 	
@@ -814,21 +846,17 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Hotkey ───────────────────────────────────────────────────────────────
 
-	// Note: ctrl+alt+e (not ctrl+shift+e) because most terminals can't distinguish
+	// Note: ctrl+alt+m (not ctrl+shift+m) because most terminals can't distinguish
 	// ctrl+shift+<letter> from ctrl+<letter> — both emit the same control byte
 	// unless the terminal supports the Kitty keyboard protocol. Alt is sent as an
-	// ESC prefix, so ctrl+alt+e is reliably distinguishable from ctrl+e.
-	pi.registerShortcut("ctrl+alt+e", {
-		description: "Toggle allow-all-edits mode (this session only)",
-		handler: async (ctx) => {
-			applyAllowAllEdits(!allowAllEdits, ctx);
-		},
-	});
+	// ESC prefix, so ctrl+alt+m is reliably distinguishable from ctrl+m.
+	const MODE_CYCLE: PermissionMode[] = ["manual", "edits", "auto", "yolo"];
 
-	pi.registerShortcut("ctrl+alt+a", {
-		description: "Toggle auto permissions mode (this session only)",
+	pi.registerShortcut("ctrl+alt+m", {
+		description: "Cycle permission mode (manual/edits/auto/yolo, this session only)",
 		handler: async (ctx) => {
-			applyAutoMode(!autoModeEnabled, ctx);
+			const next = MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length];
+			applyMode(next, ctx);
 		},
 	});
 
@@ -906,9 +934,9 @@ export default function (pi: ExtensionAPI) {
 	// ── Slash command ────────────────────────────────────────────────────────
 
 	pi.registerCommand("permissions", {
-		description: "Manage tool permissions (allow/deny/ask/auto) and allow-all-edits / auto modes",
+		description: "Manage tool permissions (allow/deny/ask rules) and the session permission mode",
 		getArgumentCompletions: (prefix: string) => {
-			const subs = ["help", "list", "allow", "deny", "ask", "remove", "default", "reload", "allowalledits", "auto"];
+			const subs = ["help", "list", "allow", "deny", "ask", "remove", "default", "reload", "mode", "allowalledits", "auto"];
 			const items = subs.map((s) => ({ value: s, label: s }));
 			const filtered = items.filter((i) => i.value.startsWith(prefix));
 			return filtered.length > 0 ? filtered : null;
@@ -922,30 +950,33 @@ export default function (pi: ExtensionAPI) {
 					"Subcommands:",
 					"  /permissions                  Show this help",
 					"  /permissions help             Show this help",
-					"  /permissions list             Show current rules + allow-all-edits / auto state",
+					"  /permissions list             Show current rules + permission-mode state",
 					"  /permissions allow <rule> [--user]   Add an allow rule (default: project)",
 					"  /permissions deny  <rule> [--user]   Add a deny rule",
 					"  /permissions ask   <rule> [--user]   Add an ask rule",
 					"  /permissions remove <rule> [--user]  Remove a rule from any list",
 					"  /permissions default <allow|deny|ask> [--user]",
 					"  /permissions reload           Reload config from disk",
-					"  /permissions allowalledits [on|off|toggle]",
-					"  /permissions auto [on|off|toggle]   Toggle auto-mode (LLM classifier) for this session",
+					"  /permissions mode [manual|edits|auto|yolo]",
+					"                                Show or set the session permission mode",
+					"  /permissions auto             Alias for /permissions mode auto",
 					"  /permissions auto debug [on|off|toggle]   Toggle classifier debug notifications for this session",
 					"  /permissions auto model [--user]   Pick the classifier model interactively",
 					"  /permissions auto model clear [--user]   Remove the classifier pin (resume auto-select)",
+					"  /permissions allowalledits    Deprecated alias for /permissions mode edits",
 					"",
 					"Rule syntax:  ToolName  or  ToolName(pattern)",
 					"  Patterns are case-insensitive globs (* = any chars, ? = one char).",
 					"  A ' *' pair is optional, so Bash(git status *) matches 'git status' too.",
 					"  Wrap in slashes for regex: Bash(/^git (push|tag) /)",
 					"",
-					"Precedence (first match wins):  deny > ask > allow > toolDefaults > defaultAction",
+					"Precedence (first match wins):  deny > ask > allow > toolDefaults > mode strategy > defaultAction",
 					"",
-					"Session toggles (off by default, never persisted):",
-					"  allow-all-edits  — auto-approve every Write/Edit  (Ctrl+Alt+E)",
-					"  auto mode       — classifier screens fallthroughs   (Ctrl+Alt+A)",
-					"    Only active when defaultAction === \"auto\". See docs/auto-mode-design.md.",
+					"Permission mode (starts at manual each session, never persisted):",
+					"  manual  fallthroughs use defaultAction; Write/Edit asks   (Ctrl+Alt+M cycles)",
+					"  edits   Write/Edit silently allowed, rest like manual",
+					"  auto    classifier screens fallthroughs (incl. Write/Edit)",
+					"  yolo    allow everything not explicitly denied/asked/configured",
 					"  classifier debug — notify on every classifier call, including silent allows",
 					"",
 					"Config files (project overrides user for defaultAction; lists concat):",
@@ -988,14 +1019,13 @@ export default function (pi: ExtensionAPI) {
 					`bashReadOnlyAllowCwd: ${cfg.implicit.bashReadOnlyAllowCwd}`,
 					`bashAllowPureVarAssign: ${cfg.implicit.bashAllowPureVarAssign}`,
 					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
-					`allow all edits (this session): ${allowAllEdits ? "ON" : "OFF"}`,
-				`auto mode (this session): ${autoModeEnabled ? "ON" : "OFF"}`,
-				`classifier debug (this session): ${classifierDebugEnabled ? "ON" : "OFF"}`,
-				`autoMode.classifier: ${cfg.autoMode.classifier ? `${cfg.autoMode.classifier.provider}/${cfg.autoMode.classifier.model}` : "(auto-select)"}`,
-				`autoMode.classifyAllShell: ${cfg.autoMode.classifyAllShell}`,
-				`autoMode.environment (${cfg.autoMode.environment.length}):`,
-				...cfg.autoMode.environment.map((r) => `  - ${r}`),
-				`autoMode.allow (${cfg.autoMode.allow.length}):`,
+					`mode (this session): ${mode}`,
+					`classifier debug (this session): ${classifierDebugEnabled ? "ON" : "OFF"}`,
+					`autoMode.classifier: ${cfg.autoMode.classifier ? `${cfg.autoMode.classifier.provider}/${cfg.autoMode.classifier.model}` : "(auto-select)"}`,
+					`autoMode.classifyAllShell: ${cfg.autoMode.classifyAllShell}`,
+					`autoMode.environment (${cfg.autoMode.environment.length}):`,
+					...cfg.autoMode.environment.map((r) => `  - ${r}`),
+					`autoMode.allow (${cfg.autoMode.allow.length}):`,
 				...cfg.autoMode.allow.map((r) => `  - ${r}`),
 				`autoMode.soft_deny (${cfg.autoMode.soft_deny.length}):`,
 				...cfg.autoMode.soft_deny.map((r) => `  - ${r}`),
@@ -1037,7 +1067,7 @@ export default function (pi: ExtensionAPI) {
 					return;
 				case "default": {
 					if (!isDefaultAction(value)) {
-						ctx.ui.notify(`Usage: /permissions default <allow|deny|ask> [--user] (use \`/permissions auto on\` for auto mode)`, "warning");
+						ctx.ui.notify(`Usage: /permissions default <allow|deny|ask> [--user] (use \`/permissions mode auto\` for auto mode)`, "warning");
 						return;
 					}
 					setDefault(scope, ctx.cwd, value);
@@ -1045,17 +1075,22 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Set default (${scope}): ${value}`, "info");
 					return;
 				}
-				case "allowalledits": {
+				case "mode": {
 					const normalized = value.toLowerCase();
-					if (!normalized || normalized === "toggle") {
-						applyAllowAllEdits(!allowAllEdits, ctx);
-					} else if (normalized === "on") {
-						applyAllowAllEdits(true, ctx);
-					} else if (normalized === "off") {
-						applyAllowAllEdits(false, ctx);
+					if (!normalized) {
+						ctx.ui.notify(`Mode (this session): ${mode}`, "info");
+					} else if (normalized === "manual" || normalized === "edits" || normalized === "auto" || normalized === "yolo") {
+						applyMode(normalized, ctx);
 					} else {
-						ctx.ui.notify(`Usage: /permissions allowalledits [on|off|toggle]`, "warning");
+						ctx.ui.notify(`Usage: /permissions mode [manual|edits|auto|yolo] (current: ${mode})`, "warning");
 					}
+					return;
+				}
+				case "allowalledits": {
+					// Deprecated alias: the old allow-all-edits toggle is now the edits
+					// rung of the permission-mode enum. Any argument is ignored.
+					ctx.ui.notify("/permissions allowalledits is deprecated; use /permissions mode edits.", "info");
+					applyMode("edits", ctx);
 					return;
 				}
 				case "auto": {
@@ -1086,10 +1121,10 @@ export default function (pi: ExtensionAPI) {
 							return;
 						}
 						reload(ctx.cwd, ctx);
-						if (autoModeEnabled && ctx.hasUI) {
+						if (mode === "auto" && ctx.hasUI) {
 							const model = resolveClassifierModelFromCtx(ctx);
 							lastAutoStatusId = model?.id;
-							ctx.ui.setStatus(STATUS_KEY_AUTO, autoStatusLabel(model));
+							ctx.ui.setStatus(STATUS_KEY, autoStatusLabel(model));
 						}
 						ctx.ui.notify(`Classifier pin cleared (${scope}); resuming auto-select.`, "info");
 						return;
@@ -1120,24 +1155,21 @@ export default function (pi: ExtensionAPI) {
 					const modelId = choice.slice(slash + 1);
 					setClassifier(scope, ctx.cwd, provider, modelId);
 					reload(ctx.cwd, ctx);
-					if (autoModeEnabled && ctx.hasUI) {
+					if (mode === "auto" && ctx.hasUI) {
 						const model = resolveClassifierModelFromCtx(ctx);
 						lastAutoStatusId = model?.id;
-						ctx.ui.setStatus(STATUS_KEY_AUTO, autoStatusLabel(model));
+						ctx.ui.setStatus(STATUS_KEY, autoStatusLabel(model));
 					}
 					ctx.ui.notify(`Classifier model set to ${choice} (${scope})`, "info");
 					return;
 				}
-				const normalized = value.toLowerCase();
-				if (!normalized || normalized === "toggle") {
-					applyAutoMode(!autoModeEnabled, ctx);
-				} else if (normalized === "on") {
-					applyAutoMode(true, ctx);
-				} else if (normalized === "off") {
-					applyAutoMode(false, ctx);
-				} else {
-					ctx.ui.notify(`Usage: /permissions auto [on|off|toggle] | auto debug [on|off|toggle] | auto model [--user] [clear]`, "warning");
+				// Bare /permissions auto is now an alias for mode auto. Legacy
+				// on/off/toggle forms are gone: use /permissions mode instead.
+				if (value) {
+					ctx.ui.notify(`Usage: /permissions auto | auto debug [on|off|toggle] | auto model [--user] [clear] (or /permissions mode [manual|edits|auto|yolo])`, "warning");
+					return;
 				}
+				applyMode("auto", ctx);
 				return;
 			}
 			case "allow":
@@ -1172,7 +1204,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				default:
 					ctx.ui.notify(
-						`Unknown subcommand: ${sub}. Use: help | list | allow | deny | ask | remove | default | reload | allowalledits | auto`,
+						`Unknown subcommand: ${sub}. Use: help | list | allow | deny | ask | remove | default | reload | mode | allowalledits | auto`,
 						"warning",
 					);
 			}
