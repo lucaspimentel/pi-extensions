@@ -495,7 +495,7 @@ Suggested rule: Bash(rm*)
     Deny always (save rule)
 ```
 
-Every permission dialog also offers mode-switch choices: **"Switch to edits mode (this session)"** (Write/Edit dialogs only), **"Switch to auto mode (this session)"**, and **"Switch to yolo mode (this session)"** (see [Permission modes](#permission-modes) below). Each appears only when its mode isn't already active, at the **bottom** of the choice list, so **"Allow once"** stays the default (pi's selector starts on the first item).
+Every permission dialog also offers mode-switch choices: **"Switch to \"allow edits\" mode (this session)"** (Write/Edit dialogs only), **"Switch to auto mode (this session)"**, and **"Switch to yolo mode (this session)"** (see [Permission modes](#permission-modes) below). Each appears only when its mode isn't already active, at the **bottom** of the choice list, so **"Allow once"** stays the default (pi's selector starts on the first item).
 
 Choosing **always** opens a second selector asking *where* to save the rule:
 
@@ -559,12 +559,12 @@ In non-interactive modes (`-p`, JSON mode), `ask` falls back to **deny** so noth
 
 ## Permission modes
 
-The two former independent session toggles (allow-all-edits, auto mode) are consolidated into a single **permission mode** enum: `manual | edits | auto | yolo`. The mode is **session-only**: it always starts at `manual`, is never persisted, and only changes the strategy for the *non-explicit* remainder of the precedence chain. Explicit `deny` rules, explicit `ask` rules, and explicit `toolDefaults` win identically in every mode.
+The two former independent session toggles (allow-all-edits, auto mode) are consolidated into a single **permission mode** enum: `manual | edits | auto | yolo`. The `edits` rung is displayed as **"allow edits"** in every user-facing surface (footer, dialogs, notifications, CLI usage); the internal id stays `edits`, so both `/permissions mode edits` and `/permissions mode allow-edits` work. The mode is **session-only**: it always starts at `manual`, is never persisted, and only changes the strategy for the *non-explicit* remainder of the precedence chain. Explicit `deny` rules, explicit `ask` rules, and explicit `toolDefaults` win identically in every mode.
 
 | Mode | Non-explicit strategy | Footer indicator |
 | ---- | --------------------- | ---------------- |
 | `manual` | Fallthroughs use `defaultAction`; the implicit `write → ask` guard prompts for Write/Edit | *(blank)* |
-| `edits` | Write/Edit silently allowed (the implicit guard resolves to allow); everything else like `manual` | `✏️ edits` |
+| `edits` ("allow edits") | Write/Edit silently allowed (the implicit guard resolves to allow); everything else like `manual` | `✏️ allow edits` |
 | `auto` | An LLM classifier screens fallthroughs, including Write/Edit (the implicit guard is demoted below the classifier) | `🤖 auto: <model-id>` |
 | `yolo` | Allow everything not explicitly denied/asked/configured; the classifier never runs | `💀 yolo` |
 
@@ -572,11 +572,11 @@ The two former independent session toggles (allow-all-edits, auto mode) are cons
 
 | Method | Action |
 | ------ | ------ |
-| **Ctrl+Alt+M** | Cycle manual → edits → auto → yolo → manual |
-| Any permission dialog | Choose **"Switch to edits / auto / yolo mode (this session)"** |
-| `/permissions mode [manual\|edits\|auto\|yolo]` | Show or set the mode |
+| **Ctrl+Alt+M** | Cycle manual → allow edits → auto → yolo → manual |
+| Any permission dialog | Choose **"Switch to \"allow edits\" / auto / yolo mode (this session)"** |
+| `/permissions mode [manual\|allow-edits\|auto\|yolo]` | Show or set the mode |
 | `/permissions auto` | Alias for `/permissions mode auto` |
-| `/permissions allowalledits` | Deprecated alias for `/permissions mode edits` |
+| `/permissions allowalledits` | Deprecated alias for `/permissions mode allow-edits` |
 
 The full design (precedence, invariants, sharp edges) lives in [`docs/permission-modes-design.md`](./docs/permission-modes-design.md). The `auto` rung's classifier layer is detailed in [Auto mode](#auto-mode) below.
 
@@ -592,12 +592,12 @@ The full design (precedence, invariants, sharp edges) lives in [`docs/permission
 /permissions remove <rule> [--user]     # remove a rule (searches project by default; --user searches user config)
 /permissions default <allow|deny|ask> [--user]
 /permissions reload                     # reload config from disk
-/permissions mode [manual|edits|auto|yolo]  # show or set the session permission mode
+/permissions mode [manual|allow-edits|auto|yolo]  # show or set the session permission mode
 /permissions auto                       # alias for /permissions mode auto
 /permissions auto debug [on|off|toggle] # toggle classifier debug notifications for this session
 /permissions auto model [--user]        # pick the classifier model interactively
 /permissions auto model clear [--user]  # remove the classifier pin (resume auto-select)
-/permissions allowalledits              # deprecated alias for /permissions mode edits
+/permissions allowalledits              # deprecated alias for /permissions mode allow-edits
 ```
 
 All write subcommands (`allow`/`deny`/`ask`/`remove`/`default`) accept `--user` to target the user-global config (`~/.pi/agent/pi-tool-permissions.json`); the default is the project-local `.pi/pi-tool-permissions.local.json`. `/permissions list` tags each rule with its source: `[implicit]`, `[user]`, `[project]`, or `[user+project]` when the same rule lives in both files.
@@ -616,7 +616,7 @@ Examples:
 /permissions ask   Mcp(atlassian_*)
 /permissions default deny
 /permissions default deny --user
-/permissions mode edits
+/permissions mode allow-edits
 /permissions mode yolo
 /permissions auto
 ```

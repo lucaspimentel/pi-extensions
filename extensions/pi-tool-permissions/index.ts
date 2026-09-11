@@ -183,8 +183,9 @@
  *
  *     manual  default. Unknown calls fall through to defaultAction; the
  *               implicit write → ask guard prompts for Write/Edit.
- *     edits   Write/Edit calls are silently allowed (the implicit guard
- *               resolves to allow). Everything else behaves like manual.
+ *     edits   (displayed as "allow edits") Write/Edit calls are silently
+ *               allowed (the implicit guard resolves to allow). Everything
+ *               else behaves like manual.
  *     auto    an LLM classifier screens the non-explicit remainder, including
  *               Write/Edit (the implicit guard is demoted below the classifier:
  *               repo edits silently allow via the default NL allow list,
@@ -199,12 +200,12 @@
  *   docs/permission-modes-design.md.
  *
  *   Switch via:
- *     - Ctrl+Alt+M hotkey (cycles manual → edits → auto → yolo → manual)
- *     - /permissions mode [manual|edits|auto|yolo]
- *     - "Switch to edits mode (this session)" in Write/Edit dialogs
+ *     - Ctrl+Alt+M hotkey (cycles manual → allow edits → auto → yolo → manual)
+ *     - /permissions mode [manual|allow-edits|auto|yolo]
+ *     - "Switch to \"allow edits\" mode (this session)" in Write/Edit dialogs
  *     - "Switch to auto mode" / "Switch to yolo mode" in any permission dialog
  *
- *   Footer status key (blank for manual): `✏️ edits`, `🤖 auto: <model-id>`
+ *   Footer status key (blank for manual): `✏️ allow edits`, `🤖 auto: <model-id>`
  *   (or `🤖 auto (no classifier)`), `💀 yolo`.
  *
  * Auto mode internals (the classifier layer behind mode = auto):
@@ -285,11 +286,11 @@
  *   /permissions remove <rule>         - remove a rule from any list
  *   /permissions default <allow|deny|ask>
  *   /permissions reload                - reload config from disk
- *   /permissions mode [manual|edits|auto|yolo]  - show or set the session mode
+ *   /permissions mode [manual|allow-edits|auto|yolo]  - show or set the session mode
  *   /permissions auto                  - alias for /permissions mode auto
  *   /permissions auto model [--user]   - pick the classifier model interactively
  *   /permissions auto model clear [--user]  - remove the classifier pin (resume auto-select)
- *   /permissions allowalledits         - deprecated alias for /permissions mode edits
+ *   /permissions allowalledits         - deprecated alias for /permissions mode allow-edits
  */
 
 import { homedir } from "node:os";
@@ -404,7 +405,7 @@ export default function (pi: ExtensionAPI) {
 	 * classifier model so the label shows which model is screening fallthroughs.
 	 */
 	function modeStatusLabel(value: PermissionMode, ctx: ExtensionContext): string {
-		if (value === "edits") return "✏️ edits";
+		if (value === "edits") return "✏️ allow edits";
 		if (value === "yolo") return "💀 yolo";
 		if (value === "auto") return autoStatusLabel(resolveClassifierModelFromCtx(ctx));
 		return "";
@@ -418,7 +419,8 @@ export default function (pi: ExtensionAPI) {
 		mode = value;
 		ctx.ui.setStatus(STATUS_KEY, modeStatusLabel(value, ctx));
 		if (notify) {
-			ctx.ui.notify(`Mode: ${value} (this session only)`, "info");
+			const label = value === "edits" ? "allow edits" : value;
+			ctx.ui.notify(`Mode: ${label} (this session only)`, "info");
 		}
 	}
 
@@ -773,12 +775,12 @@ export default function (pi: ExtensionAPI) {
 			const title = `${titleHeader}\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
 	
 			// Mode-switch options for every dialog; write/edit dialogs additionally
-			// get "Switch to edits mode" (replaces the old "Allow all edits this
-			// session" toggle). Each option is hidden when its mode is already
+			// get "Switch to \"allow edits\" mode" (replaces the old "Allow all edits
+			// this session" toggle). Each option is hidden when its mode is already
 			// active, so "Allow once" stays the default cursor position.
 			const autoSwitch = mode !== "auto" ? ["Switch to auto mode (this session)"] : [];
 			const yoloSwitch = mode !== "yolo" ? ["Switch to yolo mode (this session)"] : [];
-			const editsSwitch = isWriteOrEdit && mode !== "edits" ? ["Switch to edits mode (this session)"] : [];
+			const editsSwitch = isWriteOrEdit && mode !== "edits" ? ['Switch to "allow edits" mode (this session)'] : [];
 			const choices = isWriteOrEdit
 				? [
 						"Allow once",
@@ -795,7 +797,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (choice === "Allow once") return undefined;
 
-			if (choice === "Switch to edits mode (this session)") {
+			if (choice === 'Switch to "allow edits" mode (this session)') {
 				applyMode("edits", ctx);
 				return undefined;
 			}
@@ -859,7 +861,7 @@ export default function (pi: ExtensionAPI) {
 	const MODE_CYCLE: PermissionMode[] = ["manual", "edits", "auto", "yolo"];
 
 	pi.registerShortcut("ctrl+alt+m", {
-		description: "Cycle permission mode (manual/edits/auto/yolo, this session only)",
+		description: "Cycle permission mode (manual/allow-edits/auto/yolo, this session only)",
 		handler: async (ctx) => {
 			const next = MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length];
 			applyMode(next, ctx);
@@ -963,13 +965,13 @@ export default function (pi: ExtensionAPI) {
 					"  /permissions remove <rule> [--user]  Remove a rule from any list",
 					"  /permissions default <allow|deny|ask> [--user]",
 					"  /permissions reload           Reload config from disk",
-					"  /permissions mode [manual|edits|auto|yolo]",
+					"  /permissions mode [manual|allow-edits|auto|yolo]",
 					"                                Show or set the session permission mode",
 					"  /permissions auto             Alias for /permissions mode auto",
 					"  /permissions auto debug [on|off|toggle]   Toggle classifier debug notifications for this session",
 					"  /permissions auto model [--user]   Pick the classifier model interactively",
 					"  /permissions auto model clear [--user]   Remove the classifier pin (resume auto-select)",
-					"  /permissions allowalledits    Deprecated alias for /permissions mode edits",
+					"  /permissions allowalledits    Deprecated alias for /permissions mode allow-edits",
 					"",
 					"Rule syntax:  ToolName  or  ToolName(pattern)",
 					"  Patterns are case-insensitive globs (* = any chars, ? = one char).",
@@ -980,7 +982,7 @@ export default function (pi: ExtensionAPI) {
 					"",
 					"Permission mode (starts at manual each session, never persisted):",
 					"  manual  fallthroughs use defaultAction; Write/Edit asks   (Ctrl+Alt+M cycles)",
-					"  edits   Write/Edit silently allowed, rest like manual",
+					"  allow-edits  Write/Edit silently allowed, rest like manual (alias: edits)",
 					"  auto    classifier screens fallthroughs (incl. Write/Edit)",
 					"  yolo    allow everything not explicitly denied/asked/configured",
 					"  classifier debug — notify on every classifier call, including silent allows",
@@ -1084,19 +1086,31 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "mode": {
 					const normalized = value.toLowerCase();
+					// "edits" is the internal id; the mode is displayed as "allow edits",
+					// so the CLI also accepts that spelling (hyphenated, squashed, or spaced).
+					const modeAliases: Record<string, PermissionMode> = {
+						manual: "manual",
+						edits: "edits",
+						"allow-edits": "edits",
+						allowedits: "edits",
+						"allow edits": "edits",
+						auto: "auto",
+						yolo: "yolo",
+					};
+					const target = modeAliases[normalized];
 					if (!normalized) {
-						ctx.ui.notify(`Mode (this session): ${mode}`, "info");
-					} else if (normalized === "manual" || normalized === "edits" || normalized === "auto" || normalized === "yolo") {
-						applyMode(normalized, ctx);
+						ctx.ui.notify(`Mode (this session): ${mode === "edits" ? "allow edits" : mode}`, "info");
+					} else if (target) {
+						applyMode(target, ctx);
 					} else {
-						ctx.ui.notify(`Usage: /permissions mode [manual|edits|auto|yolo] (current: ${mode})`, "warning");
+						ctx.ui.notify(`Usage: /permissions mode [manual|allow-edits|auto|yolo] (current: ${mode})`, "warning");
 					}
 					return;
 				}
 				case "allowalledits": {
-					// Deprecated alias: the old allow-all-edits toggle is now the edits
-					// rung of the permission-mode enum. Any argument is ignored.
-					ctx.ui.notify("/permissions allowalledits is deprecated; use /permissions mode edits.", "info");
+					// Deprecated alias: the old allow-all-edits toggle is now the "allow
+					// edits" rung of the permission-mode enum. Any argument is ignored.
+					ctx.ui.notify("/permissions allowalledits is deprecated; use /permissions mode allow-edits.", "info");
 					applyMode("edits", ctx);
 					return;
 				}
@@ -1173,7 +1187,7 @@ export default function (pi: ExtensionAPI) {
 				// Bare /permissions auto is now an alias for mode auto. Legacy
 				// on/off/toggle forms are gone: use /permissions mode instead.
 				if (value) {
-					ctx.ui.notify(`Usage: /permissions auto | auto debug [on|off|toggle] | auto model [--user] [clear] (or /permissions mode [manual|edits|auto|yolo])`, "warning");
+					ctx.ui.notify(`Usage: /permissions auto | auto debug [on|off|toggle] | auto model [--user] [clear] (or /permissions mode [manual|allow-edits|auto|yolo])`, "warning");
 					return;
 				}
 				applyMode("auto", ctx);

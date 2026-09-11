@@ -104,8 +104,8 @@ by the user still wins over the classifier.
 | `/permissions mode` | Bare shows the current mode; `/permissions mode <name>` sets it (usage warning for invalid values) |
 | `/permissions auto` | Bare form is now an alias for `mode auto`; `auto model` / `auto debug` subcommands unchanged |
 | `/permissions allowalledits` | Deprecated alias for `mode edits` (prints a note) |
-| Footer | Single status key: `✏️ edits`, `🤖 auto: <model-id>` (or `🤖 auto (no classifier)`), `💀 yolo`; blank for manual |
-| Write/Edit dialogs | "Switch to edits mode (this session)" replaces "Allow all edits this session" |
+| Footer | Single status key: `✏️ allow edits`, `🤖 auto: <model-id>` (or `🤖 auto (no classifier)`), `💀 yolo`; blank for manual |
+| Write/Edit dialogs | "Switch to \"allow edits\" mode (this session)" replaces "Allow all edits this session" |
 | All dialogs | Keep "Switch to auto mode", gain "Switch to yolo mode"; "Allow once" remains the default selection |
 | `/permissions list` | Single `mode (this session): <mode>` line |
 
