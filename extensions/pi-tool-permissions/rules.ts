@@ -116,6 +116,8 @@ export interface PermissionsConfig {
 	bashAllowPureVarAssign?: boolean;
 	/** When false, disables the implicit allow for no-op `cd` commands. Default: true. */
 	allowNoopCd?: boolean;
+	/** Absolute path roots whose descendants are treated as non-write redirect targets (e.g. "/tmp"). Default: [] (file redirects are never exempt). */
+	bashAllowRedirectsTo?: string[];
 }
 
 export interface ResolvedConfig {
@@ -140,6 +142,8 @@ export interface ResolvedConfig {
 	bashReadOnlyAllowCwd: boolean;
 	/** When true, pure shell variable assignments (no command/process/arithmetic substitution) are silently allowed. */
 	bashAllowPureVarAssign: boolean;
+	/** Resolved redirect-exemption roots: top-level file redirects whose target resolves under one of these paths are treated as non-writes. */
+	bashAllowRedirectsTo: string[];
 	/** Resolved auto-mode config (merged user + project). Always present; used when the session auto toggle is on. */
 	autoMode: ResolvedAutoModeConfig;
 	/** Tracks synthetically injected rules/defaults (never written to disk). */
@@ -157,6 +161,7 @@ export interface ResolvedConfig {
 		bashReadOnlyAllowCwd: boolean;
 		bashAllowPureVarAssign: boolean;
 		allowNoopCd: boolean;
+		bashAllowRedirectsTo: string[];
 	};
 }
 
@@ -289,6 +294,7 @@ export function mergeConfig(
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const bashAllowPureVarAssign = project.bashAllowPureVarAssign ?? user.bashAllowPureVarAssign ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
+	const bashAllowRedirectsTo = project.bashAllowRedirectsTo ?? user.bashAllowRedirectsTo ?? [];
 	const implicitAllow: string[] = [];
 	if (readAllowCwd) {
 		implicitAllow.push(`Read(${cwdGlobPattern(cwd)})`);
@@ -354,8 +360,9 @@ export function mergeConfig(
 		allowNoopCd,
 		bashReadOnlyAllowCwd,
 		bashAllowPureVarAssign,
+		bashAllowRedirectsTo,
 		autoMode,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, findAllowCwd, readAllowSkills, readAllowPiDocs, readAllowAgentDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, findAllowCwd, readAllowSkills, readAllowPiDocs, readAllowAgentDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd, bashAllowRedirectsTo },
 	};
 }
 
@@ -721,23 +728,17 @@ export function stripLineContinuations(cmd: string): string {
 }
 
 /**
- * If the redirect target beginning at `start` (after skipping spaces/tabs)
- * is exactly `/dev/null` — optionally single- or double-quoted — returns the
- * index just past the consumed target so the caller can resume scanning for a
- * later real redirect. Returns -1 otherwise (no target, or a different path).
- *
- * `/dev/null` is the Unix null device: writes are discarded and nothing is
- * persisted, so it is exempted from the write-risk filter just like descriptor
- * dups (`2>&1`). Only an *exact* `/dev/null` match is exempted — subpaths
- * (`/dev/null/x`) or suffixed forms (`/dev/nullx`) are real-ish paths and stay
- * write-risk. The target is read up to whitespace or a shell separator
- * (`;`, `|`, `&`, `(`, `)`, `<`, `>`) so idioms like `cmd >/dev/null; echo`
- * and `cmd >/dev/null 2>&1` resolve cleanly.
+ * Read the target of an output redirection beginning at `start` (after
+ * skipping spaces/tabs). Returns the index just past the consumed target plus
+ * the target text (quotes stripped), or null when there is no target (end of
+ * command — conservatively a write). The target is read up to whitespace or a
+ * shell separator (`;`, `|`, `&`, `(`, `)`, `<`, `>`) so idioms like
+ * `cmd >/dev/null; echo` and `cmd >/dev/null 2>&1` resolve cleanly.
  */
-function devNullTargetAt(cmd: string, start: number): number {
+function redirectTargetAt(cmd: string, start: number): { end: number; target: string } | null {
 	let j = start;
 	while (j < cmd.length && (cmd[j] === " " || cmd[j] === "\t")) j++;
-	if (j >= cmd.length) return -1; // no target — conservatively a write
+	if (j >= cmd.length) return null; // no target — conservatively a write
 	let target = "";
 	if (cmd[j] === '"' || cmd[j] === "'") {
 		const q = cmd[j];
@@ -747,7 +748,43 @@ function devNullTargetAt(cmd: string, start: number): number {
 	} else {
 		while (j < cmd.length && !/[\s;|&()<>]/.test(cmd[j])) target += cmd[j++];
 	}
-	return target === "/dev/null" ? j : -1;
+	return { end: j, target };
+}
+
+/**
+ * Returns true when a redirect `target` is exempt from the write-risk filter
+ * because it resolves under one of the configured allowed roots (`allowTargets`,
+ * e.g. `["/tmp"]` from `bashAllowRedirectsTo`). Both the target and each root
+ * are canonicalized (dot segments removed, trailing slashes trimmed) before a
+ * containment comparison, so `/tmp/../etc/passwd` does NOT match `/tmp` and
+ * `/tmpfoo` does not match `/tmp` either. Comparison is case-insensitive for
+ * Windows-style absolute paths.
+ *
+ * Targets containing unresolvable shell expansions or globs (`$`, backtick,
+ * `*`, `?`, `~`) are never exempt — their real destination cannot be known
+ * statically. A root of `/` exempts every absolute target.
+ */
+function redirectTargetAllowed(
+	target: string,
+	allowTargets: readonly string[],
+	cwd: string | undefined,
+	options: PathNormalizationOptions = {},
+): boolean {
+	if (allowTargets.length === 0) return false;
+	if (!target || /[$`*?~]/.test(target)) return false;
+	const norm = cwd !== undefined && cwd !== ""
+		? normalizeMatchPath(target, cwd, options)
+		: canonicalizeAbsolutePath(normalizePathSep(target, options));
+	const caseInsensitive = isWindowsAbsolutePath(norm);
+	const comparable = caseInsensitive ? norm.toLowerCase() : norm;
+	for (const root of allowTargets) {
+		const rootNorm = canonicalizeAbsolutePath(normalizePathSep(root, options));
+		const rootComparable = caseInsensitive ? rootNorm.toLowerCase() : rootNorm;
+		if (rootComparable === "/") return true;
+		if (comparable === rootComparable) return true;
+		if (comparable.startsWith(rootComparable.endsWith("/") ? rootComparable : `${rootComparable}/`)) return true;
+	}
+	return false;
 }
 
 /**
@@ -761,14 +798,49 @@ function devNullTargetAt(cmd: string, start: number): number {
  * are likewise NOT file writes and return false, so common idioms like
  * `cmd 2>/dev/null` or `cmd >/dev/null 2>&1` stay auto-allowable.
  *
+ * When `allowRedirectTargets` is non-empty (from the `bashAllowRedirectsTo`
+ * config option), a redirect whose target resolves under one of the listed
+ * path roots (e.g. `"/tmp"`) is ALSO treated as a non-write and skipped.
+ * Targets containing unresolvable expansions/globs are never exempt. See
+ * `redirectTargetAllowed`.
+ *
  * Used to flag otherwise-safe commands that write to files via redirection
  * so that (a) the read-only bash auto-allow short-circuit rejects them, and
  * (b) broad allow rules (e.g. `Bash(rg *)`) don't silently authorize a
  * redirected form like `rg x > out.txt`. To pre-allow a redirected command,
  * add an explicit redirect-aware rule whose pattern contains `>` (e.g.
  * `Bash(rg * > *)`) — see `rulePatternAllowsRedirect`.
+ *
+ * Implemented as a thin wrapper over `stripExemptRedirects`.
  */
-export function hasTopLevelFileRedirect(cmd: string): boolean {
+export function hasTopLevelFileRedirect(
+	cmd: string,
+	allowRedirectTargets: readonly string[] = [],
+	options: PathNormalizationOptions & { cwd?: string } = {},
+): boolean {
+	return stripExemptRedirects(cmd, allowRedirectTargets, options) === null;
+}
+
+/**
+ * Single-pass scanner shared with `hasTopLevelFileRedirect`: walks `cmd` and
+ * removes every *exempt* redirect clause (descriptor dups are left in place;
+ * `/dev/null` and allowed-target clauses are cut out) from the returned
+ * command string. Returns null when a non-exempt top-level *file* redirect
+ * exists, i.e. a real write — the caller bails in that case.
+ *
+ * The stripped return value is what the read-only bash tier tokenizes, so
+ * exempt redirect clauses (`> /tmp/out`) no longer leak into argument checks
+ * that resolve paths against cwd.
+ */
+function stripExemptRedirects(
+	cmd: string,
+	allowRedirectTargets: readonly string[],
+	options: PathNormalizationOptions & { cwd?: string },
+): string | null {
+	const isExempt = (target: string): boolean =>
+		target === "/dev/null" || redirectTargetAllowed(target, allowRedirectTargets, options.cwd, options);
+	let out = "";
+	let copyStart = 0;
 	let inSingle = false;
 	let inDouble = false;
 	let inBacktick = false;
@@ -855,38 +927,63 @@ export function hasTopLevelFileRedirect(cmd: string): boolean {
 				// `&>` / `&>>` — redirect both stdout+stderr to a file.
 				if (prev === "&") {
 					const tgtStart = next === ">" ? i + 2 : i + 1;
-					const after = devNullTargetAt(cmd, tgtStart);
-					if (after >= 0) { i = after; continue; }
-					return true;
+					const t = redirectTargetAt(cmd, tgtStart);
+					if (t && isExempt(t.target)) {
+						// Remove the whole clause, including the leading `&` (and any
+						// fd digits that cannot follow an `&`-form operator).
+						let s = i - 1;
+						while (s > 0 && /[0-9]/.test(cmd[s - 1])) s--;
+						out += cmd.slice(copyStart, s);
+						copyStart = t.end;
+						i = t.end;
+						continue;
+					}
+					return null;
 				}
 				if (next === "&") {
 					// `>&N` / `N>&M` — descriptor dup; `>&-` — close. Not a file write.
 					if (next2 !== undefined && /[0-9]/.test(next2)) { i += 3; continue; }
 					if (next2 === "-") { i += 3; continue; }
 					// `>&<other>` — unusual; treat conservatively as a file write.
-					return true;
+					return null;
 				}
 				if (next === ">") {
 					// `>>` append. `>>&N` (rare) is a descriptor dup, not a file write.
 					if (next2 === "&" && next3 !== undefined && /[0-9]/.test(next3)) { i += 4; continue; }
-					const after = devNullTargetAt(cmd, i + 2);
-					if (after >= 0) { i = after; continue; }
-					return true;
+					const t = redirectTargetAt(cmd, i + 2);
+					if (t && isExempt(t.target)) {
+						// Remove the whole clause, including any leading fd digits (`2>>`).
+						let s = i;
+						while (s > 0 && /[0-9]/.test(cmd[s - 1])) s--;
+						out += cmd.slice(copyStart, s);
+						copyStart = t.end;
+						i = t.end;
+						continue;
+					}
+					return null;
 				}
 				// `> file` / `N> file` — file write. Process substitution `>(...)`
 				// targets a subshell, not a path, so it stays a write. Otherwise
 				// check for an exempt `/dev/null` target before flagging a write.
-				if (next === "(") return true;
+				if (next === "(") return null;
 				{
-					const after = devNullTargetAt(cmd, i + 1);
-					if (after >= 0) { i = after; continue; }
-					return true;
+					const t = redirectTargetAt(cmd, i + 1);
+					if (t && isExempt(t.target)) {
+						// Remove the whole clause, including any leading fd digits (`2>`).
+						let s = i;
+						while (s > 0 && /[0-9]/.test(cmd[s - 1])) s--;
+						out += cmd.slice(copyStart, s);
+						copyStart = t.end;
+						i = t.end;
+						continue;
+					}
+					return null;
 				}
 			}
 		}
 		i++;
 	}
-	return false;
+	return out + cmd.slice(copyStart);
 }
 
 /**
@@ -960,6 +1057,8 @@ function isSetOptionsOnly(tokens: string[]): boolean {
  *     2>, &>, …). Descriptor-to-descriptor dups like `2>&1` are NOT file
  *     writes and stay auto-allowable. Redirects to `/dev/null` (null device,
  *     no persistence) are likewise NOT file writes and stay auto-allowable.
+ *     Redirects whose target resolves under a `bashAllowRedirectsTo` root
+ *     (e.g. `/tmp`) are also exempt when `allowRedirectTargets` is passed.
  *  2. If the first token is in READONLY_BASH_SAFE_ALWAYS → allow.
  *  2b. If the first token is `set` and every remaining token is a shell
  *      option (short flags, clustered flags, plus forms, `-o`/`+o` option
@@ -968,11 +1067,21 @@ function isSetOptionsOnly(tokens: string[]): boolean {
  *     every non-flag argument resolves to a path inside (or equal to) cwd.
  *  4. Anything else → false.
  */
-export function isReadOnlyBashSubcommand(cmd: string, cwd: string, options: PathNormalizationOptions = {}): boolean {
+export function isReadOnlyBashSubcommand(
+	cmd: string,
+	cwd: string,
+	options: PathNormalizationOptions = {},
+	allowRedirectTargets: readonly string[] = [],
+): boolean {
 	const trimmed = cmd.trim();
 	if (!trimmed) return false;
-	if (hasTopLevelFileRedirect(trimmed)) return false;
-	const tokens = tokenizeSimple(trimmed);
+	// Exempt redirect clauses (allowed targets, /dev/null) are stripped from the
+	// command before tokenizing so their tokens cannot leak into the path-args
+	// check below (e.g. `cat notes > /tmp/out` must not check "/tmp/out" against
+	// cwd). A non-exempt top-level file redirect returns null → not read-only.
+	const stripped = stripExemptRedirects(trimmed, allowRedirectTargets, { ...options, cwd });
+	if (stripped === null) return false;
+	const tokens = tokenizeSimple(stripped);
 	if (tokens.length === 0) return false;
 	const cmdName = tokens[0].toLowerCase();
 	if (cmdName === "set") return isSetOptionsOnly(tokens);
@@ -1034,10 +1143,14 @@ const ASSIGN_PREFIX_BUILTINS = new Set([
  *     fine too (`X="a;b"` is a literal value), so the separator scan runs on
  *     the raw RHS, quote-aware.
  */
-export function isPureVariableAssignment(cmd: string): boolean {
+export function isPureVariableAssignment(
+	cmd: string,
+	allowRedirectTargets: readonly string[] = [],
+	options: PathNormalizationOptions & { cwd?: string } = {},
+): boolean {
 	const s = cmd.trim();
 	if (!s) return false;
-	if (hasTopLevelFileRedirect(s)) return false;
+	if (hasTopLevelFileRedirect(s, allowRedirectTargets, options)) return false;
 
 	// Quote-aware top-level tokenization that preserves each token's original
 	// substring (quotes included) so RHS screening can detect `$(` etc.
@@ -2072,14 +2185,14 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	// (No-op `cd` is pure bookkeeping with zero side-effects/data access, so
 	// allowNoopCd stays active regardless of the mode.)
 	const skipReadOnlyBash = mode === "auto" && cfg.autoMode.classifyAllShell;
-	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd)) return "allow";
+	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd, {}, cfg.bashAllowRedirectsTo)) return "allow";
 	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
 	// Pure shell variable assignments (no command/process/arithmetic substitution)
 	// are no-ops in pi's fresh-shell model. Exempt from `skipReadOnlyBash` (auto
 	// mode's classifyAllShell) so they are statically allowed even in auto mode —
 	// matching allowNoopCd, and avoiding a wasteful classifier call that could
 	// mis-allow an impure `$(...)` form. Impure assignments still fall through.
-	if (cfg.bashAllowPureVarAssign && normalizeTool(toolName) === "bash" && isPureVariableAssignment(String(input.command ?? ""))) return "allow";
+	if (cfg.bashAllowPureVarAssign && normalizeTool(toolName) === "bash" && isPureVariableAssignment(String(input.command ?? ""), cfg.bashAllowRedirectsTo, { cwd: cfg.cwd })) return "allow";
 	if (check(cfg.ask)) return "ask";
 	// Allow rules — redirect-aware for Bash. A Bash command containing a
 	// top-level *file* output redirection (e.g. `rg x > out.txt`) is NOT
@@ -2088,6 +2201,11 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	// `Bash(rg * > *)`) may authorize it. `deny`/`ask` above are redirect-
 	// agnostic so safety rules always win. pwsh is out of scope (different
 	// syntax) and stays redirect-agnostic.
+	//
+	// Exception: redirects whose target resolves under a `bashAllowRedirectsTo`
+	// root (e.g. `"/tmp"`) are treated as non-writes by hasTopLevelFileRedirect,
+	// so `rg x > /tmp/out` does not count as a redirected command and broad
+	// allow rules authorize it normally.
 	//
 	// Trailing *harmless* redirects (descriptor dups like `2>&1`, `/dev/null`
 	// targets) are stripped before allow-rule matching so an exact rule like
@@ -2098,7 +2216,7 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	// naming the redirected form still fires.
 	const rawCommand = String(input.command ?? "");
 	const isBash = normalizeTool(toolName) === "bash";
-	const isBashRedirect = isBash && hasTopLevelFileRedirect(rawCommand);
+	const isBashRedirect = isBash && hasTopLevelFileRedirect(rawCommand, cfg.bashAllowRedirectsTo, { cwd: cfg.cwd });
 	const allowInput = isBash ? { ...input, command: stripTrailingHarmlessRedirects(rawCommand) } : input;
 	if (isBashRedirect) {
 		for (const raw of cfg.allow) {

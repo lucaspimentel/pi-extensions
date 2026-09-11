@@ -36,6 +36,7 @@ test("implicit.lsAllowCwd is true",             empty.implicit.lsAllowCwd, true)
 test("implicit.findAllowCwd is true",           empty.implicit.findAllowCwd, true);
 test("implicit.bashReadOnlyAllowCwd is true",   empty.implicit.bashReadOnlyAllowCwd, true);
 test("implicit.bashAllowPureVarAssign is true", empty.implicit.bashAllowPureVarAssign, true);
+test("implicit.bashAllowRedirectsTo is []",     JSON.stringify(empty.bashAllowRedirectsTo), "[]");
 // 5 cwd + 4 ancestor dirs × 2 agent docs (8) = 13
 test("implicit.allow has 5 cwd + 8 agent-doc rules", empty.implicit.allow.length, 13);
 test("implicit.allow[0] is Read(<cwd>/**)",     empty.implicit.allow[0], IMPLICIT_READ);
@@ -112,6 +113,13 @@ const merged = loadConfigFromObjects(
 test("project defaultAction overrides user",    merged.defaultAction, "deny");
 test("project toolDefaults.write overrides",    merged.toolDefaults["write"], "allow");
 test("project toolDefaults.read overrides",     merged.toolDefaults["read"], "deny");
+
+section("bashAllowRedirectsTo merge (project wins)");
+
+const redirectsProject = loadConfigFromObjects({ bashAllowRedirectsTo: ["/home"] }, { bashAllowRedirectsTo: ["/tmp"] }, CWD);
+test("project wins over user",                  redirectsProject.bashAllowRedirectsTo.join(","), "/tmp");
+const redirectsUser = loadConfigFromObjects({ bashAllowRedirectsTo: ["/home"] }, {}, CWD);
+test("user value used when project omits",      redirectsUser.bashAllowRedirectsTo.join(","), "/home");
 
 section("allow/deny/ask lists concatenated");
 

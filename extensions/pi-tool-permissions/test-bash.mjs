@@ -974,6 +974,36 @@ test("> inside (...) → false",          hasTopLevelFileRedirect("(echo a > b)"
 test("> inside heredoc body → false",   hasTopLevelFileRedirect("cat <<EOF\nx > y\nEOF"), false);
 test("mixed 2>&1 > file → true",         hasTopLevelFileRedirect("echo hi 2>&1 > out.txt"), true);
 
+section("hasTopLevelFileRedirect — bashAllowRedirectsTo targets");
+
+const TMP_OPTS = { cwd: CWD };
+
+// Default (no targets): behavior unchanged
+test("> /tmp/out, no targets → true",       hasTopLevelFileRedirect("echo foo > /tmp/out"), true);
+
+// Exempted targets
+test("> /tmp/out → false",                 hasTopLevelFileRedirect("echo foo > /tmp/out", ["/tmp"], TMP_OPTS), false);
+test(">>/tmp/out → false (append)",         hasTopLevelFileRedirect("echo foo >>/tmp/out", ["/tmp"], TMP_OPTS), false);
+test("2> /tmp/err → false",                 hasTopLevelFileRedirect("cmd 2> /tmp/err", ["/tmp"], TMP_OPTS), false);
+test("&> /tmp/all → false",                 hasTopLevelFileRedirect("cmd &> /tmp/all", ["/tmp"], TMP_OPTS), false);
+test("> /tmp/sub/deep.txt → false",         hasTopLevelFileRedirect("cmd > /tmp/sub/deep.txt", ["/tmp"], TMP_OPTS), false);
+test("> /TMP/OUT, targets [/tmp] → true (POSIX is case-sensitive)", hasTopLevelFileRedirect("cmd > /TMP/OUT", ["/tmp"], TMP_OPTS), true);
+test("> C:/TMP/OUT, targets [C:/tmp] → false (Windows case-insensitive)", hasTopLevelFileRedirect("cmd > C:/TMP/OUT", ["C:/tmp"], { cwd: "C:/Users/alice" }), false);
+test("> \"/tmp/my out.txt\" → false (quoted)", hasTopLevelFileRedirect('cmd > "/tmp/my out.txt"', ["/tmp"], TMP_OPTS), false);
+test("cmd >/tmp/a 2>/tmp/b → false (all exempt)", hasTopLevelFileRedirect("cmd >/tmp/a 2>/tmp/b", ["/tmp"], TMP_OPTS), false);
+test("cmd 2>/dev/null >/tmp/a → false",     hasTopLevelFileRedirect("cmd 2>/dev/null >/tmp/a", ["/tmp"], TMP_OPTS), false);
+
+// Not exempted
+test("> /tmp/out, targets [/var] → true",   hasTopLevelFileRedirect("cmd > /tmp/out", ["/var"], TMP_OPTS), true);
+test("> out.txt, targets [/tmp] → true (relative not under /tmp)", hasTopLevelFileRedirect("cmd > out.txt", ["/tmp"], TMP_OPTS), true);
+test("> /tmpfoo, targets [/tmp] → true (no prefix smuggling)", hasTopLevelFileRedirect("cmd >/tmpfoo", ["/tmp"], TMP_OPTS), true);
+test("> /tmp/../etc/passwd → true (dot-segment escape)", hasTopLevelFileRedirect("cmd > /tmp/../etc/passwd", ["/tmp"], TMP_OPTS), true);
+test("> $TMPDIR/out → true (unresolvable var)", hasTopLevelFileRedirect("cmd > $TMPDIR/out", ["/tmp"], TMP_OPTS), true);
+test("> ~/out → true (unexpanded tilde)",   hasTopLevelFileRedirect("cmd > ~/out", ["/tmp"], TMP_OPTS), true);
+test("> /tmp/a* → true (glob target)",      hasTopLevelFileRedirect("cmd > /tmp/a*", ["/tmp"], TMP_OPTS), true);
+test("cmd >/tmp/a 2>err → true (one non-exempt)", hasTopLevelFileRedirect("cmd >/tmp/a 2>err", ["/tmp"], TMP_OPTS), true);
+test("> /etc/passwd, targets [/] → false (root exempts all)", hasTopLevelFileRedirect("cmd > /etc/passwd", ["/"], TMP_OPTS), false);
+
 section("isReadOnlyBashSubcommand — descriptor dup is read-only");
 
 test("echo foo 2>&1 → true (dup, no file)",  isReadOnlyBashSubcommand("echo foo 2>&1", WIN_CWD), true);
@@ -984,6 +1014,9 @@ test("echo foo 2>/dev/null → true (null sink)",  isReadOnlyBashSubcommand("ech
 test("echo foo > out → false (file write)",  isReadOnlyBashSubcommand("echo foo > out", WIN_CWD), false);
 test("cmd 2> err → false",                   isReadOnlyBashSubcommand("cmd 2> err", WIN_CWD), false);
 test("cmd &> all → false",                  isReadOnlyBashSubcommand("cmd &> all", WIN_CWD), false);
+test("echo foo > /tmp/out → true with targets", isReadOnlyBashSubcommand("echo foo > /tmp/out", WIN_CWD, {}, ["/tmp"]), true);
+test("echo foo > /tmp/out → false without targets", isReadOnlyBashSubcommand("echo foo > /tmp/out", WIN_CWD), false);
+test("echo foo > /home/x → false even with targets", isReadOnlyBashSubcommand("echo foo > /home/x", WIN_CWD, {}, ["/tmp"]), false);
 
 section("decide — redirect-aware allow rules");
 
@@ -1005,6 +1038,24 @@ test("rg x → allow (broad rule still works)",        decide(rgRedirectCfg, "ba
 const rgAppendCfg = makeCfg({ allow: ["Bash(rg *)", "Bash(rg * >> *)"], defaultAction: "ask", bashReadOnlyAllowCwd: true, cwd: WIN_CWD });
 test("rg x >> out.txt → allow (>> rule)", decide(rgAppendCfg, "bash", { command: "rg x >> out.txt" }), "allow");
 test("rg x > out.txt → ask (> not covered by >> rule)", decide(rgAppendCfg, "bash", { command: "rg x > out.txt" }), "ask");
+
+section("decide — bashAllowRedirectsTo exemption");
+
+const tmpAllowCfg = makeCfg({ allow: ["Bash(rg *)"], defaultAction: "deny", bashAllowRedirectsTo: ["/tmp"], cwd: WIN_CWD });
+test("rg x > /tmp/out → allow (broad rule + /tmp)", decide(tmpAllowCfg, "bash", { command: "rg x > /tmp/out" }), "allow");
+test("rg x >> /tmp/out → allow (append)", decide(tmpAllowCfg, "bash", { command: "rg x >> /tmp/out" }), "allow");
+test("rg x > out.txt → deny (outside /tmp)", decide(tmpAllowCfg, "bash", { command: "rg x > out.txt" }), "deny");
+test("rg x > /home/x → deny (outside /tmp)", decide(tmpAllowCfg, "bash", { command: "rg x > /home/x" }), "deny");
+
+const tmpOffCfg = makeCfg({ allow: ["Bash(rg *)"], defaultAction: "deny", cwd: WIN_CWD });
+test("rg x > /tmp/out → deny when no targets configured", decide(tmpOffCfg, "bash", { command: "rg x > /tmp/out" }), "deny");
+
+// Read-only auto-allow also honors the exemption
+test("cat notes.txt > /tmp/out → allow (read-only + /tmp)", decide(makeCfg({ defaultAction: "deny", bashReadOnlyAllowCwd: true, bashAllowRedirectsTo: ["/tmp"], cwd: WIN_CWD }), "bash", { command: "cat notes.txt > /tmp/out" }), "allow");
+test("cat notes.txt > /tmp/out → deny without targets", decide(makeCfg({ defaultAction: "deny", bashReadOnlyAllowCwd: true, cwd: WIN_CWD }), "bash", { command: "cat notes.txt > /tmp/out" }), "deny");
+
+// deny rules still win over exempted redirects
+test("deny beats /tmp exemption", decide(makeCfg({ allow: ["Bash(rm *)"], deny: ["Bash(rm *)"], defaultAction: "allow", bashAllowRedirectsTo: ["/tmp"], cwd: WIN_CWD }), "bash", { command: "rm -rf / > /tmp/out" }), "deny");
 
 // deny rules are redirect-agnostic: they always win over a redirected command
 const denyRmCfg = makeCfg({ deny: ["Bash(rm -rf*)"], allow: ["Bash(rm -rf * > *)"], defaultAction: "ask" });
