@@ -17,7 +17,7 @@ const CHOICE_CLEAR_AND_IMPLEMENT = "Accept: clear context, then implement";
 const CHOICE_REVISE = "Decline: write feedback, try again";
 const CHOICE_STOP = "Decline: stop";
 
-function makeHarness(selectChoice?: string, editorText?: string) {
+function makeHarness(selectChoice?: string, editorText?: string, allToolNames?: string[]) {
 	const commands: Record<string, any> = {};
 	const events: Record<string, any> = {};
 	const sent: string[] = [];
@@ -28,14 +28,14 @@ function makeHarness(selectChoice?: string, editorText?: string) {
 	let activeTools: string[] = [];
 
 	const originalTools = ["read", "write", "edit", "bash"];
-	const allToolNames = ["read", "write", "edit", "bash", "grep", "find", "ls", "web_fetch", "mcp__slack"];
+	const allToolNamesFinal = allToolNames ?? ["read", "write", "edit", "bash", "grep", "find", "ls", "web_fetch", "mcp__slack"];
 
 	const pi: any = {
 		registerCommand(name: string, opts: any) { commands[name] = opts; },
 		registerShortcut() {},
 		on(event: string, handler: any) { events[event] = handler; },
 		getActiveTools: () => activeTools.length ? activeTools.slice() : originalTools.slice(),
-		getAllTools: () => allToolNames.map((name) => ({ name })),
+		getAllTools: () => allToolNamesFinal.map((name) => ({ name })),
 		setActiveTools(tools: string[]) { activeTools = tools.slice(); },
 		sendUserMessage(msg: string) { sent.push(msg); },
 	};
@@ -222,6 +222,37 @@ async function main() {
 		await h.events["agent_settled"](undefined, h.ctx);
 		assert.equal(h.selects.length, 0);
 		assert.equal(h.sent.length, 0);
+	}
+
+	// ── Clarifying questions: nudge variant depends on tool availability ─────
+	{
+		// Tool present: the planner is told to call ask_user_question.
+		const withTool = makeHarness(
+			CHOICE_STOP,
+			undefined,
+			["read", "write", "edit", "bash", "ask_user_question"],
+		);
+		await withTool.commands["plan"].handler("design a thing", withTool.ctx);
+		assert.equal(withTool.sent.length, 1);
+		assert.ok(withTool.sent[0].includes("ask_user_question"), "clarify nudge must mention the tool");
+		assert.ok(
+			withTool.notifications.some((n) => n.msg.includes("clarifying questions enabled")),
+			"must notify that clarifying questions are enabled",
+		);
+		assert.ok(withTool.narrowed(), "ask_user_question must stay active during planning");
+
+		// Tool absent: the original nudge is used and no enablement notice fires.
+		const withoutTool = makeHarness(CHOICE_STOP);
+		await withoutTool.commands["plan"].handler("design a thing", withoutTool.ctx);
+		assert.equal(withoutTool.sent.length, 1);
+		assert.ok(
+			!withoutTool.sent[0].includes("ask_user_question"),
+			"nudge must not mention the tool when it is unavailable",
+		);
+		assert.ok(
+			!withoutTool.notifications.some((n) => n.msg.includes("clarifying questions enabled")),
+			"must not claim clarifying questions are enabled",
+		);
 	}
 
 	// ── session_start resets transient state ───────────────────────────────────

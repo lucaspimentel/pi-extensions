@@ -3,7 +3,10 @@
  *
  * When the user runs `/plan <task>`, pi disables the `write` and `edit` tools
  * (everything else stays active, including unrestricted bash and MCP tools)
- * and sends a planning prompt as a user message. The planner is asked to
+ * and sends a planning prompt as a user message. If the optional
+ * ask_user_question tool is installed (rpiv-ask-user-question package), the
+ * planner is instructed to ask clarifying questions before writing the
+ * handoff. The planner is asked to
  * produce a self-contained "handoff" prompt: written in imperative voice and
  * addressed to a fresh agent session with no memory of this conversation, so
  * it can be pasted verbatim elsewhere.
@@ -31,12 +34,11 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-const PLAN_SYSTEM_NUDGE = `
-The user has asked for a plan. Produce a complete, self-contained handoff prompt
-that a fresh agent session (with no memory of this conversation) could be given
-directly and implement from scratch.
+const PLAN_NUDGE_INTRO = `The user has asked for a plan. Produce a complete, self-contained handoff
+prompt that a fresh agent session (with no memory of this conversation) could
+be given directly and implement from scratch.`;
 
-Requirements:
+const PLAN_HANDOFF_REQUIREMENTS = `
 - Written in imperative voice, addressed to the implementing agent.
 - Self-contained: include the task, relevant file paths discovered during
   research, constraints, a numbered step-by-step implementation plan, and
@@ -49,6 +51,35 @@ Requirements:
   so it must contain the handoff prompt and nothing else: no meta commentary,
   no "here is the plan" preamble.
 `.trim();
+
+const PLAN_CLARIFY_REQUIREMENTS = `
+- Before producing the handoff plan, resolve design ambiguity by calling the
+  ask_user_question tool. Ask only about genuine design decisions (approach,
+  scope, tradeoffs), not about anything discoverable by reading the code.
+- Batch up to 4 questions per call. Call ask_user_question again when later
+  questions depend on earlier answers, but keep the total to at most 2-3
+  rounds.
+- Once the design ambiguity is resolved, stop asking and produce the final
+  handoff plan in the same turn, folding the user's answers into the plan
+  content.
+- If the user cancels a questionnaire, proceed with your best judgment and
+  note the open question in the plan.
+`.trim();
+
+const PLAN_SYSTEM_NUDGE = `${PLAN_NUDGE_INTRO}
+
+Requirements:
+${PLAN_HANDOFF_REQUIREMENTS}`.trim();
+
+const PLAN_SYSTEM_NUDGE_WITH_CLARIFY = `${PLAN_NUDGE_INTRO}
+
+Requirements:
+${PLAN_HANDOFF_REQUIREMENTS}
+${PLAN_CLARIFY_REQUIREMENTS}`.trim();
+
+// Set when the rpiv-ask-user-question package is installed; lets the planner
+// ask the user clarifying questions mid-turn via its ask_user_question tool.
+const ASK_USER_TOOL_NAME = "ask_user_question";
 
 const IMPLEMENT_MESSAGE = "Implement the plan.";
 
@@ -156,17 +187,27 @@ export default function plan(pi: ExtensionAPI) {
 			return;
 		}
 
-		// Snapshot the active tool set so it can be restored later.
+		// Snapshot the active tool set so it can be restored later. Also check
+		// whether the questionnaire tool is registered (optional dependency on
+		// the rpiv-ask-user-question package); it stays active because
+		// narrowTools() only excludes write/edit.
 		savedTools = pi.getActiveTools();
+		const canAskUser = pi.getAllTools().some((t) => t.name === ASK_USER_TOOL_NAME);
 		narrowTools();
 		planCommandCtx = ctx;
 
 		planning = true;
 		updateStatus(ctx);
-		ctx.ui.notify("Planning (write/edit disabled).", "info");
+		ctx.ui.notify(
+			canAskUser
+				? "Planning (write/edit disabled; clarifying questions enabled)."
+				: "Planning (write/edit disabled).",
+			"info",
+		);
 
 		// Send the planning prompt as a real user message so it triggers a turn.
-		pi.sendUserMessage(`${PLAN_SYSTEM_NUDGE}\n\nTask:\n${task}`);
+		const nudge = canAskUser ? PLAN_SYSTEM_NUDGE_WITH_CLARIFY : PLAN_SYSTEM_NUDGE;
+		pi.sendUserMessage(`${nudge}\n\nTask:\n${task}`);
 	}
 
 	async function restoreTools(ctx: ExtensionContext): Promise<void> {
