@@ -200,7 +200,7 @@
  *   docs/permission-modes-design.md.
  *
  *   Switch via:
- *     - Ctrl+Alt+M hotkey (cycles manual → allow edits → auto → yolo → manual)
+ *     - Ctrl+Alt+P hotkey (cycles manual → allow edits → auto → yolo → manual)
  *     - /permissions mode [manual|allow-edits|auto|yolo]
  *     - "Switch to \"allow edits\" mode (this session)" in Write/Edit dialogs
  *     - "Switch to auto mode" / "Switch to yolo mode" in any permission dialog
@@ -250,7 +250,7 @@
  *   Explicit `deny` rules always win.
  *
  *   Select via:
- *     - Ctrl+Alt+M hotkey (cycle) or /permissions mode auto
+ *     - Ctrl+Alt+P hotkey (cycle) or /permissions mode auto
  *     - /permissions auto (alias for mode auto; /permissions auto model and
  *       /permissions auto debug keep their dedicated subcommands)
  *     - "Switch to auto mode (this session)" option in any permission dialog
@@ -854,13 +854,17 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Hotkey ───────────────────────────────────────────────────────────────
 
-	// Note: ctrl+alt+m (not ctrl+shift+m) because most terminals can't distinguish
-	// ctrl+shift+<letter> from ctrl+<letter> — both emit the same control byte
-	// unless the terminal supports the Kitty keyboard protocol. Alt is sent as an
-	// ESC prefix, so ctrl+alt+m is reliably distinguishable from ctrl+m.
+	// Note: ctrl+alt+p (not ctrl+alt+m). In legacy terminal encoding both are
+	// ESC + a control byte, but ctrl+m's control byte is CR (Enter), so
+	// ctrl+alt+m is indistinguishable from alt+enter. herdr's input parser
+	// resolves that ambiguity as alt+enter, making ctrl+alt+m unreachable
+	// inside herdr panes. ctrl+p's control byte (0x10) is unnamed and passes
+	// through intact. (Also not ctrl+shift+m: most terminals can't distinguish
+	// ctrl+shift+<letter> from ctrl+<letter> unless the Kitty protocol is
+	// active.)
 	const MODE_CYCLE: PermissionMode[] = ["manual", "edits", "auto", "yolo"];
 
-	pi.registerShortcut("ctrl+alt+m", {
+	pi.registerShortcut("ctrl+alt+p", {
 		description: "Cycle permission mode (manual/allow-edits/auto/yolo, this session only)",
 		handler: async (ctx) => {
 			const next = MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length];
@@ -981,7 +985,7 @@ export default function (pi: ExtensionAPI) {
 					"Precedence (first match wins):  deny > ask > allow > toolDefaults > mode strategy > defaultAction",
 					"",
 					"Permission mode (starts at manual each session, never persisted):",
-					"  manual  fallthroughs use defaultAction; Write/Edit asks   (Ctrl+Alt+M cycles)",
+					"  manual  fallthroughs use defaultAction; Write/Edit asks   (Ctrl+Alt+P cycles)",
 					"  allow-edits  Write/Edit silently allowed, rest like manual (alias: edits)",
 					"  auto    classifier screens fallthroughs (incl. Write/Edit)",
 					"  yolo    allow everything not explicitly denied/asked/configured",

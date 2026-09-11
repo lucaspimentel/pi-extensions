@@ -337,15 +337,6 @@ export default function plan(pi: ExtensionAPI) {
 		},
 	});
 
-	// Ctrl+Alt+P: take whatever's currently in the editor and use it as the plan task.
-	pi.registerShortcut("ctrl+alt+p", {
-		description: "Plan current editor text",
-		handler: async (ctx) => {
-			// Grab editor text via setEditorText round-trip is not possible; rely on /plan.
-			ctx.ui.notify("Use /plan <task> to start planning.", "info");
-		},
-	});
-
 	// After the planning turn settles (retries/continuations included), capture
 	// the plan and ask the user what to do next.
 	pi.on("agent_settled", async (_event, ctx) => {

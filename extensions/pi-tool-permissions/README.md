@@ -572,7 +572,7 @@ The two former independent session toggles (allow-all-edits, auto mode) are cons
 
 | Method | Action |
 | ------ | ------ |
-| **Ctrl+Alt+M** | Cycle manual → allow edits → auto → yolo → manual |
+| **Ctrl+Alt+P** | Cycle manual → allow edits → auto → yolo → manual |
 | Any permission dialog | Choose **"Switch to \"allow edits\" / auto / yolo mode (this session)"** |
 | `/permissions mode [manual\|allow-edits\|auto\|yolo]` | Show or set the mode |
 | `/permissions auto` | Alias for `/permissions mode auto` |
@@ -693,7 +693,7 @@ So `git add -A && git commit -m ...` runs silently, while anything that leaves y
 
 | Method | Action |
 | ------ | ------ |
-| **Ctrl+Alt+M** | Cycle through the modes (auto is the third stop) |
+| **Ctrl+Alt+P** | Cycle through the modes (auto is the third stop) |
 | Any permission dialog | Choose **"Switch to auto mode (this session)"** |
 | `/permissions mode auto` | Set the mode |
 | `/permissions auto` | Alias for `/permissions mode auto` |
