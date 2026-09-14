@@ -59,6 +59,11 @@ function getExe(): string | null {
 
 // ── Tool definition ─────────────────────────────────────────────────────────
 
+// Force UTF-8 console output so non-ASCII output survives the utf8 decode.
+// Mirrors pi's built-in `powershell` tool (dist/core/tools/powershell.js).
+const UTF8_OUTPUT_PREFIX =
+	"try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n";
+
 const pwshTool = defineTool({
 	name: "pwsh",
 	label: "PowerShell",
@@ -127,7 +132,7 @@ const pwshTool = defineTool({
 				"-OutputFormat",
 				"Text",
 				"-Command",
-				params.command,
+				UTF8_OUTPUT_PREFIX + params.command,
 			],
 			{
 				cwd,
