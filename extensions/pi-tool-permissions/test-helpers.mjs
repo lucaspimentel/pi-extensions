@@ -41,6 +41,7 @@ export {
 	splitTopLevelShell,
 	stripStructuralKeywords,
 	decideCompound,
+	decideWithReason,
 	shouldClassifyWholeCompound,
 	decide,
 	actionIcon,

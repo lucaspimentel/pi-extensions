@@ -59,6 +59,17 @@
  * Precedence (first match wins):
  *   deny > ask > allow > toolDefaults > mode strategy > defaultAction.
  *
+ * Prompt reason ("Why:" line):
+ *   Every ask dialog appends a single "Why: <reason>" line explaining which
+ *   decision layer triggered the prompt. When the classifier screened the
+ *   action (soft_deny → ask), the reason is the classifier's attribution
+ *   ("classifier <model-id>: <reason>"); otherwise it comes from
+ *   decideWithReason() / decideCompound(): a matched ask rule, an explicit
+ *   toolDefaults entry, the implicit write guard, the defaultAction
+ *   fallthrough, the auto-mode no-classifier stub, or an unparseable compound
+ *   command. Both the single-command dialog and each per-subcommand dialog in
+ *   the compound-Bash loop show it.
+ *
  * Implicit defaults (session-only, never persisted to disk):
  *   readAllowCwd (default: true)
  *     Injects Read(<cwd>/**) into the allow list so every read within the working
@@ -304,8 +315,8 @@ import {
 	buildActionContext,
 	classifierAttribution,
 	classifyAction,
-	decide,
 	decideCompound,
+	decideWithReason,
 	dedupe,
 	formatBreakdown,
 	getMatchField,
@@ -354,6 +365,25 @@ function pwshExtraInfo(toolName: string, input: Record<string, unknown>): string
 	const timeout = input.timeout;
 	if (typeof timeout === "number") parts.push(`timeout: ${timeout}s`);
 	return parts.length ? `\n  ${parts.join(", ")}` : "";
+}
+
+/** Reason shown when auto mode is on but no classifier model is available, so fallthroughs stub to ask. */
+const AUTO_NO_CLASSIFIER_REASON = "auto mode: no classifier model available";
+
+/**
+ * Build the unified "Why: ..." explanation appended to permission prompts.
+ *
+ * Precedence: when the classifier produced this verdict (soft_deny -> ask),
+ * its attribution is the why; otherwise the static reason from
+ * `decideWithReason()`/`decideCompound()` is used (matched ask rule,
+ * write guard, toolDefaults, defaultAction fallthrough, ...). Returns an
+ * empty string when there is nothing to explain, so the prompt is unchanged.
+ */
+function whyLine(staticReason: string | undefined, classifierModelId: string | undefined, classifierReason: string): string {
+	if (classifierModelId || classifierReason) {
+		return `Why: ${classifierAttribution(classifierModelId, classifierReason)}`;
+	}
+	return staticReason ? `Why: ${staticReason}` : "";
 }
 
 export default function (pi: ExtensionAPI) {
@@ -513,6 +543,11 @@ export default function (pi: ExtensionAPI) {
 		// post-decide short-circuit is needed here anymore.
 		const compound = decideCompound(cfg, event.toolName, matchInput, mode);
 		let { action, isCompound, ambiguous, breakdown } = compound;
+		// Why the static-rule layer chose this action (matched rule, write guard,
+		// defaultAction, ...). Shown in ask prompts; replaced by the classifier's
+		// attribution when the classifier screened the action, and by the no-
+		// classifier stub reason when auto mode could not screen at all.
+		let staticReason: string | undefined = compound.reason;
 		let classifierReason = "";
 		// Model id of the classifier that produced the verdict for this call.
 		// Undefined when the classifier didn't run for this verdict (a static
@@ -553,10 +588,14 @@ export default function (pi: ExtensionAPI) {
 				// breakdown loop.
 				isCompound = false;
 				breakdown = [];
+				// The classifier owns the why for this verdict.
+				staticReason = undefined;
 			} else if (!autoEngaged || isCompound) {
 				// Stub (no model) or compound with a static `ask` sub (loop handles
-				// per-sub).
+				// per-sub). For the stub, the static fallthrough reason would be
+				// misleading ("screened by the classifier"), so replace it.
 				action = "ask";
+				if (!isCompound) staticReason = AUTO_NO_CLASSIFIER_REASON;
 			}
 		}
 
@@ -635,9 +674,14 @@ export default function (pi: ExtensionAPI) {
 					// a freshly saved deny must not override an explicit one-shot allow.
 					if (allowAllStepsOnce) continue;
 	
-					let liveAction = decide(cfg, "bash", { command: sub }, mode);
+					const liveStatic = decideWithReason(cfg, "bash", { command: sub }, mode);
+					let liveAction = liveStatic.action;
 					let subReason = "";
 					let subClassifierModelId: string | undefined;
+					// Why the static-rule layer chose this sub's action; replaced by the
+					// classifier attribution when the classifier screens the sub, and by
+					// the no-classifier stub reason when auto mode can't screen it.
+					let subStaticReason: string | undefined = liveStatic.reason;
 					// Auto fallthrough: run the classifier for this subcommand.
 					if (liveAction === "auto") {
 						if (autoEngaged && classifierModel) {
@@ -652,10 +696,13 @@ export default function (pi: ExtensionAPI) {
 							);
 							subReason = result.reason;
 							subClassifierModelId = classifierModel.id;
+							// The classifier owns the why for this verdict.
+							subStaticReason = undefined;
 							notifyClassifierDebug(ctx, "bash", { command: sub }, classifierModel.id, result);
 							liveAction = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
 						} else {
 							liveAction = "ask";
+							subStaticReason = AUTO_NO_CLASSIFIER_REASON;
 						}
 					}
 					if (liveAction === "allow") continue;
@@ -672,9 +719,9 @@ export default function (pi: ExtensionAPI) {
 	
 					const suggested = suggestRule("Bash", { command: sub });
 					const breakdownLines = formatBreakdown(currentBreakdown, sub);
-	
-					const subAttr = classifierAttribution(subClassifierModelId, subReason);
-					const reasonNote = subAttr ? `\n\n  ${subAttr}` : "";
+
+					const subWhy = whyLine(subStaticReason, subClassifierModelId, subReason);
+					const reasonNote = subWhy ? `\n\n${subWhy}` : "";
 					const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}`;
 					// "Allow ALL steps once" only makes sense when more than one step
 					// in this compound actually needs human approval; with a single
@@ -770,8 +817,8 @@ export default function (pi: ExtensionAPI) {
 				: `Allow ${event.toolName}?`;
 			const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
 			const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
-			const attr = classifierAttribution(classifierModelId, classifierReason);
-			const reasonNote = attr ? `\n\n  ${attr}` : "";
+			const why = whyLine(staticReason, classifierModelId, classifierReason);
+			const reasonNote = why ? `\n\n${why}` : "";
 			const title = `${titleHeader}\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
 	
 			// Mode-switch options for every dialog; write/edit dialogs additionally

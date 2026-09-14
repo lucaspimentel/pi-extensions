@@ -495,7 +495,36 @@ Suggested rule: Bash(rm*)
     Deny always (save rule)
 ```
 
+### Why you're being prompted
+
+Every ask dialog appends a single `Why:` line explaining which decision layer triggered the prompt:
+
+```
+Allow Bash?
+
+  git push origin
+
+Why: matched ask rule 'Bash(git push*)'
+
+  > Allow once
+    ...
+```
+
+The possible explanations, in precedence order:
+
+- **Explicit rule**: `matched ask rule 'Bash(git push*)'` — a user-authored ask rule matched.
+- **Per-tool default**: `toolDefaults.write = ask` — the config's `toolDefaults` map assigned ask to this tool.
+- **Implicit write guard**: `write guard: write always prompts unless toolDefaults overrides it` — the built-in safety default for Write (see [`write` → `ask` (automatic)](#write--ask-automatic)).
+- **Classifier**: `classifier <model-id>: <reason>` — auto mode's LLM classifier soft-denied the action and shows its reason.
+- **Auto mode without a classifier**: `auto mode: no classifier model available` — fallthroughs stub to ask when no classifier model is authed.
+- **Default action**: `no matching rule; defaultAction = ask` — nothing matched, so the configured default applies.
+- **Unparseable compound**: `complex command could not be split for per-subcommand checks` — the shell command couldn't be safely split, so the whole command prompts.
+
+In compound Bash prompts, each subcommand's dialog shows its own why (see [Compound Bash commands](#compound-bash-commands)).
+
 Every permission dialog also offers mode-switch choices: **"Switch to \"allow edits\" mode (this session)"** (Write/Edit dialogs only), **"Switch to auto mode (this session)"**, and **"Switch to yolo mode (this session)"** (see [Permission modes](#permission-modes) below). Each appears only when its mode isn't already active, at the **bottom** of the choice list, so **"Allow once"** stays the default (pi's selector starts on the first item).
+
+Each compound prompt's dialog also shows the `Why:` line for the subcommand currently being confirmed, e.g. `Why: matched ask rule 'Bash(git push*)'` or the classifier's attribution when auto mode screened that step.
 
 Choosing **always** opens a second selector asking *where* to save the rule:
 

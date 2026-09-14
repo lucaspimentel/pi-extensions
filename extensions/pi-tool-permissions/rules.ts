@@ -1658,6 +1658,8 @@ export function stripStructuralKeywords(part: string): string | null {
 export interface SubcommandDecision {
 	sub: string;
 	action: Action;
+	/** Why this subcommand got its action; shown in permission prompts. */
+	reason?: string;
 }
 
 export interface CompoundDecision {
@@ -1668,6 +1670,8 @@ export interface CompoundDecision {
 	ambiguous: boolean;
 	/** Per-subcommand results. Empty for single/ambiguous commands. */
 	breakdown: SubcommandDecision[];
+	/** Why the aggregate action was chosen; shown in permission prompts. */
+	reason?: string;
 }
 
 export function decideCompound(
@@ -1680,7 +1684,8 @@ export function decideCompound(
 	// "auto" sentinel for fallthroughs (the handler runs the classifier); in the
 	// other modes, `decide()` returns a terminal action directly.
 	if (normalizeTool(toolName) !== "bash") {
-		return { action: decide(cfg, toolName, input, mode), isCompound: false, ambiguous: false, breakdown: [] };
+		const d = decideWithReason(cfg, toolName, input, mode);
+		return { action: d.action, isCompound: false, ambiguous: false, breakdown: [], reason: d.reason };
 	}
 
 	const rawCmd = String(input.command ?? "");
@@ -1691,14 +1696,21 @@ export function decideCompound(
 	const split = splitTopLevelShell(cmd);
 
 	if (split.kind === "ambiguous") {
-		return { action: "ask", isCompound: false, ambiguous: true, breakdown: [] };
+		return {
+			action: "ask",
+			isCompound: false,
+			ambiguous: true,
+			breakdown: [],
+			reason: "complex command could not be split for per-subcommand checks",
+		};
 	}
 
 	if (split.kind === "single") {
 		const effectiveInput = split.effectiveCmd != null
 			? { ...normalizedInput, command: split.effectiveCmd }
 			: normalizedInput;
-		return { action: decide(cfg, "bash", effectiveInput, mode), isCompound: false, ambiguous: false, breakdown: [] };
+		const d = decideWithReason(cfg, "bash", effectiveInput, mode);
+		return { action: d.action, isCompound: false, ambiguous: false, breakdown: [], reason: d.reason };
 	}
 
 	// compound — strip structural shell keywords (`for`, `do`, `done`) so
@@ -1707,7 +1719,8 @@ export function decideCompound(
 	for (const rawSub of split.parts) {
 		const stripped = stripStructuralKeywords(rawSub);
 		if (stripped === null) continue;
-		breakdown.push({ sub: stripped, action: decide(cfg, "bash", { command: stripped }, mode) });
+		const d = decideWithReason(cfg, "bash", { command: stripped }, mode);
+		breakdown.push({ sub: stripped, action: d.action, reason: d.reason });
 	}
 
 	// Entirely structural (e.g. empty-body `for x in a; do; done`) — no commands
@@ -1720,7 +1733,7 @@ export function decideCompound(
 	// If filtering left a single command, downgrade to non-compound so callers
 	// render the simpler single-command prompt rather than a 1-row breakdown.
 	if (breakdown.length === 1) {
-		return { action: breakdown[0].action, isCompound: false, ambiguous: false, breakdown: [] };
+		return { action: breakdown[0].action, isCompound: false, ambiguous: false, breakdown: [], reason: breakdown[0].reason };
 	}
 
 	let action: Action = "allow";
@@ -1730,7 +1743,14 @@ export function decideCompound(
 		else if (a === "ask" && action !== "auto") action = "ask";
 	}
 
-	return { action, isCompound: true, ambiguous: false, breakdown };
+	// Attribute the aggregate action to the subcommand that caused it (first
+	// deny, else first ask, else first auto) so prompts can explain the why.
+	const worst =
+		breakdown.find((b) => b.action === "deny") ??
+		breakdown.find((b) => b.action === "ask") ??
+		breakdown.find((b) => b.action === "auto");
+
+	return { action, isCompound: true, ambiguous: false, breakdown, reason: worst?.reason };
 }
 
 /**
@@ -1786,7 +1806,10 @@ export function formatBreakdown(breakdown: SubcommandDecision[], currentSub: str
  * block and the per-step decisions reflect the freshly loaded config.
  */
 export function recomputeBreakdown(breakdown: SubcommandDecision[], cfg: ResolvedConfig, mode: PermissionMode = "manual"): SubcommandDecision[] {
-	return breakdown.map((b) => ({ sub: b.sub, action: decide(cfg, "bash", { command: b.sub }, mode) }));
+	return breakdown.map((b) => {
+		const d = decideWithReason(cfg, "bash", { command: b.sub }, mode);
+		return { sub: b.sub, action: d.action, reason: d.reason };
+	});
 }
 
 // ── Auto-mode classifier (Step 2) ─────────────────────────────────────────
@@ -1847,9 +1870,11 @@ export function autoStatusLabel(model: Pick<Model<Api>, "id"> | undefined): stri
 /**
  * Attribution core for a classifier verdict, shown in permission prompts so the
  * user can see *which* model screened the action (mirrors the `🤖 auto: <id>`
- * status line). Empty when the classifier didn't run for this verdict — in
- * that case neither a model id nor a reason is set, so the prompt omits the
- * note entirely (as before). Format: `classifier <modelId>: <reason>` when both
+ * status line). Embedded in the unified "Why: ..." line: when the classifier
+ * produced the verdict (soft_deny -> ask) this text IS the why, taking
+ * precedence over the static reason from decideWithReason(). Empty when the
+ * classifier didn't run for this verdict — in that case the prompt shows the
+ * static reason instead. Format: `classifier <modelId>: <reason>` when both
  * are present, `classifier <modelId>` when the model ran but gave no reason,
  * `classifier: <reason>` when only a reason is present (defensive — a verdict
  * implies the model ran, so this only happens if a caller passes a reason
@@ -2159,23 +2184,43 @@ export async function classifyAction(
 	return result;
 }
 
-export function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>, mode: PermissionMode = "manual"): Action {
-	const check = (list: string[]): boolean => {
+/**
+ * A decision plus a short human-readable explanation of why it was chosen.
+ * The reason is shown in permission prompts ("Why: ..."); prompts only ever
+ * surface `ask` decisions, but the reason is recorded for every action so the
+ * function is total and testable.
+ */
+export interface DecisionWithReason {
+	action: Action;
+	reason: string;
+}
+
+/**
+ * Same decision chain as `decide()`, but also returns why the action was
+ * chosen: the matched rule (for rule hits), the config knob (for toolDefaults
+ * / implicit guards / defaultAction), or the mode strategy. `decide()` is a
+ * thin wrapper over this, so the two can never drift: every existing `decide()`
+ * assertion pins the refactored behavior.
+ */
+export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>, mode: PermissionMode = "manual"): DecisionWithReason {
+	// Returns the raw rule string that matched, so reasons can name it.
+	const matched = (list: string[]): string | undefined => {
 		for (const raw of list) {
 			const rule = parseRule(raw);
-			if (rule && ruleMatches(rule, toolName, input, cfg.cwd)) return true;
+			if (rule && ruleMatches(rule, toolName, input, cfg.cwd)) return raw;
 		}
-		return false;
+		return undefined;
 	};
-	// Same as `check(cfg.allow)` but against a (possibly redirect-stripped) input.
-	const checkAllow = (matchInput: Record<string, unknown>): boolean => {
+	// Same as `matched(cfg.allow)` but against a (possibly redirect-stripped) input.
+	const matchedAllow = (matchInput: Record<string, unknown>): string | undefined => {
 		for (const raw of cfg.allow) {
 			const rule = parseRule(raw);
-			if (rule && ruleMatches(rule, toolName, matchInput, cfg.cwd)) return true;
+			if (rule && ruleMatches(rule, toolName, matchInput, cfg.cwd)) return raw;
 		}
-		return false;
+		return undefined;
 	};
-	if (check(cfg.deny)) return "deny";
+	const denyRule = matched(cfg.deny);
+	if (denyRule !== undefined) return { action: "deny", reason: `matched deny rule '${denyRule}'` };
 	// Read-only bash auto-allow short-circuit. When the auto layer is engaged
 	// (auto mode) AND classifyAllShell is set, route read-only bash
 	// commands through the classifier instead of silently allowing them. For
@@ -2185,15 +2230,19 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	// (No-op `cd` is pure bookkeeping with zero side-effects/data access, so
 	// allowNoopCd stays active regardless of the mode.)
 	const skipReadOnlyBash = mode === "auto" && cfg.autoMode.classifyAllShell;
-	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd, {}, cfg.bashAllowRedirectsTo)) return "allow";
-	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd)) return "allow";
+	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd, {}, cfg.bashAllowRedirectsTo))
+		return { action: "allow", reason: "read-only bash command (bashReadOnlyAllowCwd)" };
+	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd))
+		return { action: "allow", reason: "no-op cd (allowNoopCd)" };
 	// Pure shell variable assignments (no command/process/arithmetic substitution)
 	// are no-ops in pi's fresh-shell model. Exempt from `skipReadOnlyBash` (auto
 	// mode's classifyAllShell) so they are statically allowed even in auto mode —
 	// matching allowNoopCd, and avoiding a wasteful classifier call that could
 	// mis-allow an impure `$(...)` form. Impure assignments still fall through.
-	if (cfg.bashAllowPureVarAssign && normalizeTool(toolName) === "bash" && isPureVariableAssignment(String(input.command ?? ""), cfg.bashAllowRedirectsTo, { cwd: cfg.cwd })) return "allow";
-	if (check(cfg.ask)) return "ask";
+	if (cfg.bashAllowPureVarAssign && normalizeTool(toolName) === "bash" && isPureVariableAssignment(String(input.command ?? ""), cfg.bashAllowRedirectsTo, { cwd: cfg.cwd }))
+		return { action: "allow", reason: "pure shell variable assignment (bashAllowPureVarAssign)" };
+	const askRule = matched(cfg.ask);
+	if (askRule !== undefined) return { action: "ask", reason: `matched ask rule '${askRule}'` };
 	// Allow rules — redirect-aware for Bash. A Bash command containing a
 	// top-level *file* output redirection (e.g. `rg x > out.txt`) is NOT
 	// covered by a broad allow rule whose pattern lacks `>` (e.g. `Bash(rg *)`);
@@ -2221,10 +2270,12 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	if (isBashRedirect) {
 		for (const raw of cfg.allow) {
 			const rule = parseRule(raw);
-			if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, toolName, allowInput, cfg.cwd)) return "allow";
+			if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, toolName, allowInput, cfg.cwd))
+				return { action: "allow", reason: `matched redirect-aware allow rule '${raw}'` };
 		}
-	} else if (checkAllow(allowInput)) {
-		return "allow";
+	} else {
+		const allowRule = matchedAllow(allowInput);
+		if (allowRule !== undefined) return { action: "allow", reason: `matched allow rule '${allowRule}'` };
 	}
 	const tool = normalizeTool(toolName);
 	// Explicit toolDefaults win in every mode (including yolo): a user-authored
@@ -2233,7 +2284,7 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	// consulted here; the merged cfg.toolDefaults view also contains the
 	// implicit write guard, which must NOT short-circuit the mode strategy.
 	const td = cfg.explicitToolDefaults[tool];
-	if (td !== undefined) return td;
+	if (td !== undefined) return { action: td, reason: `toolDefaults.${tool} = ${td}` };
 	// Mode strategy for the non-explicit remainder. Layering rationale (see
 	// docs/permission-modes-design.md):
 	//
@@ -2254,15 +2305,21 @@ export function decide(cfg: ResolvedConfig, toolName: string, input: Record<stri
 	// 4. Plain fallthrough: auto returns the "auto" sentinel (handler screens
 	//    with the classifier, or stubs to ask when no model is available);
 	//    manual/edits return the terminal `defaultAction`.
-	if (mode === "yolo") return "allow";
-	if (mode === "edits" && (tool === "write" || tool === "edit")) return "allow";
+	if (mode === "yolo") return { action: "allow", reason: "yolo mode allows all non-explicit actions" };
+	if (mode === "edits" && (tool === "write" || tool === "edit"))
+		return { action: "allow", reason: "allow-edits mode silently allows Write/Edit" };
 	const implicitTd = cfg.implicit.toolDefaults[tool];
 	if (implicitTd !== undefined) {
-		if (mode === "auto") return "auto";
-		return implicitTd;
+		if (mode === "auto") return { action: "auto", reason: "auto mode: implicit write guard demoted below the classifier" };
+		return { action: implicitTd, reason: `write guard: ${tool} always prompts unless toolDefaults overrides it` };
 	}
-	if (mode === "auto") return "auto";
-	return cfg.defaultAction;
+	if (mode === "auto") return { action: "auto", reason: "auto mode: fallthrough screened by the classifier" };
+	return { action: cfg.defaultAction, reason: `no matching rule; defaultAction = ${cfg.defaultAction}` };
+}
+
+/** Bare-action view of `decideWithReason()`; preserved so existing call sites and tests stay valid. */
+export function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>, mode: PermissionMode = "manual"): Action {
+	return decideWithReason(cfg, toolName, input, mode).action;
 }
 
 /** Suggest a rule string that matches the current call exactly enough to be useful. */

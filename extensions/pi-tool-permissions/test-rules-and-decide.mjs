@@ -1,7 +1,7 @@
 // run: node test-rules-and-decide.mjs
 
 import {
-	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideCompound, shouldClassifyWholeCompound, makeCfg,
+	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideWithReason, decideCompound, shouldClassifyWholeCompound, makeCfg,
 	cwdGlobPattern, normalizePathSep, normalizeMatchPath, inputForMatching, recomputeBreakdown,
 	loadConfigFromObjects,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
@@ -160,6 +160,65 @@ section("decide — deny always wins");
 
 const hardDeny = makeCfg({ deny: ["Read"], allow: ["Read"], ask: ["Read"], defaultAction: "allow" });
 test("deny overrides allow and ask for same tool", decide(hardDeny, "read", { path: "./f.ts" }), "deny");
+
+// ── decideWithReason — action + why ───────────────────────────────────────
+
+section("decideWithReason — rule matches name the rule");
+
+test("ask rule match: action",     decideWithReason(cfg, "bash", { command: "git push origin" }).action, "ask");
+test("ask rule match: reason",     decideWithReason(cfg, "bash", { command: "git push origin" }).reason, "matched ask rule 'Bash(git push*)'");
+test("allow rule match: action",   decideWithReason(cfg, "bash", { command: "npm test" }).action, "allow");
+test("allow rule match: reason",   decideWithReason(cfg, "bash", { command: "npm test" }).reason, "matched allow rule 'Bash(npm*)'");
+test("deny rule match: action",    decideWithReason(cfg, "bash", { command: "rm -rf ." }).action, "deny");
+test("deny rule match: reason",    decideWithReason(cfg, "bash", { command: "rm -rf ." }).reason, "matched deny rule 'Bash(rm*)'");
+
+section("decideWithReason — config knobs and fallthroughs");
+
+test("explicit toolDefaults: reason",   decideWithReason(tdCfg, "write", { path: "./f.ts" }).reason, "toolDefaults.write = ask");
+test("defaultAction fallthrough: action", decideWithReason(makeCfg({ defaultAction: "deny" }), "bash", { command: "echo hi" }).action, "deny");
+test("defaultAction fallthrough: reason", decideWithReason(makeCfg({ defaultAction: "deny" }), "bash", { command: "echo hi" }).reason, "no matching rule; defaultAction = deny");
+
+const writeGuardCfg = { ...makeCfg({}), implicit: { ...makeCfg({}).implicit, toolDefaults: { write: "ask" } } };
+test("implicit write guard: action",   decideWithReason(writeGuardCfg, "write", { path: "./src/x.ts" }).action, "ask");
+test("implicit write guard: reason",   decideWithReason(writeGuardCfg, "write", { path: "./src/x.ts" }).reason, "write guard: write always prompts unless toolDefaults overrides it");
+
+test("yolo mode: action",              decideWithReason(makeCfg({ defaultAction: "deny" }), "bash", { command: "echo hi" }, "yolo").action, "allow");
+test("yolo mode: reason",              decideWithReason(makeCfg({ defaultAction: "deny" }), "bash", { command: "echo hi" }, "yolo").reason, "yolo mode allows all non-explicit actions");
+test("allow-edits mode: action",       decideWithReason(writeGuardCfg, "write", { path: "./src/x.ts" }, "edits").action, "allow");
+test("allow-edits mode: reason",       decideWithReason(writeGuardCfg, "write", { path: "./src/x.ts" }, "edits").reason, "allow-edits mode silently allows Write/Edit");
+test("auto mode sentinel: action",     decideWithReason(makeCfg({ defaultAction: "deny" }), "bash", { command: "echo hi" }, "auto").action, "auto");
+test("auto mode sentinel: reason",     decideWithReason(makeCfg({ defaultAction: "deny" }), "bash", { command: "echo hi" }, "auto").reason, "auto mode: fallthrough screened by the classifier");
+test("auto mode write guard demoted: action", decideWithReason(writeGuardCfg, "write", { path: "./src/x.ts" }, "auto").action, "auto");
+test("auto mode write guard demoted: reason", decideWithReason(writeGuardCfg, "write", { path: "./src/x.ts" }, "auto").reason, "auto mode: implicit write guard demoted below the classifier");
+
+section("decideWithReason — decide() wrapper parity");
+
+// decide() must stay a thin wrapper so the two can never drift.
+test("parity: ask rule",     decide(cfg, "bash", { command: "git push origin" }), decideWithReason(cfg, "bash", { command: "git push origin" }).action);
+test("parity: allow rule",   decide(cfg, "bash", { command: "npm test" }), decideWithReason(cfg, "bash", { command: "npm test" }).action);
+test("parity: deny rule",    decide(cfg, "bash", { command: "rm -rf ." }), decideWithReason(cfg, "bash", { command: "rm -rf ." }).action);
+test("parity: toolDefaults", decide(tdCfg, "write", { path: "./f.ts" }), decideWithReason(tdCfg, "write", { path: "./f.ts" }).action);
+test("parity: write guard",  decide(writeGuardCfg, "write", { path: "./src/x.ts" }), decideWithReason(writeGuardCfg, "write", { path: "./src/x.ts" }).action);
+test("parity: auto sentinel", decide(makeCfg({ defaultAction: "deny" }), "bash", { command: "echo hi" }, "auto"), decideWithReason(makeCfg({ defaultAction: "deny" }), "bash", { command: "echo hi" }, "auto").action);
+
+section("decideWithReason — compound reasons");
+
+const compoundCfg = makeCfg({ ask: ["Bash(git push*)"], defaultAction: "ask" });
+const dcCompound = decideCompound(compoundCfg, "bash", { command: "git push origin && echo a" });
+test("compound: aggregate action",         dcCompound.action, "ask");
+test("compound: aggregate reason names ask-rule sub", dcCompound.reason, "matched ask rule 'Bash(git push*)'");
+test("compound: per-sub reason for fallthrough sub", dcCompound.breakdown[1].reason, "no matching rule; defaultAction = ask");
+
+const dcDenyCompound = decideCompound(makeCfg({ deny: ["Bash(rm*)"], defaultAction: "allow" }), "bash", { command: "echo a && rm -rf ." });
+test("compound: deny wins aggregate",      dcDenyCompound.action, "deny");
+test("compound: deny reason carried up",   dcDenyCompound.reason, "matched deny rule 'Bash(rm*)'");
+
+const dcAmbiguous = decideCompound(makeCfg({ defaultAction: "deny" }), "bash", { command: "echo 'unmatched" });
+test("ambiguous: action",   dcAmbiguous.action, "ask");
+test("ambiguous: reason",   dcAmbiguous.reason, "complex command could not be split for per-subcommand checks");
+
+const dcSingle = decideCompound(makeCfg({ allow: ["Read"], defaultAction: "deny" }), "read", { path: "./file.ts" });
+test("single command carries reason", dcSingle.reason, "matched allow rule 'Read'");
 
 section("decideCompound — non-bash short-circuit");
 
