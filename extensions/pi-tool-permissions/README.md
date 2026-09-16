@@ -334,9 +334,9 @@ Two tiers of safe commands:
 
 | Tier | Commands | Condition |
 | ---- | -------- | --------- |
-| **Safe always** — no filesystem access | `pwd`, `echo`, `printf`, `date`, `whoami`, `id`, `hostname`, `uname`, `env`, `printenv`, `true`, `false`, `which`, `type`, `command` | Always allowed |
+| **Safe always** — no filesystem access | `pwd`, `echo`, `printf`, `date`, `whoami`, `id`, `hostname`, `uname`, `env`, `printenv`, `true`, `false`, `which`, `where`, `type`, `command`, `sleep` | Always allowed |
 | **Safe always** — `set` shell options | `set` with only shell options (`set -e`, `set -euo pipefail`, `set -o pipefail`, `set +x`, bare `set`) | Allowed; any positional argument (e.g. `set foo`, `set -- foo`) is not |
-| **Safe with paths** — read-only filesystem access | `ls`, `cat`, `head`, `tail`, `wc`, `file`, `stat`, `tree`, `du`, `realpath`, `readlink`, `dirname`, `basename` | Allowed when all non-flag arguments resolve inside cwd |
+| **Safe with paths** — read-only filesystem access | `ls`, `cat`, `head`, `tail`, `wc`, `file`, `stat`, `tree`, `du`, `realpath`, `readlink`, `dirname`, `basename`, `cut`, `jq`, `nl`, `grep`, `rg`, `fd`, `diff`, `cmp`, `comm`, `sort`, `uniq`, `tr`, `od`, `base64`, `md5sum` | Allowed when all non-flag arguments resolve inside cwd |
 
 Commands containing top-level *file* output redirections (`>`, `>>`, `2>`, `&>`, etc.) are **never** auto-allowed, even if the base command is in the safe list — e.g. `echo foo > /tmp/out` is denied. Descriptor-to-descriptor redirects such as `2>&1` / `1>&2` / `>&2` are **not** file writes (they only rearrange existing streams) and stay auto-allowable, so common combined-output patterns like `cmd 2>&1` are not blocked. Redirects to `/dev/null` (the Unix null device — writes are discarded, nothing persisted) are likewise **not** file writes, so idioms like `cmd 2>/dev/null` or `cmd >/dev/null 2>&1` stay auto-allowable. Finally, redirects whose target resolves under a configured `bashAllowRedirectsTo` root (see below) are also exempt — with `"bashAllowRedirectsTo": ["/tmp"]`, `echo foo > /tmp/out` is auto-allowed like an unredirected command.
 

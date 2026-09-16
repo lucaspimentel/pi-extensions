@@ -417,6 +417,8 @@ test("which node → safe always",   isReadOnlyBashSubcommand("which node", CWD)
 test("env → safe always",          isReadOnlyBashSubcommand("env", CWD), true);
 test("printf hi → safe always",    isReadOnlyBashSubcommand("printf hi", CWD), true);
 test("true → safe always",          isReadOnlyBashSubcommand("true", CWD), true);
+test("where node → safe always",    isReadOnlyBashSubcommand("where node", CWD), true);
+test("sleep 5 → safe always",       isReadOnlyBashSubcommand("sleep 5", CWD), true);
 // Read-only condition evaluators: at most a stat()/access(), never mutate
 // state or read file contents. Safe to auto-allow regardless of arguments.
 test("test -f x → safe always",       isReadOnlyBashSubcommand("test -f x", CWD), true);
@@ -459,6 +461,19 @@ test("cut -d, -f1 ./data.csv → true",       isReadOnlyBashSubcommand("cut -d, 
 test("jq '.foo' ./in.json → true",          isReadOnlyBashSubcommand("jq '.foo' ./in.json", WIN_CWD), true);
 test("nl ./file.txt → true",                isReadOnlyBashSubcommand("nl ./file.txt", WIN_CWD), true);
 test("jq -n '1+1' → true (no file args)",   isReadOnlyBashSubcommand("jq -n '1+1'", WIN_CWD), true);
+test("grep -rn foo ./src → true",           isReadOnlyBashSubcommand("grep -rn foo ./src", WIN_CWD), true);
+test("rg pattern ./src → true",             isReadOnlyBashSubcommand("rg pattern ./src", WIN_CWD), true);
+test("fd .ts ./src → true",                 isReadOnlyBashSubcommand(`fd ".ts" ./src`, WIN_CWD), true);
+test("diff ./a.txt ./b.txt → true",         isReadOnlyBashSubcommand("diff ./a.txt ./b.txt", WIN_CWD), true);
+test("cmp ./a.txt ./b.txt → true",          isReadOnlyBashSubcommand("cmp ./a.txt ./b.txt", WIN_CWD), true);
+test("comm -3 ./a.txt ./b.txt → true",      isReadOnlyBashSubcommand("comm -3 ./a.txt ./b.txt", WIN_CWD), true);
+test("sort ./data.txt → true",              isReadOnlyBashSubcommand("sort ./data.txt", WIN_CWD), true);
+test("uniq -c ./data.txt → true",           isReadOnlyBashSubcommand("uniq -c ./data.txt", WIN_CWD), true);
+test("tr a-z A-Z < ./in.txt → true",        isReadOnlyBashSubcommand("tr a-z A-Z < ./in.txt", WIN_CWD), true);
+test("od -c ./blob.bin → true",             isReadOnlyBashSubcommand("od -c ./blob.bin", WIN_CWD), true);
+test("base64 ./file.bin → true",            isReadOnlyBashSubcommand("base64 ./file.bin", WIN_CWD), true);
+test("md5sum ./file.bin → true",            isReadOnlyBashSubcommand("md5sum ./file.bin", WIN_CWD), true);
+test("grep (bare, stdin) → true",           isReadOnlyBashSubcommand("grep foo", WIN_CWD), true);
 test("MSYS absolute path inside cwd → true",       isReadOnlyBashSubcommand("cat /c/Users/alice/proj/README.md", WIN_CWD, MSYS_PATHS), true);
 test("Cygwin absolute path inside cwd → true",     isReadOnlyBashSubcommand("cat /cygdrive/c/Users/alice/proj/README.md", WIN_CWD, CYGWIN_PATHS), true);
 test("MSYS tilde path inside cwd → true",          isReadOnlyBashSubcommand("cat ~/proj/README.md", WIN_CWD, MSYS_PATHS), true);
@@ -468,10 +483,16 @@ test("MSYS path under drive-root cwd → true",         isReadOnlyBashSubcommand
 section("isReadOnlyBashSubcommand — rejected cases");
 
 test("rm → not in safe lists",               isReadOnlyBashSubcommand("rm -rf .", WIN_CWD), false);
+test("sed -i → not readonly (in-place edit)", isReadOnlyBashSubcommand("sed -i 's/a/b/' ./f.txt", WIN_CWD), false);
+test("xargs → not readonly (executes commands)", isReadOnlyBashSubcommand("xargs rm", WIN_CWD), false);
 test("git → not in safe lists",              isReadOnlyBashSubcommand("git status", WIN_CWD), false);
 test("curl → not in safe lists",             isReadOnlyBashSubcommand("curl http://x.com", WIN_CWD), false);
 test("cat /etc/passwd → path outside cwd",   isReadOnlyBashSubcommand("cat /etc/passwd", WIN_CWD), false);
 test("jq . /etc/passwd → path outside cwd", isReadOnlyBashSubcommand("jq . /etc/passwd", WIN_CWD), false);
+test("grep foo /etc/passwd → path outside cwd", isReadOnlyBashSubcommand("grep foo /etc/passwd", WIN_CWD), false);
+test("diff ./a.txt /etc/passwd → path outside cwd", isReadOnlyBashSubcommand("diff ./a.txt /etc/passwd", WIN_CWD), false);
+test("sort /etc/passwd → path outside cwd",  isReadOnlyBashSubcommand("sort /etc/passwd", WIN_CWD), false);
+test("base64 /etc/passwd → path outside cwd", isReadOnlyBashSubcommand("base64 /etc/passwd", WIN_CWD), false);
 test("nl /etc/passwd → path outside cwd",   isReadOnlyBashSubcommand("nl /etc/passwd", WIN_CWD), false);
 test("ls .. → parent dir not inside cwd",    isReadOnlyBashSubcommand("ls ..", WIN_CWD), false);
 test("ls C:/Windows → path outside cwd",     isReadOnlyBashSubcommand("ls C:/Windows", WIN_CWD), false);

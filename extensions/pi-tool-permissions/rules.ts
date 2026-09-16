@@ -675,6 +675,7 @@ const READONLY_BASH_SAFE_ALWAYS = new Set([
 	"test", "[", "[[",
 	"pwd", "echo", "printf", "date", "whoami", "id", "hostname",
 	"uname", "env", "printenv", "true", "false", "which", "type", "command",
+	"where", "sleep",
 ]);
 
 /**
@@ -685,6 +686,8 @@ const READONLY_BASH_WITH_PATHS = new Set([
 	"ls", "cat", "head", "tail", "wc", "file", "stat", "tree",
 	"du", "realpath", "readlink", "dirname", "basename",
 	"cut", "jq", "nl",
+	"grep", "rg", "fd", "diff", "cmp", "comm",
+	"sort", "uniq", "tr", "od", "base64", "md5sum",
 ]);
 
 /**
