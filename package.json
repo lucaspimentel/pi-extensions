@@ -11,6 +11,8 @@
     "extensions": [
       "./extensions/colored-footer.ts",
       "./extensions/herdr-ask-user-bridge.ts",
+      "./extensions/herdr-tab-name.ts",
+      "./extensions/llm-session-name.ts",
       "./extensions/plan.ts",
       "./extensions/stash.ts",
       "./extensions/questionnaire.ts",
