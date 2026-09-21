@@ -116,8 +116,14 @@ export interface PermissionsConfig {
 	bashAllowPureVarAssign?: boolean;
 	/** When false, disables the implicit allow for no-op `cd` commands. Default: true. */
 	allowNoopCd?: boolean;
-	/** Absolute path roots whose descendants are treated as non-write redirect targets (e.g. "/tmp"). Default: [] (file redirects are never exempt). */
+	/** Absolute path roots whose descendants are treated as non-write redirect targets (e.g. "/tmp"). Default: [] (file redirects are never exempt). Deprecated alias for writeAllowPaths: only read when writeAllowPaths is absent in both scopes. */
 	bashAllowRedirectsTo?: string[];
+	/** Directory roots the agent may read (e.g. "/tmp", "~/source/datadog"). Merge: user union project, deduped. Trailing "/**" or "/" is stripped, ~/$HOME expanded, relative entries resolved against cwd, all at merge time. */
+	readAllowPaths?: string[];
+	/** When true, seeds the read roots with the platform scratch dirs (/tmp, /var/tmp, $TMPDIR on POSIX; %TEMP%, %TMP% on Windows). Default: false (safe by default; ask dialogs offer one-click grants). */
+	readAllowScratch?: boolean;
+	/** Writable directory roots: grants BOTH shell-redirect exemption (the old bashAllowRedirectsTo behavior) AND implicit Write/Edit allow rules for descendants (allow beats toolDefaults). Merge: user union project, deduped; same normalization as readAllowPaths. */
+	writeAllowPaths?: string[];
 	/** Map of bash command name -> built-in validator name (e.g. {"duckdb": "readonly-duckdb"}). When the validator proves the command read-only, it is implicitly allowed. Project keys override user keys. */
 	bashValidators?: Record<string, string>;
 }
@@ -144,8 +150,20 @@ export interface ResolvedConfig {
 	bashReadOnlyAllowCwd: boolean;
 	/** When true, pure shell variable assignments (no command/process/arithmetic substitution) are silently allowed. */
 	bashAllowPureVarAssign: boolean;
-	/** Resolved redirect-exemption roots: top-level file redirects whose target resolves under one of these paths are treated as non-writes. */
+	/** Resolved redirect-exemption roots: top-level file redirects whose target resolves under one of these paths are treated as non-writes. Equal to writeRoots; kept as a deprecated view of the same list. */
 	bashAllowRedirectsTo: string[];
+	/** When true, the read roots include the platform scratch dirs (readAllowScratch). */
+	readAllowScratch: boolean;
+	/** Where readAllowScratch came from: "default" (absent/false), "project", or "user". */
+	readAllowScratchSource: "default" | "project" | "user";
+	/** Resolved read roots: scratch roots (when readAllowScratch) + user + project readAllowPaths. cwd is always implicitly readable on top of these. */
+	readRoots: string[];
+	/** Resolved write roots: user + project writeAllowPaths, or the deprecated bashAllowRedirectsTo alias when no scope sets writeAllowPaths. Grants redirect exemption + Write/Edit implicit allows. */
+	writeRoots: string[];
+	/** The merged writeAllowPaths lists only (empty when the legacy alias supplied the roots). */
+	writeAllowPaths: string[];
+	/** True when the deprecated bashAllowRedirectsTo key was read from config (surfaces a debug warning). */
+	legacyBashAllowRedirectsToUsed: boolean;
 	/** Resolved per-command validators: command name -> BASH_VALIDATORS key. Approved commands are implicitly allowed read-only. */
 	bashValidators: Record<string, string>;
 	/** Resolved auto-mode config (merged user + project). Always present; used when the session auto toggle is on. */
@@ -166,6 +184,10 @@ export interface ResolvedConfig {
 		bashAllowPureVarAssign: boolean;
 		allowNoopCd: boolean;
 		bashAllowRedirectsTo: string[];
+		readRoots: string[];
+		writeRoots: string[];
+		writeAllowPaths: string[];
+		legacyBashAllowRedirectsToUsed: boolean;
 		bashValidators: Record<string, string>;
 	};
 }
@@ -299,7 +321,31 @@ export function mergeConfig(
 	const bashReadOnlyAllowCwd = project.bashReadOnlyAllowCwd ?? user.bashReadOnlyAllowCwd ?? true;
 	const bashAllowPureVarAssign = project.bashAllowPureVarAssign ?? user.bashAllowPureVarAssign ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
-	const bashAllowRedirectsTo = project.bashAllowRedirectsTo ?? user.bashAllowRedirectsTo ?? [];
+	const bashAllowRedirectsToRaw = project.bashAllowRedirectsTo ?? user.bashAllowRedirectsTo;
+	// Path roots: readAllowPaths merges as user union project (deduped);
+	// readAllowScratch is a scalar (project wins). Scratch roots are expanded
+	// per-merge so a changed $TMPDIR is picked up on reload.
+	const readAllowScratchSource: "default" | "project" | "user" =
+		project.readAllowScratch !== undefined ? "project" : user.readAllowScratch !== undefined ? "user" : "default";
+	const readAllowScratch = readAllowScratchSource === "default" ? false : (project.readAllowScratch ?? user.readAllowScratch ?? false);
+	const readAllowPaths = normalizeRootList([...(user.readAllowPaths ?? []), ...(project.readAllowPaths ?? [])], cwd, home);
+	const readRoots = dedupe([...(readAllowScratch ? scratchRoots() : []), ...readAllowPaths]);
+	// writeAllowPaths merges as user union project (deduped). The deprecated
+	// bashAllowRedirectsTo alias is only consulted when NEITHER scope sets
+	// writeAllowPaths; it keeps its old project-wins scalar merge. Either way
+	// the alias feeds the same resolved writeRoots list (redirect exemption +
+	// Write/Edit implicit allows), and its use is flagged for a debug warning.
+	const writeAllowPaths = normalizeRootList([...(user.writeAllowPaths ?? []), ...(project.writeAllowPaths ?? [])], cwd, home);
+	let writeRoots: string[];
+	let legacyBashAllowRedirectsToUsed = false;
+	if (user.writeAllowPaths === undefined && project.writeAllowPaths === undefined) {
+		if (bashAllowRedirectsToRaw !== undefined) legacyBashAllowRedirectsToUsed = true;
+		writeRoots = normalizeRootList(bashAllowRedirectsToRaw ?? [], cwd, home);
+	} else {
+		if (bashAllowRedirectsToRaw !== undefined) legacyBashAllowRedirectsToUsed = true;
+		writeRoots = writeAllowPaths;
+	}
+	const bashAllowRedirectsTo = writeRoots;
 	// Per-key override (project wins) — unlike scalar flags, a project entry
 	// replaces only the keys it names and inherits the rest from user config.
 	const bashValidators = { ...(user.bashValidators ?? {}), ...(project.bashValidators ?? {}) };
@@ -336,6 +382,12 @@ export function mergeConfig(
 	if (readAllowAgentDocs) {
 		implicitAllow.push(...agentDocsReadRules(cwd));
 	}
+	// Per-root read/write allows. These sit in the implicit allow tier: below
+	// explicit deny and ask rules (checked first) and above toolDefaults (allow
+	// rules are checked before toolDefaults), so Read(.env*) deny and
+	// Bash(cat *) ask still win over any root grant.
+	implicitAllow.push(...readRootImplicitRules(readRoots));
+	implicitAllow.push(...writeRootImplicitRules(writeRoots));
 
 	// Inject write→ask unless the user has explicitly set toolDefaults.write
 	const implicitToolDefaults: Record<string, Action> = {};
@@ -369,9 +421,15 @@ export function mergeConfig(
 		bashReadOnlyAllowCwd,
 		bashAllowPureVarAssign,
 		bashAllowRedirectsTo,
+		readAllowScratch,
+		readAllowScratchSource,
+		readRoots,
+		writeRoots,
+		writeAllowPaths,
+		legacyBashAllowRedirectsToUsed,
 		bashValidators,
 		autoMode,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, findAllowCwd, readAllowSkills, readAllowPiDocs, readAllowAgentDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd, bashAllowRedirectsTo, bashValidators },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, findAllowCwd, readAllowSkills, readAllowPiDocs, readAllowAgentDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd, bashAllowRedirectsTo, readRoots, writeRoots, writeAllowPaths, legacyBashAllowRedirectsToUsed, bashValidators },
 	};
 }
 
@@ -525,6 +583,86 @@ export function cwdGlobPattern(cwd: string, options: PathNormalizationOptions = 
 	const normalized = canonicalizeAbsolutePath(normalizePathSep(cwd, options));
 	const base = normalized === "/" ? "" : normalized.replace(/\/+$/, "");
 	return `${base}/**`;
+}
+
+/**
+ * Normalize one configured path-root entry into a canonical absolute directory
+ * root: strip a trailing "/**" glob suffix, expand "~" and "$HOME" prefixes,
+ * then resolve (relative entries against cwd) and canonicalize. Returns null
+ * for empty entries. Purely string-based, matching the redirect-target
+ * canonicalization so "/a/../b" never matches and "/tmpfoo" never matches
+ * "/tmp".
+ */
+export function normalizeRootEntry(entry: string, cwd: string, home: string): string | null {
+	if (!entry) return null;
+	let e = entry.trim();
+	if (!e) return null;
+	e = e.replace(/\/\*\*$/, "");
+	const h = normalizePathSep(home || homedir());
+	// normalizePathSep only expands ~ in MSYS-like shells, so expand ~ and
+	// $HOME explicitly here for both platforms.
+	if (e === "~" || e.startsWith("~/")) e = h + e.slice(1);
+	if (e === "$HOME" || e.startsWith("$HOME/")) e = h + e.slice(5);
+	return normalizeMatchPath(e, cwd, { home: h });
+}
+
+/**
+ * Normalize a list of configured path-root entries (see normalizeRootEntry),
+ * preserving order and deduping.
+ */
+export function normalizeRootList(entries: readonly string[], cwd: string, home: string): string[] {
+	const out: string[] = [];
+	for (const entry of entries ?? []) {
+		const normalized = normalizeRootEntry(entry, cwd, home);
+		if (normalized !== null && !out.includes(normalized)) out.push(normalized);
+	}
+	return out;
+}
+
+/**
+ * Platform scratch directories used by readAllowScratch. POSIX: /tmp,
+ * /var/tmp, and $TMPDIR (when set). Windows: %TEMP% and %TMP%. Evaluated
+ * per-merge so a changed $TMPDIR is picked up on config reload.
+ */
+export function scratchRoots(env: Readonly<Record<string, string | undefined>> = process.env): string[] {
+	if (process.platform === "win32") {
+		const roots = [env.TEMP, env.TMP].filter((v): v is string => !!v);
+		return dedupe(roots.map((r) => canonicalizeAbsolutePath(normalizePathSep(r))));
+	}
+	const roots = ["/tmp", "/var/tmp"];
+	if (env.TMPDIR) roots.push(env.TMPDIR);
+	return dedupe(roots.map((r) => canonicalizeAbsolutePath(normalizePathSep(r))));
+}
+
+/**
+ * Implicit Read/Ls/Glob/Grep/Find allow rules covering the given read roots
+ * (one glob rule per root per tool, e.g. Read(/tmp/...) for root /tmp). Mirrors the readAllowSkills/readAllowPiDocs rule
+ * shapes: read-only path tools only, Write/Edit deliberately excluded here
+ * (write roots get their own Write/Edit rules).
+ */
+export function readRootImplicitRules(roots: readonly string[]): string[] {
+	const rules: string[] = [];
+	for (const root of roots) {
+		const glob = cwdGlobPattern(root);
+		for (const tool of READONLY_PATH_TOOLS) rules.push(`${tool}(${glob})`);
+	}
+	return rules;
+}
+
+/**
+ * Implicit Write/Edit allow rules covering the given write roots (one glob
+ * rule per tool per root, e.g. Write(/tmp/...) for root /tmp). Allow rules are checked before toolDefaults, so these
+ * grants beat an explicit toolDefaults.write = "deny"/"ask"; explicit deny
+ * and ask rules still win because they are checked first.
+ */
+export function writeRootImplicitRules(roots: readonly string[]): string[] {
+	const rules: string[] = [];
+	for (const root of roots) {
+		const glob = cwdGlobPattern(root);
+		rules.push(`Write(${glob})`);
+		rules.push(`Edit(${glob})`);
+	}
+	return rules;
 }
 
 /**
@@ -1076,7 +1214,8 @@ function isSetOptionsOnly(tokens: string[]): boolean {
  *      option (short flags, clustered flags, plus forms, `-o`/`+o` option
  *      values, or a trailing `--`) → allow. Any positional argument → false.
  *  3. If the first token is in READONLY_BASH_WITH_PATHS → allow only when
- *     every non-flag argument resolves to a path inside (or equal to) cwd.
+ *     every non-flag argument resolves to a path inside (or equal to) cwd or
+ *     one of the allowed read roots.
  *  4. Anything else → false.
  */
 export function isReadOnlyBashSubcommand(
@@ -1084,6 +1223,7 @@ export function isReadOnlyBashSubcommand(
 	cwd: string,
 	options: PathNormalizationOptions = {},
 	allowRedirectTargets: readonly string[] = [],
+	readRoots: readonly string[] = [],
 ): boolean {
 	const trimmed = cmd.trim();
 	if (!trimmed) return false;
@@ -1102,15 +1242,7 @@ export function isReadOnlyBashSubcommand(
 		const pathArgs = tokens.slice(1).filter((t) => t.length > 0 && !t.startsWith("-"));
 		// No path args — command implicitly uses cwd, safe
 		if (pathArgs.length === 0) return true;
-		const cwdNorm = normalizeMatchPath(".", cwd, options);
-		const caseInsensitive = isWindowsAbsolutePath(cwdNorm);
-		const comparableCwd = caseInsensitive ? cwdNorm.toLowerCase() : cwdNorm;
-		const cwdPrefix = comparableCwd.endsWith("/") ? comparableCwd : comparableCwd + "/";
-		return pathArgs.every((arg) => {
-			const normalized = normalizeMatchPath(arg, cwd, options);
-			const comparable = caseInsensitive ? normalized.toLowerCase() : normalized;
-			return comparable === comparableCwd || comparable.startsWith(cwdPrefix);
-		});
+		return pathArgs.every((arg) => pathInsideAllowedRoots(arg, cwd, readRoots, options));
 	}
 	return false;
 }
@@ -1118,11 +1250,16 @@ export function isReadOnlyBashSubcommand(
 // ── Per-command bash validators (bashValidators) ────────────────────────────
 
 /**
- * True when path `p` resolves inside (or equal to) `cwd`, using the same
- * normalization and Windows case-insensitivity as the read-only bash tier.
- * Purely string-based: no filesystem access, matching `isReadOnlyBashSubcommand`.
+ * True when path `p` resolves inside (or equal to) `cwd` or one of the given
+ * allowed roots, using the same normalization and Windows case-insensitivity
+ * as the read-only bash tier. `cwd` is always an implicit first root; each
+ * entry in `roots` is prefix-matched with the same canonicalization as
+ * redirect targets (dot segments removed, trailing slashes trimmed, so
+ * "/a/../b" does not match "/a" and "/tmpfoo" does not match "/tmp"; Windows
+ * comparisons are case-insensitive). Purely string-based: no filesystem
+ * access, matching `isReadOnlyBashSubcommand`.
  */
-function pathInsideCwd(p: string, cwd: string, options: PathNormalizationOptions = {}): boolean {
+function pathInsideAllowedRoots(p: string, cwd: string, roots: readonly string[], options: PathNormalizationOptions = {}): boolean {
 	if (!p) return false;
 	// Scheme-like prefixes (`https://`, `s3://`) are never local paths; only a
 	// single letter before the colon (a Windows drive) is allowed through.
@@ -1132,10 +1269,15 @@ function pathInsideCwd(p: string, cwd: string, options: PathNormalizationOptions
 		const normalized = normalizeMatchPath(p, cwd, options);
 		const cwdNorm = normalizeMatchPath(".", cwd, options);
 		const caseInsensitive = isWindowsAbsolutePath(cwdNorm);
-		const comparableCwd = caseInsensitive ? cwdNorm.toLowerCase() : cwdNorm;
 		const comparable = caseInsensitive ? normalized.toLowerCase() : normalized;
-		const cwdPrefix = comparableCwd.endsWith("/") ? comparableCwd : comparableCwd + "/";
-		return comparable === comparableCwd || comparable.startsWith(cwdPrefix);
+		for (const root of [cwdNorm, ...roots]) {
+			const rootNorm = canonicalizeAbsolutePath(normalizePathSep(root, options));
+			const rootComparable = caseInsensitive ? rootNorm.toLowerCase() : rootNorm;
+			if (rootComparable === "/") return true;
+			if (comparable === rootComparable) return true;
+			if (comparable.startsWith(rootComparable.endsWith("/") ? rootComparable : `${rootComparable}/`)) return true;
+		}
+		return false;
 	} catch {
 		return false;
 	}
@@ -1218,11 +1360,11 @@ function singleQuotedLiterals(sql: string): string[] {
  *     database attach (ATTACH), extension install/load (INSTALL, LOAD —
  *     network access), or dot-commands (.output, .open, .import, .read).
  *  4. Every single-quoted string literal must either not look like a path or
- *     resolve inside cwd (so `FROM 'data.csv'` passes but
- *     `FROM 'https://…'` and `FROM '/etc/passwd'` do not). Double-quoted
- *     identifiers are not paths and are ignored.
+ *     resolve inside cwd or one of the allowed read roots (so `FROM 'data.csv'`
+ *     passes but `FROM 'https://…'` and `FROM '/etc/passwd'` do not).
+ *     Double-quoted identifiers are not paths and are ignored.
  */
-function validateReadOnlyDuckdb(tokens: string[], cwd: string): boolean {
+function validateReadOnlyDuckdb(tokens: string[], cwd: string, readRoots: readonly string[]): boolean {
 	const sqlChunks: string[] = [];
 	let valueFor: string | null = null; // flag currently consuming a value token
 	for (let i = 1; i < tokens.length; i++) {
@@ -1251,7 +1393,7 @@ function validateReadOnlyDuckdb(tokens: string[], cwd: string): boolean {
 	// Dot-commands (.output, .open, .import, .read, ...) can redirect I/O.
 	if (/(?:^|;|\n)\s*\.[a-z]/i.test(sql)) return false;
 	for (const literal of singleQuotedLiterals(sql)) {
-		if (looksFileish(literal) && !pathInsideCwd(literal, cwd)) return false;
+		if (looksFileish(literal) && !pathInsideAllowedRoots(literal, cwd, readRoots)) return false;
 	}
 	return true;
 }
@@ -1265,9 +1407,10 @@ function validateReadOnlyDuckdb(tokens: string[], cwd: string): boolean {
  *     name list and is fine. Unknown flags pass — mlr itself errors
  *     harmlessly on them at runtime.
  *  2. `--from` / `--mfrom` name an input file; the value must resolve inside
- *     cwd.
+ *     cwd or one of the allowed read roots.
  *  3. Any other non-flag token (a verb, quoted DSL, or an input file) must
- *     either not look like a path or resolve inside cwd. Verbs and typical
+ *     either not look like a path or resolve inside cwd or one of the allowed
+ *     read roots. Verbs and typical
  *     DSL strings (`'$x > 3'`, `'sum(bytes)'`) never look file-ish; input
  *     files like `data.csv` do and get checked.
  *  4. In-DSL file writes are rejected: `tee`, and `print`/`emit`/`dump` with
@@ -1277,13 +1420,13 @@ function validateReadOnlyDuckdb(tokens: string[], cwd: string): boolean {
  * Known false positive: a literal argument containing the word "tee"
  * (e.g. a file named `tee.csv`) declines to ask, which is safe.
  */
-function validateReadOnlyMlr(tokens: string[], cwd: string): boolean {
+function validateReadOnlyMlr(tokens: string[], cwd: string, readRoots: readonly string[]): boolean {
 	let currentVerb = "";
 	let expectingFile = false; // consuming the value of --from / --mfrom
 	for (let i = 1; i < tokens.length; i++) {
 		const tok = tokens[i];
 		if (expectingFile) {
-			if (!pathInsideCwd(tok, cwd)) return false;
+			if (!pathInsideAllowedRoots(tok, cwd, readRoots)) return false;
 			expectingFile = false;
 			continue;
 		}
@@ -1295,7 +1438,7 @@ function validateReadOnlyMlr(tokens: string[], cwd: string): boolean {
 		}
 		// Non-flag token: a verb, quoted DSL, or an input file.
 		currentVerb = tok;
-		if (looksFileish(tok) && !pathInsideCwd(tok, cwd)) return false;
+		if (looksFileish(tok) && !pathInsideAllowedRoots(tok, cwd, readRoots)) return false;
 	}
 	if (expectingFile) return false; // dangling --from value
 	const rest = tokens.slice(1).join(" ");
@@ -1304,7 +1447,7 @@ function validateReadOnlyMlr(tokens: string[], cwd: string): boolean {
 	return true;
 }
 
-type BashValidator = (tokens: string[], cwd: string) => boolean;
+type BashValidator = (tokens: string[], cwd: string, readRoots: readonly string[]) => boolean;
 
 /**
  * Built-in per-command bash validators. Each proves that a command whose
@@ -1331,6 +1474,7 @@ export function validatorApprovedBashReason(
 	cwd: string,
 	validators: Record<string, string>,
 	allowRedirectTargets: readonly string[] = [],
+	readRoots: readonly string[] = [],
 ): string | null {
 	const trimmed = cmd.trim();
 	if (!trimmed) return null;
@@ -1343,7 +1487,7 @@ export function validatorApprovedBashReason(
 	if (validatorName === undefined) return null;
 	const validator = BASH_VALIDATORS[validatorName];
 	if (validator === undefined) return null; // unknown validator name — fail open
-	return validator(tokens, cwd) ? `validated read-only ${cmdName} (bashValidators.${validatorName})` : null;
+	return validator(tokens, cwd, readRoots) ? `validated read-only ${cmdName} (bashValidators.${validatorName})` : null;
 }
 
 /**
@@ -2479,7 +2623,9 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// (No-op `cd` is pure bookkeeping with zero side-effects/data access, so
 	// allowNoopCd stays active regardless of the mode.)
 	const skipReadOnlyBash = mode === "auto" && cfg.autoMode.classifyAllShell;
-	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd, {}, cfg.bashAllowRedirectsTo))
+	const redirectTargets = cfg.writeRoots ?? cfg.bashAllowRedirectsTo ?? [];
+	const readRoots = cfg.readRoots ?? [];
+	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd, {}, redirectTargets, readRoots))
 		return { action: "allow", reason: "read-only bash command (bashReadOnlyAllowCwd)" };
 	// Per-command validators (bashValidators): a validator proves that a
 	// command whose risk lives inside program text (SQL in `duckdb -c "..."`,
@@ -2488,7 +2634,7 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// Gated by the same classifyAllShell gate as the read-only tier so auto
 	// mode screens validated commands with the classifier like everything else.
 	if (!skipReadOnlyBash && normalizeTool(toolName) === "bash") {
-		const validatorReason = validatorApprovedBashReason(String(input.command ?? ""), cfg.cwd, cfg.bashValidators ?? {}, cfg.bashAllowRedirectsTo);
+		const validatorReason = validatorApprovedBashReason(String(input.command ?? ""), cfg.cwd, cfg.bashValidators ?? {}, redirectTargets, readRoots);
 		if (validatorReason !== null) return { action: "allow", reason: validatorReason };
 	}
 	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd))
@@ -2498,7 +2644,7 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// mode's classifyAllShell) so they are statically allowed even in auto mode —
 	// matching allowNoopCd, and avoiding a wasteful classifier call that could
 	// mis-allow an impure `$(...)` form. Impure assignments still fall through.
-	if (cfg.bashAllowPureVarAssign && normalizeTool(toolName) === "bash" && isPureVariableAssignment(String(input.command ?? ""), cfg.bashAllowRedirectsTo, { cwd: cfg.cwd }))
+	if (cfg.bashAllowPureVarAssign && normalizeTool(toolName) === "bash" && isPureVariableAssignment(String(input.command ?? ""), redirectTargets, { cwd: cfg.cwd }))
 		return { action: "allow", reason: "pure shell variable assignment (bashAllowPureVarAssign)" };
 	// Allow rules — redirect-aware for Bash. A Bash command containing a
 	// top-level *file* output redirection (e.g. `rg x > out.txt`) is NOT
@@ -2508,8 +2654,9 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// agnostic so safety rules always win. pwsh is out of scope (different
 	// syntax) and stays redirect-agnostic.
 	//
-	// Exception: redirects whose target resolves under a `bashAllowRedirectsTo`
-	// root (e.g. `"/tmp"`) are treated as non-writes by hasTopLevelFileRedirect,
+	// Exception: redirects whose target resolves under a `writeAllowPaths` root
+	// (or its deprecated `bashAllowRedirectsTo` alias, e.g. `"/tmp"`) are
+	// treated as non-writes by hasTopLevelFileRedirect,
 	// so `rg x > /tmp/out` does not count as a redirected command and broad
 	// allow rules authorize it normally.
 	//
@@ -2522,7 +2669,7 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// naming the redirected form still fires.
 	const rawCommand = String(input.command ?? "");
 	const isBash = normalizeTool(toolName) === "bash";
-	const isBashRedirect = isBash && hasTopLevelFileRedirect(rawCommand, cfg.bashAllowRedirectsTo, { cwd: cfg.cwd });
+	const isBashRedirect = isBash && hasTopLevelFileRedirect(rawCommand, redirectTargets, { cwd: cfg.cwd });
 	const allowInput = isBash ? { ...input, command: stripTrailingHarmlessRedirects(rawCommand) } : input;
 	if (isBashRedirect) {
 		for (const raw of cfg.allow) {
@@ -2577,6 +2724,97 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 /** Bare-action view of `decideWithReason()`; preserved so existing call sites and tests stay valid. */
 export function decide(cfg: ResolvedConfig, toolName: string, input: Record<string, unknown>, mode: PermissionMode = "manual"): Action {
 	return decideWithReason(cfg, toolName, input, mode).action;
+}
+
+/** Result of a successful read-root escalation suggestion. */
+export interface ReadRootSuggestion {
+	root: string;
+	flipped: boolean;
+}
+
+/**
+ * Resolve one bash token to an absolute path candidate for read-root
+ * escalation, or null when the token cannot be resolved statically
+ * (unresolvable expansions/globs like `$VAR` / backticks / globs, or a
+ * scheme-like prefix such as `https://`). `~` is expanded against `home`
+ * (the shell expands it before the command runs).
+ */
+function resolveCandidateReadPath(tok: string, cwd: string, home: string): string | null {
+	if (/[$`*?]/.test(tok)) return null;
+	let p = tok;
+	if (p === "~" || p.startsWith("~/")) p = home + p.slice(1);
+	const colon = p.indexOf(":");
+	if (colon > 1) return null;
+	return normalizeMatchPath(p, cwd);
+}
+
+/**
+ * Suggest a readable directory root for a permission ask caused by read-root
+ * containment, used by the ask-dialog escalation options in index.ts.
+ *
+ * Bash: tokenize the (redirect-stripped) command, collect the parent dirs of
+ * file-ish tokens that fail `pathInsideAllowedRoots`, and require exactly one
+ * distinct candidate. Read/Grep/Glob/Ls/Find: candidate is the parent dir of
+ * the resolved target path. Write/Edit (and anything else) always return
+ * null: reads never justify a write-root grant.
+ *
+ * The candidate is only returned when appending it to the read roots would
+ * actually flip the decision to "allow": the full decision is re-run with the
+ * candidate root added (as both a containment root and an implicit allow
+ * rule). This guards against offering an escalation for asks caused by
+ * something else (an unknown mlr flag, `tee` in mlr DSL, a duckdb positional
+ * argument, an explicit ask rule, the write guard), where no root grant can
+ * help. Returns null for zero or more-than-one candidates (ambiguous).
+ */
+export function suggestReadRoot(
+	toolName: string,
+	input: Record<string, unknown>,
+	cfg: ResolvedConfig,
+	mode: PermissionMode = "manual",
+): ReadRootSuggestion | null {
+	const t = normalizeTool(toolName);
+	if (t === "write" || t === "edit") return null;
+	const cwd = cfg.cwd;
+	const readRoots = cfg.readRoots ?? [];
+	const home = homedir();
+	const candidates = new Set<string>();
+	if (t === "bash" || t === "pwsh") {
+		const cmd = stripLineContinuations(String(input.command ?? "")).trim();
+		if (!cmd) return null;
+		const redirectTargets = cfg.writeRoots ?? cfg.bashAllowRedirectsTo ?? [];
+		const stripped = stripExemptRedirects(cmd, redirectTargets, { cwd });
+		if (stripped === null) return null; // real file redirect: not a read-root problem
+		const tokens = tokenizeSimple(stripped);
+		for (let i = 1; i < tokens.length; i++) {
+			const tok = tokens[i];
+			if (!tok || tok.startsWith("-")) continue;
+			if (!looksFileish(tok)) continue;
+			const resolved = resolveCandidateReadPath(tok, cwd, home);
+			if (resolved === null) continue;
+			if (!pathInsideAllowedRoots(resolved, cwd, readRoots)) candidates.add(dirname(resolved));
+		}
+	} else if (t === "read" || t === "grep" || t === "glob" || t === "ls" || t === "find") {
+		const p = String(input.path ?? "").trim();
+		if (!p) return null;
+		const resolved = normalizeMatchPath(p, cwd);
+		if (!pathInsideAllowedRoots(resolved, cwd, readRoots)) candidates.add(dirname(resolved));
+	} else {
+		return null;
+	}
+	if (candidates.size !== 1) return null; // zero or ambiguous
+	const root = [...candidates][0];
+	// Only suggest when the current decision is actually an ask that the grant
+	// would flip. A non-ask base (e.g. a tilde path that the string-based tier
+	// already treats as cwd-relative) means the ask the caller saw came from a
+	// different input, so no option is offered.
+	if (decideWithReason(cfg, toolName, input, mode).action !== "ask") return null;
+	const escalated: ResolvedConfig = {
+		...cfg,
+		readRoots: [...readRoots, root],
+		allow: [...readRootImplicitRules([root]), ...cfg.allow],
+	};
+	const decision = decideWithReason(escalated, toolName, input, mode);
+	return decision.action === "allow" ? { root, flipped: true } : null;
 }
 
 /** Suggest a rule string that matches the current call exactly enough to be useful. */

@@ -4,6 +4,7 @@ import {
 	makeTestRunner, compilePattern, parseRule, ruleMatches, decide, decideWithReason, decideCompound, shouldClassifyWholeCompound, makeCfg,
 	cwdGlobPattern, normalizePathSep, normalizeMatchPath, inputForMatching, recomputeBreakdown,
 	loadConfigFromObjects,
+	suggestReadRoot, scratchRoots, readRootImplicitRules, writeRootImplicitRules,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
 	classifyAction, classifierCacheKey, pickClassifierModel, rankModels, dedupeModels, hasPrice, modelLabel, pickableModels, autoStatusLabel, classifierAttribution,
 	buildActionContext, findGitRoot, leadingCdTarget, resolveAgainstCwd,
@@ -1155,5 +1156,124 @@ test("all ask subs → false",
 		{ sub: "git push", action: "ask" },
 		{ sub: "rm x", action: "ask" },
 	]), false);
+
+// ── Read/write path roots (readAllowPaths / readAllowScratch / writeAllowPaths) ─
+
+const ROOTS_HOME = "/home/tester";
+const ROOTS_CWD = "/home/tester/proj";
+const rootsCfg = (user = {}, project = {}, extra = {}) =>
+	loadConfigFromObjects(user, project, ROOTS_CWD, ROOTS_HOME);
+
+section("readAllowScratch default matrix");
+
+const scratchOff = rootsCfg();
+test("readAllowScratch absent -> false",                  scratchOff.readAllowScratch, false);
+test("readAllowScratchSource default",                     scratchOff.readAllowScratchSource, "default");
+test("no scratch roots in readRoots by default",           scratchOff.readRoots.length, 0);
+test("cat /tmp/x asks with scratch off",                   decide(scratchOff, "Bash", { command: "cat /tmp/x" }, "manual"), "ask");
+
+const scratchProject = rootsCfg({}, { readAllowScratch: true });
+test("readAllowScratch true -> scratch roots resolved",    scratchProject.readRoots.join(","), scratchRoots().join(","));
+test("readAllowScratchSource project",                     scratchProject.readAllowScratchSource, "project");
+test("cat /tmp/x allows with scratch on",                  decide(scratchProject, "Bash", { command: "cat /tmp/x" }, "manual"), "allow");
+test("cat /var/tmp/x allows with scratch on",              decide(scratchProject, "Bash", { command: "cat /var/tmp/x" }, "manual"), "allow");
+
+const scratchUserOnly = rootsCfg({ readAllowScratch: true }, {});
+test("readAllowScratch user-only scalar",                  scratchUserOnly.readAllowScratch, true);
+test("readAllowScratchSource user",                        scratchUserOnly.readAllowScratchSource, "user");
+const scratchProjectWins = rootsCfg({ readAllowScratch: true }, { readAllowScratch: false });
+test("readAllowScratch project false wins",                scratchProjectWins.readAllowScratch, false);
+test("project false source",                               scratchProjectWins.readAllowScratchSource, "project");
+test("cat /tmp/x asks again when project sets false",      decide(scratchProjectWins, "Bash", { command: "cat /tmp/x" }, "manual"), "ask");
+
+section("readAllowPaths / writeAllowPaths merge + normalization");
+
+const unionCfg = rootsCfg(
+	{ readAllowPaths: ["/a"], writeAllowPaths: ["/w1"] },
+	{ readAllowPaths: ["/b", "/a"], writeAllowPaths: ["/w2"] },
+);
+test("readAllowPaths user+project union deduped",          unionCfg.readRoots.join(","), "/a,/b");
+test("writeAllowPaths user+project union deduped",         unionCfg.writeRoots.join(","), "/w1,/w2");
+
+const normCfg = rootsCfg({ readAllowPaths: ["~/source/datadog/**", "/tmp/", "$HOME/x", "relroot"] });
+test("trailing /** stripped",                              normCfg.readRoots.includes("/home/tester/source/datadog"), true);
+test("trailing slash stripped",                            normCfg.readRoots.includes("/tmp"), true);
+test("$HOME expanded",                                     normCfg.readRoots.includes("/home/tester/x"), true);
+test("relative entry resolved against cwd",                normCfg.readRoots.includes("/home/tester/proj/relroot"), true);
+test("~/source/datadogfoo not added by datadog root",      normCfg.readRoots.includes("/home/tester/source/datadogfoo"), false);
+
+section("bashAllowRedirectsTo deprecated alias");
+
+const aliasOnly = rootsCfg({ bashAllowRedirectsTo: ["/legacy"] });
+test("alias feeds writeRoots when no writeAllowPaths",     aliasOnly.writeRoots.join(","), "/legacy");
+test("alias still exposed as bashAllowRedirectsTo",        aliasOnly.bashAllowRedirectsTo.join(","), "/legacy");
+test("legacyBashAllowRedirectsToUsed true",                aliasOnly.legacyBashAllowRedirectsToUsed, true);
+test("writeAllowPaths empty when alias supplied roots",    aliasOnly.writeAllowPaths.length, 0);
+test("alias project wins over user",                       rootsCfg({ bashAllowRedirectsTo: ["/u"] }, { bashAllowRedirectsTo: ["/p"] }).writeRoots.join(","), "/p");
+const aliasAndNew = rootsCfg({ bashAllowRedirectsTo: ["/legacy"], writeAllowPaths: ["/new"] });
+test("alias ignored when writeAllowPaths present",         aliasAndNew.writeRoots.join(","), "/new");
+test("alias use still flagged when ignored",               aliasAndNew.legacyBashAllowRedirectsToUsed, true);
+const noAlias = rootsCfg({});
+test("no alias -> no legacy flag",                         noAlias.legacyBashAllowRedirectsToUsed, false);
+
+section("implicit rules for read/write roots");
+
+test("read root injects Read rule",                        readRootImplicitRules(["/tmp"]).includes("Read(/tmp/**)"), true);
+test("read root injects Ls/Glob/Grep/Find rules",          ["Ls", "Glob", "Grep", "Find"].every((t) => readRootImplicitRules(["/tmp"]).includes(`${t}(/tmp/**)`)), true);
+test("write root injects Write and Edit rules",            writeRootImplicitRules(["/tmp"]).join(","), "Write(/tmp/**),Edit(/tmp/**)");
+const rootsImplicit = rootsCfg({}, { readAllowPaths: ["/r"], writeAllowPaths: ["/w"] });
+test("read root rules land in implicit.allow",             rootsImplicit.implicit.allow.includes("Read(/r/**)"), true);
+test("write root rules land in implicit.allow",            rootsImplicit.implicit.allow.includes("Write(/w/**)"), true);
+test("write root rules land in merged allow",              rootsImplicit.allow.includes("Edit(/w/**)"), true);
+test("implicit.readRoots exposed",                         rootsImplicit.implicit.readRoots.join(","), "/r");
+test("implicit.writeRoots exposed",                        rootsImplicit.implicit.writeRoots.join(","), "/w");
+
+section("writeAllowPaths: redirect exemption + Write/Edit allows");
+
+const writeRootsCfg = rootsCfg({}, { writeAllowPaths: ["/tmp"], bashReadOnlyAllowCwd: true });
+test("echo redirect to /tmp allowed",                      decide(writeRootsCfg, "Bash", { command: "echo x > /tmp/out" }), "allow");
+test("echo redirect outside roots asks",                   decide(writeRootsCfg, "Bash", { command: "echo x > /etc/out" }), "ask");
+test("append redirect to /tmp allowed",                    decide(writeRootsCfg, "Bash", { command: "echo x >> /tmp/out" }), "allow");
+test("Write under write root allowed",                     decide(writeRootsCfg, "Write", { path: "/tmp/out.txt" }), "allow");
+test("Edit under write root allowed",                      decide(writeRootsCfg, "Edit", { path: "/tmp/out.txt" }), "allow");
+test("Write outside write roots still asks",               decide(writeRootsCfg, "Write", { path: "/etc/out.txt" }), "ask");
+test("Write allow rule beats toolDefaults deny",           decide(rootsCfg({}, { writeAllowPaths: ["/tmp"], toolDefaults: { write: "deny" } }), "Write", { path: "/tmp/out.txt" }), "allow");
+test("Write under root beats implicit write guard",        decide(writeRootsCfg, "Write", { path: "/tmp/out.txt" }, "manual"), "allow");
+test("Write allow does not leak to other tools",           decide(writeRootsCfg, "Write", { path: "/tmpfoo/out.txt" }), "ask");
+
+section("precedence: deny/ask/auto gates beat root grants");
+
+test("deny rule beats read root (Read)",                   decide(rootsCfg({ deny: ["Read(/r/**)"] }, { readAllowPaths: ["/r"] }), "Read", { path: "/r/file.txt" }), "deny");
+test("deny rule beats scratch (Bash)",                     decide(rootsCfg({ deny: ["Bash(cat *)"] }, { readAllowScratch: true }), "Bash", { command: "cat /tmp/x" }), "deny");
+test("ask rule beats scratch (Bash)",                      decide(rootsCfg({ ask: ["Bash(cat *)"] }, { readAllowScratch: true }), "Bash", { command: "cat /tmp/x" }), "ask");
+test("ask rule beats read root (Read)",                    decide(rootsCfg({ ask: ["Read(/r/*)"] }, { readAllowPaths: ["/r"] }), "Read", { path: "/r/file.txt" }), "ask");
+test("classifier gate: auto+classifyAllShell skips read-only tier even with scratch",
+	decideWithReason(rootsCfg({}, { readAllowScratch: true, autoMode: { classifyAllShell: true } }), "Bash", { command: "cat /tmp/x" }, "auto").action, "auto");
+
+section("read-only bash tier with read roots");
+
+const roRootsCfg = makeCfg({ bashReadOnlyAllowCwd: true, readRoots: ["/tmp"], cwd: ROOTS_CWD });
+test("cat /tmp/x allowed via read root",                   decide(roRootsCfg, "Bash", { command: "cat /tmp/x" }), "allow");
+test("cat outside roots asks",                             decide(roRootsCfg, "Bash", { command: "cat /etc/x" }), "ask");
+test("/tmpfoo does not match /tmp root",                   decide(roRootsCfg, "Bash", { command: "cat /tmpfoo" }), "ask");
+test("dot-segment escape does not match /tmp root",        decide(roRootsCfg, "Bash", { command: "cat /tmp/../etc/passwd" }), "ask");
+
+section("suggestReadRoot");
+
+const sugCfg = makeCfg({ defaultAction: "ask", bashReadOnlyAllowCwd: true, cwd: ROOTS_CWD });
+test("bash single candidate flips",                        JSON.stringify(suggestReadRoot("Bash", { command: "cat /tmp/a.txt" }, sugCfg)), JSON.stringify({ root: "/tmp", flipped: true }));
+test("Read flips to parent dir",                           JSON.stringify(suggestReadRoot("Read", { path: "/etc/passwd" }, sugCfg)), JSON.stringify({ root: "/etc", flipped: true }));
+test("Grep flips to search dir",                           suggestReadRoot("Grep", { path: "/var/log/app" }, sugCfg)?.root, "/var/log");
+test("tilde token does not flip (tier is string-based, ~ unexpanded on POSIX)", suggestReadRoot("Bash", { command: "cat ~/notes.txt" }, sugCfg), null);
+test("already-covered read returns null (root present)",   suggestReadRoot("Bash", { command: "cat /tmp/a" }, makeCfg({ cwd: ROOTS_CWD, readRoots: ["/tmp"] }), "manual"), null);
+test("in-cwd read returns null (no containment failure)",  suggestReadRoot("Bash", { command: "cat notes.txt" }, sugCfg), null);
+test("write tool returns null",                            suggestReadRoot("Write", { path: "/tmp/x" }, sugCfg), null);
+test("edit tool returns null",                             suggestReadRoot("Edit", { path: "/tmp/x" }, sugCfg), null);
+test("two distinct dirs -> null (ambiguous)",              suggestReadRoot("Bash", { command: "cat /tmp/a /var/b" }, sugCfg), null);
+test("ask rule blocks flip",                               suggestReadRoot("Bash", { command: "cat /tmp/a" }, makeCfg({ ask: ["Bash(cat *)"], cwd: ROOTS_CWD }), "manual"), null);
+test("validator refusal blocks flip",                      suggestReadRoot("Bash", { command: "duckdb --frobnicate -c \"SELECT 1\"" }, makeCfg({ bashValidators: { duckdb: "readonly-duckdb" }, cwd: ROOTS_CWD }), "manual"), null);
+test("mlr tee in DSL blocks flip",                         suggestReadRoot("Bash", { command: "mlr put 'tee > \"out.tsv\", $*' data.csv" }, makeCfg({ bashValidators: { mlr: "readonly-mlr" }, cwd: ROOTS_CWD }), "manual"), null);
+test("file redirect blocks flip",                          suggestReadRoot("Bash", { command: "cat x > /etc/out" }, sugCfg), null);
+test("unresolvable expansion blocks flip",                 suggestReadRoot("Bash", { command: "cat $UNKNOWN/x" }, sugCfg), null);
 
 process.exit(summary() > 0 ? 1 : 0);

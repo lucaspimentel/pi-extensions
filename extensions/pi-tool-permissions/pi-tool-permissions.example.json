@@ -9,7 +9,9 @@
   "readAllowAgentDocs": true,
   "bashReadOnlyAllowCwd": true,
   "bashAllowPureVarAssign": true,
-  "bashAllowRedirectsTo": [],
+  "readAllowPaths": [],
+  "readAllowScratch": false,
+  "writeAllowPaths": [],
   "toolDefaults": {
     "write": "ask",
     "mcp": "ask"

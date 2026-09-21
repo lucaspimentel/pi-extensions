@@ -70,6 +70,20 @@ test("mlr --from outside cwd",                  decide(validatorCfg(), "Bash", {
 test("mlr input file outside cwd",              decide(validatorCfg(), "Bash", { command: "mlr cat /etc/passwd" }), "ask");
 test("declined validator falls to defaultAction reason", decideWithReason(validatorCfg(), "Bash", { command: "duckdb -c \"COPY t TO 'out.csv'\"" }, "manual").reason, "no matching rule; defaultAction = ask");
 
+section("validators: read roots (readAllowPaths)");
+
+const withTmpRoot = validatorCfg({ readRoots: ["/tmp"] });
+test("mlr --from /tmp/x declines without roots",        decide(validatorCfg(), "Bash", { command: "mlr --from /tmp/x cut -f x" }), "ask");
+test("mlr --from /tmp/x allows with /tmp root",         decide(withTmpRoot, "Bash", { command: "mlr --from /tmp/x cut -f x" }), "allow");
+test("mlr input file /tmp/x allows with /tmp root",     decide(withTmpRoot, "Bash", { command: "mlr cut -f x /tmp/x.csv" }), "allow");
+test("duckdb FROM /tmp/x.csv declines without roots",   decide(validatorCfg(), "Bash", { command: "duckdb -c \"SELECT * FROM '/tmp/x.csv'\"" }), "ask");
+test("duckdb FROM /tmp/x.csv allows with /tmp root",    decide(withTmpRoot, "Bash", { command: "duckdb -c \"SELECT * FROM '/tmp/x.csv'\"" }), "allow");
+test("/tmpfoo does not match /tmp root",                decide(withTmpRoot, "Bash", { command: "mlr cat /tmpfoo" }), "ask");
+test("dot-segment escape does not match /tmp root",     decide(withTmpRoot, "Bash", { command: "mlr --from /tmp/../etc/passwd cat" }), "ask");
+test("URL still declines with /tmp root",               decide(withTmpRoot, "Bash", { command: "duckdb -c \"SELECT * FROM 'https://example.com/f.csv'\"" }), "ask");
+test("direct validatorApprovedBashReason with read root", validatorApprovedBashReason("mlr --from /tmp/x cut -f x", CWD, { mlr: "readonly-mlr" }, [], ["/tmp"]), "validated read-only mlr (bashValidators.readonly-mlr)");
+test("direct validatorApprovedBashReason without roots",  validatorApprovedBashReason("mlr --from /tmp/x cut -f x", CWD, { mlr: "readonly-mlr" }, []), null);
+
 section("validators — disabled / not configured");
 
 test("no validators configured → ask",          decide(makeCfg({ defaultAction: "ask", cwd: CWD }), "Bash", { command: "duckdb -c \"SELECT 1\"" }), "ask");

@@ -47,7 +47,10 @@
  *     "readAllowAgentDocs": true,
  *     "bashReadOnlyAllowCwd": true,
  *     "allowNoopCd": true,
- *     "bashAllowRedirectsTo": ["/tmp"],
+ *     "readAllowPaths": ["~/source/datadog"],
+ *     "readAllowScratch": false,
+ *     "writeAllowPaths": ["/tmp"],
+ *     "bashAllowRedirectsTo": ["/tmp"],   // deprecated alias for writeAllowPaths
  *     "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr" },
  *     "autoMode": {                       // used when the session auto toggle is on
  *       "classifier": { "provider": "anthropic", "model": "claude-haiku-4-5" },
@@ -145,10 +148,12 @@
  *       "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr" }
  *     A validator is a positive safety proof, not a deny mechanism: when it
  *     cannot prove the command read-only (unknown flag, write statement,
- *     positional database file, input path resolving outside cwd, URL input,
+ *     positional database file, input path resolving outside cwd and the
+ *     configured read roots, URL input,
  *     in-DSL file writes like mlr's `tee`), the command falls through to the
  *     normal pipeline (classifier / defaultAction) and never denied.
- *     Validators only approve input files that resolve inside cwd. Explicit
+ *     Validators only approve input files that resolve inside cwd or one of
+ *     the resolved read roots (readAllowPaths + readAllowScratch). Explicit
  *     ask rules always win (they are checked before every implicit tier).
  *     In auto mode with classifyAllShell, validated commands are screened by
  *     the classifier like everything else (the tier is gated by the same
@@ -157,6 +162,39 @@
  *     (e.g. a file named tee.csv) declines to ask, which is safe. Unquoted
  *     SQL (`duckdb -c SELECT 1` — the stray positional `1`) also declines;
  *     agents quote SQL.
+ *   readAllowPaths (default: [])
+ *     Directory roots the agent may read without prompting, on top of cwd
+ *     (e.g. ["/tmp", "~/source/datadog"]). User and project lists are unioned
+ *     (deduped). Entries are directory roots, not full globs: a trailing "/**"
+ *     or "/" is stripped, ~ and $HOME are expanded, and relative entries are
+ *     resolved against cwd, all at merge time. Each resolved root injects
+ *     implicit Read/Ls/Glob/Grep/Find allow rules and extends the cwd
+ *     containment check used by the read-only bash tier and the bash
+ *     validators. These allows sit in the implicit tier: explicit deny rules
+ *     (e.g. Read(.env*)) and ask rules (e.g. Bash(cat *)) always win.
+ *   readAllowScratch (default: false)
+ *     Safe by default. When true, seeds the read roots with the platform
+ *     scratch dirs (/tmp, /var/tmp, $TMPDIR on POSIX; %TEMP%, %TMP% on
+ *     Windows), so reading from scratch dirs no longer prompts. When an ask is
+ *     caused by scratch containment, the dialog offers one-click grants:
+ *     "Allow scratch reads (this session)" (session-only flag, reset at
+ *     session_start) or persist readAllowScratch: true into the project or
+ *     user config (scope options are hidden when already set). Effective value
+ *     = persisted flag OR session flag; shown in /permissions list.
+ *   writeAllowPaths (default: [])
+ *     Writable directory roots. Grants BOTH: shell-redirect exemption (a
+ *     redirect whose target resolves under a root is treated as a non-write,
+ *     the old bashAllowRedirectsTo behavior) AND implicit Write/Edit allow
+ *     rules for descendants (allow rules beat toolDefaults, so these writes
+ *     are silently allowed even with the write → ask guard). User and project
+ *     lists are unioned (deduped); same normalization as readAllowPaths.
+ *     Caveat: world-writable roots like /tmp allow symlink attacks (a
+ *     planted symlink inside the root can redirect a write outside it); only
+ *     grant roots you trust. Writes have no escalation dialog: outside these
+ *     roots (and cwd) Write/Edit still prompt.
+ *     "bashAllowRedirectsTo" is a deprecated alias: read only when
+ *     writeAllowPaths is absent in BOTH scopes, feeding the same resolved
+ *     write-root list (a debug warning fires when the alias is used).
  *   bashAllowPureVarAssign (default: true)
  *     Silently allows pure shell variable assignments (e.g. `SKILL_DIR="/path"`,
  *     `PID=130847101`, `export FOO="bar"`) whose RHS contains no command,
@@ -358,14 +396,18 @@ import {
 	normalizeTool,
 	parseRule,
 	pickClassifierModel,
+	readRootImplicitRules,
 	recomputeBreakdown,
 	resolveAgainstCwd,
 	saveProjectConfig,
 	saveUserConfig,
+	scratchRoots,
 	shouldClassifyWholeCompound,
+	suggestReadRoot,
 	suggestRule,
 	userConfigPath,
 	verdictToAction,
+	writeRootImplicitRules,
 } from "./rules.ts";
 import type { ClassifyResult, DefaultAction, ListAction, PermissionMode, ResolvedConfig } from "./rules.ts";
 
@@ -394,6 +436,25 @@ function pwshExtraInfo(toolName: string, input: Record<string, unknown>): string
 	const timeout = input.timeout;
 	if (typeof timeout === "number") parts.push(`timeout: ${timeout}s`);
 	return parts.length ? `\n  ${parts.join(", ")}` : "";
+}
+
+/**
+ * Return a copy of `base` with the given extra read roots applied: the roots
+ * are appended to readRoots (deduped, already-present roots skipped) and the
+ * matching implicit Read/Ls/Glob/Grep/Find allow rules are prepended to the
+ * allow list (implicit tier: below explicit deny/ask rules). Pure derivation;
+ * the base config is never mutated. Used for session-only read grants (the
+ * scratch toggle and escalated read roots), which must never be persisted.
+ */
+function withExtraReadRoots(base: ResolvedConfig, roots: readonly string[]): ResolvedConfig {
+	const extra = dedupe([...roots].filter((r) => !base.readRoots.includes(r)));
+	if (extra.length === 0) return base;
+	return {
+		...base,
+		readRoots: [...base.readRoots, ...extra],
+		allow: [...readRootImplicitRules(extra), ...base.allow],
+		implicit: { ...base.implicit, readRoots: [...base.readRoots, ...extra] },
+	};
 }
 
 /** Reason shown when auto mode is on but no classifier model is available, so fallthroughs stub to ask. */
@@ -437,6 +498,21 @@ export default function (pi: ExtensionAPI) {
 	// toggling on when no model is authed yet can resolve later, so the tool_call
 	// handler refreshes the status when the resolved id drifts from this.
 	let lastAutoStatusId: string | undefined = undefined;
+	// Session-only read grants (never persisted, reset at session_start):
+	// sessionScratch mirrors readAllowScratch for this session, and
+	// sessionReadRoots holds extra read roots granted via dialog escalation.
+	// Both are folded into decisions through sessionCfg(); the persisted cfg is
+	// only ever replaced by loadConfig().
+	let sessionScratch = false;
+	let sessionReadRoots: string[] = [];
+
+	/**
+	 * Effective config for decisions: the persisted cfg plus any session-only
+	 * read grants. Pure derivation over the current module state.
+	 */
+	function sessionCfg(): ResolvedConfig {
+		return withExtraReadRoots(cfg, [...(sessionScratch ? scratchRoots() : []), ...sessionReadRoots]);
+	}
 
 	// ── Deny-with-message helper ─────────────────────────────────────────────
 
@@ -541,6 +617,9 @@ export default function (pi: ExtensionAPI) {
 		mode = "manual";
 		classifierDebugEnabled = false;
 		lastAutoStatusId = undefined;
+		// Session-only read grants reset with everything else.
+		sessionScratch = false;
+		sessionReadRoots = [];
 		ctx.ui.setStatus(STATUS_KEY, "");
 	});
 
@@ -570,7 +649,7 @@ export default function (pi: ExtensionAPI) {
 		// silently applying `defaultAction`). In `edits`/`yolo` mode `decide()`
 		// resolves the implicit write guard and fallthroughs itself, so no
 		// post-decide short-circuit is needed here anymore.
-		const compound = decideCompound(cfg, event.toolName, matchInput, mode);
+		const compound = decideCompound(sessionCfg(), event.toolName, matchInput, mode);
 		let { action, isCompound, ambiguous, breakdown } = compound;
 		// Why the static-rule layer chose this action (matched rule, write guard,
 		// defaultAction, ...). Shown in ask prompts; replaced by the classifier's
@@ -667,6 +746,128 @@ export default function (pi: ExtensionAPI) {
 			label: `awaiting permission: ${event.toolName}`,
 		});
 		try {
+			// ── Read-root escalation options for ask dialogs ─────────────────────
+			// Two kinds, mutually exclusive per dialog (scratch wins if both would
+			// apply): a scratch-read grant (session flag or persisted
+			// readAllowScratch) and a suggested read-root grant (session list or
+			// persisted readAllowPaths). An option is only offered when granting it
+			// would actually flip this ask to an allow (asks caused by ask rules,
+			// deny rules, validator refusals, or the write guard get no options).
+			// Each entry pairs a dialog label with an async action returning true
+			// when the caller should proceed (grant applied, or the user cancelled
+			// the edit-before-save prompt, which degrades to a plain allow-once)
+			// and false when the caller should block (grant did not authorize).
+			type EscalationOption = { label: string; act: () => Promise<boolean> };
+			const escalateProceed = (toolName: string, input: Record<string, unknown>, m: PermissionMode): boolean =>
+				decideWithReason(sessionCfg(), toolName, input, m).action === "allow";
+			const escalationOptions = (toolName: string, input: Record<string, unknown>, m: PermissionMode): EscalationOption[] => {
+				const options: EscalationOption[] = [];
+				const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
+				const userPath = tildify(userConfigPath());
+				// Scratch escalation: only when scratch is fully off (persisted and
+				// session) and forcing it on would flip this ask to an allow.
+				if (!cfg.readAllowScratch && !sessionScratch) {
+					const scratchProbe = withExtraReadRoots(sessionCfg(), scratchRoots());
+					if (decideWithReason(scratchProbe, toolName, input, m).action === "allow") {
+						options.push({
+							label: "Allow scratch reads (this session)",
+							act: async () => {
+								sessionScratch = true;
+								return escalateProceed(toolName, input, m);
+							},
+						});
+						if (loadProjectConfigRaw(ctx.cwd).readAllowScratch !== true) {
+							options.push({
+								label: `Allow scratch reads (project: ${projectPath})`,
+								act: async () => {
+									const raw = loadProjectConfigRaw(ctx.cwd);
+									raw.readAllowScratch = true;
+									saveProjectConfig(ctx.cwd, raw);
+									cfg = loadConfig(ctx.cwd);
+									return escalateProceed(toolName, input, m);
+								},
+							});
+						}
+						if (loadUserConfigRaw().readAllowScratch !== true) {
+							options.push({
+								label: `Allow scratch reads (user: ${userPath})`,
+								act: async () => {
+									const raw = loadUserConfigRaw();
+									raw.readAllowScratch = true;
+									saveUserConfig(raw);
+									cfg = loadConfig(ctx.cwd);
+									return escalateProceed(toolName, input, m);
+								},
+							});
+						}
+						return options; // scratch takes the slot: never offer root options too
+					}
+				}
+				// Root escalation for readAllowPaths: a single unambiguous candidate
+				// directory whose grant would flip this ask to an allow. The
+				// edit-before-save prompt (cancel = plain allow-once) matches the
+				// rule-save dialogs.
+				const suggestion = suggestReadRoot(toolName, input, sessionCfg(), m);
+				if (suggestion?.flipped && suggestion.root) {
+					const root = suggestion.root;
+					options.push({
+						label: `Allow reads from ${root} (this session)`,
+						act: async () => {
+							const edited = await ctx.ui.editor("Edit read root:", root);
+							if (!edited) return true; // editor cancel == plain allow-once
+							const trimmed = edited.trim();
+							if (!trimmed) return true;
+							if (!sessionReadRoots.includes(trimmed)) sessionReadRoots.push(trimmed);
+							return escalateProceed(toolName, input, m);
+						},
+					});
+					if (!loadProjectConfigRaw(ctx.cwd).readAllowPaths?.includes(root)) {
+						options.push({
+							label: `Allow reads from ${root} (project: ${projectPath})`,
+							act: async () => {
+								const edited = await ctx.ui.editor("Edit read root:", root);
+								if (!edited) return true;
+								const trimmed = edited.trim();
+								if (!trimmed) return true;
+								const raw = loadProjectConfigRaw(ctx.cwd);
+								raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), trimmed]);
+								saveProjectConfig(ctx.cwd, raw);
+								cfg = loadConfig(ctx.cwd);
+								return escalateProceed(toolName, input, m);
+							},
+						});
+					}
+					if (!loadUserConfigRaw().readAllowPaths?.includes(root)) {
+						options.push({
+							label: `Allow reads from ${root} (user: ${userPath})`,
+							act: async () => {
+								const edited = await ctx.ui.editor("Edit read root:", root);
+								if (!edited) return true;
+								const trimmed = edited.trim();
+								if (!trimmed) return true;
+								const raw = loadUserConfigRaw();
+								raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), trimmed]);
+								saveUserConfig(raw);
+								cfg = loadConfig(ctx.cwd);
+								return escalateProceed(toolName, input, m);
+							},
+						});
+					}
+				}
+				return options;
+			};
+			const applyEscalationChoice = async (
+				escalations: EscalationOption[],
+				choice: string | undefined,
+			): Promise<boolean> => {
+				const idx = escalations.findIndex((e) => e.label === choice);
+				if (idx < 0) return false;
+				// False means the grant did not authorize the action (e.g. the edited
+				// root was changed to something that no longer covers it): the caller
+				// blocks rather than silently bypassing the still-asking decision.
+				return escalations[idx].act();
+			};
+
 			// ── Compound bash command: confirm each ask subcommand separately ──────
 			// Note: decideCompound() short-circuits any compound containing a `deny`
 			// subcommand before we reach this loop (see the `culprit` block above),
@@ -703,7 +904,7 @@ export default function (pi: ExtensionAPI) {
 					// a freshly saved deny must not override an explicit one-shot allow.
 					if (allowAllStepsOnce) continue;
 	
-					const liveStatic = decideWithReason(cfg, "bash", { command: sub }, mode);
+					const liveStatic = decideWithReason(sessionCfg(), "bash", { command: sub }, mode);
 					let liveAction = liveStatic.action;
 					let subReason = "";
 					let subClassifierModelId: string | undefined;
@@ -748,6 +949,10 @@ export default function (pi: ExtensionAPI) {
 	
 					const suggested = suggestRule("Bash", { command: sub });
 					const breakdownLines = formatBreakdown(currentBreakdown, sub);
+					// Read-root escalation options for this subcommand (scratch wins;
+					// empty when the ask was not caused by read-root containment).
+					const subEscalations = escalationOptions("bash", { command: sub }, mode);
+					const subEscalationLabels = subEscalations.map((e) => e.label);
 
 					const subWhy = whyLine(subStaticReason, subClassifierModelId, subReason);
 					const reasonNote = subWhy ? `\n\n${subWhy}` : "";
@@ -757,6 +962,7 @@ export default function (pi: ExtensionAPI) {
 					// ask sub it's identical to "Allow once", so omit it.
 					const choices = [
 						"Allow once",
+						...subEscalationLabels,
 						...(askSubs.length > 1 ? ["Allow ALL steps once"] : []),
 						"Allow always (save rule)",
 						"Deny once",
@@ -767,7 +973,12 @@ export default function (pi: ExtensionAPI) {
 					const choice = await ctx.ui.select(title, choices);
 	
 					if (choice === "Allow once") continue;
-	
+
+					if (subEscalationLabels.includes(choice ?? "")) {
+						if (await applyEscalationChoice(subEscalations, choice)) continue;
+						return { block: true, reason: "read-root grant did not authorize this subcommand" };
+					}
+ 
 					if (choice === "Allow ALL steps once") {
 						allowAllStepsOnce = true;
 						continue;
@@ -801,7 +1012,7 @@ export default function (pi: ExtensionAPI) {
 						if (!scope) continue;
 						addRule(scope, ctx.cwd, "allow", edited.trim());
 						cfg = loadConfig(ctx.cwd);
-						currentBreakdown = recomputeBreakdown(breakdown, cfg, mode);
+						currentBreakdown = recomputeBreakdown(breakdown, sessionCfg(), mode);
 						const autoCount = currentBreakdown.filter(
 							(b) => b.sub !== sub && askSubs.includes(b.sub) && b.action === "allow",
 						).length;
@@ -823,7 +1034,7 @@ export default function (pi: ExtensionAPI) {
 						}
 						addRule(scope, ctx.cwd, "deny", edited.trim());
 						cfg = loadConfig(ctx.cwd);
-						currentBreakdown = recomputeBreakdown(breakdown, cfg, mode);
+						currentBreakdown = recomputeBreakdown(breakdown, sessionCfg(), mode);
 						ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
 						await promptSteerMessage(ctx);
 						return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
@@ -854,12 +1065,18 @@ export default function (pi: ExtensionAPI) {
 			// get "Switch to \"allow edits\" mode" (replaces the old "Allow all edits
 			// this session" toggle). Each option is hidden when its mode is already
 			// active, so "Allow once" stays the default cursor position.
+			// Read-root escalation options (scratch grant / suggested read root) are
+			// injected right after "Allow once"; they are empty unless the ask was
+			// caused by read-root containment and a grant would flip it to allow.
 			const autoSwitch = mode !== "auto" ? ["Switch to auto mode (this session)"] : [];
 			const yoloSwitch = mode !== "yolo" ? ["Switch to yolo mode (this session)"] : [];
 			const editsSwitch = isWriteOrEdit && mode !== "edits" ? ['Switch to "allow edits" mode (this session)'] : [];
+			const escalations = escalationOptions(event.toolName, matchInput, mode);
+			const escalationLabels = escalations.map((e) => e.label);
 			const choices = isWriteOrEdit
 				? [
 						"Allow once",
+						...escalationLabels,
 						...editsSwitch,
 						"Allow always (save rule)",
 						"Deny once",
@@ -867,11 +1084,16 @@ export default function (pi: ExtensionAPI) {
 						...autoSwitch,
 						...yoloSwitch,
 				  ]
-				: ["Allow once", "Allow always (save rule)", "Deny once", "Deny always (save rule)", ...autoSwitch, ...yoloSwitch];
+				: ["Allow once", ...escalationLabels, "Allow always (save rule)", "Deny once", "Deny always (save rule)", ...autoSwitch, ...yoloSwitch];
 
 			const choice = await ctx.ui.select(title, choices);
 
 			if (choice === "Allow once") return undefined;
+
+			if (escalationLabels.includes(choice ?? "")) {
+				if (await applyEscalationChoice(escalations, choice)) return undefined;
+				return { block: true, reason: "read-root grant did not authorize this action" };
+			}
 
 			if (choice === 'Switch to "allow edits" mode (this session)') {
 				applyMode("edits", ctx);
@@ -1060,6 +1282,14 @@ export default function (pi: ExtensionAPI) {
 					"",
 					"Precedence (first match wins):  deny > ask > allow > toolDefaults > mode strategy > defaultAction",
 					"",
+					"Path roots:",
+					"  readAllowPaths   extra readable directory roots (user+project union)",
+					"  readAllowScratch allow reads from scratch dirs (/tmp, /var/tmp, $TMPDIR); default false",
+					"  writeAllowPaths  writable roots: redirect exemption + Write/Edit allows; default []",
+					"  bashAllowRedirectsTo  deprecated alias for writeAllowPaths",
+					"  Escalation: ask dialogs offer one-click grants when a read-root grant",
+					"  would flip the ask to an allow (scratch takes the slot when both apply).",
+					"",
 					"Permission mode (starts at manual each session, never persisted):",
 					"  manual  fallthroughs use defaultAction; Write/Edit asks   (Ctrl+Alt+P cycles)",
 					"  allow-edits  Write/Edit silently allowed, rest like manual (alias: edits)",
@@ -1077,6 +1307,12 @@ export default function (pi: ExtensionAPI) {
 
 			if (trimmed === "list") {
 				const implicitAllowSet = new Set(cfg.implicit.allow);
+				// Effective read roots (persisted + session grants), with session-only
+				// entries tagged so it's clear they vanish at session_start.
+				const sessionRootSet = new Set([...sessionReadRoots, ...(sessionScratch ? scratchRoots() : [])]);
+				const displayRoots = sessionCfg().readRoots.map((r) =>
+					!cfg.readRoots.includes(r) && sessionRootSet.has(r) ? `${r} (session)` : r,
+				);
 				const implicitTDKeys = new Set(Object.keys(cfg.implicit.toolDefaults));
 				const tdEntries = Object.entries(cfg.toolDefaults);
 				// Re-read both raw files so we can tag each merged rule with its source.
@@ -1108,6 +1344,16 @@ export default function (pi: ExtensionAPI) {
 					`bashReadOnlyAllowCwd: ${cfg.implicit.bashReadOnlyAllowCwd}`,
 					`bashAllowPureVarAssign: ${cfg.implicit.bashAllowPureVarAssign}`,
 					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
+					`readAllowScratch: ${sessionScratch || cfg.readAllowScratch} (source: ${sessionScratch ? "session" : cfg.readAllowScratchSource})`,
+					`readRoots (${sessionCfg().readRoots.length}):`,
+					...displayRoots.map((r) => `  - ${r}`),
+					`writeRoots (${cfg.writeRoots.length}):`,
+					...cfg.writeRoots.map((r) => `  - ${r}`),
+					`writeAllowPaths (${cfg.writeAllowPaths.length}):`,
+					...cfg.writeAllowPaths.map((r) => `  - ${r}`),
+					...(cfg.legacyBashAllowRedirectsToUsed
+						? ["warning: legacy config key bashAllowRedirectsTo used; rename it to writeAllowPaths"]
+						: []),
 					`bashValidators (${Object.keys(cfg.bashValidators).length}):`,
 					...Object.entries(cfg.bashValidators).map(([k, v]) => `  - ${k} -> ${v}`),
 					`mode (this session): ${mode}`,

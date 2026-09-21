@@ -56,7 +56,10 @@ See [`pi-tool-permissions.example.json`](./pi-tool-permissions.example.json) for
   "readAllowSkills": true,
   "readAllowPiDocs": true,
   "readAllowAgentDocs": true,
-  "bashReadOnlyAllowCwd": true
+  "bashReadOnlyAllowCwd": true,
+  "readAllowPaths": ["~/source/datadog"],
+  "readAllowScratch": false,
+  "writeAllowPaths": ["/tmp"]
 }
 ```
 
@@ -338,7 +341,7 @@ Two tiers of safe commands:
 | **Safe always** — `set` shell options | `set` with only shell options (`set -e`, `set -euo pipefail`, `set -o pipefail`, `set +x`, bare `set`) | Allowed; any positional argument (e.g. `set foo`, `set -- foo`) is not |
 | **Safe with paths** — read-only filesystem access | `ls`, `cat`, `head`, `tail`, `wc`, `file`, `stat`, `tree`, `du`, `realpath`, `readlink`, `dirname`, `basename`, `cut`, `jq`, `nl`, `grep`, `rg`, `fd`, `diff`, `cmp`, `comm`, `sort`, `uniq`, `tr`, `od`, `base64`, `md5sum` | Allowed when all non-flag arguments resolve inside cwd |
 
-Commands containing top-level *file* output redirections (`>`, `>>`, `2>`, `&>`, etc.) are **never** auto-allowed, even if the base command is in the safe list — e.g. `echo foo > /tmp/out` is denied. Descriptor-to-descriptor redirects such as `2>&1` / `1>&2` / `>&2` are **not** file writes (they only rearrange existing streams) and stay auto-allowable, so common combined-output patterns like `cmd 2>&1` are not blocked. Redirects to `/dev/null` (the Unix null device — writes are discarded, nothing persisted) are likewise **not** file writes, so idioms like `cmd 2>/dev/null` or `cmd >/dev/null 2>&1` stay auto-allowable. Finally, redirects whose target resolves under a configured `bashAllowRedirectsTo` root (see below) are also exempt — with `"bashAllowRedirectsTo": ["/tmp"]`, `echo foo > /tmp/out` is auto-allowed like an unredirected command.
+Commands containing top-level *file* output redirections (`>`, `>>`, `2>`, `&>`, etc.) are **never** auto-allowed, even if the base command is in the safe list — e.g. `echo foo > /tmp/out` is denied. Descriptor-to-descriptor redirects such as `2>&1` / `1>&2` / `>&2` are **not** file writes (they only rearrange existing streams) and stay auto-allowable, so common combined-output patterns like `cmd 2>&1` are not blocked. Redirects to `/dev/null` (the Unix null device — writes are discarded, nothing persisted) are likewise **not** file writes, so idioms like `cmd 2>/dev/null` or `cmd >/dev/null 2>&1` stay auto-allowable. Finally, redirects whose target resolves under a configured `writeAllowPaths` root (see below) are also exempt — with `"writeAllowPaths": ["/tmp"]`, `echo foo > /tmp/out` is auto-allowed like an unredirected command.
 
 The compound-command splitter applies first, so each subcommand in a `&&` / `||` / `;` chain is evaluated independently. A chain like `ls && pwd` is fully auto-allowed; `ls && rm -rf .` is denied because `rm` is not on the safe list.
 
@@ -351,22 +354,59 @@ Disable per-project:
 { "bashReadOnlyAllowCwd": false }
 ```
 
-#### `bashAllowRedirectsTo` (default: `[]`)
+#### `readAllowPaths` (default: `[]`)
 
-Lists absolute path roots whose descendants are treated as **non-write redirect targets**. With this option set, a top-level file redirect whose target resolves under one of the roots no longer counts as a write: the command is authorized like an unredirected one (read-only auto-allow, pure variable assignments, and broad allow rules such as `Bash(rg *)` all apply normally), instead of requiring an explicit redirect-aware rule.
+Lists directory roots the agent may read without prompting, on top of the working directory. User and project lists are **unioned** (deduped). With a root configured, reading, listing, globbing, grepping, or finding anything under it no longer prompts, and the read-only bash tier and bash validators accept input paths under it too:
 
 ```json
-{ "bashAllowRedirectsTo": ["/tmp"] }
+{ "readAllowPaths": ["/tmp", "~/source/datadog"] }
 ```
 
-With the above, `rg x > /tmp/out`, `cmd 2> /tmp/err`, and `cat notes.txt > /tmp/out` are all authorized by broad rules / the read-only tier. Without it (the default), any top-level file redirect keeps the write-risk behavior described above.
+Entries are **directory roots, not full globs**: a trailing `/**` or `/` is stripped, `~` and `$HOME` are expanded, and relative entries are resolved against cwd, all at merge time. Matching is exact-root or under-root containment (same canonicalization as redirect targets: `/tmp/../etc/passwd` does not match `/tmp`, `/tmpfoo` does not match `/tmp`, Windows comparisons are case-insensitive).
 
-Notes:
-- Targets and roots are **canonicalized before matching**: `/tmp/../etc/passwd` does **not** match the root `/tmp`, and `/tmpfoo` does not match `/tmp` either. Matching is exact-root or under-root containment.
-- Comparison is **case-insensitive for Windows-style absolute paths** (so `C:/TMP/out` matches a `C:/tmp` root). Configure roots using the same absolute form your commands use.
+Precedence: these allows sit in the implicit tier, so explicit `deny` rules (e.g. `Read(.env*)`) and `ask` rules (e.g. `Bash(cat *)`) always win over any root grant, and in auto mode with `classifyAllShell` the bash side of the tier is screened by the classifier like everything else.
+
+#### `readAllowScratch` (default: `false`)
+
+Safe by default. When `true`, seeds the read roots with the platform scratch directories (`/tmp`, `/var/tmp`, `$TMPDIR` on POSIX; `%TEMP%`, `%TMP%` on Windows), so reading from scratch dirs no longer prompts:
+
+```json
+{ "readAllowScratch": true }
+```
+
+Scalar merge: project wins over user.
+
+**Escalation UX:** when an ask dialog is caused by scratch containment, it offers one-click grants instead of a raw rule:
+
+- `Allow scratch reads (this session)` — session-only flag, reset at session start, never persisted.
+- `Allow scratch reads (project: <path>)` / `(user: <path>)` — persists `readAllowScratch: true` into that scope's config (hidden when already set).
+
+The effective value (persisted flag OR session flag) and its source are shown in `/permissions list`.
+
+#### `writeAllowPaths` (default: `[]`)
+
+Lists writable directory roots. User and project lists are **unioned** (deduped), with the same root normalization as `readAllowPaths`. A write root grants BOTH:
+
+1. **Shell-redirect exemption** (the old `bashAllowRedirectsTo` behavior): a top-level file redirect whose target resolves under a root no longer counts as a write, so `rg x > /tmp/out`, `cmd 2> /tmp/err`, and `cat notes.txt > /tmp/out` are authorized by broad rules / the read-only tier instead of requiring an explicit redirect-aware rule.
+2. **Implicit `Write(<root>/**)` and `Edit(<root>/**)` allow rules**: writes and edits under the root are silently allowed. Allow rules are checked before `toolDefaults`, so these grants beat even an explicit `toolDefaults.write = "deny"` (explicit `deny`/`ask` rules still win because they are checked first).
+
+```json
+{ "writeAllowPaths": ["/tmp"] }
+```
+
+Redirect-target matching details (inherited from the alias):
+
+- Targets and roots are **canonicalized before matching**: `/tmp/../etc/passwd` does **not** match the root `/tmp`, and `/tmpfoo` does not match `/tmp` either. Comparison is **case-insensitive for Windows-style absolute paths**.
 - Targets containing unresolvable shell expansions or globs — `$`, backtick, `*`, `?`, `~` — are **never** exempt, since the real destination cannot be known statically. A root of `/` exempts every absolute target.
 - `deny` and `ask` rules still win: the exemption only affects how redirects are classified, not rule precedence.
-- Commands that write files without `>` (e.g. `cmd | tee /tmp/out`) are not affected by this option — the tee form was never classified as a redirect in the first place.
+- Commands that write files without `>` (e.g. `cmd | tee /tmp/out`) are not affected — the tee form was never classified as a redirect.
+
+Caveats:
+
+- **World-writable roots enable symlink attacks**: a planted symlink inside the root can redirect a write to a path outside it. Only grant roots you trust.
+- **Writes have no escalation dialog**: outside these roots (and cwd), Write/Edit still prompt normally.
+
+**Deprecated alias:** `bashAllowRedirectsTo` is still read, but only when `writeAllowPaths` is absent in *both* scopes (it keeps its old project-wins scalar merge and feeds the same resolved write-root list). A debug warning appears in `/permissions list` when the alias is used; rename it to `writeAllowPaths`.
 
 #### `bashValidators` (default: `{}`)
 
@@ -390,10 +430,10 @@ mlr cut -f x,y data.csv
 Semantics:
 
 - **A validator is a positive safety proof, not a deny mechanism.** When it cannot prove the command read-only, the command falls through to the normal pipeline (classifier / `defaultAction`) and is never denied by the validator.
-- **Input paths must resolve inside cwd.** A validator-approved command may only reference input files under the working directory; anything else fails validation and falls through to ask. This covers `duckdb -c "SELECT * FROM '/etc/passwd'"`, URL inputs (`FROM 'https://…'`), and `mlr --from /etc/passwd cat`.
+- **Input paths must resolve inside cwd or a read root.** A validator-approved command may only reference input files under the working directory or one of the resolved read roots (`readAllowPaths`, plus the scratch dirs when `readAllowScratch` is on); anything else fails validation and falls through to ask. This covers `duckdb -c "SELECT * FROM '/etc/passwd'"`, URL inputs (`FROM 'https://…'`), and `mlr --from /etc/passwd cat`.
 - **Explicit `ask` rules always win.** Ask rules are checked before every implicit allow tier, so `Bash(duckdb *)` in `ask` prompts even when the validator would approve. Likewise `deny` rules fire first.
 - **Auto mode gates the tier.** With `autoMode.classifyAllShell: true`, validated commands are screened by the classifier like everything else instead of being silently allowed.
-- Redirects interact with `bashAllowRedirectsTo` as expected: with `"bashAllowRedirectsTo": ["/tmp"]`, `duckdb -c "SELECT 1" > /tmp/out` validates like an unredirected command; `> out.txt` falls through to ask.
+- Redirects interact with `writeAllowPaths` as expected: with `"writeAllowPaths": ["/tmp"]`, `duckdb -c "SELECT 1" > /tmp/out` validates like an unredirected command; `> out.txt` falls through to ask.
 - Compound commands (`&&`, `||`, `;`, `|`) work per-subcommand, so `ls && duckdb -c "SELECT 1"` allows while `ls && duckdb -c "COPY t TO 'x'"` asks.
 
 What each validator accepts and declines:
@@ -423,7 +463,7 @@ Notes:
 - `deny` and `ask` rules are **redirect-agnostic** and always still apply, so safety rules win over a redirected command even when a redirect-aware `allow` rule exists.
 - Descriptor-to-descriptor redirects (`2>&1`, `1>&2`, `>&2`, `>&-`) are **not** file writes and are exempt from this filter — `cmd 2>&1` is still covered by a broad `Bash(cmd *)` rule.
 - Redirects to `/dev/null` (the Unix null device) are **not** file writes either — `cmd 2>/dev/null` and `cmd >/dev/null 2>&1` stay auto-allowable and covered by broad rules. Only an *exact* `/dev/null` target is exempted; subpaths like `/dev/null/x` stay write-risk. Process substitution `>(...)` still counts as a write.
-- Redirects whose target is covered by `bashAllowRedirectsTo` are exempt too — see the option above.
+- Redirects whose target is covered by `writeAllowPaths` are exempt too — see the option above.
 - Trailing harmless redirects are **stripped before allow-rule matching** (Bash only), so an exact rule like `Bash(gh auth status)` also covers `gh auth status 2>&1` and `gh auth status >/dev/null`. The strip applies after the write-risk screen, so `cmd > out 2>&1` still requires a `>`-containing rule, and `deny`/`ask` rules still match the full unstripped command.
 - `toolDefaults` and `defaultAction` are **not** gated by the redirect filter.
 - `pwsh` is out of scope (different redirection syntax) and stays redirect-agnostic.
@@ -536,6 +576,15 @@ Suggested rule: Bash(rm*)
     Deny once
     Deny always (save rule)
 ```
+
+### Read-root escalation options
+
+When an ask is caused by read-root containment (a path outside cwd and every configured read root), the dialog injects one-click grants right after "Allow once". Two kinds, mutually exclusive per dialog (scratch wins if both would apply):
+
+- **Scratch escalation** (when `readAllowScratch` is off and turning it on would allow the call): `Allow scratch reads (this session)`, plus per-scope `Allow scratch reads (project: <path>)` / `(user: <path>)` options that persist `readAllowScratch: true` (hidden when that scope already sets it).
+- **Root escalation**: `suggestReadRoot` finds the single unambiguous parent directory of the failing path(s) (bash tokens, or the Read/Grep/Glob/Ls/Find target) and offers `Allow reads from <dir> (this session)` plus per-scope persist options that append the dir to `readAllowPaths`. Before any grant, an editor opens prefilled with the suggested root (cancelling it degrades to a plain allow-once, matching rule-save semantics).
+
+No option is offered when a grant would not actually flip the ask to an allow (asks caused by explicit ask/deny rules, validator refusals, unknown flags, in-DSL writes, or the write guard). Writes never get escalation options.
 
 ### Why you're being prompted
 
