@@ -1,8 +1,10 @@
 // Tests for the llm-session-name extension.
 //
-// Covers the pure helpers (sanitize, truncate, prompt build) and drives the
-// REAL default export with a mock pi/ctx to verify: one title per session,
-// fallback naming on model failure, and manual /name always winning.
+// Covers the pure helpers (sanitize, truncate, prompt build, config read,
+// recent-turns build) and drives the REAL default export with a mock pi/ctx
+// to verify: one title per session, regeneration cadence with provenance
+// tracking, manual /name locking, the /name-auto force command, fallback
+// naming on model failure, and manual /name always winning.
 //
 // Run: node tests/llm-session-name.test.mts
 import assert from "node:assert/strict";
@@ -11,7 +13,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const mod = await import("../extensions/llm-session-name.ts");
-const { collapseWhitespace, truncateFallbackName, sanitizeTitle, buildTitlePrompt } = mod;
+const {
+	collapseWhitespace,
+	truncateFallbackName,
+	sanitizeTitle,
+	buildTitlePrompt,
+	buildRegenerationPrompt,
+	buildRecentTurnsText,
+	readTurnInterval,
+} = mod;
+
+const msgEntry = (role: string, text: string) => ({
+	type: "message",
+	message: { role, content: [{ type: "text", text }] },
+});
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
 
@@ -32,19 +47,48 @@ const titlePrompt = buildTitlePrompt("please   fix\nthe login bug");
 assert.ok(titlePrompt.includes("please fix the login bug"));
 assert.ok(titlePrompt.includes("<request>"));
 
+const regenPrompt = buildRegenerationPrompt("Old title", "User: fix  auth\nAssistant: done");
+assert.ok(regenPrompt.includes("<current_title>Old title</current_title>"));
+assert.ok(regenPrompt.includes("User: fix auth"));
+assert.ok(regenPrompt.includes("<recent_conversation>"));
+// The recent conversation sample is truncated to the same cap as first prompts.
+const longRegen = buildRegenerationPrompt("t", "y".repeat(3000));
+assert.ok(longRegen.length < 3000 + 500);
+
+const turns = buildRecentTurnsText(
+	[
+		msgEntry("user", "u1"),
+		msgEntry("assistant", "a1"),
+		{ type: "message", message: { role: "system", content: "ignored" } },
+		msgEntry("user", "u2"),
+	],
+	3,
+);
+assert.ok(turns.includes("Assistant: a1"));
+assert.ok(turns.includes("User: u2"));
+assert.ok(!turns.includes("u1"), "messages outside the window must be excluded");
+assert.ok(!turns.includes("ignored"), "non user/assistant roles must be excluded");
+
 // ── Mock pi/ctx ──────────────────────────────────────────────────────────────
 
 const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
+const commands: Record<string, { description: string; handler: (args: string, ctx: any) => Promise<void> }> = {};
 
 function makePi(initialName?: string) {
 	let name = initialName;
+	let setCalls = 0;
 	return {
 		name: () => name,
+		setCallCount: () => setCalls,
 		on(event: string, handler: any) {
 			handlers[event] = handler;
 		},
+		registerCommand(command: string, opts: any) {
+			commands[command] = opts;
+		},
 		getSessionName: () => name,
 		setSessionName(next: string) {
+			setCalls++;
 			name = next;
 		},
 	};
@@ -53,15 +97,22 @@ function makePi(initialName?: string) {
 function makeCtx(opts: {
 	complete?: (model: any, context: any, options?: any) => Promise<any>;
 	authed?: boolean;
+	entries?: any[];
 } = {}) {
-	return {
-		sessionManager: { getSessionId: () => "s1" },
+	const ctx: any = {
+		sessionManager: {
+			getSessionId: () => "s1",
+			getBranch: () => opts.entries ?? [],
+		},
 		model: { provider: "anthropic", id: "claude-x" },
 		modelRegistry: {
 			hasConfiguredAuth: () => opts.authed ?? true,
 			complete: opts.complete ?? (async () => ({ content: [], errorMessage: undefined })),
 		},
 	};
+	ctx.notifies = [] as { msg: string; level?: string }[];
+	ctx.ui = { notify: (msg: string, level?: string) => ctx.notifies.push({ msg, level }) };
+	return ctx;
 }
 
 const textResponse = (text: string) => ({
@@ -187,6 +238,198 @@ const textResponse = (text: string) => ({
 	await handlers.before_agent_start({ prompt: "second session prompt" }, customCtx);
 	await handlers.turn_end({}, customCtx);
 	assert.equal(pi.name(), "second title");
+}
+
+// 9. Regeneration cadence: nothing between cadence points; at the next one
+// (turn 11 for the default interval) the title regenerates from the current
+// title plus recent turns.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "initial prompt" }, makeCtx());
+	const completeCalls: any[] = [];
+	const responses = ["first title", "second title"];
+	const ctx = makeCtx({
+		complete: async (_model, context) => {
+			completeCalls.push(context);
+			return textResponse(responses[completeCalls.length - 1]);
+		},
+		entries: [msgEntry("user", "now working on the parser"), msgEntry("assistant", "ok")],
+	});
+	await handlers.turn_end({}, ctx); // turn 1: first title
+	assert.equal(pi.name(), "first title");
+	for (let t = 2; t <= 10; t++) await handlers.turn_end({}, ctx);
+	assert.equal(completeCalls.length, 1, "no regeneration before the cadence point");
+	assert.equal(pi.name(), "first title");
+	await handlers.turn_end({}, ctx); // turn 11: regeneration
+	assert.equal(completeCalls.length, 2);
+	assert.equal(pi.name(), "second title");
+	const sent = JSON.stringify(completeCalls[1]);
+	assert.ok(sent.includes("first title"), "regeneration prompt must include the current title");
+	assert.ok(sent.includes("now working on the parser"), "regeneration prompt must include recent turns");
+}
+
+// 10. Manual /name after a generated title locks the session: no further
+// regeneration at any later cadence point.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	let calls = 0;
+	const ctx = makeCtx({
+		complete: async () => {
+			calls++;
+			return textResponse("t");
+		},
+		entries: [msgEntry("user", "recent")],
+	});
+	await handlers.turn_end({}, ctx); // turn 1: first title
+	assert.equal(pi.name(), "t");
+	pi.setSessionName("my manual name");
+	for (let t = 2; t <= 21; t++) await handlers.turn_end({}, ctx);
+	assert.equal(calls, 1, "manual rename must block all regeneration");
+	assert.equal(pi.name(), "my manual name");
+}
+
+// 11. Clearing the name also locks the session.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	let calls = 0;
+	const ctx = makeCtx({
+		complete: async () => {
+			calls++;
+			return textResponse("t");
+		},
+		entries: [msgEntry("user", "recent")],
+	});
+	await handlers.turn_end({}, ctx); // turn 1
+	pi.setSessionName("");
+	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
+	assert.equal(calls, 1, "a cleared name must block regeneration");
+	assert.equal(pi.name(), "");
+}
+
+// 12. /name-auto bypasses the manual lock, adopts the new title as
+// extension-owned, and periodic regeneration resumes.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	let calls = 0;
+	const ctx = makeCtx({
+		complete: async () => {
+			calls++;
+			return textResponse(calls === 1 ? "t1" : "forced title");
+		},
+		entries: [msgEntry("user", "latest focus")],
+	});
+	await handlers.turn_end({}, ctx); // turn 1: t1
+	pi.setSessionName("manual");
+	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
+	assert.equal(calls, 1, "locked session must not regenerate on cadence");
+	assert.ok(commands["name-auto"], "/name-auto must be registered");
+	await commands["name-auto"].handler("", ctx);
+	assert.equal(calls, 2, "/name-auto must force a regeneration");
+	assert.equal(pi.name(), "forced title");
+	assert.ok(
+		ctx.notifies.some((n: { msg: string }) => n.msg.includes("forced title")),
+		"/name-auto must notify with the new title",
+	);
+	// Ownership resumed: the next cadence point regenerates again.
+	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, ctx);
+	assert.equal(calls, 3);
+	assert.equal(pi.name(), "forced title");
+}
+
+// 13. Regeneration failure keeps the existing name and retries at the next
+// cadence point (no lock, no degradation).
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	let calls = 0;
+	const ctx = makeCtx({
+		complete: async () => {
+			calls++;
+			if (calls === 1) return textResponse("good title");
+			throw new Error("api down");
+		},
+		entries: [msgEntry("user", "recent stuff")],
+	});
+	await handlers.turn_end({}, ctx); // turn 1
+	assert.equal(pi.name(), "good title");
+	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
+	assert.equal(calls, 2, "regeneration must be attempted at the cadence point");
+	assert.equal(pi.name(), "good title", "failed regeneration must keep the existing name");
+	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, ctx);
+	assert.equal(calls, 3, "a failed regeneration must not lock the session");
+	assert.equal(pi.name(), "good title");
+}
+
+// 14. No thrash: an identical regenerated title must not call setSessionName.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	let calls = 0;
+	const ctx = makeCtx({
+		complete: async () => {
+			calls++;
+			return textResponse("same title");
+		},
+		entries: [msgEntry("user", "recent")],
+	});
+	await handlers.turn_end({}, ctx);
+	assert.equal(pi.setCallCount(), 1);
+	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
+	assert.equal(calls, 2);
+	assert.equal(pi.setCallCount(), 1, "identical title must not re-set the session name");
+	assert.equal(pi.name(), "same title");
+}
+
+// 15. Config reading and cadence honoring a configured interval.
+{
+	const dir = mkdtempSync(join(tmpdir(), "lsn-config-"));
+	const prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+	try {
+		assert.equal(readTurnInterval(dir), 10, "missing config falls back to the default");
+		writeFileSync(join(dir, "llm-session-name.json"), JSON.stringify({ turnInterval: 3 }));
+		assert.equal(readTurnInterval(dir), 3);
+		writeFileSync(join(dir, "llm-session-name.json"), "{ not json");
+		assert.equal(readTurnInterval(dir), 10, "corrupt config falls back to the default");
+		writeFileSync(join(dir, "llm-session-name.json"), JSON.stringify({ turnInterval: 0 }));
+		assert.equal(readTurnInterval(dir), 10, "zero interval falls back to the default");
+		writeFileSync(join(dir, "llm-session-name.json"), JSON.stringify({ turnInterval: 2.5 }));
+		assert.equal(readTurnInterval(dir), 10, "non-integer interval falls back to the default");
+
+		// Cadence honors the configured interval: with turnInterval 3 the
+		// regeneration fires on turn 4.
+		writeFileSync(join(dir, "llm-session-name.json"), JSON.stringify({ turnInterval: 3 }));
+		process.env.PI_CODING_AGENT_DIR = dir;
+		const pi = makePi();
+		mod.default(pi as any);
+		await handlers.before_agent_start({ prompt: "interval prompt" }, makeCtx());
+		let calls = 0;
+		const ctx = makeCtx({
+			complete: async () => {
+				calls++;
+				return textResponse(calls === 1 ? "t1" : "t2");
+			},
+			entries: [msgEntry("user", "recent")],
+		});
+		await handlers.turn_end({}, ctx);
+		for (let t = 2; t <= 3; t++) await handlers.turn_end({}, ctx);
+		assert.equal(calls, 1);
+		await handlers.turn_end({}, ctx); // turn 4
+		assert.equal(calls, 2);
+		assert.equal(pi.name(), "t2");
+	} finally {
+		if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+		rmSync(dir, { recursive: true, force: true });
+	}
 }
 
 // ── herdr-tab-name: rename via a fake herdr on PATH ──────────────────────────
