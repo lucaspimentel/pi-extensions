@@ -27,6 +27,8 @@ export {
 	isNoopCd,
 	isReadOnlyBashSubcommand,
 	isPureVariableAssignment,
+	validatorApprovedBashReason,
+	BASH_VALIDATORS,
 	hasTopLevelFileRedirect,
 	rulePatternAllowsRedirect,
 	normalizeToolDefaultsKeys,
@@ -95,7 +97,7 @@ export function saveUserConfigToDisk(home, cfg) {
  * Note: bashReadOnlyAllowCwd defaults to false here to preserve existing test
  * semantics. Pass bashReadOnlyAllowCwd: true explicitly when testing that feature.
  */
-export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, bashAllowPureVarAssign = true, bashAllowRedirectsTo = [], cwd = process.cwd(), autoMode } = {}) {
+export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, defaultAction = "ask", allowNoopCd = true, bashReadOnlyAllowCwd = false, bashAllowPureVarAssign = true, bashAllowRedirectsTo = [], bashValidators = {}, cwd = process.cwd(), autoMode } = {}) {
 	// Normalize toolDefault keys so decide() can look them up via normalizeTool()
 	// Coerce legacy `defaultAction: "auto"` → "ask" (auto is now a mode rung, not a default).
 	// explicitToolDefaults mirrors what mergeConfig computes so tests exercise the
@@ -103,7 +105,7 @@ export function makeCfg({ allow = [], deny = [], ask = [], toolDefaults = {}, de
 	// the config's own toolDefaults; the implicit write → ask guard lives in
 	// implicit.toolDefaults and never lands here).
 	const normalizedDefaults = normalizeToolDefaultsKeys(toolDefaults);
-	return { allow, deny, ask, toolDefaults: normalizedDefaults, explicitToolDefaults: normalizedDefaults, defaultAction: coerceDefaultAction(defaultAction), allowNoopCd, bashReadOnlyAllowCwd, bashAllowPureVarAssign, bashAllowRedirectsTo, cwd, autoMode: autoMode ?? { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false }, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd, bashAllowRedirectsTo } };
+	return { allow, deny, ask, toolDefaults: normalizedDefaults, explicitToolDefaults: normalizedDefaults, defaultAction: coerceDefaultAction(defaultAction), allowNoopCd, bashReadOnlyAllowCwd, bashAllowPureVarAssign, bashAllowRedirectsTo, bashValidators, cwd, autoMode: autoMode ?? { classifier: undefined, environment: [], allow: [], soft_deny: [], hard_deny: [], classifyAllShell: false }, implicit: { allow: [], toolDefaults: {}, readAllowCwd: true, grepAllowCwd: true, globAllowCwd: true, lsAllowCwd: true, readAllowSkills: true, readAllowPiDocs: true, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd, bashAllowRedirectsTo, bashValidators } };
 }
 
 // ── Test runner ───────────────────────────────────────────────────────────

@@ -121,6 +121,22 @@ test("project wins over user",                  redirectsProject.bashAllowRedire
 const redirectsUser = loadConfigFromObjects({ bashAllowRedirectsTo: ["/home"] }, {}, CWD);
 test("user value used when project omits",      redirectsUser.bashAllowRedirectsTo.join(","), "/home");
 
+section("bashValidators merge (per-key, project wins)");
+
+const validatorsMerged = loadConfigFromObjects(
+	{ bashValidators: { duckdb: "readonly-duckdb", mlr: "readonly-mlr" } },
+	{ bashValidators: { mlr: "readonly-other", sqlite3: "readonly-duckdb" } },
+	CWD,
+);
+test("project key overrides user key",          validatorsMerged.bashValidators["mlr"], "readonly-other");
+test("user key inherited when project omits",   validatorsMerged.bashValidators["duckdb"], "readonly-duckdb");
+test("project-only key present",                validatorsMerged.bashValidators["sqlite3"], "readonly-duckdb");
+test("implicit mirror reflects merge",          JSON.stringify(validatorsMerged.implicit.bashValidators), JSON.stringify(validatorsMerged.bashValidators));
+const validatorsUserOnly = loadConfigFromObjects({ bashValidators: { duckdb: "readonly-duckdb" } }, {}, CWD);
+test("user-only value used when project omits", validatorsUserOnly.bashValidators["duckdb"], "readonly-duckdb");
+const validatorsEmpty = loadConfigFromObjects({}, {}, CWD);
+test("default is empty map",                    Object.keys(validatorsEmpty.bashValidators).length, 0);
+
 section("allow/deny/ask lists concatenated");
 
 const withRules = loadConfigFromObjects(

@@ -161,6 +161,26 @@ section("decide — deny always wins");
 const hardDeny = makeCfg({ deny: ["Read"], allow: ["Read"], ask: ["Read"], defaultAction: "allow" });
 test("deny overrides allow and ask for same tool", decide(hardDeny, "read", { path: "./f.ts" }), "deny");
 
+section("decide — explicit ask rules beat implicit allow tiers");
+
+// The implicit allow tiers (read-only bash, validators, no-op cd, pure var
+// assignment) sit BELOW the explicit ask rules: an ask rule is a deliberate
+// safety choice by the user and must never be bypassed by an implicit allow.
+const askOverTiersCfg = makeCfg({
+	ask: ["Bash(cat *)", "Bash(FOO=*)", "Bash(cd*)", "Bash(duckdb *)"],
+	bashReadOnlyAllowCwd: true,
+	bashAllowPureVarAssign: true,
+	allowNoopCd: true,
+	bashValidators: { duckdb: "readonly-duckdb" },
+	defaultAction: "allow",
+});
+test("ask rule beats read-only bash tier",      decide(askOverTiersCfg, "bash", { command: "cat foo" }), "ask");
+test("ask rule beats validator tier",           decide(askOverTiersCfg, "bash", { command: "duckdb -c \"SELECT 1\"" }), "ask");
+test("ask rule beats pure var assign tier",     decide(askOverTiersCfg, "bash", { command: "FOO=1" }), "ask");
+test("ask rule beats noop cd tier",             decide(askOverTiersCfg, "bash", { command: "cd ." }), "ask");
+test("validator tier still fires without ask rule",
+	decide({ ...askOverTiersCfg, ask: [] }, "bash", { command: "duckdb -c \"SELECT 1\"" }), "allow");
+
 // ── decideWithReason — action + why ───────────────────────────────────────
 
 section("decideWithReason — rule matches name the rule");

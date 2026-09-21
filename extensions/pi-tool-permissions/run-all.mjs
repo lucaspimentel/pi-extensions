@@ -15,6 +15,7 @@ const suites = [
 	"test-grep-glob.mjs",
 	"test-read-write-edit.mjs",
 	"test-bash.mjs",
+	"test-validators.mjs",
 	"test-web.mjs",
 	"test-rules-and-decide.mjs",
 	"test-loadconfig.mjs",

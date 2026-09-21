@@ -118,6 +118,8 @@ export interface PermissionsConfig {
 	allowNoopCd?: boolean;
 	/** Absolute path roots whose descendants are treated as non-write redirect targets (e.g. "/tmp"). Default: [] (file redirects are never exempt). */
 	bashAllowRedirectsTo?: string[];
+	/** Map of bash command name -> built-in validator name (e.g. {"duckdb": "readonly-duckdb"}). When the validator proves the command read-only, it is implicitly allowed. Project keys override user keys. */
+	bashValidators?: Record<string, string>;
 }
 
 export interface ResolvedConfig {
@@ -144,6 +146,8 @@ export interface ResolvedConfig {
 	bashAllowPureVarAssign: boolean;
 	/** Resolved redirect-exemption roots: top-level file redirects whose target resolves under one of these paths are treated as non-writes. */
 	bashAllowRedirectsTo: string[];
+	/** Resolved per-command validators: command name -> BASH_VALIDATORS key. Approved commands are implicitly allowed read-only. */
+	bashValidators: Record<string, string>;
 	/** Resolved auto-mode config (merged user + project). Always present; used when the session auto toggle is on. */
 	autoMode: ResolvedAutoModeConfig;
 	/** Tracks synthetically injected rules/defaults (never written to disk). */
@@ -162,6 +166,7 @@ export interface ResolvedConfig {
 		bashAllowPureVarAssign: boolean;
 		allowNoopCd: boolean;
 		bashAllowRedirectsTo: string[];
+		bashValidators: Record<string, string>;
 	};
 }
 
@@ -295,6 +300,9 @@ export function mergeConfig(
 	const bashAllowPureVarAssign = project.bashAllowPureVarAssign ?? user.bashAllowPureVarAssign ?? true;
 	const allowNoopCd = project.allowNoopCd ?? user.allowNoopCd ?? true;
 	const bashAllowRedirectsTo = project.bashAllowRedirectsTo ?? user.bashAllowRedirectsTo ?? [];
+	// Per-key override (project wins) — unlike scalar flags, a project entry
+	// replaces only the keys it names and inherits the rest from user config.
+	const bashValidators = { ...(user.bashValidators ?? {}), ...(project.bashValidators ?? {}) };
 	const implicitAllow: string[] = [];
 	if (readAllowCwd) {
 		implicitAllow.push(`Read(${cwdGlobPattern(cwd)})`);
@@ -361,8 +369,9 @@ export function mergeConfig(
 		bashReadOnlyAllowCwd,
 		bashAllowPureVarAssign,
 		bashAllowRedirectsTo,
+		bashValidators,
 		autoMode,
-		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, findAllowCwd, readAllowSkills, readAllowPiDocs, readAllowAgentDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd, bashAllowRedirectsTo },
+		implicit: { allow: implicitAllow, toolDefaults: implicitToolDefaults, readAllowCwd, grepAllowCwd, globAllowCwd, lsAllowCwd, findAllowCwd, readAllowSkills, readAllowPiDocs, readAllowAgentDocs, bashReadOnlyAllowCwd, bashAllowPureVarAssign, allowNoopCd, bashAllowRedirectsTo, bashValidators },
 	};
 }
 
@@ -1104,6 +1113,237 @@ export function isReadOnlyBashSubcommand(
 		});
 	}
 	return false;
+}
+
+// ── Per-command bash validators (bashValidators) ────────────────────────────
+
+/**
+ * True when path `p` resolves inside (or equal to) `cwd`, using the same
+ * normalization and Windows case-insensitivity as the read-only bash tier.
+ * Purely string-based: no filesystem access, matching `isReadOnlyBashSubcommand`.
+ */
+function pathInsideCwd(p: string, cwd: string, options: PathNormalizationOptions = {}): boolean {
+	if (!p) return false;
+	// Scheme-like prefixes (`https://`, `s3://`) are never local paths; only a
+	// single letter before the colon (a Windows drive) is allowed through.
+	const colon = p.indexOf(":");
+	if (colon > 1) return false;
+	try {
+		const normalized = normalizeMatchPath(p, cwd, options);
+		const cwdNorm = normalizeMatchPath(".", cwd, options);
+		const caseInsensitive = isWindowsAbsolutePath(cwdNorm);
+		const comparableCwd = caseInsensitive ? cwdNorm.toLowerCase() : cwdNorm;
+		const comparable = caseInsensitive ? normalized.toLowerCase() : normalized;
+		const cwdPrefix = comparableCwd.endsWith("/") ? comparableCwd : comparableCwd + "/";
+		return comparable === comparableCwd || comparable.startsWith(cwdPrefix);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * True when a string plausibly names a file or URL rather than program text:
+ * it contains a path separator, a scheme/Windows-drive colon, or ends with a
+ * file-extension-like suffix. Used by the validators so real file arguments
+ * get a cwd containment check while quoted DSL/SQL fragments pass untouched.
+ */
+function looksFileish(s: string): boolean {
+	if (s.includes("/") || s.includes(":")) return true;
+	return /\.[A-Za-z0-9]+$/.test(s);
+}
+
+/**
+ * Safe duckdb CLI flags. Value is the flag's arity: 0 = boolean toggle,
+ * 1 = the next token is the flag's value. Anything not listed here (notably
+ * `-f` / `--init`, which execute a script file) fails validation.
+ */
+const DUCKDB_SAFE_FLAGS: Record<string, 0 | 1> = {
+	"-b": 0, "-batch": 0, "--batch": 0,
+	"-box": 0, "--box": 0,
+	"-csv": 0, "--csv": 0,
+	"-column": 0, "--column": 0,
+	"-header": 0, "--header": 0,
+	"-noheader": 0, "--noheader": 0,
+	"-json": 0, "--json": 0,
+	"-list": 0, "--list": 0,
+	"-line": 0, "--line": 0,
+	"-l": 0,
+	"-listing": 0, "--listing": 0,
+	"-quote": 0, "--quote": 0,
+	"-readonly": 0, "--readonly": 0,
+	"-no-stdin": 0, "--no-stdin": 0,
+	"-no-monitor": 0, "--no-monitor": 0,
+	"-help": 0, "--help": 0,
+	"-version": 0, "--version": 0,
+	"-c": 1, "--command": 1,
+	"-nullvalue": 1, "--nullvalue": 1,
+};
+
+/**
+ * Extract single-quoted SQL string literals, handling doubled `''` escapes.
+ * An unterminated literal's remainder is pushed too so a malformed string
+ * containing a path still reaches the caller's containment check.
+ */
+function singleQuotedLiterals(sql: string): string[] {
+	const literals: string[] = [];
+	let i = 0;
+	while (i < sql.length) {
+		if (sql[i] !== "'") { i++; continue; }
+		let j = i + 1;
+		let lit = "";
+		while (j < sql.length) {
+			if (sql[j] === "'") {
+				if (sql[j + 1] === "'") { lit += "'"; j += 2; continue; }
+				break;
+			}
+			lit += sql[j++];
+		}
+		literals.push(lit);
+		i = j + 1;
+	}
+	return literals;
+}
+
+/**
+ * Validate a `duckdb` invocation as read-only.
+ *
+ * Rules:
+ *  1. Every flag must be in DUCKDB_SAFE_FLAGS; an unknown flag fails (this
+ *     rejects `-f`, `-init`, and anything unvetted).
+ *  2. Any non-flag token that is not a flag value fails: a positional
+ *     argument to the CLI is a database file opened in read-write mode (a
+ *     potential write). This also declines unquoted SQL (`duckdb -c SELECT 1`
+ *     leaves a stray positional `1`), which is acceptable — agents quote SQL.
+ *  3. The collected SQL must not contain write statements (COPY, EXPORT),
+ *     database attach (ATTACH), extension install/load (INSTALL, LOAD —
+ *     network access), or dot-commands (.output, .open, .import, .read).
+ *  4. Every single-quoted string literal must either not look like a path or
+ *     resolve inside cwd (so `FROM 'data.csv'` passes but
+ *     `FROM 'https://…'` and `FROM '/etc/passwd'` do not). Double-quoted
+ *     identifiers are not paths and are ignored.
+ */
+function validateReadOnlyDuckdb(tokens: string[], cwd: string): boolean {
+	const sqlChunks: string[] = [];
+	let valueFor: string | null = null; // flag currently consuming a value token
+	for (let i = 1; i < tokens.length; i++) {
+		const tok = tokens[i];
+		if (valueFor !== null) {
+			// `-c`/`--command` values are SQL to scan; `-nullvalue` values are not.
+			if (valueFor === "-c" || valueFor === "--command") sqlChunks.push(tok);
+			valueFor = null;
+			continue;
+		}
+		if (tok.startsWith("-") && tok.length > 1) {
+			const flag = tok.toLowerCase();
+			const arity = DUCKDB_SAFE_FLAGS[flag];
+			if (arity === undefined) return false; // unknown/unvetted flag
+			if (arity === 1) valueFor = flag;
+			continue;
+		}
+		// Positional argument — see rule 2 above.
+		return false;
+	}
+	if (valueFor !== null) return false; // dangling flag value
+	if (sqlChunks.length === 0) return false;
+	const sql = sqlChunks.join("; ");
+	// Writes, database attach, and extension install/load (= network access).
+	if (/\b(copy|export|attach|install|load)\b/i.test(sql)) return false;
+	// Dot-commands (.output, .open, .import, .read, ...) can redirect I/O.
+	if (/(?:^|;|\n)\s*\.[a-z]/i.test(sql)) return false;
+	for (const literal of singleQuotedLiterals(sql)) {
+		if (looksFileish(literal) && !pathInsideCwd(literal, cwd)) return false;
+	}
+	return true;
+}
+
+/**
+ * Validate an `mlr` (Miller) invocation as read-only.
+ *
+ * Rules:
+ *  1. `-f` on the `put`/`filter` verbs loads unscannable DSL from a file and
+ *     fails. `-f` on other verbs (`stats1`, `cut`, `sort`, ...) is a field-
+ *     name list and is fine. Unknown flags pass — mlr itself errors
+ *     harmlessly on them at runtime.
+ *  2. `--from` / `--mfrom` name an input file; the value must resolve inside
+ *     cwd.
+ *  3. Any other non-flag token (a verb, quoted DSL, or an input file) must
+ *     either not look like a path or resolve inside cwd. Verbs and typical
+ *     DSL strings (`'$x > 3'`, `'sum(bytes)'`) never look file-ish; input
+ *     files like `data.csv` do and get checked.
+ *  4. In-DSL file writes are rejected: `tee`, and `print`/`emit`/`dump` with
+ *     a `>` target. Shell-level redirects were already screened by
+ *     stripExemptRedirects before tokenization.
+ *
+ * Known false positive: a literal argument containing the word "tee"
+ * (e.g. a file named `tee.csv`) declines to ask, which is safe.
+ */
+function validateReadOnlyMlr(tokens: string[], cwd: string): boolean {
+	let currentVerb = "";
+	let expectingFile = false; // consuming the value of --from / --mfrom
+	for (let i = 1; i < tokens.length; i++) {
+		const tok = tokens[i];
+		if (expectingFile) {
+			if (!pathInsideCwd(tok, cwd)) return false;
+			expectingFile = false;
+			continue;
+		}
+		if (tok.startsWith("-") && tok.length > 1) {
+			const flag = tok.toLowerCase();
+			if (flag === "-f" && (currentVerb === "put" || currentVerb === "filter")) return false;
+			if (flag === "--from" || flag === "--mfrom") { expectingFile = true; continue; }
+			continue;
+		}
+		// Non-flag token: a verb, quoted DSL, or an input file.
+		currentVerb = tok;
+		if (looksFileish(tok) && !pathInsideCwd(tok, cwd)) return false;
+	}
+	if (expectingFile) return false; // dangling --from value
+	const rest = tokens.slice(1).join(" ");
+	if (/\btee\b/.test(rest)) return false;
+	if (/\b(?:print|emit|dump)\s*>>?\s*["'a-z0-9./]/i.test(rest)) return false;
+	return true;
+}
+
+type BashValidator = (tokens: string[], cwd: string) => boolean;
+
+/**
+ * Built-in per-command bash validators. Each proves that a command whose
+ * risk lives inside program text (SQL in `duckdb -c "..."`, DSL in `mlr`
+ * verbs) is read-only. Registry keys are the validator names accepted by the
+ * `bashValidators` config map (`{ "duckdb": "readonly-duckdb" }`).
+ */
+export const BASH_VALIDATORS: Record<string, BashValidator> = {
+	"readonly-duckdb": validateReadOnlyDuckdb,
+	"readonly-mlr": validateReadOnlyMlr,
+};
+
+/**
+ * Returns a reason string when `cmd` is approved read-only by one of the
+ * `bashValidators`, or null when it is not covered. Fail-open: a null return
+ * means the caller continues down the normal decision pipeline (classifier /
+ * defaultAction) and never denies. Shell-level redirects are screened first:
+ * a redirect whose target resolves under an allowed root is stripped and
+ * treated like an unredirected command, while any real file redirect returns
+ * null (not provably read-only).
+ */
+export function validatorApprovedBashReason(
+	cmd: string,
+	cwd: string,
+	validators: Record<string, string>,
+	allowRedirectTargets: readonly string[] = [],
+): string | null {
+	const trimmed = cmd.trim();
+	if (!trimmed) return null;
+	const stripped = stripExemptRedirects(trimmed, allowRedirectTargets, { cwd });
+	if (stripped === null) return null;
+	const tokens = tokenizeSimple(stripped);
+	if (tokens.length === 0) return null;
+	const cmdName = tokens[0].toLowerCase();
+	const validatorName = validators[cmdName];
+	if (validatorName === undefined) return null;
+	const validator = BASH_VALIDATORS[validatorName];
+	if (validator === undefined) return null; // unknown validator name — fail open
+	return validator(tokens, cwd) ? `validated read-only ${cmdName} (bashValidators.${validatorName})` : null;
 }
 
 /**
@@ -2224,6 +2464,12 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	};
 	const denyRule = matched(cfg.deny);
 	if (denyRule !== undefined) return { action: "deny", reason: `matched deny rule '${denyRule}'` };
+	// Explicit `ask` rules sit above every implicit allow tier (read-only bash,
+	// bashValidators, no-op `cd`, pure variable assignments): an ask rule such
+	// as `Bash(cat *)` is a deliberate safety choice by the user and is never
+	// bypassed by an implicit allow.
+	const askRule = matched(cfg.ask);
+	if (askRule !== undefined) return { action: "ask", reason: `matched ask rule '${askRule}'` };
 	// Read-only bash auto-allow short-circuit. When the auto layer is engaged
 	// (auto mode) AND classifyAllShell is set, route read-only bash
 	// commands through the classifier instead of silently allowing them. For
@@ -2235,6 +2481,16 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	const skipReadOnlyBash = mode === "auto" && cfg.autoMode.classifyAllShell;
 	if (!skipReadOnlyBash && cfg.bashReadOnlyAllowCwd && normalizeTool(toolName) === "bash" && isReadOnlyBashSubcommand(String(input.command ?? ""), cfg.cwd, {}, cfg.bashAllowRedirectsTo))
 		return { action: "allow", reason: "read-only bash command (bashReadOnlyAllowCwd)" };
+	// Per-command validators (bashValidators): a validator proves that a
+	// command whose risk lives inside program text (SQL in `duckdb -c "..."`,
+	// DSL in `mlr` verbs) is read-only. Fail-open: a null result falls through
+	// to the normal pipeline (classifier / defaultAction), never a deny.
+	// Gated by the same classifyAllShell gate as the read-only tier so auto
+	// mode screens validated commands with the classifier like everything else.
+	if (!skipReadOnlyBash && normalizeTool(toolName) === "bash") {
+		const validatorReason = validatorApprovedBashReason(String(input.command ?? ""), cfg.cwd, cfg.bashValidators ?? {}, cfg.bashAllowRedirectsTo);
+		if (validatorReason !== null) return { action: "allow", reason: validatorReason };
+	}
 	if (cfg.allowNoopCd && normalizeTool(toolName) === "bash" && isNoopCd(String(input.command ?? ""), cfg.cwd))
 		return { action: "allow", reason: "no-op cd (allowNoopCd)" };
 	// Pure shell variable assignments (no command/process/arithmetic substitution)
@@ -2244,8 +2500,6 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// mis-allow an impure `$(...)` form. Impure assignments still fall through.
 	if (cfg.bashAllowPureVarAssign && normalizeTool(toolName) === "bash" && isPureVariableAssignment(String(input.command ?? ""), cfg.bashAllowRedirectsTo, { cwd: cfg.cwd }))
 		return { action: "allow", reason: "pure shell variable assignment (bashAllowPureVarAssign)" };
-	const askRule = matched(cfg.ask);
-	if (askRule !== undefined) return { action: "ask", reason: `matched ask rule '${askRule}'` };
 	// Allow rules — redirect-aware for Bash. A Bash command containing a
 	// top-level *file* output redirection (e.g. `rg x > out.txt`) is NOT
 	// covered by a broad allow rule whose pattern lacks `>` (e.g. `Bash(rg *)`);

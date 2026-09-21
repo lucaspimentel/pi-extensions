@@ -46,6 +46,9 @@
  *     "readAllowPiDocs": true,
  *     "readAllowAgentDocs": true,
  *     "bashReadOnlyAllowCwd": true,
+ *     "allowNoopCd": true,
+ *     "bashAllowRedirectsTo": ["/tmp"],
+ *     "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr" },
  *     "autoMode": {                       // used when the session auto toggle is on
  *       "classifier": { "provider": "anthropic", "model": "claude-haiku-4-5" },
  *       "environment": ["Trusted repo: github.com/lucaspimentel/*"],
@@ -122,6 +125,8 @@
  *   bashReadOnlyAllowCwd (default: true)
  *     Silently allows a curated set of read-only bash subcommands (pwd, echo, ls,
  *     cat, head, tail, wc, stat, …) when their path arguments resolve inside cwd.
+ *     Explicit ask rules (e.g. "Bash(cat *)") are checked FIRST and always win —
+ *     this tier never bypasses them.
  *     `set` with only shell options (`set -e`, `set -euo pipefail`,
  *     `set -o pipefail`, `set +x`, bare `set`) is also allowed since pi runs
  *     each Bash call in a fresh shell; `set` with any positional argument
@@ -132,18 +137,42 @@
  *     Unix null device — writes are discarded) are likewise NOT file writes and
  *     stay auto-allowable, so `cmd 2>/dev/null` is not blocked.
  *     Disable with "bashReadOnlyAllowCwd": false.
+ *   bashValidators (default: {})
+ *     Maps a bash command name to a built-in validator that proves the command
+ *     read-only, so tools whose risk lives inside program text (SQL in
+ *     `duckdb -c "..."`, DSL in `mlr` verbs) can run read-only data analysis
+ *     without permission prompts. Example:
+ *       "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr" }
+ *     A validator is a positive safety proof, not a deny mechanism: when it
+ *     cannot prove the command read-only (unknown flag, write statement,
+ *     positional database file, input path resolving outside cwd, URL input,
+ *     in-DSL file writes like mlr's `tee`), the command falls through to the
+ *     normal pipeline (classifier / defaultAction) and never denied.
+ *     Validators only approve input files that resolve inside cwd. Explicit
+ *     ask rules always win (they are checked before every implicit tier).
+ *     In auto mode with classifyAllShell, validated commands are screened by
+ *     the classifier like everything else (the tier is gated by the same
+ *     switch as the read-only bash tier).
+ *     Known mlr false positives: a literal argument containing the word "tee"
+ *     (e.g. a file named tee.csv) declines to ask, which is safe. Unquoted
+ *     SQL (`duckdb -c SELECT 1` — the stray positional `1`) also declines;
+ *     agents quote SQL.
  *   bashAllowPureVarAssign (default: true)
  *     Silently allows pure shell variable assignments (e.g. `SKILL_DIR="/path"`,
  *     `PID=130847101`, `export FOO="bar"`) whose RHS contains no command,
  *     process, or arithmetic substitution. Impure forms (`TOKEN=$(ddtool ...)`,
  *     `` X=`pwd` ``, `A=1 echo hi`, `X=$((1+2))`) still fall through to normal
  *     rules. Exempt from auto-mode classifyAllShell (pure assignments are
- *     statically allowed even in auto mode). Explicit deny rules win.
+ *     statically allowed even in auto mode). Explicit ask rules are checked
+ *     first and win. Explicit deny rules win.
  *     Disable with "bashAllowPureVarAssign": false.
  *   write → ask (automatic)
  *     Unless toolDefaults.write is explicitly set, Write always prompts regardless
  *     of defaultAction. Override with "toolDefaults": { "write": "allow" }.
  *     Explicit Write(<path>) allow rules still win because allow > toolDefaults.
+ *   allowNoopCd (default: true)
+ *     Silently allows no-op `cd` commands (cd to cwd). Explicit ask rules are
+ *     checked first and win; deny rules always win.
  *
  * Redirected Bash commands (write-risk):
  *   A Bash command containing a top-level *file* output redirection (>, >>, 2>,
@@ -1079,6 +1108,8 @@ export default function (pi: ExtensionAPI) {
 					`bashReadOnlyAllowCwd: ${cfg.implicit.bashReadOnlyAllowCwd}`,
 					`bashAllowPureVarAssign: ${cfg.implicit.bashAllowPureVarAssign}`,
 					`allowNoopCd: ${cfg.implicit.allowNoopCd}`,
+					`bashValidators (${Object.keys(cfg.bashValidators).length}):`,
+					...Object.entries(cfg.bashValidators).map(([k, v]) => `  - ${k} -> ${v}`),
 					`mode (this session): ${mode}`,
 					`classifier debug (this session): ${classifierDebugEnabled ? "ON" : "OFF"}`,
 					`autoMode.classifier: ${cfg.autoMode.classifier ? `${cfg.autoMode.classifier.provider}/${cfg.autoMode.classifier.model}` : "(auto-select)"}`,

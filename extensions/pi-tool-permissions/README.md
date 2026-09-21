@@ -342,6 +342,8 @@ Commands containing top-level *file* output redirections (`>`, `>>`, `2>`, `&>`,
 
 The compound-command splitter applies first, so each subcommand in a `&&` / `||` / `;` chain is evaluated independently. A chain like `ls && pwd` is fully auto-allowed; `ls && rm -rf .` is denied because `rm` is not on the safe list.
 
+**Precedence change:** explicit `ask` rules are now checked **before** this tier. An ask rule like `Bash(cat *)` is a deliberate safety choice, so `cat foo` prompts even though it would qualify for the read-only tier.
+
 Notably excluded from the safe list: `find` (has `-delete` / `-exec` flags), `grep`/`rg` (covered as dedicated tools), `git` (mixed read/write). Add explicit allow rules for these if needed.
 
 Disable per-project:
@@ -365,6 +367,46 @@ Notes:
 - Targets containing unresolvable shell expansions or globs — `$`, backtick, `*`, `?`, `~` — are **never** exempt, since the real destination cannot be known statically. A root of `/` exempts every absolute target.
 - `deny` and `ask` rules still win: the exemption only affects how redirects are classified, not rule precedence.
 - Commands that write files without `>` (e.g. `cmd | tee /tmp/out`) are not affected by this option — the tee form was never classified as a redirect in the first place.
+
+#### `bashValidators` (default: `{}`)
+
+Maps a Bash command name to a built-in **validator** that proves the command is read-only, so tools whose risk lives inside *program text* (SQL in `duckdb -c "..."`, DSL in `mlr` verbs) can run read-only data analysis without permission prompts. An argv-based path check cannot see the SQL or the DSL, so these tools would otherwise always prompt.
+
+```json
+{ "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr" } }
+```
+
+Project keys override user keys per-command (`mergeConfig` merges the maps key-by-key).
+
+With the above config, all of these run silently:
+
+```sh
+duckdb -c "SELECT user, sum(bytes) FROM 'data.csv' GROUP BY user"
+duckdb --csv -c "SELECT * FROM read_csv_auto('data.csv', header=true)"
+mlr --icsv --ojson stats1 -a sum -f bytes -g user data.csv
+mlr cut -f x,y data.csv
+```
+
+Semantics:
+
+- **A validator is a positive safety proof, not a deny mechanism.** When it cannot prove the command read-only, the command falls through to the normal pipeline (classifier / `defaultAction`) and is never denied by the validator.
+- **Input paths must resolve inside cwd.** A validator-approved command may only reference input files under the working directory; anything else fails validation and falls through to ask. This covers `duckdb -c "SELECT * FROM '/etc/passwd'"`, URL inputs (`FROM 'https://…'`), and `mlr --from /etc/passwd cat`.
+- **Explicit `ask` rules always win.** Ask rules are checked before every implicit allow tier, so `Bash(duckdb *)` in `ask` prompts even when the validator would approve. Likewise `deny` rules fire first.
+- **Auto mode gates the tier.** With `autoMode.classifyAllShell: true`, validated commands are screened by the classifier like everything else instead of being silently allowed.
+- Redirects interact with `bashAllowRedirectsTo` as expected: with `"bashAllowRedirectsTo": ["/tmp"]`, `duckdb -c "SELECT 1" > /tmp/out` validates like an unredirected command; `> out.txt` falls through to ask.
+- Compound commands (`&&`, `||`, `;`, `|`) work per-subcommand, so `ls && duckdb -c "SELECT 1"` allows while `ls && duckdb -c "COPY t TO 'x'"` asks.
+
+What each validator accepts and declines:
+
+| | `readonly-duckdb` | `readonly-mlr` |
+| --- | --- | --- |
+| Flags | Only a vetted allowlist (`-csv`, `--json`, `-header`, `-c`, `-nullvalue`, …); any unknown flag (including `-f` script execution) declines | All flags pass except `-f` on `put`/`filter` (loads unscannable DSL from a file); `--from`/`--mfrom` values must resolve inside cwd |
+| SQL/DSL writes | `COPY`, `EXPORT`, `ATTACH`, `INSTALL`, `LOAD`, and dot-commands (`.output`, `.open`, `.import`, `.read`) decline | In-DSL file writes decline: `tee`, and `print`/`emit`/`dump` with a `>` target |
+| Positional arguments | Any positional argument (a database file opened read-write) declines | Non-flag tokens that look like paths must resolve inside cwd |
+
+Known false positives (both safe — they decline to ask rather than allow): a literal argument containing the word `tee` (e.g. a file named `tee.csv`), and unquoted SQL (`duckdb -c SELECT 1` leaves a stray positional `1`). Agents quote SQL anyway.
+
+For structured data analysis prefer `duckdb` and `mlr`; plain `awk` is a possible future validator but is not yet built in — add an explicit allow rule for it if needed.
 
 #### Redirected Bash commands (write-risk)
 
@@ -428,7 +470,7 @@ Silently allows **pure shell variable assignments** — assignments whose right-
 
 Recognised prefix builtins (`export`, `local`, `readonly`, `declare`, `typeset`) are allowed when the RHS is pure. Bare `$VAR` / `${VAR}` expansions are allowed (no command runs); `$(`, backticks, `$((`, and process substitution `>(` / `<(` are the side-effect vectors that trigger a prompt. A non-assignment token after the assignments (e.g. `A=1 echo hi`) means a command runs, so it falls through.
 
-Like `allowNoopCd`, this check is **exempt from auto-mode `classifyAllShell`** — pure assignments are statically allowed even in auto mode (skipping a wasteful classifier call that could mis-allow an impure `$(...)` form). Impure assignments still reach the classifier. Explicit `deny` rules always win.
+Like `allowNoopCd`, this check is **exempt from auto-mode `classifyAllShell`** — pure assignments are statically allowed even in auto mode (skipping a wasteful classifier call that could mis-allow an impure `$(...)` form). Impure assignments still reach the classifier. Explicit `ask` rules are checked before this tier and win; explicit `deny` rules always win.
 
 Disable per-project:
 ```json
