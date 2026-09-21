@@ -1,7 +1,8 @@
 /**
  * Idle Summary Extension
  *
- * After the agent has been idle for ~2 minutes, generates a session summary
+ * After the agent has been idle for ~3 minutes (configurable via
+ * `timeoutMinutes` in the config file), generates a session summary
  * and displays it inline in the chat history (no modal — no dismiss required).
  * Use the `/summary` command to trigger it immediately; doing so suppresses the
  * pending idle timer for the current idle period. `/summary model` opens a
@@ -24,9 +25,11 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+	DEFAULT_IDLE_TIMEOUT_MS,
 	modelLabel,
 	orderedSummaryCandidates,
 	pickableModels,
+	resolveIdleTimeoutMs,
 } from "./idle-summary-models.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -48,29 +51,38 @@ type SessionEntry = {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const IDLE_DELAY_MS = 120_000;
 const CUSTOM_TYPE = "idle-summary";
 const CONFIG_FILE = "idle-summary.json";
 
 // ── Config persistence ──────────────────────────────────────────────────────
-// The user's chosen summary model lives in the global agent dir
-// (`getAgentDir()`), so it applies across all projects and sessions. Stored as
-// `{ "model": "provider/modelId" }`. Missing/corrupt file = no override.
+// The user's summary model and idle timeout live in the global agent dir
+// (`getAgentDir()`), so they apply across all projects and sessions. Stored as
+// `{ "model": "provider/modelId", "timeoutMinutes": 3 }`. Missing/corrupt file
+// = defaults for everything.
 const configPath = () => join(getAgentDir(), CONFIG_FILE);
 
-const readConfiguredModel = (): string | undefined => {
+const readConfig = (): Record<string, unknown> | undefined => {
 	try {
 		const raw = readFileSync(configPath(), "utf8");
-		const parsed = JSON.parse(raw) as { model?: unknown } | null;
-		return typeof parsed?.model === "string" ? parsed.model : undefined;
+		const parsed = JSON.parse(raw) as Record<string, unknown> | null;
+		return parsed ?? undefined;
 	} catch {
 		return undefined;
 	}
 };
 
+const readConfiguredModel = (): string | undefined => {
+	const model = readConfig()?.model;
+	return typeof model === "string" ? model : undefined;
+};
+
 const writeConfiguredModel = (ref: string): void => {
 	try {
-		writeFileSync(configPath(), JSON.stringify({ model: ref }, null, 2));
+		// Merge into the existing config so fields like timeoutMinutes survive.
+		writeFileSync(
+			configPath(),
+			JSON.stringify({ ...readConfig(), model: ref }, null, 2),
+		);
 	} catch {
 		// Best-effort: a failed write just means the choice won't persist.
 	}
@@ -171,6 +183,9 @@ const buildSummaryPrompt = (conversationText: string): string =>
 
 export default function (pi: ExtensionAPI) {
 	let idleTimer: ReturnType<typeof setTimeout> | null = null;
+	// Set on the first arming that observes an invalid `timeoutMinutes` config
+	// value, so the warning shows once instead of on every agent_end.
+	let warnedInvalidTimeout = false;
 	// Bumped by session_shutdown (which fires before the runner is invalidated).
 	// An in-flight generateAndShowSummary captures the value at entry and compares
 	// it after its model await, so it can bail before touching a now-stale ctx/pi.
@@ -186,6 +201,29 @@ export default function (pi: ExtensionAPI) {
 			clearTimeout(idleTimer);
 			idleTimer = null;
 		}
+	}
+
+	function armIdleTimer(ctx: ExtensionContext) {
+		const { timeoutMs, invalid } = resolveIdleTimeoutMs(readConfig()?.timeoutMinutes);
+		if (invalid && !warnedInvalidTimeout) {
+			warnedInvalidTimeout = true;
+			try {
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						`idle-summary: invalid "timeoutMinutes" in ${CONFIG_FILE}; ` +
+							`using default (${DEFAULT_IDLE_TIMEOUT_MS / 60_000} minutes).`,
+						"warning",
+					);
+				}
+			} catch {
+				// Stale ctx: the summary generation guard handles the run path;
+				// a warning is best-effort and never worth throwing over.
+			}
+		}
+		idleTimer = setTimeout(() => {
+			idleTimer = null;
+			generateAndShowSummary(ctx).catch(() => {});
+		}, timeoutMs);
 	}
 
 	async function generateAndShowSummary(ctx: ExtensionContext) {
@@ -293,12 +331,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", async (_event, ctx) => {
 		clearIdleTimer();
 		// Each agent_end re-arms the timer and agent_start clears it, so the
-		// summary only appears after IDLE_DELAY_MS of true idleness (no further
-		// agent activity). Intermediate retries/compaction just reset the countdown.
-		idleTimer = setTimeout(() => {
-			idleTimer = null;
-			generateAndShowSummary(ctx).catch(() => {});
-		}, IDLE_DELAY_MS);
+		// summary only appears after the configured idle timeout of true idleness
+		// (no further agent activity). Intermediate retries/compaction just reset
+		// the countdown.
+		armIdleTimer(ctx);
 	});
 
 	// Shared model picker for `/summary model` and the deprecated

@@ -16,6 +16,9 @@
 import assert from "node:assert/strict";
 
 const idleSummary = (await import("../extensions/idle-summary/index.ts")).default;
+const { resolveIdleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS } = await import(
+	"../extensions/idle-summary/idle-summary-models.ts"
+);
 
 // ── Mock pi: capture event handlers + command + sendMessage ─────────────────
 const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
@@ -148,7 +151,64 @@ async function runSummary() {
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
+// ── Idle timeout resolution ────────────────────────────────────────────────
+// Pure helper tests: no file IO, no extension runtime.
+
+function testIdleTimeoutResolution() {
+	const DEFAULT = DEFAULT_IDLE_TIMEOUT_MS;
+	assert.equal(DEFAULT, 180_000, "default idle timeout should be 3 minutes");
+
+	// Missing value: default, not invalid.
+	assert.deepEqual(resolveIdleTimeoutMs(undefined), { timeoutMs: DEFAULT, invalid: false });
+
+	// Valid positive numbers (fractional minutes allowed).
+	assert.deepEqual(resolveIdleTimeoutMs(1), { timeoutMs: 60_000, invalid: false });
+	assert.deepEqual(resolveIdleTimeoutMs(3), { timeoutMs: 180_000, invalid: false });
+	assert.deepEqual(resolveIdleTimeoutMs(0.5), { timeoutMs: 30_000, invalid: false });
+
+	// Present but invalid: default + invalid flag (notify once).
+	for (const bad of [0, -5, NaN, Infinity, -Infinity, "3", null, true, {}]) {
+		assert.deepEqual(
+			resolveIdleTimeoutMs(bad as unknown),
+			{ timeoutMs: DEFAULT, invalid: true },
+			`timeoutMinutes=${JSON.stringify(String(bad))} should be invalid`,
+		);
+	}
+	console.log("  ✓ idle-timeout resolution: 5 checks passed");
+}
+
+// ── Timer arming (agent_end) ────────────────────────────────────────────────
+// The extension reads the REAL user config for timeoutMinutes, so this only
+// asserts invariants that hold regardless of the user's config: a positive,
+// finite timer is armed on agent_end and cleaned up on shutdown.
+
+function testAgentEndArmsTimer() {
+	const realSetTimeout = globalThis.setTimeout;
+	let armedDelay: number | undefined;
+	let armedTimer: any;
+	(globalThis as any).setTimeout = ((fn: any, delay: number) => {
+		armedDelay = delay;
+		// Real timer (immediately clearable) so cleanup paths stay exercisable.
+		armedTimer = realSetTimeout(() => {}, delay);
+		return armedTimer;
+	}) as any;
+	try {
+		const ctx = makeCtx();
+		handlers.agent_end({}, ctx);
+		assert.equal(typeof armedDelay, "number", "agent_end should arm the idle timer");
+		assert.ok(Number.isFinite(armedDelay) && (armedDelay as number) > 0, "armed delay should be positive and finite");
+
+		handlers.session_shutdown({}, makeCtx()); // clears the idle timer
+	} finally {
+		(globalThis as any).setTimeout = realSetTimeout;
+		if (armedTimer) clearTimeout(armedTimer);
+	}
+	console.log("  ✓ agent_end timer arming: 2 checks passed");
+}
+
 async function main() {
+	testIdleTimeoutResolution();
+	testAgentEndArmsTimer();
 	// 1. Happy path: no shutdown, summary is produced and sent.
 	resetScenario();
 	const happy = runSummary();
