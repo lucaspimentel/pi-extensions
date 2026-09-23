@@ -1,5 +1,12 @@
 # TODO
 
+- [x] Enable duckdb/mlr readonly bash validators by default with a `"none"` opt-out (2026-09-23)
+  - `bashValidators` no longer defaults to an empty map: `duckdb -> readonly-duckdb` and `mlr -> readonly-mlr` are enabled without any user/project config, so read-only SQL/DSL data analysis never prompts out of the box.
+  - New sentinel value `"none"` (lowercase, compared case-sensitively) disables a mapping for that command, including the built-in defaults: `{ "bashValidators": { "duckdb": "none" } }` restores normal prompting for duckdb while keeping mlr default-on.
+  - Merge order is defaults < user < project per key, then sentinel entries are stripped. A project `"none"` therefore beats both the default and any user-configured validator; a project validator beats a user `"none"`.
+  - Fail-open semantics unchanged: a validator can only convert would-be-ask into allow by proving the command read-only; everything else falls through to the normal pipeline. The resolved map is still mirrored to `cfg.implicit.bashValidators` and shown by `/permissions list`.
+  - Implemented in `rules.ts` (`DEFAULT_BASH_VALIDATORS`, `BASH_VALIDATOR_NONE`), documented in the `index.ts` header block and `README.md`, covered by new merge tests in `test-loadconfig.mjs` and decide-level default tests in `test-validators.mjs`.
+
 - [x] Consolidate allow-all-edits + auto mode into a single permission-mode enum (2026-02-14)
   - Done: `PermissionMode = "manual" | "edits" | "auto" | "yolo"` session-only enum replaces the two independent toggles (`allowAllEdits`, `autoModeEnabled`). Starts at `manual` every session, never persisted.
   - Precedence is now `deny > ask > allow > explicit toolDefaults > mode strategy > defaultAction`; explicit `toolDefaults` were split from the implicit write guard (`implicit.toolDefaults`) so config-authored per-tool actions win in every mode while the write guard is demoted below the classifier in auto mode.

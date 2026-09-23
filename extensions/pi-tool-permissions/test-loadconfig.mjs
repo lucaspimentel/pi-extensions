@@ -135,7 +135,31 @@ test("implicit mirror reflects merge",          JSON.stringify(validatorsMerged.
 const validatorsUserOnly = loadConfigFromObjects({ bashValidators: { duckdb: "readonly-duckdb" } }, {}, CWD);
 test("user-only value used when project omits", validatorsUserOnly.bashValidators["duckdb"], "readonly-duckdb");
 const validatorsEmpty = loadConfigFromObjects({}, {}, CWD);
-test("default is empty map",                    Object.keys(validatorsEmpty.bashValidators).length, 0);
+test("defaults present without config",         JSON.stringify(validatorsEmpty.bashValidators), JSON.stringify({ duckdb: "readonly-duckdb", mlr: "readonly-mlr" }));
+test("defaults in implicit mirror too",         JSON.stringify(validatorsEmpty.implicit.bashValidators), JSON.stringify(validatorsEmpty.bashValidators));
+
+section("bashValidators sentinel \"none\" and defaults layering");
+
+const validatorsUserOverride = loadConfigFromObjects({ bashValidators: { duckdb: "readonly-other" } }, {}, CWD);
+test("user mapping overrides default",          validatorsUserOverride.bashValidators["duckdb"], "readonly-other");
+const validatorsProjectOverride = loadConfigFromObjects({}, { bashValidators: { mlr: "readonly-other" } }, CWD);
+test("project mapping overrides default",       validatorsProjectOverride.bashValidators["mlr"], "readonly-other");
+test("project mapping keeps other default",     validatorsProjectOverride.bashValidators["duckdb"], "readonly-duckdb");
+const validatorsUserNone = loadConfigFromObjects({ bashValidators: { duckdb: "none" } }, {}, CWD);
+test("user none removes default",               validatorsUserNone.bashValidators["duckdb"], undefined);
+test("user none keeps other defaults",          validatorsUserNone.bashValidators["mlr"], "readonly-mlr");
+const validatorsProjectNone = loadConfigFromObjects(
+	{ bashValidators: { duckdb: "readonly-duckdb" } },
+	{ bashValidators: { duckdb: "none" } },
+	CWD,
+);
+test("project none overrides user validator",   validatorsProjectNone.bashValidators["duckdb"], undefined);
+const validatorsProjectBeatsNone = loadConfigFromObjects(
+	{ bashValidators: { duckdb: "none" } },
+	{ bashValidators: { duckdb: "readonly-duckdb" } },
+	CWD,
+);
+test("project validator beats user none",       validatorsProjectBeatsNone.bashValidators["duckdb"], "readonly-duckdb");
 
 section("allow/deny/ask lists concatenated");
 

@@ -6,7 +6,7 @@
 
 import {
 	makeTestRunner, makeCfg, decide, decideWithReason, decideCompound,
-	validatorApprovedBashReason, BASH_VALIDATORS,
+	validatorApprovedBashReason, BASH_VALIDATORS, loadConfigFromObjects,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -86,7 +86,15 @@ test("direct validatorApprovedBashReason without roots",  validatorApprovedBashR
 
 section("validators — disabled / not configured");
 
-test("no validators configured → ask",          decide(makeCfg({ defaultAction: "ask", cwd: CWD }), "Bash", { command: "duckdb -c \"SELECT 1\"" }), "ask");
+// A bare config with no bashValidators key must still get the built-in
+// defaults (duckdb/mlr readonly validators) via the merge in rules.ts.
+const bareCfg = loadConfigFromObjects({}, {}, CWD);
+test("no bashValidators key → default duckdb allow", decide(bareCfg, "Bash", { command: "duckdb -c \"SELECT * FROM 'data.csv'\"" }), "allow");
+test("no bashValidators key → default mlr allow",   decide(bareCfg, "Bash", { command: "mlr cut -f x data.csv" }), "allow");
+test("none sentinel → duckdb falls through to ask", decide(loadConfigFromObjects({ bashValidators: { duckdb: "none" } }, {}, CWD), "Bash", { command: "duckdb -c \"SELECT * FROM 'data.csv'\"" }), "ask");
+
+const emptyDefaultCfg = makeCfg({ defaultAction: "ask", cwd: CWD, bashValidators: {} });
+test("no validators configured → ask",          decide(emptyDefaultCfg, "Bash", { command: "duckdb -c \"SELECT 1\"" }), "ask");
 test("empty validators map → ask",              decide(validatorCfg({ bashValidators: {} }), "Bash", { command: "mlr cat data.csv" }), "ask");
 
 section("validators — redirect interplay");

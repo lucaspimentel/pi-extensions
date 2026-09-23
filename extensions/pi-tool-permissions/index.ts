@@ -140,11 +140,16 @@
  *     Unix null device — writes are discarded) are likewise NOT file writes and
  *     stay auto-allowable, so `cmd 2>/dev/null` is not blocked.
  *     Disable with "bashReadOnlyAllowCwd": false.
- *   bashValidators (default: {})
+ *   bashValidators (default: { duckdb: "readonly-duckdb", mlr: "readonly-mlr" })
  *     Maps a bash command name to a built-in validator that proves the command
  *     read-only, so tools whose risk lives inside program text (SQL in
  *     `duckdb -c "..."`, DSL in `mlr` verbs) can run read-only data analysis
- *     without permission prompts. Example:
+ *     without permission prompts. The duckdb and mlr readonly validators are
+ *     enabled by default, no config needed. A value of "none" (sentinel,
+ *     lowercase) disables the mapping for that command, e.g. to turn off the
+ *     built-in duckdb validator while keeping mlr default-on:
+ *       "bashValidators": { "duckdb": "none" }
+ *     Custom mappings merge per command (project over user over defaults):
  *       "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr" }
  *     A validator is a positive safety proof, not a deny mechanism: when it
  *     cannot prove the command read-only (unknown flag, write statement,

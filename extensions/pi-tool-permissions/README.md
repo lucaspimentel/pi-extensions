@@ -408,15 +408,17 @@ Caveats:
 
 **Deprecated alias:** `bashAllowRedirectsTo` is still read, but only when `writeAllowPaths` is absent in *both* scopes (it keeps its old project-wins scalar merge and feeds the same resolved write-root list). A debug warning appears in `/permissions list` when the alias is used; rename it to `writeAllowPaths`.
 
-#### `bashValidators` (default: `{}`)
+#### `bashValidators` (default: `{ "duckdb": "readonly-duckdb", "mlr": "readonly-mlr" }`)
 
 Maps a Bash command name to a built-in **validator** that proves the command is read-only, so tools whose risk lives inside *program text* (SQL in `duckdb -c "..."`, DSL in `mlr` verbs) can run read-only data analysis without permission prompts. An argv-based path check cannot see the SQL or the DSL, so these tools would otherwise always prompt.
+
+Both built-in validators are **enabled by default**: `duckdb` and `mlr` are validated read-only out of the box, no config needed.
 
 ```json
 { "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr" } }
 ```
 
-Project keys override user keys per-command (`mergeConfig` merges the maps key-by-key).
+Project keys override user keys per-command (`mergeConfig` merges the maps key-by-key, with the defaults at the bottom).
 
 With the above config, all of these run silently:
 
@@ -426,6 +428,14 @@ duckdb --csv -c "SELECT * FROM read_csv_auto('data.csv', header=true)"
 mlr --icsv --ojson stats1 -a sum -f bytes -g user data.csv
 mlr cut -f x,y data.csv
 ```
+
+**Opting out:** set a command's value to the sentinel `"none"` (lowercase) to disable its validator and restore normal prompting. This works for the built-in defaults too — for example, this turns off the duckdb validator while keeping mlr default-on:
+
+```json
+{ "bashValidators": { "duckdb": "none" } }
+```
+
+A project-level `"none"` wins over a user-configured validator for the same command; a project-level validator wins over a user-level `"none"`.
 
 Semantics:
 

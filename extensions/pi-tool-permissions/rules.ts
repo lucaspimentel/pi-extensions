@@ -124,7 +124,7 @@ export interface PermissionsConfig {
 	readAllowScratch?: boolean;
 	/** Writable directory roots: grants BOTH shell-redirect exemption (the old bashAllowRedirectsTo behavior) AND implicit Write/Edit allow rules for descendants (allow beats toolDefaults). Merge: user union project, deduped; same normalization as readAllowPaths. */
 	writeAllowPaths?: string[];
-	/** Map of bash command name -> built-in validator name (e.g. {"duckdb": "readonly-duckdb"}). When the validator proves the command read-only, it is implicitly allowed. Project keys override user keys. */
+	/** Map of bash command name -> built-in validator name (e.g. {"duckdb": "readonly-duckdb"}). When the validator proves the command read-only, it is implicitly allowed. Defaults: duckdb -> readonly-duckdb and mlr -> readonly-mlr are enabled without any config. Set a value to "none" (sentinel, lowercase) to disable that entry. Project keys override user keys and defaults. */
 	bashValidators?: Record<string, string>;
 }
 
@@ -348,7 +348,15 @@ export function mergeConfig(
 	const bashAllowRedirectsTo = writeRoots;
 	// Per-key override (project wins) — unlike scalar flags, a project entry
 	// replaces only the keys it names and inherits the rest from user config.
-	const bashValidators = { ...(user.bashValidators ?? {}), ...(project.bashValidators ?? {}) };
+	// Built-in defaults (duckdb/mlr readonly validators) sit at the bottom of the
+	// merge so user/project entries win per key; after merging, entries set to
+	// the "none" sentinel are stripped so any scope can disable a default (or a
+	// lower-scope mapping). Project "none" therefore beats a user validator and
+	// the default, while a project validator beats a user "none".
+	const bashValidators = { ...DEFAULT_BASH_VALIDATORS, ...(user.bashValidators ?? {}), ...(project.bashValidators ?? {}) };
+	for (const [cmd, name] of Object.entries(bashValidators)) {
+		if (name === BASH_VALIDATOR_NONE) delete bashValidators[cmd];
+	}
 	const implicitAllow: string[] = [];
 	if (readAllowCwd) {
 		implicitAllow.push(`Read(${cwdGlobPattern(cwd)})`);
@@ -1458,6 +1466,23 @@ type BashValidator = (tokens: string[], cwd: string, readRoots: readonly string[
 export const BASH_VALIDATORS: Record<string, BashValidator> = {
 	"readonly-duckdb": validateReadOnlyDuckdb,
 	"readonly-mlr": validateReadOnlyMlr,
+};
+
+/**
+ * Sentinel value for `bashValidators` entries that disables the mapping for
+ * that command (e.g. `{ "duckdb": "none" }` turns off the built-in default
+ * readonly-duckdb validator). Compared case-sensitively; document as lowercase.
+ */
+export const BASH_VALIDATOR_NONE = "none";
+
+/**
+ * Default `bashValidators` mappings, enabled without any user/project config.
+ * They sit at the bottom of the merge (user/project entries win per key) and
+ * can be disabled per command with the "none" sentinel.
+ */
+export const DEFAULT_BASH_VALIDATORS: Record<string, string> = {
+	duckdb: "readonly-duckdb",
+	mlr: "readonly-mlr",
 };
 
 /**
