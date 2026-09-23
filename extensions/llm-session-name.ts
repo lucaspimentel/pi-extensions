@@ -3,8 +3,11 @@
  *
  * Generates a short session title from the first user prompt using the
  * session's active model, then keeps it fresh: the title regenerates from the
- * current title plus recent conversation turns every `turnInterval` turns
- * (default 10). The interval is configurable via
+ * current title plus the session's original first two user prompts (theme
+ * anchors, taken from branch history so they survive /resume and /fork) and
+ * snippets of the last 10 user/assistant messages every `turnInterval` turns
+ * (default 10). Each anchor is clipped to 1000 characters and each recent
+ * message to 300 characters, independently. The interval is configurable via
  * <agentDir>/llm-session-name.json: {"turnInterval": N}. All names are set
  * via pi.setSessionName() so they show in the session selector and flow to
  * session_info_changed consumers (e.g. the herdr tab renamer). The very first
@@ -38,7 +41,10 @@ const PROMPT_SAMPLE_LENGTH = 2000;
 const MAX_TOKENS = 64;
 const DEFAULT_TURN_INTERVAL = 10;
 const CONFIG_FILE = "llm-session-name.json";
-const RECENT_MESSAGE_COUNT = 8;
+const RECENT_MESSAGE_COUNT = 10;
+const RECENT_MESSAGE_SAMPLE_LENGTH = 300;
+const INITIAL_PROMPT_COUNT = 2;
+const INITIAL_PROMPT_SAMPLE_LENGTH = 1000;
 
 // ── Pure helpers (exported for tests) ────────────────────────────────────────
 
@@ -75,22 +81,33 @@ export const buildTitlePrompt = (prompt: string): string => {
 };
 
 /**
- * Build the regeneration prompt: current title plus a sample of recent
- * conversation turns, asking for an updated title.
+ * Build the regeneration prompt: current title, the session's original first
+ * two user prompts as theme anchors, and a sample of recent conversation
+ * turns (already normalized and clipped per message by buildRecentTurnsText),
+ * asking for an updated title that reflects the overall theme.
  */
-export const buildRegenerationPrompt = (currentTitle: string, recentTurns: string): string => {
+export const buildRegenerationPrompt = (
+	currentTitle: string,
+	initialPrompts: string[],
+	recentTurns: string,
+): string => {
 	const title = collapseWhitespace(currentTitle);
-	const turns = collapseWhitespace(recentTurns).slice(0, PROMPT_SAMPLE_LENGTH);
-	return [
+	const anchors = initialPrompts
+		.map((prompt) => collapseWhitespace(prompt).slice(0, INITIAL_PROMPT_SAMPLE_LENGTH))
+		.filter((prompt) => prompt.length > 0);
+	const lines = [
 		"Generate a short updated title (3-6 words) for the coding session described below.",
-		"The session currently has the noted title; keep it or revise it based on the recent conversation.",
+		"The session currently has the noted title; keep it or revise it based on the context below.",
+		"Title the session's overall theme, not just the latest subtask, but do change the title when the session has genuinely moved to different work.",
 		"Reply with only the title text: no quotes, no markdown, no trailing period.",
 		"",
 		`<current_title>${title}</current_title>`,
-		"<recent_conversation>",
-		turns,
-		"</recent_conversation>",
-	].join("\n");
+	];
+	if (anchors.length > 0) {
+		lines.push("<original_requests>", ...anchors, "</original_requests>");
+	}
+	lines.push("<recent_conversation>", recentTurns.trim(), "</recent_conversation>");
+	return lines.join("\n");
 };
 
 /**
@@ -136,18 +153,51 @@ const extractMessageText = (content: unknown): string => {
 	return parts.join(" ");
 };
 
-/** Flatten the last maxMessages user/assistant entries into "Role: text" lines. */
+/**
+ * Extract up to maxPrompts original, nonempty user-message texts from branch
+ * entries, in chronological order. Entries are filtered to real user text
+ * first, so empty or tool-only user messages do not consume a slot. Used as
+ * the theme anchor for regeneration; it sees the full branch, including
+ * history from before /resume or /fork.
+ */
+export const extractInitialPrompts = (entries: unknown[], maxPrompts: number = INITIAL_PROMPT_COUNT): string[] => {
+	const prompts: string[] = [];
+	for (const entry of entries) {
+		if (!isMessageEntry(entry)) continue;
+		if (entry.message?.role !== "user") continue;
+		const text = extractMessageText(entry.message?.content).trim();
+		if (!text) continue;
+		prompts.push(text);
+		if (prompts.length >= maxPrompts) break;
+	}
+	return prompts;
+};
+
+/**
+ * Flatten the last maxMessages eligible user/assistant messages into
+ * "Role: text" lines. Entries are filtered to nonempty user/assistant text
+ * BEFORE the window is selected, so ignored or empty entries do not consume a
+ * slot. Each message is normalized and clipped to
+ * RECENT_MESSAGE_SAMPLE_LENGTH characters independently; the joined result is
+ * never sliced, so the full window always survives.
+ */
 export const buildRecentTurnsText = (entries: unknown[], maxMessages: number = RECENT_MESSAGE_COUNT): string => {
-	const messages = entries.filter(isMessageEntry).slice(-maxMessages);
-	const lines: string[] = [];
-	for (const entry of messages) {
+	const eligible: { role: string; text: string }[] = [];
+	for (const entry of entries) {
+		if (!isMessageEntry(entry)) continue;
 		const role = entry.message?.role;
 		if (role !== "user" && role !== "assistant") continue;
 		const text = extractMessageText(entry.message?.content).trim();
 		if (!text) continue;
-		lines.push(`${role === "user" ? "User" : "Assistant"}: ${text}`);
+		eligible.push({ role, text });
 	}
-	return lines.join("\n");
+	return eligible
+		.slice(-maxMessages)
+		.map(({ role, text }) => {
+			const clipped = collapseWhitespace(text).slice(0, RECENT_MESSAGE_SAMPLE_LENGTH);
+			return `${role === "user" ? "User" : "Assistant"}: ${clipped}`;
+		})
+		.join("\n");
 };
 
 // ── Extension ────────────────────────────────────────────────────────────────
@@ -248,7 +298,16 @@ export default function (pi: ExtensionAPI) {
 			const branch = ctx.sessionManager.getBranch() as unknown[];
 			const recent = buildRecentTurnsText(branch);
 			if (!recent.trim()) return undefined;
-			prompt = buildRegenerationPrompt(current || owned || "", recent);
+			// Theme anchors come from the branch's original user messages, so
+			// they survive /resume and /fork. The first prompt captured via
+			// before_agent_start is only a fallback for branches without user
+			// messages; regeneration does not require two anchors.
+			const anchors = extractInitialPrompts(branch);
+			if (anchors.length === 0) {
+				const first = firstPromptBySession.get(sessionId);
+				if (first) anchors.push(first);
+			}
+			prompt = buildRegenerationPrompt(current || owned || "", anchors, recent);
 		} else {
 			const first = firstPromptBySession.get(sessionId);
 			if (!first) return undefined;

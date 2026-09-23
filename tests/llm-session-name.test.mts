@@ -20,6 +20,7 @@ const {
 	buildTitlePrompt,
 	buildRegenerationPrompt,
 	buildRecentTurnsText,
+	extractInitialPrompts,
 	readTurnInterval,
 } = mod;
 
@@ -47,27 +48,79 @@ const titlePrompt = buildTitlePrompt("please   fix\nthe login bug");
 assert.ok(titlePrompt.includes("please fix the login bug"));
 assert.ok(titlePrompt.includes("<request>"));
 
-const regenPrompt = buildRegenerationPrompt("Old title", "User: fix  auth\nAssistant: done");
+const regenPrompt = buildRegenerationPrompt(
+	"Old title",
+	["please   fix\nthe auth bug"],
+	"User: fix auth\nAssistant: done",
+);
 assert.ok(regenPrompt.includes("<current_title>Old title</current_title>"));
+assert.ok(regenPrompt.includes("please fix the auth bug"));
 assert.ok(regenPrompt.includes("User: fix auth"));
 assert.ok(regenPrompt.includes("<recent_conversation>"));
-// The recent conversation sample is truncated to the same cap as first prompts.
-const longRegen = buildRegenerationPrompt("t", "y".repeat(3000));
-assert.ok(longRegen.length < 3000 + 500);
 
+// Each initial prompt is normalized and clipped to 1000 characters
+// independently; both long anchors survive the combined prompt.
+const longAnchorA = "a".repeat(1500);
+const longAnchorB = "b".repeat(1500);
+const anchorsPrompt = buildRegenerationPrompt("t", [longAnchorA, longAnchorB], "User: recent");
+assert.ok(anchorsPrompt.includes("a".repeat(1000)), "first anchor present, clipped to 1000");
+assert.ok(anchorsPrompt.includes("b".repeat(1000)), "second anchor present, clipped to 1000");
+assert.ok(!anchorsPrompt.includes("a".repeat(1001)), "first anchor clipped at 1000");
+assert.ok(!anchorsPrompt.includes("b".repeat(1001)), "second anchor clipped at 1000");
+assert.ok(!anchorsPrompt.includes("<original_requests>\n\n"), "empty anchors must not create a blank section");
+assert.ok(buildRegenerationPrompt("t", [], "User: x").includes("<recent_conversation>"), "no anchors still builds a prompt");
+
+// extractInitialPrompts: first two nonempty user texts, in branch order.
+assert.deepEqual(
+	extractInitialPrompts([
+		msgEntry("user", "first prompt"),
+		msgEntry("assistant", "ack"),
+		msgEntry("user", "second prompt"),
+		msgEntry("user", "third prompt"),
+	]),
+	["first prompt", "second prompt"],
+);
+assert.deepEqual(extractInitialPrompts([msgEntry("assistant", "hi"), { type: "other" }]), []);
+assert.deepEqual(extractInitialPrompts([]), []);
+
+// Eligible messages are selected BEFORE the window, so ignored or empty
+// entries do not consume a slot.
 const turns = buildRecentTurnsText(
 	[
 		msgEntry("user", "u1"),
 		msgEntry("assistant", "a1"),
 		{ type: "message", message: { role: "system", content: "ignored" } },
+		{ type: "message", message: { role: "user", content: "" } },
+		{ type: "message", message: { role: "user", content: [] } },
+		{ type: "other" },
 		msgEntry("user", "u2"),
 	],
-	3,
+	2,
 );
 assert.ok(turns.includes("Assistant: a1"));
 assert.ok(turns.includes("User: u2"));
-assert.ok(!turns.includes("u1"), "messages outside the window must be excluded");
+assert.ok(!turns.includes("u1"), "eligible messages outside the window must be excluded");
 assert.ok(!turns.includes("ignored"), "non user/assistant roles must be excluded");
+
+// The window selects the last 10 ELIGIBLE messages; each is clipped to 300
+// characters independently and the joined result is never sliced.
+const windowEntries: any[] = [];
+for (let i = 0; i < 12; i++) {
+	windowEntries.push(msgEntry(i % 2 === 0 ? "user" : "assistant", `m${String(i).padStart(2, "0")} ${"z".repeat(400)}`));
+}
+const windowTurns = buildRecentTurnsText(windowEntries);
+for (const i of [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]) {
+	assert.ok(windowTurns.includes(`m${String(i).padStart(2, "0")} `), `eligible message ${i} must be in the window`);
+}
+for (const i of [0, 1]) {
+	assert.ok(!windowTurns.includes(`m${String(i).padStart(2, "0")} `), `message ${i} must fall outside the 10-message window`);
+}
+assert.ok(windowTurns.includes("z".repeat(296)), "each message keeps its full 300-character clip");
+assert.ok(!windowTurns.includes("z".repeat(297)), "each message is clipped at 300 characters");
+assert.ok(windowTurns.length > 3000, "the full window exceeds the old combined 2000-character cap");
+assert.ok(windowTurns.includes("m02 "), "the earliest selected message survives: no combined front-slice");
+assert.ok(windowTurns.startsWith("User: m02 "), "snippets stay in chronological order with role labels");
+assert.ok(windowTurns.split("\n").length === 10, "one labeled line per selected message");
 
 // ── Mock pi/ctx ──────────────────────────────────────────────────────────────
 
@@ -254,7 +307,13 @@ const textResponse = (text: string) => ({
 			completeCalls.push(context);
 			return textResponse(responses[completeCalls.length - 1]);
 		},
-		entries: [msgEntry("user", "now working on the parser"), msgEntry("assistant", "ok")],
+		entries: [
+			msgEntry("user", "original theme one"),
+			msgEntry("assistant", "ack one"),
+			msgEntry("user", "original theme two"),
+			msgEntry("user", "now working on the parser"),
+			msgEntry("assistant", "ok"),
+		],
 	});
 	await handlers.turn_end({}, ctx); // turn 1: first title
 	assert.equal(pi.name(), "first title");
@@ -267,6 +326,11 @@ const textResponse = (text: string) => ({
 	const sent = JSON.stringify(completeCalls[1]);
 	assert.ok(sent.includes("first title"), "regeneration prompt must include the current title");
 	assert.ok(sent.includes("now working on the parser"), "regeneration prompt must include recent turns");
+	assert.ok(sent.includes("original theme one"), "regeneration prompt must include the first original prompt");
+	assert.ok(sent.includes("original theme two"), "regeneration prompt must include the second original prompt");
+	const anchorSection = sent.slice(sent.indexOf("<original_requests>"), sent.indexOf("</original_requests>"));
+	assert.ok(anchorSection.indexOf("original theme one") < anchorSection.indexOf("original theme two"), "anchors are chronological");
+	assert.ok(!anchorSection.includes("ack one"), "assistant messages are sampled, not treated as anchors");
 }
 
 // 10. Manual /name after a generated title locks the session: no further
@@ -430,6 +494,51 @@ const textResponse = (text: string) => ({
 		else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
 		rmSync(dir, { recursive: true, force: true });
 	}
+}
+
+// 16. Theme anchors come from the branch's original user messages, including
+// history from before /resume or /fork (not just prompts observed after
+// session_start). A branch without user messages falls back to the captured
+// first prompt.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "post-resume prompt" }, makeCtx());
+	const completeCalls: any[] = [];
+	const responses = ["t1", "t2", "t3"];
+	const complete = async (_model: any, context: any) => {
+		completeCalls.push(context);
+		return textResponse(responses[completeCalls.length - 1]);
+	};
+	await handlers.turn_end({}, makeCtx({ complete, entries: [] })); // turn 1: first title
+	assert.equal(pi.name(), "t1");
+
+	// Regeneration on a branch whose user messages predate session_start
+	// (e.g. history restored by /resume or /fork).
+	const resumedCtx = makeCtx({
+		complete,
+		entries: [
+			msgEntry("user", "pre-resume theme A"),
+			msgEntry("assistant", "ack"),
+			msgEntry("user", "pre-resume theme B"),
+			msgEntry("user", "current subtask"),
+		],
+	});
+	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, resumedCtx);
+	assert.equal(completeCalls.length, 2);
+	const resumedSent = JSON.stringify(completeCalls[1]);
+	assert.ok(resumedSent.includes("pre-resume theme A"), "anchor from branch history before session_start");
+	assert.ok(resumedSent.includes("pre-resume theme B"), "second anchor from branch history");
+	assert.ok(resumedSent.includes("current subtask"), "recent messages still sampled");
+	assert.ok(!resumedSent.includes("post-resume prompt"), "captured prompt is only a fallback, not the anchor");
+
+	// Branch without any user messages: fall back to the captured first prompt.
+	const fallbackCtx = makeCtx({ complete, entries: [msgEntry("assistant", "only assistant text")] });
+	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, fallbackCtx);
+	assert.equal(completeCalls.length, 3);
+	const fallbackSent = JSON.stringify(completeCalls[2]);
+	assert.ok(fallbackSent.includes("post-resume prompt"), "anchor fallback uses the captured first prompt");
+	assert.ok(fallbackSent.includes("only assistant text"), "recent messages still sampled");
 }
 
 // ── herdr-tab-name: rename via a fake herdr on PATH ──────────────────────────
