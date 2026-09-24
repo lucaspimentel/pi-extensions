@@ -23,11 +23,15 @@
       "./extensions/idle-summary",
       "./extensions/pwsh.ts",
       "./extensions/slack-via-claude.ts",
-      "./extensions/ollama-models.ts"
+      "./extensions/ollama-models.ts",
+      "./extensions/python"
     ],
     "skills": [
       "./skills"
     ]
+  },
+  "scripts": {
+    "test:python": "node --test tests/python-unit.test.mts tests/python-integration.test.mts"
   },
   "dependencies": {
     "html-to-text": "^9.0.5"
