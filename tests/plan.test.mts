@@ -255,6 +255,21 @@ async function main() {
 		);
 	}
 
+	// ── Bare /plan: infer the task from the conversation ───────────────────
+	{
+		const h = makeHarness(CHOICE_STOP);
+		await h.commands["plan"].handler("", h.ctx);
+		assert.ok(h.narrowed(), "bare /plan must enter planning mode");
+		assert.equal(h.sent.length, 1, "bare /plan must start a planning turn");
+		assert.ok(h.sent[0].includes("infer the task from the"), "must instruct the planner to infer the task");
+		assert.ok(h.sent[0].includes("Task:\n"), "task section must be present but empty");
+		assert.ok(h.sent[0].endsWith("Task:\n"), "no task text may be appended after the empty Task section");
+		assert.ok(
+			!h.notifications.some((n) => n.msg.startsWith("Usage:")),
+			"bare /plan must not show the usage warning",
+		);
+	}
+
 	// ── session_start resets transient state ───────────────────────────────────
 	{
 		const h = makeHarness(CHOICE_STOP);

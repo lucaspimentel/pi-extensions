@@ -3,7 +3,10 @@
  *
  * When the user runs `/plan <task>`, pi disables the `write` and `edit` tools
  * (everything else stays active, including unrestricted bash and MCP tools)
- * and sends a planning prompt as a user message. If the optional
+ * and sends a planning prompt as a user message. `/plan` with no task tells
+ * the planner to infer what to plan from the conversation, asking the user
+ * (via ask_user_question when available, plain text otherwise) if the intent
+ * is ambiguous. If the optional
  * ask_user_question tool is installed (rpiv-ask-user-question package), the
  * planner is instructed to ask clarifying questions before writing the
  * handoff. The planner is asked to
@@ -66,10 +69,25 @@ const PLAN_CLARIFY_REQUIREMENTS = `
   note the open question in the plan.
 `.trim();
 
+const PLAN_INFER_TASK_INSTRUCTION = `
+- The Task section below may be empty. In that case, infer the task from the
+conversation so far: what the user has been discussing, asking about, or
+working on. If the user's intent is ambiguous, resolve it first: call the
+ask_user_question tool if available, otherwise ask in plain text, then fold
+the answer into the plan. If you cannot infer any task at all, reply with a
+single sentence asking what to plan.
+`.trim();
+
 const PLAN_SYSTEM_NUDGE = `${PLAN_NUDGE_INTRO}
 
 Requirements:
 ${PLAN_HANDOFF_REQUIREMENTS}`.trim();
+
+const PLAN_SYSTEM_NUDGE_INFER = `${PLAN_NUDGE_INTRO}
+
+Requirements:
+${PLAN_HANDOFF_REQUIREMENTS}
+${PLAN_INFER_TASK_INSTRUCTION}`.trim();
 
 const PLAN_SYSTEM_NUDGE_WITH_CLARIFY = `${PLAN_NUDGE_INTRO}
 
@@ -177,16 +195,11 @@ export default function plan(pi: ExtensionAPI) {
 		pi.setActiveTools(allTools);
 	}
 
-	async function startPlanning(task: string, ctx: ExtensionCommandContext): Promise<void> {
+	async function startPlanning(args: string, ctx: ExtensionCommandContext): Promise<void> {
 		if (planning) {
 			ctx.ui.notify("Already in planning mode.", "warning");
 			return;
 		}
-		if (!task.trim()) {
-			ctx.ui.notify("Usage: /plan <what you want planned>, or /plan cancel to exit planning early", "warning");
-			return;
-		}
-
 		// Snapshot the active tool set so it can be restored later. Also check
 		// whether the questionnaire tool is registered (optional dependency on
 		// the rpiv-ask-user-question package); it stays active because
@@ -206,8 +219,14 @@ export default function plan(pi: ExtensionAPI) {
 		);
 
 		// Send the planning prompt as a real user message so it triggers a turn.
-		const nudge = canAskUser ? PLAN_SYSTEM_NUDGE_WITH_CLARIFY : PLAN_SYSTEM_NUDGE;
-		pi.sendUserMessage(`${nudge}\n\nTask:\n${task}`);
+		// With no task, the planner is told to infer one from the conversation.
+		const inferred = !args.trim();
+		const nudge = inferred
+			? PLAN_SYSTEM_NUDGE_INFER
+			: canAskUser
+				? PLAN_SYSTEM_NUDGE_WITH_CLARIFY
+				: PLAN_SYSTEM_NUDGE;
+		pi.sendUserMessage(`${nudge}\n\nTask:\n${args}`);
 	}
 
 	async function restoreTools(ctx: ExtensionContext): Promise<void> {
@@ -314,7 +333,7 @@ export default function plan(pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("plan", {
-		description: "Plan with the current model (write/edit disabled); /plan cancel exits early",
+		description: "Plan with the current model (write/edit disabled); with no task, infers one from the conversation; /plan cancel exits early",
 		getArgumentCompletions: (prefix: string) => {
 			const items = [{ value: "cancel", label: "cancel" }];
 			const filtered = items.filter((i) => i.value.startsWith(prefix));
