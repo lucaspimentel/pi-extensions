@@ -26,6 +26,7 @@ import {
 	defineTool,
 	type ExtensionAPI,
 	formatSize,
+	keyHint,
 	truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -155,13 +156,35 @@ const pythonTool = defineTool({
 		return new Text(theme.fg("toolTitle", theme.bold(`python> ${display}`)) + more + timeout, 0, 0);
 	},
 
-	renderResult(result, _options, theme, _context) {
-		const details = result.details as { status?: string; durationMs?: number } | undefined;
+	renderResult(result, { expanded }, theme, _context) {
+		const details = result.details as
+			| { status?: string; durationMs?: number }
+			| undefined;
 		const status = details?.status ?? "unknown";
-		const duration = typeof details?.durationMs === "number" ? ` ${(details.durationMs / 1000).toFixed(1)}s` : "";
+		const duration =
+			typeof details?.durationMs === "number" ? ` ${(details.durationMs / 1000).toFixed(1)}s` : "";
 		const failed = FAILURE_STATUSES.has(status as never);
+		const label = status === "python_error" ? "error" : status;
 		const glyph = failed ? theme.fg("error", "✗") : theme.fg("success", "✓");
-		return new Text(`${glyph} python ${status}${duration}`, 0, 0);
+		const header = `${glyph} python ${label}${theme.fg("muted", duration)}`;
+
+		// Body is the model-facing text minus its first line (the status line,
+		// replaced by the glyph header above). Mirrors pi's fallback result
+		// rendering: first lines collapsed, everything on expand.
+		const content = result.content.find((c) => c.type === "text");
+		const bodyLines = content && content.type === "text" ? content.text.split("\n").slice(1) : [];
+
+		if (expanded) {
+			return new Text([header, ...bodyLines.map((line) => theme.fg("toolOutput", line))].join("\n"), 0, 0);
+		}
+		const previewLines = 10;
+		const display = bodyLines.slice(0, previewLines);
+		const remaining = bodyLines.length - display.length;
+		let text = [header, ...display.map((line) => theme.fg("toolOutput", line))].join("\n");
+		if (remaining > 0) {
+			text += `${theme.fg("muted", `\n... (${remaining} more lines, `)}${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+		}
+		return new Text(text, 0, 0);
 	},
 });
 
