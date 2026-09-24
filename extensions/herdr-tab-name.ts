@@ -8,6 +8,11 @@
  * llm-session-name extension, which flows through setSessionName). A cleared
  * name never renames the tab.
  *
+ * Subagent child sessions spawned by @tintinweb/pi-subagents never rename the
+ * tab: they run in the same pi process, inherit HERDR_TAB_ID, and would
+ * otherwise overwrite the label with their auto-assigned name (e.g.
+ * "general#123455AB") for as long as they run. See isSubagentSession.
+ *
  * No-op outside herdr: HERDR_ENV must be "1" and HERDR_TAB_ID must be set.
  */
 
@@ -16,6 +21,39 @@ import { execFile } from "node:child_process";
 
 /** Collapse whitespace runs and trim; used for tab labels. */
 export const cleanLabel = (name: string): string => name.replace(/\s+/g, " ").trim();
+
+/** Matches the pi-subagents child-session naming scheme: "type#<8-char id>". */
+const SUBAGENT_NAME_PATTERN = /#[0-9A-Za-z_-]{8}$/;
+
+/**
+ * True for subagent child sessions spawned by @tintinweb/pi-subagents. Two
+ * signals, either is sufficient: pi-subagents stamps a persisted child
+ * session's header with parentSession (the spawner's session file), and it
+ * names every child session "<type>#<first 8 chars of a nanoid id>" before
+ * extensions bind. The name pattern also covers nested (in-memory) child
+ * sessions, whose header carries no parentSession.
+ */
+export const isSubagentSession = (
+	name: string,
+	header?: { parentSession?: string } | null,
+): boolean => !!header?.parentSession || SUBAGENT_NAME_PATTERN.test(name);
+
+/**
+ * Read the session header off an event context, tolerating a missing context,
+ * session manager, or getHeader method (older/mocked contexts). Returns
+ * undefined when nothing usable is there, which counts as "not a subagent".
+ */
+const getHeader = (ctx: unknown): { parentSession?: string } | undefined => {
+	try {
+		const sessionManager = (ctx as { sessionManager?: { getHeader?: () => unknown } } | undefined)
+			?.sessionManager;
+		const header = sessionManager?.getHeader?.();
+		if (header && typeof header === "object") return header as { parentSession?: string };
+	} catch {
+		// Best-effort: an unreadable header counts as "not a subagent".
+	}
+	return undefined;
+};
 
 export default function (pi: ExtensionAPI) {
 	// Read at registration time: a pi process runs in one pane, so the env
@@ -45,18 +83,22 @@ export default function (pi: ExtensionAPI) {
 		);
 	};
 
-	pi.on("session_start", async () => {
+	pi.on("session_start", async (_event, ctx) => {
 		try {
 			const name = pi.getSessionName();
-			if (name) renameTab(name);
+			if (name && !isSubagentSession(name, getHeader(ctx))) renameTab(name);
 		} catch {
 			// Best-effort.
 		}
 	});
 
-	pi.on("session_info_changed", async (event) => {
+	pi.on("session_info_changed", async (event, ctx) => {
 		// Only a defined name renames the tab; a cleared name leaves it alone.
-		if (typeof event.name === "string" && event.name) {
+		if (
+			typeof event.name === "string" &&
+			event.name &&
+			!isSubagentSession(event.name, getHeader(ctx))
+		) {
 			renameTab(event.name);
 		}
 	});

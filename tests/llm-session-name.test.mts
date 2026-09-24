@@ -612,6 +612,68 @@ try {
 	const all = await waitForLog(2);
 	assert.ok(all[1].startsWith(PREFIX), `unexpected call: ${all[1]}`);
 	assert.equal(all[1].slice(PREFIX.length), "renamed again");
+
+	// ── Subagent child sessions (pi-subagents) must never rename the tab ──────
+
+	const { isSubagentSession } = tabMod;
+	assert.equal(isSubagentSession("general#123455AB", undefined), true);
+	assert.equal(isSubagentSession("my title", { parentSession: "/x/session.jsonl" }), true);
+	assert.equal(isSubagentSession("my title", undefined), false);
+	assert.equal(isSubagentSession("my title", {}), false);
+	assert.equal(isSubagentSession("my title", null), false);
+	assert.equal(isSubagentSession("fix#12", undefined), false, "too short for the id pattern");
+	assert.equal(isSubagentSession("", undefined), false);
+
+	// Log has 2 lines so far; counts below are absolute.
+	const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+	const logLines = async () => {
+		const content = (await import("node:fs")).readFileSync(logFile, "utf8").trim();
+		return content ? content.split("\n") : [];
+	};
+
+	const subHandlers: Record<string, (event: any, ctx: any) => unknown> = {};
+	tabMod.default({
+		on(event: string, handler: any) {
+			subHandlers[event] = handler;
+		},
+		getSessionName: () => "general#123455AB",
+	} as any);
+
+	// Header stamped with parentSession: skipped regardless of the name.
+	const stampedCtx = { sessionManager: { getHeader: () => ({ parentSession: "/x/session.jsonl" }) } };
+	// Header without parentSession: the name pattern alone must skip these.
+	const emptyHeaderCtx = { sessionManager: { getHeader: () => ({}) } };
+
+	await subHandlers.session_start({}, stampedCtx);
+	await subHandlers.session_info_changed({ name: "general#123455AB" }, stampedCtx);
+	// Nested (in-memory) child: no parentSession in the header, name-only signal.
+	await subHandlers.session_info_changed({ name: "general#123455AB" }, emptyHeaderCtx);
+	await subHandlers.session_start({}, stampedCtx);
+	await sleep(150);
+	assert.equal((await logLines()).length, 2, "subagent sessions must not rename the tab");
+
+	// A normal name through a subagent-free context still renames: the guard
+	// only skips what it positively identifies as a subagent.
+	await subHandlers.session_info_changed({ name: "my title" }, emptyHeaderCtx);
+	const lines3 = await waitForLog(3);
+	assert.equal(lines3[2].slice(PREFIX.length), "my title");
+
+	// Fail-open: a ctx without a usable header must not block the parent.
+	await subHandlers.session_info_changed({ name: "renamed third" }, {});
+	const lines4 = await waitForLog(4);
+	assert.equal(lines4[3].slice(PREFIX.length), "renamed third");
+
+	// Fail-open on session_start too: no ctx at all, normal name from getSessionName.
+	const mainHandlers: Record<string, (event: any, ctx: any) => unknown> = {};
+	tabMod.default({
+		on(event: string, handler: any) {
+			mainHandlers[event] = handler;
+		},
+		getSessionName: () => "fresh session",
+	} as any);
+	await mainHandlers.session_start({}, undefined);
+	const lines5 = await waitForLog(5);
+	assert.equal(lines5[4].slice(PREFIX.length), "fresh session");
 } finally {
 	process.env.HERDR_ENV = prevEnv;
 	process.env.HERDR_TAB_ID = prevTab;
