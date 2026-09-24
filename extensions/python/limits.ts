@@ -56,6 +56,9 @@ export const LIMITS = {
 	/** After a result frame, keep draining output pipes until this much time passes without data. */
 	drainQuietMs: 300,
 
+	/** Quiet window used when no live sandbox processes could still write. */
+	drainQuietIdleMs: 50,
+
 	/** Upper bound on the drain grace period after a result frame. */
 	drainMaxMs: 2_000,
 

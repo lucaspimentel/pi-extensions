@@ -632,10 +632,37 @@ test("session-tree style re-creation deletes the old context's scratch", async (
 });
 
 test("no surviving worker processes after the suite", async () => {
-	// Give late kills a moment, then verify nothing from this test run survives.
+	// Give late kills a moment, then verify nothing from this test run
+	// survives. Scope to test-owned workers: their scratch mounts live under
+	// the py-int-runtime temp roots, unlike a live pi session's worker.
 	await new Promise((r) => setTimeout(r, 500));
-	const survivors = findProcessesByCmdline("/worker.py");
+	const survivors = findProcessesByCmdline("/worker.py").filter((pid) => {
+		try {
+			return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes("py-int-runtime");
+		} catch {
+			return false;
+		}
+	});
 	assert.deepEqual(survivors, [], `no worker processes may survive; found: ${survivors}`);
+});
+
+test("first execution on fresh workers captures stdout despite pipe races", async () => {
+	// Regression: the result frame can be processed before pending stdout data
+	// events fire (separate pipes), which used to drop the first execution's
+	// output. Hammer the window: many fresh workers, first-execution prints.
+	for (let i = 0; i < 5; i++) {
+		const c = makeController(makeProject());
+		try {
+			const r = await c.execute(`print('first-exec-${i}')`, undefined, undefined);
+			assert.equal(r.status, "ok");
+			assert.ok(
+				r.stdout.includes(`first-exec-${i}`),
+				`first-execution stdout lost on iteration ${i}: got ${JSON.stringify(r.stdout)}`,
+			);
+		} finally {
+			await c.dispose("test");
+		}
+	}
 });
 
 // ── Runner ───────────────────────────────────────────────────────────────────

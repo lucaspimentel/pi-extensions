@@ -599,13 +599,13 @@ export class PythonSessionController {
 					);
 				if (frame.sandboxProcesses > 0) {
 					// Something in the sandbox (a spawned subprocess, a re-parented
-					// grandchild) may still write to the output pipes. Drain with a
-					// generous initial window, then finalize so nothing leaks into
-					// the next execution. Output arriving after the window ends is
-					// discarded: it can no longer be attributed.
+					// grandchild) may still write to the output pipes for a while.
 					void drainQuiet(handle, frame.sandboxProcesses).then(finalize);
 				} else {
-					finalize();
+					// No live processes, but the protocol pipe can still be
+					// processed before pending stdout/stderr data events fire.
+					// Drain briefly so trailing output stays with this execution.
+					void drainQuiet(handle, 0).then(finalize);
 				}
 			};
 
@@ -886,22 +886,24 @@ export class PythonSessionController {
 	}
 }
 
-/**
- * After a result frame, wait for the output pipes to go quiet (bounded) so
- * trailing bytes are captured with their own execution instead of leaking
- * into the next one. When live sandbox processes exist, give them the full
- * window to start writing before the quiet windows begin. Output that
- * arrives after the window ends is discarded.
+/*
+ * After a result frame, the output pipes may still hold undelivered data:
+ * the protocol pipe and the output pipes are separate, and the result frame
+ * can be processed before pending stdout/stderr data events fire. Always
+ * drain briefly so trailing output stays with its own execution; when live
+ * sandbox processes exist, give them the full window to start writing.
+ * Output that arrives after the window ends is discarded.
  */
 async function drainQuiet(handle: WorkerHandle, sandboxProcesses: number): Promise<void> {
 	const deadline = Date.now() + LIMITS.drainMaxMs;
 	if (sandboxProcesses > 0) {
 		await waitForPipeActivity(handle, Math.max(0, deadline - Date.now()));
 	}
+	const quietMs = sandboxProcesses > 0 ? LIMITS.drainQuietMs : LIMITS.drainQuietIdleMs;
 	for (;;) {
 		const remaining = deadline - Date.now();
 		if (remaining <= 0) return;
-		const sawData = await waitForPipeActivity(handle, Math.min(LIMITS.drainQuietMs, remaining));
+		const sawData = await waitForPipeActivity(handle, Math.min(quietMs, remaining));
 		if (!sawData) return;
 	}
 }

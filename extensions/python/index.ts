@@ -99,7 +99,9 @@ const pythonTool = defineTool({
 				}
 			}
 		} else if (action === "reset" || action === "status") {
-			if (params.code !== undefined || params.timeoutSeconds !== undefined) {
+			// Runtime shims may pass code as an empty string; treat that as absent.
+			const hasCode = params.code !== undefined && params.code !== "";
+			if (hasCode || params.timeoutSeconds !== undefined) {
 				throw new Error(`The python tool rejects \`code\` and \`timeoutSeconds\` when action is ${action}.`);
 			}
 		}
