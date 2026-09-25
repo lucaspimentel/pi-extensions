@@ -5,6 +5,7 @@
 //
 // Run: node --test tests/python-unit.test.mts
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -543,6 +544,70 @@ function testLimits() {
 	console.log("  ✓ centralized limits match the documented defaults");
 }
 
+// ── Worker read-audit hook (step 3; runs the real worker.py via python3) ─────
+
+async function testWorkerReadHook() {
+	// Locate a python3; skip (do not fail) when absent, like a bare machine.
+	const pythonBin = process.env.PI_PYTHON_TOOL_INTERPRETER || "python3";
+	const probe = spawnSync(pythonBin, ["-c", "print('ok')"], { encoding: "utf8", timeout: 10_000 });
+	if (probe.error || probe.status !== 0) {
+		console.log("  - skipped: python3 not available on this machine");
+		return;
+	}
+	const workerPath = path.join(import.meta.dirname, "../extensions/python/worker.py");
+	const harness = `
+import importlib.util, os, sys, tempfile
+spec = importlib.util.spec_from_file_location("worker", sys.argv[1])
+w = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(w)
+
+# parse_mounted_prefixes: real /proc on Linux; root "/" excluded.
+prefixes = w.parse_mounted_prefixes()
+assert prefixes, "no mountpoints parsed"
+assert "/" not in prefixes
+
+# _path_outside_mounts: inside a mount allowed, outside denied.
+assert not w._path_outside_mounts("/usr/lib", ["/usr"])
+assert w._path_outside_mounts("/etc/passwd", ["/usr"])
+assert w._path_outside_mounts("/usrx", ["/usr"]), "prefix must not match partial components"
+
+# Hook + execute_code end to end, with cwd as the only allowed prefix.
+cwd = tempfile.mkdtemp()
+os.chdir(cwd)
+with open(os.path.join(cwd, "allow.txt"), "w") as fh:
+    fh.write("fixture")
+w.install_read_audit_hook([cwd, "/proc", os.path.dirname(os.path.abspath(sys.argv[1]))])
+ns = {"__builtins__": __builtins__}
+r_ok = w.execute_code(dict(ns), "open('allow.txt').read()", 100)  # relative, inside cwd
+assert r_ok["status"] == "ok", r_ok
+assert r_ok["repr"] == "'fixture'", r_ok
+r_denied = w.execute_code(dict(ns), "open('/etc/hostname').read()", 100)
+assert r_denied["status"] == "permission_needed", r_denied
+assert r_denied["path"] == "/etc/hostname", r_denied
+assert r_denied["exception"] is not None and r_denied["exception"]["type"] == "SandboxReadDenied", r_denied
+# Directory listing outside the mounts is hooked too; inside is fine.
+import os as _os
+r_list = w.execute_code(dict(ns), "import os; os.listdir('/etc')", 100)
+assert r_list["status"] == "permission_needed", r_list
+r_list_ok = w.execute_code(dict(ns), "import os; os.listdir('.')", 100)
+assert r_list_ok["status"] == "ok", r_list_ok
+# State is preserved across a permission_needed (ordinary exception path).
+r_state = w.execute_code(dict(ns), "marker = 1; marker + 1", 100)
+assert r_state["status"] == "ok" and r_state["repr"] == "2", r_state
+print("WORKER-HOOK-OK")
+`;
+	const run = spawnSync(pythonBin, ["-", workerPath], {
+		input: harness,
+		encoding: "utf8",
+		timeout: 30_000,
+	});
+	assert.ok(
+		run.status === 0 && (run.stdout ?? "").includes("WORKER-HOOK-OK"),
+		`worker hook harness failed: ${run.stderr ?? run.stdout}`,
+	);
+	console.log("  ✓ worker read-audit hook: mount parsing, prefix checks, permission_needed results");
+}
+
 const tests = [
 	testRegistrationHasNoSideEffects,
 	testSchemaValidation,
@@ -555,6 +620,7 @@ const tests = [
 	testWorkspaceMountFlag,
 	testFilterMountableReadRoots,
 	testReadRootBinds,
+	testWorkerReadHook,
 	testPermissionModeEvent,
 	testLimits,
 ];

@@ -33,7 +33,9 @@ export interface ResultFrame {
 	type: "result";
 	protocol: number;
 	id: number;
-	status: "ok" | "python_error";
+	status: "ok" | "python_error" | "permission_needed";
+	/** Set only for status "permission_needed": the requested out-of-sandbox path. */
+	path?: string;
 	repr: string | null;
 	reprTruncated: boolean;
 	exception: PythonExceptionInfo | null;
@@ -103,8 +105,13 @@ export function decodeFrame(line: string): FrameDecodeResult {
 			if (!Number.isInteger(raw.id) || (raw.id as number) < 0) {
 				return { ok: false, error: "result frame has invalid id" };
 			}
-			if (raw.status !== "ok" && raw.status !== "python_error") {
+			if (raw.status !== "ok" && raw.status !== "python_error" && raw.status !== "permission_needed") {
 				return { ok: false, error: "result frame has invalid status" };
+			}
+			if (raw.status === "permission_needed") {
+				if (!isBoundedString(raw.path, 4096) || !(raw.path as string).startsWith("/")) {
+					return { ok: false, error: "permission_needed frame has invalid path" };
+				}
 			}
 			if (raw.repr !== null && !isBoundedString(raw.repr, LIMITS.maxReprBytes)) {
 				return { ok: false, error: "result frame repr missing or over limit" };
@@ -140,6 +147,7 @@ export function decodeFrame(line: string): FrameDecodeResult {
 					protocol: PROTOCOL_VERSION,
 					id: raw.id as number,
 					status: raw.status,
+					path: raw.status === "permission_needed" ? (raw.path as string) : undefined,
 					repr: raw.repr as string | null,
 					reprTruncated: raw.reprTruncated as boolean,
 					exception,

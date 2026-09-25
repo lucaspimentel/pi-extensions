@@ -53,7 +53,9 @@ const pythonTool = defineTool({
 		"scratch directory whose files persist across calls and resets, and outputs belong " +
 		"there. Read roots granted via tool-permissions (readAllowPaths and friends) are " +
 		"mounted read-only at their host paths, so files outside the project are readable " +
-		"once granted to other tools; python status lists them. Standard library only, no package installs, no " +
+		"once granted to other tools; python status lists them. Reads of paths outside the " +
+		"mounted roots prompt the user for permission via tool-permissions; a granted path " +
+		"is mounted and the code re-run automatically. Standard library only, no package installs, no " +
 		"network, no sockets, no input() (it returns EOF at once), no top-level await. " +
 		"Ordinary Python exceptions keep interpreter state (execution is not transactional); " +
 		"timeout, cancellation, output overflow, or a crash kill the interpreter and lose its " +
@@ -118,8 +120,32 @@ const pythonTool = defineTool({
 		}
 
 		if (action === "execute") {
-			const result = await controller.execute(params.code!, params.timeoutSeconds, signal);
-			return executionToolResult(result);
+			// Replay loop for out-of-sandbox read prompts: each "permission_needed"
+			// result offers the user a prompt (routed through pi-tool-permissions);
+			// on allow, tool-permissions has already re-broadcast { mode, readRoots
+			// }, our event handler disposed the controller, and the next iteration
+			// rebuilds it with the new mount and replays the code. Unbounded but
+			// user-gated: every cycle needs an explicit grant. Re-fetch the
+			// controller each iteration: the event handler swaps it out.
+			for (;;) {
+				const current = controllerFor(cwdRoot(ctx.cwd));
+				if ("error" in current) {
+					return unavailableResult(current.error, { action });
+				}
+				const result = await current.execute(params.code!, params.timeoutSeconds, signal);
+				if (result.status !== "permission_needed") return executionToolResult(result);
+				const verdict = await promptForRead(result.permissionPath!, signal);
+				if (verdict === "deny") {
+					return executionToolResult({
+						...result,
+						diagnostic:
+							`Read of ${result.permissionPath} was denied by the user; the path stays unavailable for this session. ` +
+							"Choose an alternative source or ask the user to grant reads from that directory.",
+					});
+				}
+				// allow: loop re-fetches the controller (fresh sandbox with the new
+				// read root) and replays the code from a clean interpreter.
+			}
 		}
 		if (action === "reset") {
 			await controller.reset();
@@ -213,6 +239,58 @@ let writableWorkspace = false;
  */
 let readRoots: string[] = [];
 
+// ── Out-of-sandbox read prompts (step 3) ────────────────────────────────────
+// Correlated bus round trip with pi-tool-permissions: we emit
+// "tool-permissions:prompt" { id, path } and await the matching
+// "tool-permissions:promptResult" { id, outcome }. tool-permissions renders
+// the dialog and, on allow, persists the covering-dir grant and re-broadcasts
+// { mode, readRoots } BEFORE the verdict, so our step-2.5 handler has already
+// updated module state and disposed the controller by the time we proceed to
+// the replay. Timeout, absent listener, or non-interactive UI = deny.
+
+let promptSeq = 0;
+const pendingPrompts = new Map<number, (verdict: "allow" | "deny") => void>();
+/** Covering dirs the user denied this session; later attempts auto-deny. */
+const deniedRoots = new Set<string>();
+const PROMPT_TIMEOUT_MS = 30_000;
+
+/** Covering directory of an absolute path (its parent); falls back to itself. */
+function coveringRootOf(path: string): string {
+	const trimmed = path.replace(/\/+$/, "");
+	const idx = trimmed.lastIndexOf("/");
+	if (idx <= 0) return path;
+	return trimmed.slice(0, idx) || "/";
+}
+
+async function promptForRead(path: string, signal?: AbortSignal): Promise<"allow" | "deny"> {
+	if (!lastCtx?.hasUI) return "deny";
+	if (signal?.aborted) return "deny";
+	const root = coveringRootOf(path);
+	if (deniedRoots.has(root)) return "deny";
+	const id = ++promptSeq;
+	const verdict = await new Promise<"allow" | "deny">((resolve) => {
+		let settled = false;
+		const settle = (v: "allow" | "deny") => {
+			if (settled) return;
+			settled = true;
+			pendingPrompts.delete(id);
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			resolve(v);
+		};
+		const timer = setTimeout(() => settle("deny"), PROMPT_TIMEOUT_MS);
+		const onAbort = () => settle("deny");
+		signal?.addEventListener("abort", onAbort, { once: true });
+		pendingPrompts.set(id, settle);
+		bus?.emit("tool-permissions:prompt", { id, path });
+	});
+	if (verdict === "deny") deniedRoots.add(root);
+	return verdict;
+}
+
+/** Shared event bus, captured at extension init for the correlated prompt round trip. */
+let bus: { emit(channel: string, data: unknown): void } | undefined;
+
 /** Captured ExtensionContext, for notifications from bus events that carry none. */
 let lastCtx: ExtensionContext | undefined;
 
@@ -265,6 +343,7 @@ function executionToolResult(result: ExecutionResult) {
 		details: {
 			action: "execute" as const,
 			status: result.status,
+			permissionPath: result.permissionPath,
 			durationMs: Math.round(result.durationMs),
 			generation: result.generation,
 			stateLost: result.stateLost,
@@ -276,6 +355,7 @@ function executionToolResult(result: ExecutionResult) {
 			outputLimitExceeded: result.outputLimitExceeded,
 			logPaths: result.logPaths,
 			logComplete: result.logComplete,
+			diagnostic: result.diagnostic,
 			exceptionType: result.exception?.type,
 		},
 	};
@@ -285,6 +365,16 @@ function renderExecution(result: ExecutionResult): string {
 	const lines: string[] = [];
 	const duration = `${(result.durationMs / 1000).toFixed(1)}s`;
 	lines.push(`status: ${result.status} (${duration}, worker generation ${result.generation})`);
+
+	if (result.status === "permission_needed" && result.permissionPath) {
+		lines.push(
+			"",
+			`The code tried to read ${result.permissionPath}, which is outside the sandbox mounts.`,
+			result.diagnostic
+				? result.diagnostic
+				: "A permission prompt was offered; if granted, the read root is mounted and the code re-runs automatically.",
+		);
+	}
 
 	if (result.repr !== null) {
 		const marker = result.reprTruncated ? " (truncated)" : "";
@@ -345,6 +435,18 @@ function renderStatus(st: StatusReport): string {
 
 export default function pythonExtension(pi: ExtensionAPI) {
 	pi.registerTool(pythonTool);
+	bus = pi.events;
+
+	// Correlated verdicts for out-of-sandbox read prompts. See the block comment
+	// above promptForRead for the full contract.
+	pi.events.on("tool-permissions:promptResult", (data) => {
+		const payload = (data ?? {}) as { id?: unknown; outcome?: unknown };
+		if (typeof payload.id !== "number" || !Number.isInteger(payload.id)) return;
+		if (payload.outcome !== "allow" && payload.outcome !== "deny") return;
+		const settle = pendingPrompts.get(payload.id);
+		if (!settle) return; // unknown or already-settled id: ignore
+		settle(payload.outcome);
+	});
 
 	// Track the session permission mode and read roots announced by
 	// pi-tool-permissions on the shared event bus (channel
@@ -394,7 +496,7 @@ export default function pythonExtension(pi: ExtensionAPI) {
 			skipped.length > 0
 				? `; skipped: ${skipped.map((s) => `${s.root} (${s.reason})`).join(", ")}`
 				: "";
-		lastCtx?.ui.notify(`python sandbox: ${changed.join("; ")} (interpreter state discarded)${skipNote}`, "info");
+		lastCtx?.ui?.notify(`python sandbox: ${changed.join("; ")} (interpreter state discarded)${skipNote}`, "info");
 	});
 
 	pi.on("session_start", (_event, ctx) => {
@@ -423,6 +525,8 @@ export default function pythonExtension(pi: ExtensionAPI) {
 		controller = undefined;
 		writableWorkspace = false;
 		readRoots = [];
+		deniedRoots.clear();
+		for (const settle of pendingPrompts.values()) settle("deny");
 		lastCtx = undefined;
 		await current?.dispose("session_shutdown");
 	});
@@ -431,6 +535,8 @@ export default function pythonExtension(pi: ExtensionAPI) {
 		controller = undefined;
 		writableWorkspace = false;
 		readRoots = [];
+		deniedRoots.clear();
+		for (const settle of pendingPrompts.values()) settle("deny");
 		lastCtx = undefined;
 		await current?.dispose("session_tree_change");
 	});

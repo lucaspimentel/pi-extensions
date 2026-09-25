@@ -81,6 +81,35 @@ stays read-only with no extra mounts.
 is always safe, and a writable mount only exists because the user explicitly
 switched into a mode that grants unprompted edits.
 
+## Out-of-sandbox read prompts
+
+When python code reads a path that is not mounted into the sandbox (not
+`/workspace`, `/scratch`, a granted read root, or runtime dirs), the read
+fails with a `permission_needed` result instead of a bare `FileNotFoundError`,
+and pi-tool-permissions offers a permission prompt: allow reads from the
+covering directory for this session, for the project config, for the user
+config, or deny.
+
+- Detection: an audit hook in the worker (covering `open`, `os.listdir`,
+`os.scandir`; never `stat`/existence probes) compares requested paths against
+the sandbox's own mountpoints read from `/proc/self/mounts`. The hook is UX,
+not a security boundary: the kernel mounts remain the enforcement, and the
+allow-set is derived from those mounts so it can never drift from them.
+- On **allow**: the covering directory is granted (session or persisted to
+`readAllowPaths`, shared with the Read/bash tools), the sandbox relaunches
+with the new read-only mount, and the code is **replayed once** automatically.
+Replay runs on a fresh interpreter (the relaunch discards the old one), so
+there are no double side effects; this is a deliberate exception to the
+"code is never replayed" rule, gated on the user's explicit grant. Replay may
+surface another ungranted path, prompting again; the loop is unbounded but
+every cycle needs an explicit grant.
+- On **deny**: the result reports the denied path; the covering directory is
+remembered for the session and later attempts auto-deny without re-prompting.
+- Without pi-tool-permissions loaded (or in non-interactive `pi -p` mode),
+there is nobody to prompt: the read denies with an informative error.
+- Limitation: the audit hook is per-process. Reads via *subprocesses* spawned
+by user code bypass it and simply fail with the kernel's own error.
+
 ## Limits
 
 | Limit | Default |
@@ -115,7 +144,9 @@ session disposes them.
 - **Recovery**: on timeout, cancellation, output-limit overflow, worker death,
   or protocol failure, the entire sandbox is killed (including `setsid`
   descendants), captured partial output is returned, state loss is reported,
-  and the next execution starts a fresh interpreter. Code is never replayed.
+  and the next execution starts a fresh interpreter. Code is never replayed
+  automatically (the one exception: the out-of-sandbox read prompt flow above,
+  which replays once after an explicit grant).
 - **No interaction**: `input()` meets immediate EOF (worker stdin is
   `/dev/null` during execution); no top-level await in v1.
 - **Trailing output**: after a result, output pipes drain briefly so a spawned

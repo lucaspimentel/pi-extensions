@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { PythonSessionController } from "../extensions/python/session.ts";
 import { checkDependencies } from "../extensions/python/sandbox.ts";
 import { LIMITS } from "../extensions/python/limits.ts";
+import pythonExtension from "../extensions/python/index.ts";
 
 // ── Prerequisites: skip with an explicit reason when unsupported ─────────────
 
@@ -664,6 +665,125 @@ test("first execution on fresh workers captures stdout despite pipe races", asyn
 		}
 	}
 });
+
+// ── Out-of-sandbox read prompts (step 3, through the extension) ─────────────
+
+interface ExtensionHarness {
+	tool: { execute: (id: string, params: any, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) => Promise<any> };
+	handlers: Record<string, (event: unknown, ctx: unknown) => unknown>;
+	events: { on(channel: string, handler: (data: unknown) => void): () => void; emit(channel: string, data: unknown): void };
+}
+
+function makeExtensionHarness(): ExtensionHarness {
+	let tool: any;
+	const handlers: Record<string, any> = {};
+	const listeners: Array<[string, (data: unknown) => void]> = [];
+	const pi = {
+		registerTool: (t: any) => {
+			tool = t;
+		},
+		on: (event: string, handler: any) => {
+			handlers[event] = handler;
+			return () => {};
+		},
+		events: {
+			on: (channel: string, handler: (data: unknown) => void) => {
+				listeners.push([channel, handler]);
+				return () => {};
+			},
+			emit: (channel: string, data: unknown) => {
+				for (const [c, h] of [...listeners]) if (c === channel) h(data);
+			},
+		},
+	};
+	pythonExtension(pi as any);
+	return { tool, handlers, events: pi.events } as ExtensionHarness;
+}
+
+/** Fake tool-permissions listener: counts prompts, grants or denies, and on
+ * grant re-broadcasts { mode, readRoots } BEFORE the verdict (the real
+ * extension's ordering contract). */
+function fakePermissionsListener(
+	harness: ExtensionHarness,
+	mode: "grant" | "deny",
+) {
+	let prompts = 0;
+	harness.events.on("tool-permissions:prompt", (data) => {
+		prompts++;
+		const p = data as { id: number; path: string };
+		const trimmed = p.path.replace(/\/+$/, "");
+		const root = trimmed.slice(0, trimmed.lastIndexOf("/")) || p.path;
+		if (mode === "grant") {
+			harness.events.emit("tool-permissions:mode", { mode: "manual", readRoots: [root] });
+			harness.events.emit("tool-permissions:promptResult", { id: p.id, outcome: "allow" });
+		} else {
+			harness.events.emit("tool-permissions:promptResult", { id: p.id, outcome: "deny" });
+		}
+	});
+	return { get prompts() { return prompts; } };
+}
+
+async function runExtension(harness: ExtensionHarness, projectDir: string, code: string) {
+	const ctx = { cwd: projectDir, hasUI: true };
+	harness.handlers.session_start({}, ctx);
+	return harness.tool.execute("call-1", { code }, undefined, undefined, ctx);
+}
+
+/** Reset the extension's module state between tests (it persists per process). */
+async function resetExtension(harness: ExtensionHarness) {
+	await harness.handlers.session_shutdown({}, {});
+}
+
+const readHostFile = "open('/etc/hostname').read().strip()";
+
+if (supported) {
+	test("out-of-sandbox read prompts, then grant mounts the root and replays", async () => {
+		const harness = makeExtensionHarness();
+		await resetExtension(harness);
+		const listener = fakePermissionsListener(harness, "grant");
+		const project = makeProject();
+		const result = await runExtension(harness, project, readHostFile);
+		assert.equal(result.details?.status, "ok", JSON.stringify(result.details ?? {}));
+		assert.equal(listener.prompts, 1, "exactly one prompt for one ungranted path");
+		const host = fs.readFileSync("/etc/hostname", "utf8").trim();
+		const text = (result.content as Array<{ type: string; text?: string }> | undefined)
+			?.find((c) => c.type === "text")?.text ?? "";
+		assert.ok(text.includes(host), `replayed code must read the granted file; got: ${text.slice(0, 400)}`);
+	});
+
+	test("denied reads return permission_needed and are remembered for the session", async () => {
+		const harness = makeExtensionHarness();
+		await resetExtension(harness);
+		const listener = fakePermissionsListener(harness, "deny");
+		const project = makeProject();
+		const r1 = await runExtension(harness, project, readHostFile);
+		assert.equal(r1.details?.status, "permission_needed");
+		assert.equal(r1.details?.permissionPath, "/etc/hostname");
+		assert.match(r1.details?.diagnostic ?? "", /denied by the user/);
+		assert.equal(listener.prompts, 1);
+		// Second attempt at the same covering dir auto-denies without a prompt.
+		const ctx = { cwd: project, hasUI: true };
+		harness.handlers.session_start({}, ctx);
+		const r2 = await harness.tool.execute("call-2", { code: readHostFile }, undefined, undefined, ctx);
+		assert.equal(r2.details?.status, "permission_needed");
+		assert.equal(listener.prompts, 1, "no second prompt for a denied root");
+	});
+
+	test("aborted signal during a pending read prompt settles as deny", async () => {
+		const harness = makeExtensionHarness();
+		await resetExtension(harness);
+		const ac = new AbortController();
+		// Deterministic: abort exactly when the prompt is emitted, so the await
+		// is pending and the abort listener settles it as deny.
+		harness.events.on("tool-permissions:prompt", () => ac.abort());
+		const project = makeProject();
+		const ctx = { cwd: project, hasUI: true };
+		harness.handlers.session_start({}, ctx);
+		const result = await harness.tool.execute("call-3", { code: readHostFile }, ac.signal, undefined, ctx);
+		assert.equal(result.details?.status, "permission_needed");
+		assert.match(result.details?.diagnostic ?? "", /denied by the user/);
+	});
+}
 
 // ── Runner ───────────────────────────────────────────────────────────────────
 

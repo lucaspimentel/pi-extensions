@@ -25,7 +25,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
-import { LIMITS } from "./limits.ts";
+import { LIMITS, PROTOCOL_VERSION } from "./limits.ts";
 import {
 	decodeFrame,
 	encodeRequest,
@@ -44,6 +44,7 @@ import {
 export type ExecutionStatus =
 	| "ok"
 	| "python_error"
+	| "permission_needed"
 	| "timeout"
 	| "cancelled"
 	| "output_limit"
@@ -53,6 +54,7 @@ export type ExecutionStatus =
 /** Statuses whose tool results are marked as errors toward the model. */
 export const FAILURE_STATUSES: ReadonlySet<ExecutionStatus> = new Set([
 	"python_error",
+	"permission_needed",
 	"timeout",
 	"cancelled",
 	"output_limit",
@@ -74,6 +76,8 @@ export interface ExecutionResult {
 	/** True when the interpreter and its namespace were destroyed. */
 	stateLost: boolean;
 	stateLostReason?: string;
+	/** Set only for status "permission_needed": the requested out-of-sandbox path. */
+	permissionPath?: string;
 	/** True when the hard output budget was hit (sandbox killed). */
 	outputLimitExceeded: boolean;
 	logPaths?: { stdout: string; stderr: string };
@@ -571,6 +575,7 @@ export class PythonSessionController {
 						resolve(
 							assemble({
 								status: frame.status,
+								permissionPath: frame.path,
 								repr: frame.repr,
 								reprTruncated: frame.reprTruncated,
 								exception: frame.exception,
@@ -605,6 +610,7 @@ export class PythonSessionController {
 					resolve(
 						assemble({
 							status: frame.status,
+							permissionPath: frame.path,
 							repr: frame.repr,
 							reprTruncated: frame.reprTruncated,
 							exception: frame.exception,
@@ -628,7 +634,7 @@ export class PythonSessionController {
 
 			// Send the request.
 			try {
-				handle.child.stdin!.write(encodeRequest({ type: "exec", protocol: 1, id, code }));
+				handle.child.stdin!.write(encodeRequest({ type: "exec", protocol: PROTOCOL_VERSION, id, code }));
 			} catch (err) {
 				handle.deathAction?.(
 					`Failed to write the request to the worker: ${err instanceof Error ? err.message : String(err)}`,

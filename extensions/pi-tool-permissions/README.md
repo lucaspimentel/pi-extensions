@@ -704,6 +704,10 @@ Examples:
 - `if a; then b; elif c; then d; else e; fi` → prompts for `a`, `b`, `c`, `d`, `e`
 - `select x in a b c; do echo $x; done` → prompts once for `echo $x`
 
+#### `timeout` wrapper
+
+A leading `timeout [OPTION]... DURATION` wrapper is also stripped (on single commands and per compound part), so only the wrapped command is evaluated: `timeout 120 node --test foo.mts` is analyzed as `node --test foo.mts`. Recognized shapes are the GNU coreutils form: any `-x`/`--xyz` options (with `-k`/`--kill-after` and `-s`/`--signal` consuming a separate value), an optional `--`, then a duration of one or more `NUMBER[UNIT]` groups (`120`, `90s`, `2m30s`). Shapes that do not parse (no duration, a non-numeric duration) are left intact and analyzed as-is.
+
 Nested constructs collapse in one pass (e.g. `do while true` → `true`). When filtering leaves a single command the breakdown downgrades to a simpler single-command dialog.
 
 > `case` statements are kept as a single unit and prompt once for the whole block. Pattern-clause `)` characters would otherwise look like unmatched parentheses to the splitter, so the entire `case … esac` command is evaluated as one command against your allow/deny rules. Add an explicit `Bash(case*)` allow rule to auto-approve familiar case blocks.
@@ -742,6 +746,10 @@ Every mode change (and the `session_start` reset to `manual`) is broadcast on pi
 
 - Flipping the mode or changing the read roots mid-session kills the running python sandbox (interpreter state is discarded); the next execution starts one with the new mounts, and a notification announces the change. The event is re-emitted whenever a read-root grant is added (dialog escalation, session or persisted) and on `/permissions reload`.
 - The mode signal is a courtesy UX, not a security boundary: the mount flags themselves are kernel-enforced, and a writable mount only exists because you explicitly switched into a mode that grants unprompted edits.
+
+### Out-of-sandbox read prompts
+
+When sandboxed python code reads a path outside every mounted root, the python extension emits `tool-permissions:prompt` `{ id, path }` and awaits the correlated `tool-permissions:promptResult` `{ id, outcome }`. This extension renders the dialog (mirroring the read-root escalation options): allow reads from the covering directory for **this session**, the **project** config, or the **user** config, or **deny**. On allow, the grant is persisted through the normal `readAllowPaths` machinery and the mode event is re-broadcast **before** the verdict, so the python sandbox is remounted before its code replays. Non-interactive contexts (no UI) deny immediately. See `docs/read-prompts-design.md` for the full design.
 
 ## Slash command
 

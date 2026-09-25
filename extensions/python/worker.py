@@ -226,6 +226,19 @@ def execute_code(namespace, code, repr_limit):
         # SystemExit. Only unrecoverable protocol failures end the loop.
         if isinstance(exc, SystemExit):
             pass
+        # Read of a path outside the sandbox mounts: report it so the parent can
+        # offer the user a permission prompt. State is preserved (this is an
+        # ordinary exception path); the worker stays alive.
+        if isinstance(exc, SandboxReadDenied):
+            denied_path, _truncated = bounded(str(exc.path), 4096)
+            return {
+                "status": "permission_needed",
+                "path": denied_path,
+                "repr": None,
+                "reprTruncated": False,
+                "exception": format_exception(exc),
+                "sandboxProcesses": count_live_others(),
+            }
         return {
             "status": "python_error",
             "repr": None,
@@ -233,6 +246,20 @@ def execute_code(namespace, code, repr_limit):
             "exception": format_exception(exc),
             "sandboxProcesses": count_live_others(),
         }
+
+
+class SandboxReadDenied(Exception):
+    """Raised by the read audit hook for opens outside the sandbox mounts.
+
+    This is UX, not a security boundary: the kernel mounts (read-only project,
+    private tmpfs, granted read roots) remain the real enforcement. The hook
+    exists so the parent can offer the user a permission prompt instead of a
+    bare FileNotFoundError.
+    """
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.path = path
 
 
 def count_live_others():
@@ -306,6 +333,94 @@ class LineReader:
             self.buf.extend(chunk)
 
 
+def parse_mounted_prefixes():
+    """Sandbox mountpoints from /proc/self/mounts, excluding the root "/".
+
+    Returns a sorted list of absolute prefix paths. Any path equal to one of
+    these or nested under one is readable; everything else is outside the
+    sandbox view and triggers a read prompt.
+    """
+    prefixes = []
+    with open("/proc/self/mounts", "rb") as fh:
+        data = fh.read().decode("utf-8", "replace")
+    for line in data.splitlines():
+        fields = line.split()
+        # <device> <mountpoint> <fstype> ...
+        if len(fields) < 2:
+            continue
+        mountpoint = fields[1]
+        # /proc/self/mounts escapes spaces/octal; unescape the common \040 form.
+        mountpoint = mountpoint.replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
+        if mountpoint == "/" or not mountpoint.startswith("/"):
+            continue
+        prefixes.append(mountpoint.rstrip("/") or "/")
+    return sorted(set(prefixes))
+
+
+def _decode_audit_path(arg):
+    if isinstance(arg, bytes):
+        try:
+            return arg.decode("utf-8", "replace")
+        except Exception:  # pragma: no cover - decode with replace cannot raise
+            return None
+    if isinstance(arg, str):
+        return arg
+    return None
+
+
+def _path_outside_mounts(path, prefixes):
+    """True when path resolves outside every mounted prefix.
+
+    Relative paths resolve against the cwd (the sandbox starts in /workspace).
+    Only candidates that fail the literal prefix check pay for a realpath call,
+    which resolves symlinks pointing back into mounted territory.
+    """
+    if not os.path.isabs(path):
+        path = os.path.join(os.getcwd(), path)
+    normalized = os.path.normpath(path)
+    for prefix in prefixes:
+        if normalized == prefix or normalized.startswith(prefix + "/"):
+            return False
+    try:
+        real = os.path.realpath(normalized)
+    except Exception:
+        return True
+    if real == normalized:
+        return True
+    for prefix in prefixes:
+        if real == prefix or real.startswith(prefix + "/"):
+            return False
+    return True
+
+
+def install_read_audit_hook(prefixes):
+    """Raise SandboxReadDenied for open/listdir/scandir outside the mounts.
+
+    stat/existence probes are deliberately NOT hooked: they are the weakest
+    signal (no content read) and accidental glob patterns over outside paths
+    would trigger prompt storms. The hook must never break interpreter
+    internals: any error inside it is swallowed and the open proceeds to the
+    kernel, which returns its own error (usually FileNotFoundError).
+    """
+    prefixes = tuple(prefixes)
+
+    def hook(event, args):
+        if event not in ("open", "os.listdir", "os.scandir"):
+            return
+        try:
+            path = _decode_audit_path(args[0] if args else None)
+            if path is None:
+                return
+            if _path_outside_mounts(path, prefixes):
+                raise SandboxReadDenied(path)
+        except SandboxReadDenied:
+            raise
+        except Exception:
+            pass
+
+    sys.addaudithook(hook)
+
+
 def main():
     repr_limit = 8192
     if len(sys.argv) > 1:
@@ -326,6 +441,22 @@ def main():
         except OSError:
             pass
         os._exit(1)
+
+    # Read-path prompting: derive the readable allow-set from the sandbox's own
+    # mountpoints. bwrap mounts the project (/workspace), scratch (/scratch),
+    # the private tmpfs (/tmp), runtime dirs (/usr, /proc, /dev) and the granted
+    # read roots 1:1 at their host paths, so the mountpoint list IS the set of
+    # readable prefixes and can never drift from what the kernel enforces.
+    # The root "/" is excluded: the sandbox rootfs is a namespace-private tmpfs
+    # whose only contents are the mounts below, and treating "/" as readable
+    # would allow everything. Deriving from /proc/self/mounts keeps the hook in
+    # sync with reality without any protocol change. Fail-open: if the parse
+    # fails, no hook is installed and out-of-sandbox opens just fail with the
+    # kernel's own error (usually FileNotFoundError).
+    try:
+        install_read_audit_hook(parse_mounted_prefixes())
+    except Exception:
+        pass  # prompting is best-effort UX; kernel mounts still enforce
 
     # Detach fd 0 (the request channel) for request reading, then point fd 0
     # and sys.stdin at /dev/null: input() and subprocess stdin hit EOF

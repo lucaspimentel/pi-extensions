@@ -304,6 +304,14 @@
  *   the mode or changing roots mid-session discards the python interpreter's
  *   state (the sandbox is restarted with the new mounts).
  *
+ *   Python read prompts: when sandboxed python code reads a path outside the
+ *   mounted roots, the python extension emits "tool-permissions:prompt"
+ *   { id, path } and awaits the correlated "tool-permissions:promptResult"
+ *   { id, outcome }. We render the read-root dialog (session / project / user /
+ *   deny); on allow we grant the covering directory and re-broadcast the mode
+ *   event BEFORE the verdict so the sandbox is remounted before the code
+ *   replays. Non-interactive contexts (no UI) deny immediately.
+ *
  *   Switch via:
  *     - Ctrl+Alt+P hotkey (cycles manual → allow edits → auto → yolo → manual)
  *     - /permissions mode [manual|allow-edits|auto|yolo]
@@ -527,6 +535,8 @@ export default function (pi: ExtensionAPI) {
 	// toggling on when no model is authed yet can resolve later, so the tool_call
 	// handler refreshes the status when the resolved id drifts from this.
 	let lastAutoStatusId: string | undefined = undefined;
+	/** Captured ExtensionContext for the python read-prompt dialog (bus events carry none). */
+	let promptCtx: ExtensionContext | undefined;
 	// Session-only read grants (never persisted, reset at session_start):
 	// sessionScratch mirrors readAllowScratch for this session, and
 	// sessionReadRoots holds extra read roots granted via dialog escalation.
@@ -674,6 +684,90 @@ export default function (pi: ExtensionAPI) {
 		// ordering is safe).
 		emitPythonModeEvent();
 		ctx.ui.setStatus(STATUS_KEY, "");
+		promptCtx = ctx;
+	});
+
+	// ── Out-of-sandbox read prompts from the python tool (step 3) ──────────
+	// The python extension emits "tool-permissions:prompt" { id, path } while a
+	// python execution is paused on an ungranted out-of-sandbox read, and awaits
+	// the correlated "tool-permissions:promptResult" { id, outcome }. We render
+	// the dialog (mirroring the read-root escalation options) and, on allow,
+	// grant the covering directory (session set or persisted readAllowPaths) and
+	// re-broadcast { mode, readRoots } BEFORE the verdict, so the python side's
+	// step-2.5 handler has already mounted the root and disposed its controller
+	// by the time it proceeds to replay the code.
+	pi.events.on("tool-permissions:prompt", async (data) => {
+		const payload = (data ?? {}) as { id?: unknown; path?: unknown };
+		const id = typeof payload.id === "number" ? payload.id : undefined;
+		const path = typeof payload.path === "string" && payload.path.startsWith("/") ? payload.path : undefined;
+		if (id === undefined || path === undefined) return;
+		const respond = (outcome: "allow" | "deny") =>
+			pi.events.emit("tool-permissions:promptResult", { id, outcome });
+
+		if (!promptCtx || !promptCtx.hasUI) {
+			respond("deny");
+			return;
+		}
+
+		// Suggested covering directory: the parent dir of the requested path.
+		const trimmed = path.replace(/\/+$/, "");
+		const slash = trimmed.lastIndexOf("/");
+		const root = slash > 0 ? trimmed.slice(0, slash) : path;
+
+		const ctx = promptCtx;
+		ctx.ui.setWorkingVisible(false);
+		pi.events.emit("herdr:blocked", { active: true, label: "awaiting read permission: python" });
+		try {
+			const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
+			const userPath = tildify(userConfigPath());
+			const title = `python wants to read ${path}`;
+			const choice = await ctx.ui.select(title, [
+				`Allow reads from ${root} (this session)`,
+				`Allow reads from ${root} (project: ${projectPath})`,
+				`Allow reads from ${root} (user: ${userPath})`,
+				"Deny",
+			]);
+			if (choice === undefined) {
+				respond("deny");
+				return;
+			}
+			if (choice.startsWith("Allow reads from") && choice.endsWith("(this session)")) {
+				if (!sessionReadRoots.includes(root)) sessionReadRoots.push(root);
+				emitPythonModeEvent();
+				respond("allow");
+				return;
+			}
+			if (choice.includes("(project:")) {
+				const raw = loadProjectConfigRaw(ctx.cwd);
+				if (!raw.readAllowPaths?.includes(root)) {
+					raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), root]);
+					saveProjectConfig(ctx.cwd, raw);
+					cfg = loadConfig(ctx.cwd);
+				}
+				emitPythonModeEvent();
+				respond("allow");
+				return;
+			}
+			if (choice.includes("(user:")) {
+				const raw = loadUserConfigRaw();
+				if (!raw.readAllowPaths?.includes(root)) {
+					raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), root]);
+					saveUserConfig(raw);
+					cfg = loadConfig(ctx.cwd);
+				}
+				emitPythonModeEvent();
+				respond("allow");
+				return;
+			}
+			respond("deny");
+		} catch {
+			// Dialog failed (interrupted, redraw error): deny so the python side
+			// never hangs on a missing verdict.
+			respond("deny");
+		} finally {
+			ctx.ui.setWorkingVisible(true);
+			pi.events.emit("herdr:blocked", { active: false });
+		}
 	});
 
 	// ── Tool call gating ─────────────────────────────────────────────────────
