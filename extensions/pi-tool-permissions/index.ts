@@ -216,6 +216,17 @@
  *   allowNoopCd (default: true)
  *     Silently allows no-op `cd` commands (cd to cwd). Explicit ask rules are
  *     checked first and win; deny rules always win.
+ *   python (automatic, no config key)
+ *     The sandboxed `python` tool is implicitly allowed in every mode (manual,
+ *     edits, auto, yolo): it runs inside a bubblewrap sandbox with no network,
+ *     a read-only project mount, and no host mounts, so it is strictly more
+ *     restricted than the read-only bash tier. `python reset`/`python status`
+ *     run no code and are always allowed, even over toolDefaults.python = ask.
+ *     `execute` can still be gated with an explicit "toolDefaults":
+ *     { "python": "ask" | "deny" }, which wins in every mode. Bare allow/deny/ask
+ *     rules (`Python`) work with normal precedence (deny > ask > allow); note
+ *     pattern rules like `Python(x)` are NOT supported for python (patterns
+ *     would match the raw JSON of the input, not the code).
  *
  * Redirected Bash commands (write-risk):
  *   A Bash command containing a top-level *file* output redirection (>, >>, 2>,
@@ -1383,6 +1394,9 @@ export default function (pi: ExtensionAPI) {
 					...tdEntries.map(([k, v]) =>
 						implicitTDKeys.has(k) ? `  [implicit] ${k} -> ${v}` : `  - ${k} -> ${v}`
 					),
+					cfg.explicitToolDefaults["python"] === undefined
+						? `python: implicit allow (sandboxed; override with toolDefaults.python)`
+						: `python: ${cfg.explicitToolDefaults["python"]} (toolDefaults.python)`,
 				];
 				ctx.ui.notify(lines.join("\n"), "info");
 				return;

@@ -2639,6 +2639,14 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// bypassed by an implicit allow.
 	const askRule = matched(cfg.ask);
 	if (askRule !== undefined) return { action: "ask", reason: `matched ask rule '${askRule}'` };
+	// python reset/status are pure bookkeeping (they start no execution and run
+	// no code, like no-op `cd`): always allowed, even over an explicit
+	// toolDefaults.python = "ask". Explicit ask/deny rules above still win.
+	if (normalizeTool(toolName) === "python") {
+		const pyAction = String(input.action ?? "execute");
+		if (pyAction === "reset" || pyAction === "status")
+			return { action: "allow", reason: "python reset/status (bookkeeping, no code execution)" };
+	}
 	// Read-only bash auto-allow short-circuit. When the auto layer is engaged
 	// (auto mode) AND classifyAllShell is set, route read-only bash
 	// commands through the classifier instead of silently allowing them. For
@@ -2714,6 +2722,15 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// implicit write guard, which must NOT short-circuit the mode strategy.
 	const td = cfg.explicitToolDefaults[tool];
 	if (td !== undefined) return { action: td, reason: `toolDefaults.${tool} = ${td}` };
+	// The sandboxed python tool is allowed implicitly in every mode: it runs in
+	// a bubblewrap sandbox (no network, read-only project mount, no host
+	// mounts), so it is strictly more restricted than the read-only bash tier.
+	// This is a dedicated branch rather than an implicitToolDefaults entry
+	// because implicit entries are demoted below the classifier in auto mode;
+	// python must never be classified. Explicit toolDefaults.python still wins
+	// for execute in every mode (checked above).
+	if (tool === "python")
+		return { action: "allow", reason: "sandboxed python tool (implicit allow; override with toolDefaults.python)" };
 	// Mode strategy for the non-explicit remainder. Layering rationale (see
 	// docs/permission-modes-design.md):
 	//

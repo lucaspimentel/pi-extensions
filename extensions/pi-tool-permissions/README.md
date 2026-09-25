@@ -543,6 +543,27 @@ Or disable the default entirely:
 { "toolDefaults": { "write": "allow" } }
 ```
 
+#### `python` (automatic, no config key)
+
+The sandboxed `python` tool is implicitly **allowed in every permission mode** (manual, edits,
+auto, yolo). It runs inside a bubblewrap sandbox with no network, a read-only project mount,
+and no host mounts, so it is strictly more restricted than the read-only bash tier that is
+already auto-allowed. It is a built-in tier, not a config flag, and it is never screened by
+the auto-mode classifier.
+
+- `python` `execute` (the default action): implicitly allowed unless you set an explicit
+  `toolDefaults.python`, which wins in every mode:
+  ```json
+  { "toolDefaults": { "python": "ask" } }
+  ```
+- `python` `reset` / `status`: pure bookkeeping (they run no code and touch nothing), so they
+  are **always** allowed, even when `toolDefaults.python` is `"ask"`. Explicit `deny`/`ask`
+  rules still win over them.
+- Bare `Python` allow/deny/ask rules work with normal precedence (`deny > ask > allow`), so a
+  deny rule like `"Python"` blocks every python call. Pattern rules like `Python(x)` are
+  **not** supported for python: patterns would match the raw JSON of the tool input, not the
+  submitted code.
+
 #### `toolDefaults` map
 
 You can set per-tool fallback actions for any tool. They are checked **after** the explicit
@@ -563,12 +584,14 @@ allow/deny/ask lists but **before** `defaultAction`:
 For each tool call, the first matching slot wins:
 
 ```
-deny  >  ask  >  allow  >  toolDefaults  >  auto (if session toggle on)  >  defaultAction
+deny  >  ask  >  allow  >  toolDefaults  >  python implicit allow  >  auto (if session toggle on)  >  defaultAction
 ```
 
 So a `deny` rule always overrides an `allow` rule, and an explicit `allow` rule always overrides
 a `toolDefaults` entry (which is how `Write(./output/*)` in allow can opt out of the implicit
-`write → ask` default).
+`write → ask` default). The sandboxed `python` tool sits between `toolDefaults` and the mode
+strategies: explicit `toolDefaults.python` wins over it in every mode, and it wins over
+`defaultAction` and the auto-mode classifier.
 
 ## Interactive prompt
 

@@ -1276,4 +1276,53 @@ test("mlr tee in DSL blocks flip",                         suggestReadRoot("Bash
 test("file redirect blocks flip",                          suggestReadRoot("Bash", { command: "cat x > /etc/out" }, sugCfg), null);
 test("unresolvable expansion blocks flip",                 suggestReadRoot("Bash", { command: "cat $UNKNOWN/x" }, sugCfg), null);
 
+section("decideWithReason — python tool (sandboxed, implicit allow)");
+
+// The python tool gets an implicit allow in every mode (it is kernel-sandboxed:
+// no network, read-only project mount, no host mounts). Explicit
+// toolDefaults.python still wins for execute in every mode; reset/status are
+// unconditional bookkeeping allows; explicit deny/ask rules always win.
+
+const pyDefault = makeCfg({ defaultAction: "ask" });
+test("python execute: implicit allow in manual",        decideWithReason(pyDefault, "python", { code: "1+1" }).action, "allow");
+test("python execute: implicit allow reason",           decideWithReason(pyDefault, "python", { code: "1+1" }).reason, "sandboxed python tool (implicit allow; override with toolDefaults.python)");
+test("python execute: implicit allow in edits",         decideWithReason(pyDefault, "python", { code: "1+1" }, "edits").action, "allow");
+test("python execute: implicit allow in auto (no classifier)", decideWithReason(pyDefault, "python", { code: "1+1" }, "auto").action, "allow");
+test("python execute: implicit allow in yolo",          decideWithReason(pyDefault, "python", { code: "1+1" }, "yolo").action, "allow");
+test("python execute: missing action means execute",    decideWithReason(pyDefault, "python", {}).action, "allow");
+
+test("python reset: implicit allow",                    decideWithReason(pyDefault, "python", { action: "reset" }).action, "allow");
+test("python status: implicit allow",                   decideWithReason(pyDefault, "python", { action: "status" }).action, "allow");
+test("python reset: reason",                            decideWithReason(pyDefault, "python", { action: "reset" }).reason, "python reset/status (bookkeeping, no code execution)");
+
+// Explicit toolDefaults.python wins for execute in every mode.
+const pyAsk = makeCfg({ toolDefaults: { python: "ask" } });
+const pyDeny = makeCfg({ toolDefaults: { python: "deny" } });
+test("python execute: toolDefaults ask wins (manual)",  decideWithReason(pyAsk, "python", { code: "1+1" }).action, "ask");
+test("python execute: toolDefaults ask wins (auto)",    decideWithReason(pyAsk, "python", { code: "1+1" }, "auto").action, "ask");
+test("python execute: toolDefaults ask reason",         decideWithReason(pyAsk, "python", { code: "1+1" }).reason, "toolDefaults.python = ask");
+test("python execute: toolDefaults deny wins",          decideWithReason(pyDeny, "python", { code: "1+1" }).action, "deny");
+test("python execute: toolDefaults allow wins",         decideWithReason(makeCfg({ toolDefaults: { python: "allow" } }), "python", { code: "1+1" }).action, "allow");
+test("python reset/status: always allowed despite toolDefaults ask", decideWithReason(pyAsk, "python", { action: "reset" }).action, "allow");
+test("python reset/status: status allowed despite toolDefaults ask", decideWithReason(pyAsk, "python", { action: "status" }).action, "allow");
+test("python reset/status: always allowed despite toolDefaults deny", decideWithReason(pyDeny, "python", { action: "reset" }).action, "allow");
+
+// Explicit bare Python rules follow normal precedence (deny > ask > allow) and
+// win over both the implicit allow and reset/status bookkeeping.
+const pyAskRule = makeCfg({ ask: ["Python"] });
+const pyDenyRule = makeCfg({ deny: ["Python"] });
+const pyAllowRule = makeCfg({ allow: ["Python"] });
+test("python execute: explicit ask rule beats implicit allow",  decideWithReason(pyAskRule, "python", { code: "1+1" }).action, "ask");
+test("python execute: explicit ask rule reason",                decideWithReason(pyAskRule, "python", { code: "1+1" }).reason, "matched ask rule 'Python'");
+test("python reset: explicit ask rule wins (noopCd precedent)", decideWithReason(pyAskRule, "python", { action: "reset" }).action, "ask");
+test("python execute: explicit deny rule beats everything",     decideWithReason(pyDenyRule, "python", { code: "1+1" }).action, "deny");
+test("python reset: explicit deny rule wins",                   decideWithReason(pyDenyRule, "python", { action: "reset" }).action, "deny");
+test("python execute: explicit allow rule matches",             decideWithReason(pyAllowRule, "python", { code: "1+1" }).action, "allow");
+test("python execute: explicit allow rule reason",              decideWithReason(pyAllowRule, "python", { code: "1+1" }).reason, "matched allow rule 'Python'");
+
+// Parity: decide() is a thin wrapper over decideWithReason().
+test("parity: python implicit allow",   decide(pyDefault, "python", { code: "1+1" }), decideWithReason(pyDefault, "python", { code: "1+1" }).action);
+test("parity: python toolDefaults ask", decide(pyAsk, "python", { code: "1+1" }), decideWithReason(pyAsk, "python", { code: "1+1" }).action);
+test("parity: python reset",            decide(pyDefault, "python", { action: "reset" }), decideWithReason(pyDefault, "python", { action: "reset" }).action);
+
 process.exit(summary() > 0 ? 1 : 0);
