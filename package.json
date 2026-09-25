@@ -24,7 +24,8 @@
       "./extensions/pwsh.ts",
       "./extensions/slack-via-claude.ts",
       "./extensions/ollama-models.ts",
-      "./extensions/python"
+      "./extensions/python",
+      "./extensions/session-search"
     ],
     "skills": [
       "./skills"
