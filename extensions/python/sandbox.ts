@@ -202,6 +202,87 @@ export interface WorkerLaunchSpec {
 	interpreterPath: string;
 	/** Mount the project read-write (allow-edits/yolo permission modes). Default: read-only. */
 	writableWorkspace?: boolean;
+	/** Host read-root directories to mount read-only 1:1 (pre-filtered by filterMountableReadRoots). */
+	readRoots?: readonly string[];
+}
+
+/** Sandbox mountpoints that read-root binds must never shadow. */
+const RESERVED_MOUNTPOINTS = [
+	"/workspace",
+	"/scratch",
+	"/tmp",
+	"/usr",
+	"/bin",
+	"/lib",
+	"/lib64",
+	"/sbin",
+	"/proc",
+	"/dev",
+	"/worker.py",
+];
+
+export interface FilteredReadRoots {
+	/** Host paths safe to ro-bind 1:1. */
+	mountable: string[];
+	/** Roots rejected, with the reason (for the user-facing notification). */
+	skipped: Array<{ root: string; reason: string }>;
+}
+
+/**
+ * Filter candidate read roots down to what can safely be mounted read-only
+ * into the sandbox. Skips: non-absolute paths, reserved sandbox mountpoints
+ * and anything at/under them, the project directory itself and anything under
+ * it (already readable at /workspace), and roots nested under a shallower kept
+ * root (already covered). Keeps the shallowest root of each overlapping chain.
+ * Pure: exported for tests and called by the extension before constructing the
+ * controller, so skipped roots can be surfaced in the UI notification.
+ */
+export function filterMountableReadRoots(
+	roots: readonly unknown[],
+	projectDir: string | undefined,
+): FilteredReadRoots {
+	const mountable: string[] = [];
+	const skipped: Array<{ root: string; reason: string }> = [];
+	const seen = new Set<string>();
+	const candidates: string[] = [];
+	for (const raw of roots) {
+		if (typeof raw !== "string") continue;
+		const root = raw.trim();
+		// Only absolute paths; trim trailing slashes (but keep "/" itself out:
+		// a bare "/" would shadow everything).
+		if (!root.startsWith("/") || root === "/") {
+			if (raw.length > 0) skipped.push({ root: raw, reason: "not an absolute path" });
+			continue;
+		}
+		const normalized = root.replace(/\/+$/, "") || "/";
+		if (normalized === "/") {
+			skipped.push({ root: raw, reason: "not an absolute path" });
+			continue;
+		}
+		candidates.push(normalized);
+	}
+	// Shallowest first so nested dedupe keeps the covering root.
+	candidates.sort((a, b) => (a === b ? 0 : a < b ? -1 : 1));
+	for (const root of candidates) {
+		if (seen.has(root)) continue;
+		seen.add(root);
+		const reserved = RESERVED_MOUNTPOINTS.find((m) => root === m || root.startsWith(`${m}/`));
+		if (reserved !== undefined) {
+			skipped.push({ root, reason: `reserved sandbox mount (${reserved})` });
+			continue;
+		}
+		if (projectDir !== undefined && (root === projectDir || root.startsWith(`${projectDir}/`))) {
+			skipped.push({ root, reason: "covered by /workspace" });
+			continue;
+		}
+		const covering = mountable.find((kept) => root.startsWith(`${kept}/`));
+		if (covering !== undefined) {
+			skipped.push({ root, reason: `covered by ${covering}` });
+			continue;
+		}
+		mountable.push(root);
+	}
+	return { mountable, skipped };
 }
 
 /**
@@ -284,6 +365,14 @@ export function buildBwrapArgs(spec: WorkerLaunchSpec): string[] {
 		"--bind", spec.scratchDir, "/scratch",
 		"--ro-bind", spec.workerPath, "/worker.py",
 	);
+
+	// Granted read roots, mounted read-only 1:1 at their host paths
+	// (pre-filtered by filterMountableReadRoots). bind-try: a root that
+	// vanished mid-session degrades to a missing mount instead of failing
+	// sandbox startup.
+	for (const root of spec.readRoots ?? []) {
+		args.push("--ro-bind-try", root, root);
+	}
 
 	// Working directory: relative project writes fail while the mount is
 	// read-only; outputs belong under /scratch either way.

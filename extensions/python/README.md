@@ -38,6 +38,7 @@ python(action?: "execute" | "reset" | "status", code?: string, timeoutSeconds?: 
 | `/workspace` | the canonical project directory | read-only, or **read-write** in allow-edits/yolo permission modes (see below) |
 | `/scratch`   | a private scratch directory under the OS temp dir | writable |
 | `/tmp`       | namespace-private tmpfs | writable |
+| granted read roots | their host paths, 1:1 | read-only (see below) |
 
 Relative project writes fail while the mount is read-only; outputs belong
 under `/scratch`. Scratch files persist across executions and resets and are
@@ -48,21 +49,36 @@ leave temporary files despite best-effort cleanup.
 The worker's stdout/stderr per execution are also streamed to log files under
 a logs directory (kept outside the worker-writable scratch mount).
 
-## Permission modes
+## Permission modes and read roots
 
-The `pi-tool-permissions` extension announces the session permission mode on
-pi's shared event bus (channel `tool-permissions:mode`). In **allow-edits**
-(`edits`) and **yolo** modes, `/workspace` is mounted **read-write**, so python
-code can modify project files the same way `Write`/`Edit` can in those modes.
-In `manual` and `auto` modes the mount stays read-only.
+The `pi-tool-permissions` extension announces the session permission mode and
+read roots on pi's shared event bus (channel `tool-permissions:mode`, payload
+`{ mode, readRoots }`). Two things follow:
 
-- Flipping the mode mid-session kills the running sandbox (interpreter state is
-discarded, reported by the normal teardown path); the next execution starts a
-sandbox with the new mount. The remount is announced with a UI notification.
-- If `pi-tool-permissions` is not loaded, no mode events arrive and the sandbox
-stays read-only.
-- The mode signal is UX, not a security boundary: a stale read-only mount is
-always safe, and a writable mount only exists because the user explicitly
+- In **allow-edits** (`edits`) and **yolo** modes, `/workspace` is mounted
+**read-write**, so python code can modify project files the same way
+`Write`/`Edit` can in those modes. In `manual` and `auto` modes the mount stays
+read-only.
+- The effective read roots (persisted `readAllowPaths`, session grants, and
+scratch roots when `readAllowScratch` is on) are mounted **read-only at their
+host paths, 1:1, in every mode** — the user already granted them to
+`Read`/bash, so python reading them grants nothing new.
+
+In both cases:
+
+- Any change kills the running sandbox (interpreter state is discarded,
+reported by the normal teardown path); the next execution starts a sandbox
+with the new mounts, announced with a UI notification.
+- Roots colliding with reserved sandbox mounts (`/tmp`, `/workspace`,
+`/scratch`, `/usr`, `/proc`, `/dev`, ...) are skipped, with the reason named in
+the notification. Notably the `/tmp` scratch root is never mounted: the
+sandbox keeps its namespace-private tmpfs there. Roots inside the project are
+skipped too (already readable under `/workspace`); a root *containing* the
+project is kept (it also grants sibling directories).
+- If `pi-tool-permissions` is not loaded, no events arrive and the sandbox
+stays read-only with no extra mounts.
+- The mode/root signal is UX, not a security boundary: a stale read-only mount
+is always safe, and a writable mount only exists because the user explicitly
 switched into a mode that grants unprompted edits.
 
 ## Limits

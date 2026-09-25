@@ -90,6 +90,8 @@ export interface StatusReport {
 	lastResetReason?: string;
 	/** How /workspace is mounted: read-only, or read-write in allow-edits/yolo modes. */
 	workspaceMode: "read-only" | "read-write";
+	/** Host read-root directories mounted read-only 1:1. */
+	readRoots: string[];
 	limits: Record<string, unknown>;
 	paths: {
 		projectDir?: string;
@@ -104,6 +106,8 @@ export interface ControllerOptions {
 	projectDir: string;
 	/** Mount /workspace read-write (allow-edits/yolo permission modes). Default: read-only. */
 	writableWorkspace?: boolean;
+	/** Host read-root directories to mount read-only 1:1 (pre-filtered). Default: none. */
+	readRoots?: readonly string[];
 	/** Parent directory for scratch and log dirs; defaults under os.tmpdir(). */
 	runtimeRoot?: string;
 }
@@ -264,6 +268,7 @@ function collectDescendantPids(rootPid: number): number[] {
 export class PythonSessionController {
 	readonly projectDir: string;
 	readonly writableWorkspace: boolean;
+	readonly readRoots: readonly string[];
 	private readonly runtimeRoot: string;
 	private scratchDir: string | null = null;
 	private logDir: string | null = null;
@@ -279,6 +284,7 @@ export class PythonSessionController {
 	constructor(options: ControllerOptions) {
 		this.projectDir = options.projectDir;
 		this.writableWorkspace = options.writableWorkspace === true;
+		this.readRoots = options.readRoots ?? [];
 		this.runtimeRoot = options.runtimeRoot ?? defaultRuntimeRoot();
 	}
 
@@ -344,6 +350,7 @@ export class PythonSessionController {
 			generation: this.generation,
 			lastResetReason: this.lastResetReason ?? undefined,
 			workspaceMode: this.writableWorkspace ? "read-write" : "read-only",
+			readRoots: [...this.readRoots],
 			limits,
 			paths: {
 				projectDir: this.projectDir,
@@ -677,6 +684,7 @@ export class PythonSessionController {
 			bwrapPath: deps.bwrapPath!,
 			interpreterPath: deps.interpreterPath,
 			writableWorkspace: this.writableWorkspace,
+			readRoots: this.readRoots,
 		};
 		const child = spawnWorker(spec);
 		// Never let stdin EPIPE crash the process; execution paths handle it.

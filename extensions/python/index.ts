@@ -33,6 +33,7 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { realpathSync } from "node:fs";
 import { LIMITS } from "./limits.ts";
+import { filterMountableReadRoots } from "./sandbox.ts";
 import {
 	FAILURE_STATUSES,
 	PythonSessionController,
@@ -50,7 +51,9 @@ const pythonTool = defineTool({
 		"The project directory is mounted at /workspace (read-only, unless the session is in " +
 		"allow-edits or yolo permission mode, when it is writable); /scratch is a writable " +
 		"scratch directory whose files persist across calls and resets, and outputs belong " +
-		"there. Standard library only, no package installs, no " +
+		"there. Read roots granted via tool-permissions (readAllowPaths and friends) are " +
+		"mounted read-only at their host paths, so files outside the project are readable " +
+		"once granted to other tools; python status lists them. Standard library only, no package installs, no " +
 		"network, no sockets, no input() (it returns EOF at once), no top-level await. " +
 		"Ordinary Python exceptions keep interpreter state (execution is not transactional); " +
 		"timeout, cancellation, output overflow, or a crash kill the interpreter and lose its " +
@@ -62,7 +65,7 @@ const pythonTool = defineTool({
 		"Run Python snippets in a persistent bubblewrap-sandboxed interpreter with the project at /workspace (read-only, writable in allow-edits/yolo mode) and writable /scratch",
 	promptGuidelines: [
 		"Use the `python` tool for persistent Python snippets, data analysis, and stdlib scripting; state (variables, imports, functions) survives across calls.",
-		"In the `python` tool, /workspace is the project (read-only, writable in allow-edits/yolo permission mode) and /scratch is writable and persistent; write outputs to /scratch, never to /workspace.",
+		"In the `python` tool, /workspace is the project (read-only, writable in allow-edits/yolo permission mode) and /scratch is writable and persistent; write outputs to /scratch, never to /workspace. Files under tool-permissions read roots are readable at their host paths; run `python status` to list them.",
 		"An ordinary Python exception keeps interpreter state; a timeout, cancellation, or crash loses it. Use action=reset to clear state deliberately.",
 	],
 	parameters: Type.Object({
@@ -203,6 +206,13 @@ let controller: PythonSessionController | undefined;
  */
 let writableWorkspace = false;
 
+/**
+ * Host read-root directories mounted read-only into the sandbox (granted via
+ * pi-tool-permissions: readAllowPaths + session grants + readAllowScratch).
+ * Pre-filtered with filterMountableReadRoots; defaults to none.
+ */
+let readRoots: string[] = [];
+
 /** Captured ExtensionContext, for notifications from bus events that carry none. */
 let lastCtx: ExtensionContext | undefined;
 
@@ -217,17 +227,22 @@ function cwdRoot(cwd: string): string | { error: string } {
 function controllerFor(root: string | { error: string }): PythonSessionController | { error: string } {
 	if (typeof root !== "string") return root;
 	if (!controller) {
-		controller = new PythonSessionController({ projectDir: root, writableWorkspace });
+		controller = new PythonSessionController({ projectDir: root, writableWorkspace, readRoots });
 		return controller;
 	}
 	if (controller.projectDir !== root) {
 		// The project context changed: state from the abandoned context must not
 		// leak into the new one. Scratch and logs go with the old context.
 		const old = controller;
-		controller = new PythonSessionController({ projectDir: root, writableWorkspace });
+		controller = new PythonSessionController({ projectDir: root, writableWorkspace, readRoots });
 		void old.dispose("project_dir_changed");
 	}
 	return controller;
+}
+
+/** Strict element-wise equality for the read-root lists compared on every event. */
+function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
+	return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
 // ── Result assembly ─────────────────────────────────────────────────────────
@@ -317,6 +332,11 @@ function renderStatus(st: StatusReport): string {
 	lines.push(
 		`paths: project ${st.paths.projectDir ?? "?"} -> /workspace (${st.workspaceMode}); scratch ${st.paths.scratchDir ?? "(not allocated yet)"} -> /scratch (writable); logs ${st.paths.logDir ?? "(not allocated yet)"}`,
 	);
+	lines.push(
+		st.readRoots.length > 0
+			? `read roots mounted read-only: ${st.readRoots.join(", ")}`
+			: "read roots mounted: none",
+	);
 	lines.push("limits: " + JSON.stringify(st.limits));
 	return lines.join("\n");
 }
@@ -326,29 +346,55 @@ function renderStatus(st: StatusReport): string {
 export default function pythonExtension(pi: ExtensionAPI) {
 	pi.registerTool(pythonTool);
 
-	// Track the session permission mode announced by pi-tool-permissions on the
-	// shared event bus (channel "tool-permissions:mode", payload { mode }). In
-	// allow-edits/yolo modes the sandbox remounts /workspace read-write; flipping
-	// the mode mid-session kills the running sandbox (state loss, reported by the
-	// normal teardown path) and the next execution starts one with the new mount.
-	// Subscription happens at init time, before session_start dispatch, so the
-	// initial { mode: "manual" } emission is always received. If
-	// pi-tool-permissions is not loaded, no event ever arrives and the sandbox
-	// stays read-only.
+	// Track the session permission mode and read roots announced by
+	// pi-tool-permissions on the shared event bus (channel
+	// "tool-permissions:mode", payload { mode, readRoots }). In allow-edits/yolo
+	// modes the sandbox remounts /workspace read-write; the read roots are
+	// mounted read-only 1:1 in every mode. Any change kills the running sandbox
+	// (state loss, reported by the normal teardown path) and the next execution
+	// starts one with the new mounts. One event carries the full state, so each
+	// event is a single relaunch decision. Subscription happens at init time,
+	// before session_start dispatch, so the initial emission is always received.
+	// If pi-tool-permissions is not loaded, no event ever arrives and the sandbox
+	// stays read-only with no extra mounts.
 	pi.events.on("tool-permissions:mode", (data) => {
-		const raw = (data as { mode?: unknown } | null | undefined)?.mode;
-		const desired = raw === "edits" || raw === "yolo";
+		const payload = (data ?? {}) as { mode?: unknown; readRoots?: unknown };
+		const raw = payload.mode;
 		// Ignore unknown modes: only edits/yolo flip the mount; manual/auto (and
 		// anything unrecognized) keep it read-only.
 		if (raw !== "edits" && raw !== "yolo" && raw !== "manual" && raw !== "auto") return;
-		if (desired === writableWorkspace) return;
-		writableWorkspace = desired;
+		const desiredWritable = raw === "edits" || raw === "yolo";
+		// readRoots absent or malformed (e.g. an older pi-tool-permissions) means
+		// "no root mounts", never "keep whatever was mounted".
+		const candidateRoots = Array.isArray(payload.readRoots) ? (payload.readRoots as unknown[]) : [];
+		const projectDir = typeof lastCtx?.cwd === "string" ? cwdRoot(lastCtx.cwd) : undefined;
+		const { mountable, skipped } = filterMountableReadRoots(
+			candidateRoots,
+			typeof projectDir === "string" ? projectDir : undefined,
+		);
+		if (desiredWritable === writableWorkspace && arraysEqual(mountable, readRoots)) return;
+
+		const changed: string[] = [];
+		if (desiredWritable !== writableWorkspace) {
+			changed.push(`/workspace remounted ${desiredWritable ? "read-write" : "read-only"}`);
+		}
+		if (!arraysEqual(mountable, readRoots)) {
+			changed.push(
+				mountable.length > 0
+					? `read roots mounted read-only: ${mountable.join(", ")}`
+					: "read roots cleared",
+			);
+		}
+		writableWorkspace = desiredWritable;
+		readRoots = mountable;
 		const old = controller;
 		controller = undefined;
-		void old?.dispose("permission_mode_changed");
-		const mount = desired ? "read-write" : "read-only";
-		const message = `python sandbox: /workspace remounted ${mount} (interpreter state discarded)`;
-		lastCtx?.ui.notify(message, "info");
+		void old?.dispose("read_roots_or_mode_changed");
+		const skipNote =
+			skipped.length > 0
+				? `; skipped: ${skipped.map((s) => `${s.root} (${s.reason})`).join(", ")}`
+				: "";
+		lastCtx?.ui.notify(`python sandbox: ${changed.join("; ")} (interpreter state discarded)${skipNote}`, "info");
 	});
 
 	pi.on("session_start", (_event, ctx) => {
@@ -376,6 +422,7 @@ export default function pythonExtension(pi: ExtensionAPI) {
 		const current = controller;
 		controller = undefined;
 		writableWorkspace = false;
+		readRoots = [];
 		lastCtx = undefined;
 		await current?.dispose("session_shutdown");
 	});
@@ -383,6 +430,7 @@ export default function pythonExtension(pi: ExtensionAPI) {
 		const current = controller;
 		controller = undefined;
 		writableWorkspace = false;
+		readRoots = [];
 		lastCtx = undefined;
 		await current?.dispose("session_tree_change");
 	});

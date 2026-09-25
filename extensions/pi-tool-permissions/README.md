@@ -735,10 +735,13 @@ The full design (precedence, invariants, sharp edges) lives in [`docs/permission
 
 ### Effect on the python tool
 
-Every mode change (and the `session_start` reset to `manual`) is broadcast on pi's shared event bus (channel `tool-permissions:mode`, payload `{ mode }`). The sandboxed `python` extension consumes this: in `edits` and `yolo` modes it mounts the project at `/workspace` **read-write**, so python code can modify project files like `Write`/`Edit` can. In `manual` and `auto` modes the mount stays read-only.
+Every mode change (and the `session_start` reset to `manual`) is broadcast on pi's shared event bus (channel `tool-permissions:mode`, payload `{ mode, readRoots }`). The sandboxed `python` extension consumes this in two ways:
 
-- Flipping the mode mid-session kills the running python sandbox (interpreter state is discarded); the next execution starts one with the new mount, and a notification announces the remount.
-- The mode signal is a courtesy UX, not a security boundary: the mount flag itself is kernel-enforced, and a writable mount only exists because you explicitly switched into a mode that grants unprompted edits.
+- In `edits` and `yolo` modes it mounts the project at `/workspace` **read-write**, so python code can modify project files like `Write`/`Edit` can. In `manual` and `auto` modes the mount stays read-only.
+- The effective read roots (persisted `readAllowPaths`, session grants, and scratch roots when `readAllowScratch` is on) are mounted into the sandbox **read-only at their host paths, in every mode** — python can read anything you already granted to `Read`/bash. Roots colliding with reserved sandbox mounts (notably `/tmp`, whose private tmpfs is never shadowed) or covered by the project mount are skipped, with the reason announced in a notification.
+
+- Flipping the mode or changing the read roots mid-session kills the running python sandbox (interpreter state is discarded); the next execution starts one with the new mounts, and a notification announces the change. The event is re-emitted whenever a read-root grant is added (dialog escalation, session or persisted) and on `/permissions reload`.
+- The mode signal is a courtesy UX, not a security boundary: the mount flags themselves are kernel-enforced, and a writable mount only exists because you explicitly switched into a mode that grants unprompted edits.
 
 ## Slash command
 

@@ -294,11 +294,15 @@
  *   docs/permission-modes-design.md.
  *
  *   Mode broadcast: every mode change (and the session_start reset to manual)
- *   emits pi.events channel "tool-permissions:mode" with { mode }. The python
- *   extension consumes this to remount its sandbox's /workspace read-write in
- *   edits/yolo modes (see pythonWritableWorkspace in rules.ts). Flipping the
- *   mode mid-session discards the python interpreter's state (the sandbox is
- *   restarted with the new mount).
+ *   emits pi.events channel "tool-permissions:mode" with { mode, readRoots }.
+ *   The python extension consumes this to remount its sandbox's /workspace
+ *   read-write in edits/yolo modes (see pythonWritableWorkspace in rules.ts)
+ *   and to mount the effective read roots (readAllowPaths + session grants +
+ *   readAllowScratch, i.e. sessionCfg().readRoots) read-only at their host
+ *   paths. The event is also re-emitted whenever a read-root grant is added
+ *   (dialog escalation, session or persisted) and on config reload. Flipping
+ *   the mode or changing roots mid-session discards the python interpreter's
+ *   state (the sandbox is restarted with the new mounts).
  *
  *   Switch via:
  *     - Ctrl+Alt+P hotkey (cycles manual → allow edits → auto → yolo → manual)
@@ -539,6 +543,18 @@ export default function (pi: ExtensionAPI) {
 		return withExtraReadRoots(cfg, [...(sessionScratch ? scratchRoots() : []), ...sessionReadRoots]);
 	}
 
+	/**
+	 * Broadcast the full python-sandbox state on the shared event bus: the
+	 * session permission mode plus the effective read roots. The python
+	 * extension consumes this to remount /workspace (edits/yolo) and to mount
+	 * the read roots read-only (step 2.5). One event carries the complete
+	 * state, so every emission point calls this and the consumer treats each
+	 * event as a single relaunch decision (no debounce needed).
+	 */
+	function emitPythonModeEvent(): void {
+		pi.events.emit(MODE_EVENT_CHANNEL, { mode, readRoots: sessionCfg().readRoots });
+	}
+
 	// ── Deny-with-message helper ─────────────────────────────────────────────
 
 	/**
@@ -577,10 +593,11 @@ export default function (pi: ExtensionAPI) {
 	 */
 	function applyMode(value: PermissionMode, ctx: ExtensionContext, notify = true): void {
 		mode = value;
-		// Broadcast the session mode on the shared event bus. The python
-		// extension subscribes to remount its sandbox's /workspace read-write in
-		// edits/yolo modes (see pythonWritableWorkspace in rules.ts).
-		pi.events.emit(MODE_EVENT_CHANNEL, { mode: value });
+		// Broadcast the session mode (plus the effective read roots) on the
+		// shared event bus. The python extension subscribes to remount its
+		// sandbox's /workspace read-write in edits/yolo modes and to mount the
+		// read roots read-only (see pythonWritableWorkspace in rules.ts).
+		emitPythonModeEvent();
 		ctx.ui.setStatus(STATUS_KEY, modeStatusLabel(value, ctx));
 		if (notify) {
 			const label = value === "edits" ? "allow edits" : value;
@@ -634,6 +651,9 @@ export default function (pi: ExtensionAPI) {
 
 	const reload = (cwd: string, ctx?: ExtensionContext) => {
 		cfg = loadConfig(cwd);
+		// Re-broadcast: the reloaded config may have different readAllowPaths,
+		// which the python sandbox mounts read-only.
+		if (ctx) emitPythonModeEvent();
 		ctx?.ui.notify(
 			`Tool permissions reloaded (default=${cfg.defaultAction}, allow=${cfg.allow.length}, deny=${cfg.deny.length}, ask=${cfg.ask.length}, toolDefaults=${Object.keys(cfg.toolDefaults).length})`,  
 			"info",
@@ -644,15 +664,15 @@ export default function (pi: ExtensionAPI) {
 		cfg = loadConfig(ctx.cwd);
 		// Always reset the permission mode at session start. Never persisted.
 		mode = "manual";
-		// Announce the reset so the python extension remounts /workspace
-		// read-only (python registers its bus subscription at init time, before
-		// session_start dispatch, so ordering is safe).
-		pi.events.emit(MODE_EVENT_CHANNEL, { mode });
-		classifierDebugEnabled = false;
-		lastAutoStatusId = undefined;
-		// Session-only read grants reset with everything else.
 		sessionScratch = false;
 		sessionReadRoots = [];
+		classifierDebugEnabled = false;
+		lastAutoStatusId = undefined;
+		// Announce the reset (mode + roots) so the python extension remounts
+		// /workspace read-only and drops session-granted roots (python registers
+		// its bus subscription at init time, before session_start dispatch, so
+		// ordering is safe).
+		emitPythonModeEvent();
 		ctx.ui.setStatus(STATUS_KEY, "");
 	});
 
@@ -806,6 +826,10 @@ export default function (pi: ExtensionAPI) {
 							label: "Allow scratch reads (this session)",
 							act: async () => {
 								sessionScratch = true;
+								// Scratch roots are now granted: re-broadcast so the
+								// python sandbox mounts them read-only. (It skips the
+								// reserved /tmp mount itself; /var/tmp and $TMPDIR apply.)
+								emitPythonModeEvent();
 								return escalateProceed(toolName, input, m);
 							},
 						});
@@ -817,6 +841,7 @@ export default function (pi: ExtensionAPI) {
 									raw.readAllowScratch = true;
 									saveProjectConfig(ctx.cwd, raw);
 									cfg = loadConfig(ctx.cwd);
+									emitPythonModeEvent();
 									return escalateProceed(toolName, input, m);
 								},
 							});
@@ -829,6 +854,7 @@ export default function (pi: ExtensionAPI) {
 									raw.readAllowScratch = true;
 									saveUserConfig(raw);
 									cfg = loadConfig(ctx.cwd);
+									emitPythonModeEvent();
 									return escalateProceed(toolName, input, m);
 								},
 							});
@@ -851,6 +877,9 @@ export default function (pi: ExtensionAPI) {
 							const trimmed = edited.trim();
 							if (!trimmed) return true;
 							if (!sessionReadRoots.includes(trimmed)) sessionReadRoots.push(trimmed);
+							// New session read root: re-broadcast so the python sandbox
+							// mounts it read-only.
+							emitPythonModeEvent();
 							return escalateProceed(toolName, input, m);
 						},
 					});
@@ -866,6 +895,7 @@ export default function (pi: ExtensionAPI) {
 								raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), trimmed]);
 								saveProjectConfig(ctx.cwd, raw);
 								cfg = loadConfig(ctx.cwd);
+								emitPythonModeEvent();
 								return escalateProceed(toolName, input, m);
 							},
 						});
@@ -882,6 +912,7 @@ export default function (pi: ExtensionAPI) {
 								raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), trimmed]);
 								saveUserConfig(raw);
 								cfg = loadConfig(ctx.cwd);
+								emitPythonModeEvent();
 								return escalateProceed(toolName, input, m);
 							},
 						});

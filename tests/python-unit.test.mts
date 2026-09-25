@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { LIMITS, PROTOCOL_VERSION } from "../extensions/python/limits.ts";
-import { buildBwrapArgs } from "../extensions/python/sandbox.ts";
+import { buildBwrapArgs, filterMountableReadRoots } from "../extensions/python/sandbox.ts";
 import {
 	boundHead,
 	boundTail,
@@ -386,23 +386,142 @@ async function testWorkspaceMountFlag() {
 
 // ── Permission-mode event wiring ─────────────────────────────────────────
 
+// ── Read-root filtering and binds (step 2.5) ────────────────────────────────
+
+function testFilterMountableReadRoots() {
+	const project = "/fake/project";
+
+	// Empty input -> empty output.
+	assert.deepEqual(filterMountableReadRoots([], project), { mountable: [], skipped: [] });
+
+	// Reserved sandbox mounts are skipped, including anything under them.
+	const reserved = filterMountableReadRoots(
+		["/tmp", "/tmp/x", "/usr", "/usr/share", "/proc", "/dev", "/workspace", "/scratch", "/worker.py"],
+		project,
+	);
+	assert.deepEqual(reserved.mountable, []);
+	assert.equal(reserved.skipped.length, 9);
+	assert.ok(reserved.skipped.every((s) => s.reason.startsWith("reserved sandbox mount")));
+
+	// Project dir and anything inside it are skipped (readable at /workspace).
+	const projectCovered = filterMountableReadRoots([project, `${project}/sub`, "/var/tmp"], project);
+	assert.deepEqual(projectCovered.mountable, ["/var/tmp"]);
+	assert.deepEqual(
+		projectCovered.skipped.map((s) => s.root),
+		[project, `${project}/sub`],
+	);
+	assert.ok(projectCovered.skipped.every((s) => s.reason === "covered by /workspace"));
+
+	// A root CONTAINING the project is kept: it grants sibling directories too.
+	const ancestor = filterMountableReadRoots(["/fake"], project);
+	assert.deepEqual(ancestor.mountable, ["/fake"]);
+	assert.equal(ancestor.skipped.length, 0);
+
+	// Nested roots dedupe to the shallowest kept root.
+	const nested = filterMountableReadRoots(["/home/u", "/home/u/data", "/home/u/data/deep", "/other"], project);
+	assert.deepEqual(nested.mountable, ["/home/u", "/other"]);
+	assert.deepEqual(
+		nested.skipped.map((s) => [s.root, s.reason]),
+		[
+			["/home/u/data", "covered by /home/u"],
+			["/home/u/data/deep", "covered by /home/u"],
+		],
+	);
+
+	// Exact duplicates keep one; trailing slashes normalize.
+	const dupes = filterMountableReadRoots(["/var/tmp", "/var/tmp/", "/var/tmp"], project);
+	assert.deepEqual(dupes.mountable, ["/var/tmp"]);
+	assert.equal(dupes.skipped.length, 0);
+
+	// Non-absolute and garbage entries are skipped with a reason; "/" is rejected.
+	const garbage = filterMountableReadRoots(["relative/path", "", "/", 42, null, "/ok/dir"], project);
+	assert.deepEqual(garbage.mountable, ["/ok/dir"]);
+	assert.ok(garbage.skipped.some((s) => s.reason === "not an absolute path"));
+
+	// No project dir known: project-based skips simply do not fire.
+	const noProject = filterMountableReadRoots(["/fake/project", "/var/tmp"], undefined);
+	assert.deepEqual(noProject.mountable, ["/fake/project", "/var/tmp"]);
+	assert.equal(noProject.skipped.length, 0);
+
+	console.log("  ✓ filterMountableReadRoots skips reserved/project/nested roots and keeps the rest");
+}
+
+async function testReadRootBinds() {
+	// buildBwrapArgs mounts pre-filtered roots read-only 1:1 (bind-try form).
+	const spec = {
+		projectDir: "/fake/project",
+		scratchDir: "/fake/scratch",
+		workerPath: "/fake/worker.py",
+		bwrapPath: "/usr/bin/bwrap",
+		interpreterPath: "/usr/bin/python3",
+		readRoots: ["/var/tmp", "/home/u/data"],
+	};
+	const args = buildBwrapArgs(spec);
+	for (const root of spec.readRoots) {
+		const idx = args.indexOf("--ro-bind-try");
+		let found = -1;
+		for (let i = 0; i < args.length - 2; i++) {
+			if (args[i] === "--ro-bind-try" && args[i + 1] === root && args[i + 2] === root) found = i;
+		}
+		assert.notEqual(found, -1, `read root ${root} must be mounted --ro-bind-try 1:1`);
+		assert.ok(idx !== -1); // the flag exists at all
+	}
+	// Without readRoots, no bind-try for read-root paths (other bind-try
+	// entries, like /etc/ld.so.cache, are pre-existing and unrelated).
+	const plain = buildBwrapArgs({ ...spec, readRoots: undefined });
+	for (const root of spec.readRoots) {
+		for (let i = 0; i < plain.length - 2; i++) {
+			assert.ok(
+				!(plain[i] === "--ro-bind-try" && plain[i + 1] === root && plain[i + 2] === root),
+				`read root ${root} must not be mounted when readRoots is absent`,
+			);
+		}
+	}
+
+	// Controller stores the roots and reports them in status().
+	const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "py-unit-roots-"));
+	const c1 = new PythonSessionController({ projectDir: os.tmpdir(), runtimeRoot, readRoots: ["/var/tmp"] });
+	const st1 = await c1.status();
+	assert.deepEqual(st1.readRoots, ["/var/tmp"]);
+	await c1.dispose("test");
+	const c2 = new PythonSessionController({ projectDir: os.tmpdir(), runtimeRoot });
+	const st2 = await c2.status();
+	assert.deepEqual(st2.readRoots, []);
+	await c2.dispose("test");
+	fs.rmSync(runtimeRoot, { recursive: true, force: true });
+	console.log("  ✓ read roots mount --ro-bind-try 1:1 and surface in status()");
+}
+
 async function testPermissionModeEvent() {
 	const pi = makePi();
 	pythonExtension(pi as any);
-	const emit = (mode: unknown) => pi.events.emit("tool-permissions:mode", { mode });
+	const emit = (payload: unknown) => pi.events.emit("tool-permissions:mode", payload);
 
 	// Unknown modes are ignored (mount stays read-only): no dispose, no crash.
-	emit("bogus");
-	emit(undefined);
+	emit({ mode: "bogus" });
+	emit({ mode: undefined });
 	emit(null);
 	emit(42);
 
 	// edits/yolo flip to writable, manual/auto flip back.
-	emit("edits");
-	emit("yolo");
-	emit("auto");
-	emit("manual");
-	console.log("  ✓ tool-permissions:mode events are consumed without crashing on any payload");
+	emit({ mode: "edits" });
+	emit({ mode: "yolo" });
+	emit({ mode: "auto" });
+	emit({ mode: "manual" });
+
+	// Roots ride along: valid arrays are accepted, absent/malformed roots mean
+	// "no root mounts" (never "keep whatever was mounted").
+	emit({ mode: "manual", readRoots: ["/var/tmp"] });
+	emit({ mode: "manual", readRoots: "/var/tmp" }); // not an array -> cleared
+	emit({ mode: "manual", readRoots: ["/tmp", "/var/tmp"] }); // /tmp skipped, /var/tmp kept
+	emit({ mode: "manual", readRoots: ["/var/tmp", 42, "relative"] }); // filtered
+	emit({ mode: "manual" }); // absent -> cleared
+
+	// Repeated identical events are no-ops (no state churn).
+	emit({ mode: "manual", readRoots: ["/var/tmp"] });
+	emit({ mode: "manual", readRoots: ["/var/tmp"] });
+
+	console.log("  ✓ tool-permissions:mode events (mode + readRoots) are consumed safely on any payload");
 }
 
 // ── Limits table sanity ──────────────────────────────────────────────────────
@@ -434,6 +553,8 @@ const tests = [
 	testBoundHelpers,
 	testControllerStatics,
 	testWorkspaceMountFlag,
+	testFilterMountableReadRoots,
+	testReadRootBinds,
 	testPermissionModeEvent,
 	testLimits,
 ];
