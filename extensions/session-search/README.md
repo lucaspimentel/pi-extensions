@@ -17,8 +17,16 @@ branch dupes, tool-result noise).
   directly for the full transcript (JSONL, one JSON object per line).
 - **Command `/find-sessions <query>`**: same search interactively; with a UI,
   arrow-select a session to preview its full card (all snippets, name, dates,
-  path), then copy the path or go back to the list. Without a UI (RPC/print
-  modes), it prints the tool-style rendering instead.
+  path), then **Copy path**, **Load context into session**, or go back to the
+  list. Without a UI (RPC/print modes), it prints the tool-style rendering
+  instead.
+- **Load context into session**: extracts a transcript excerpt (±5 user/assistant
+  messages around the matched entry, plus summaries; per-message cap 2KB, total
+  cap 16KB; tool results excluded) and injects it into the current session as a
+  `session-search-context` message, triggering a model turn so the agent picks
+  up the context immediately. Note: the injected message is itself a
+  custom_message, so future refreshes index it as a summary of the session that
+  loaded it.
 - **`/find-sessions rebuild`**: force a full re-parse (normally refresh is
   lazy and incremental).
 - **`/find-sessions help`**: usage.
@@ -70,6 +78,7 @@ starting with `<skill`, `<system`, `<extension`, ... — see the data-driven
 - `parse.ts` - pure parser: session JSONL -> `SessionSummary` (no pi imports)
 - `search.ts` - query parsing, AND/regex matching, ranking, snippets
 - `store.ts` - index load/save + incremental refresh
+- `context.ts` - windowed transcript extraction for "Load context into session"
 - `index.ts` - extension factory: registers the tool and `/find-sessions`
 
 ## Tests

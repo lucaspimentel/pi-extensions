@@ -313,4 +313,69 @@ try {
 	rmSync(tmp, { recursive: true, force: true });
 }
 
+// ── context extraction ───────────────────────────────────────────────────
+console.log("context.ts");
+
+const { extractWindowContext, WINDOW_MESSAGES, TOTAL_CAP, PER_MESSAGE_CAP } = await import("../extensions/session-search/context.ts");
+
+function contextFixture(): string {
+	const lines: string[] = [line({ type: "session", version: 3, id: "s", timestamp: "2026-09-22T10:00:00.000Z", cwd: "/p" })];
+	for (let i = 1; i <= 20; i++) {
+		const ts = `2026-09-22T10:${String(i).padStart(2, "0")}:00.000Z`;
+		const role = i % 2 === 1 ? "user" : "assistant";
+		if (i === 11) {
+			// a summary near the anchor, in chronological file position
+			lines.push(line({ type: "custom_message", customType: "idle-summary", content: "recap of the work", timestamp: "2026-09-22T10:10:15.000Z", id: "m23", parentId: null }));
+		}
+		lines.push(msg(role, `message number ${i}`, ts, `m${i}`));
+	}
+	// tool results and boilerplate must be excluded from the window
+	lines.push(msg("user", "<skill name=\"x\">injected junk</skill>", "2026-09-22T10:10:30.000Z", "m21"));
+	lines.push(line({ type: "message", id: "m22", timestamp: "2026-09-22T10:10:31.000Z", message: { role: "toolResult", content: [{ type: "text", text: "tool noise" }] } }));
+	return lines.join("\n");
+}
+
+ok("window: includes ±5 items around the anchor, skips toolResult/boilerplate, includes summaries", () => {
+	assert.equal(WINDOW_MESSAGES, 5);
+	const out = extractWindowContext(contextFixture(), "2026-09-22T10:10:00.000Z");
+	assert.ok(out.includes("message number 10")); // anchor
+	assert.ok(out.includes("message number 5")); // 5 back
+	assert.ok(out.includes("message number 14")); // 5 forward (summary takes one slot)
+	assert.ok(!out.includes("message number 15")); // outside window
+	assert.ok(!out.includes("message number 4")); // outside window
+	assert.ok(!out.includes("injected junk"));
+	assert.ok(!out.includes("tool noise"));
+	assert.ok(out.includes("summary (idle-summary): recap of the work"));
+	// numbered roles with timestamps
+	assert.ok(/\[10:10:00\] assistant: message number 10/.test(out));
+});
+
+ok("window: all anchor timestamps are widened in even when far apart", () => {
+	const out = extractWindowContext(contextFixture(), "2026-09-22T10:10:00.000Z", ["2026-09-22T10:01:00.000Z", "2026-09-22T10:19:00.000Z"]);
+	assert.ok(out.includes("message number 1"));
+	assert.ok(out.includes("message number 19"));
+	assert.ok(!out.includes("message number 20")); // beyond the far anchor
+});
+
+ok("window: per-message and total caps are enforced", () => {
+	assert.equal(PER_MESSAGE_CAP, 2 * 1024);
+	assert.equal(TOTAL_CAP, 16 * 1024);
+	const big = "y".repeat(5000);
+	const lines: string[] = [];
+	for (let i = 1; i <= 10; i++) {
+		lines.push(msg("user", `marker-${i} ` + big, `2026-09-22T10:${String(i).padStart(2, "0")}:00.000Z`, `b${i}`));
+	}
+	const out = extractWindowContext(lines.join("\n"), "2026-09-22T10:05:00.000Z");
+	assert.ok(out.length <= TOTAL_CAP + 2000); // one item may exceed before its own drop
+	assert.ok(!out.includes("marker-1")); // farthest-from-anchor dropped
+	assert.ok(out.includes("marker-5")); // anchor kept
+	assert.ok(out.includes("[...truncated]")); // per-message cap applied
+});
+
+ok("window: missing anchor falls back to nearest timestamp", () => {
+	const out = extractWindowContext(contextFixture(), "2026-09-22T10:09:59.999Z");
+	assert.ok(out.includes("message number 10"));
+	assert.equal(extractWindowContext("", "2026-09-22T10:00:00.000Z"), "");
+});
+
 console.log(`\n${passed} tests passed`);

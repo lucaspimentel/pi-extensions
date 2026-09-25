@@ -18,12 +18,14 @@
  * one-time full parse; later calls are stat-only. Deleted sessions are pruned.
  */
 
+import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { parseSession } from "./parse.ts";
 import { indexPath, loadIndex, refreshIndex, saveIndex, sessionsDir, type SessionIndex } from "./store.ts";
 import { formatHits, formatHit, searchSessions, type SearchFilters, type SearchHit } from "./search.ts";
+import { extractWindowContext } from "./context.ts";
 
 // --------------------------- index management ---------------------------
 
@@ -178,12 +180,47 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 
 				ctx.ui.notify(formatHit(hit), "info");
 
-				const action = await ctx.ui.select("Next:", ["Copy path", "Back to list"], { signal: ctx.signal });
+				const action = await ctx.ui.select(
+					"Next:",
+					["Copy path", "Load context into session", "Back to list"],
+					{ signal: ctx.signal },
+				);
 				if (action === "Copy path") {
 					if (copyToClipboard(hit.path)) {
 						ctx.ui.notify(`Copied: ${hit.path}`, "info");
 					} else {
 						ctx.ui.notify(`Path (clipboard unavailable): ${hit.path}`, "info");
+					}
+					return;
+				}
+				if (action === "Load context into session") {
+					let content: string;
+					try {
+						content = readFileSync(hit.path, "utf8");
+					} catch (err) {
+						ctx.ui.notify(`Could not read session file: ${err instanceof Error ? err.message : String(err)}`, "warning");
+						continue;
+					}
+					const anchorTs = hit.snippets[0]?.ts ?? hit.started;
+					const excerpt = extractWindowContext(content, anchorTs, hit.snippets.map((s) => s.ts));
+					if (!excerpt) {
+						ctx.ui.notify("No indexable content found around the match in that session.", "warning");
+						continue;
+					}
+					const header = `Context from session "${hit.name ?? hit.sessionId}" (${hit.cwd}, ${hit.lastActivity.slice(0, 10)}), loaded by /find-sessions. Transcript excerpt around the matched entry:`;
+					try {
+						pi.sendMessage(
+							{
+								customType: "session-search-context",
+								content: `${header}\n\n${excerpt}`,
+								display: true,
+								details: { path: hit.path, anchorTs },
+							},
+							{ triggerTurn: true },
+						);
+						ctx.ui.notify(`Loaded context from "${hit.name ?? hit.lastActivity.slice(0, 10)}"; a turn was triggered.`, "info");
+					} catch (err) {
+						ctx.ui.notify(`Could not inject context: ${err instanceof Error ? err.message : String(err)}`, "warning");
 					}
 					return;
 				}
