@@ -16,7 +16,9 @@ branch dupes, tool-result noise).
   assistant text / summary). The agent can then read the hit's session file
   directly for the full transcript (JSONL, one JSON object per line).
 - **Command `/find-sessions <query>`**: same search interactively; with a UI,
-  arrow-select a session to copy its path.
+  arrow-select a session to preview its full card (all snippets, name, dates,
+  path), then copy the path or go back to the list. Without a UI (RPC/print
+  modes), it prints the tool-style rendering instead.
 - **`/find-sessions rebuild`**: force a full re-parse (normally refresh is
   lazy and incremental).
 - **`/find-sessions help`**: usage.
@@ -33,8 +35,9 @@ branch dupes, tool-result noise).
 
 Tiers by match origin: **user (300) > assistant (200) > summary (100)**;
 subagent sessions are halved within their tier; then total hit count and
-recency (<=7d +50, <=30d +25, <=365d +10). Snippets are clipped to +-60
-characters, up to 2 per hit, each labeled with its origin. Summaries include
+recency (<=7d +50, <=30d +25, <=365d +10). Up to 4 snippets are kept per hit,
+clipped to +-60 characters and labeled with origin: the tool output shows the
+first 2, the `/find-sessions` preview card shows all. Summaries include
 their source: `compaction`, `idle-summary`, etc.
 
 ## Index

@@ -23,7 +23,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { parseSession } from "./parse.ts";
 import { indexPath, loadIndex, refreshIndex, saveIndex, sessionsDir, type SessionIndex } from "./store.ts";
-import { formatHits, searchSessions, type SearchFilters } from "./search.ts";
+import { formatHits, formatHit, searchSessions, type SearchFilters, type SearchHit } from "./search.ts";
 
 // --------------------------- index management ---------------------------
 
@@ -165,15 +165,29 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 				const flag = h.isSubagent ? " [subagent]" : "";
 				return `${i + 1}. ${h.lastActivity.slice(0, 10)}${flag} ${h.cwd.split("/").slice(-2).join("/")}${snippet}`;
 			});
-			const choice = await ctx.ui.select("Sessions (enter to copy path):", labels, { signal: ctx.signal });
-			if (!choice) return;
 
-			const index = labels.indexOf(choice);
-			const path = index >= 0 ? hits[index].path : choice;
-			if (copyToClipboard(path)) {
-				ctx.ui.notify(`Copied: ${path}`, "info");
-			} else {
-				ctx.ui.notify(`Path (clipboard unavailable): ${path}`, "info");
+			// Preview loop: pick -> full card -> copy or go back to the list.
+			// Rows are hard-truncated to terminal width, so the deciding signal
+			// (second snippet, exact path) is often not visible until previewed.
+			for (;;) {
+				const choice = await ctx.ui.select("Sessions (enter to preview):", labels, { signal: ctx.signal });
+				if (!choice) return; // cancelled
+				const hitIndex = labels.indexOf(choice);
+				if (hitIndex < 0) return;
+				const hit: SearchHit = hits[hitIndex];
+
+				ctx.ui.notify(formatHit(hit), "info");
+
+				const action = await ctx.ui.select("Next:", ["Copy path", "Back to list"], { signal: ctx.signal });
+				if (action === "Copy path") {
+					if (copyToClipboard(hit.path)) {
+						ctx.ui.notify(`Copied: ${hit.path}`, "info");
+					} else {
+						ctx.ui.notify(`Path (clipboard unavailable): ${hit.path}`, "info");
+					}
+					return;
+				}
+				if (action !== "Back to list") return; // cancelled
 			}
 		},
 	});

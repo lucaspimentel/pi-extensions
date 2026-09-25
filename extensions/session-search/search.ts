@@ -63,7 +63,10 @@ const TIER_WEIGHT: Record<"user" | "assistant" | "summary", number> = {
 };
 
 const SNIPPET_RADIUS = 60;
-const MAX_SNIPPETS_PER_HIT = 2;
+/** Snippets kept per hit. The tool output renders TOOL_SNIPPETS of these; the
+ *  /find-sessions preview card renders all of them. */
+const MAX_SNIPPETS_PER_HIT = 4;
+const TOOL_SNIPPETS = 2;
 const RESPONSE_CAP = 4 * 1024;
 
 /** Parse a raw query string. Returns null when the regex form is invalid. */
@@ -272,7 +275,7 @@ export function formatHits(hits: SearchHit[], query: string): string {
 		if (h.name) block.push(`   name: ${h.name}`);
 		block.push(`   cwd: ${h.cwd}`);
 		block.push(`   path: ${h.path}`);
-		for (const s of h.snippets) {
+		for (const s of h.snippets.slice(0, TOOL_SNIPPETS)) {
 			block.push(`   ${s.origin}${s.source && s.origin === "summary" ? ` (${s.source})` : ""}: ${s.text}`);
 		}
 		const text = block.join("\n");
@@ -282,6 +285,21 @@ export function formatHits(hits: SearchHit[], query: string): string {
 		}
 		lines.push(text);
 		size += text.length;
+	}
+	return lines.join("\n");
+}
+
+/** Render one hit in full: every snippet, both dates. Used by the
+ *  /find-sessions preview card, where the row was too short to decide. */
+export function formatHit(h: SearchHit): string {
+	const lines: string[] = [];
+	lines.push(`${h.lastActivity.slice(0, 10)} score=${h.score} tier=${h.tier}${h.isSubagent ? " [subagent]" : ""}`);
+	if (h.name) lines.push(`name: ${h.name}`);
+	lines.push(`cwd: ${h.cwd}`);
+	if (h.started) lines.push(`started: ${h.started.slice(0, 19).replace("T", " ")}`);
+	lines.push(`path: ${h.path}`);
+	for (const s of h.snippets) {
+		lines.push(`${s.origin}${s.source && s.origin === "summary" ? ` (${s.source})` : ""} @ ${s.ts.slice(0, 19).replace("T", " ")}: ${s.text}`);
 	}
 	return lines.join("\n");
 }

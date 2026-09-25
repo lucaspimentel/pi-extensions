@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const { parseSession, TEXT_CAP, isBoilerplate, isSubagentName } = await import("../extensions/session-search/parse.ts");
-const { parseQuery, searchSessions, formatHits } = await import("../extensions/session-search/search.ts");
+const { parseQuery, searchSessions, formatHits, formatHit } = await import("../extensions/session-search/search.ts");
 const { refreshIndex, loadIndex, saveIndex, listSessionFiles } = await import("../extensions/session-search/store.ts");
 
 let passed = 0;
@@ -195,7 +195,7 @@ ok("filters: cwd substring, since date, in origin, limit", () => {
 	assert.equal(searchSessions(index, "alpha", { limit: 1 }).length, 1);
 });
 
-ok("snippets: clipped +-60 chars, origin-labeled, max 2 per hit", () => {
+ok("snippets: clipped +-60 chars, origin-labeled, max 4 kept (2 in tool output)", () => {
 	const filler = "x".repeat(200);
 	const index = [
 		fakeIndexedSession({
@@ -209,10 +209,31 @@ ok("snippets: clipped +-60 chars, origin-labeled, max 2 per hit", () => {
 	];
 	const hits = searchSessions(index, "findable-needle");
 	assert.equal(hits.length, 1);
-	assert.equal(hits[0].snippets.length, 2); // capped at 2
+	assert.equal(hits[0].snippets.length, 4); // preview card can show all
 	assert.ok(hits[0].snippets[0].text.length <= 60 * 2 + 6 + 20);
 	assert.ok(hits[0].snippets.every((s) => s.text.includes("findable-needle")));
-	assert.equal(hits[0].tier, "user"); // best origin wins even with 2-snippet cap
+	assert.equal(hits[0].tier, "user"); // best origin wins even with snippet cap
+	// tool output renders only the first 2
+	const toolOut = formatHits(hits, "findable-needle");
+	const snippetLines = toolOut.split("\n").filter((l) => l.trimStart().startsWith("user:") || l.trimStart().startsWith("assistant:") || l.trimStart().startsWith("summary:"));
+	assert.equal(snippetLines.length, 2);
+});
+
+ok("formatHit: full card with all snippets, dates, and path", () => {
+	const card = formatHit({
+		path: "/s/x.jsonl", sessionId: "id", cwd: "/proj", name: "my session",
+		started: "2026-09-22T10:00:00.000Z", lastActivity: "2026-09-22T12:00:00.000Z",
+		isSubagent: false, score: 350, tier: "user",
+		snippets: [
+			{ origin: "user", ts: "2026-09-22T10:01:00.000Z", text: "first" },
+			{ origin: "summary", ts: "2026-09-22T11:00:00.000Z", source: "compaction", text: "second" },
+		],
+	});
+	assert.ok(card.includes("my session"));
+	assert.ok(card.includes("/s/x.jsonl"));
+	assert.ok(card.includes("started: 2026-09-22 10:00:00"));
+	assert.ok(card.includes("user @ 2026-09-22 10:01:00: first"));
+	assert.ok(card.includes("summary (compaction) @ 2026-09-22 11:00:00: second"));
 });
 
 ok("formatHits: ranked, path-bearing, hard-capped at ~4KB", () => {
