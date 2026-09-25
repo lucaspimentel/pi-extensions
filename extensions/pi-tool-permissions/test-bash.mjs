@@ -7,7 +7,7 @@ import {
 	isReadOnlyBashSubcommand, isPureVariableAssignment, hasTopLevelFileRedirect, rulePatternAllowsRedirect,
 	parseRule,
 	actionIcon, formatBreakdownLine, formatBreakdown,
-	stripLineContinuations, stripStructuralKeywords,
+	stripLineContinuations, stripStructuralKeywords, stripTimeoutPrefix,
 } from "./test-helpers.mjs";
 
 const { test, section, summary } = makeTestRunner();
@@ -172,6 +172,36 @@ test("single: isCompound false",          single.isCompound, false);
 test("single: action allow",              single.action, "allow");
 test("single: ambiguous false",           single.ambiguous, false);
 test("single: empty breakdown",           single.breakdown.length, 0);
+
+section("decideCompound — timeout wrapper");
+
+// A leading `timeout [opts] DURATION` wrapper is stripped before analysis, so
+// rules and implicit tiers match the wrapped command.
+const timeoutCfg = makeCfg({ allow: ["Bash(node --test *)"], defaultAction: "ask" });
+const timeoutSingle = decideCompound(timeoutCfg, "bash", { command: "timeout 120 node --test tests/python-unit.test.mts" });
+test("timeout-wrapped single → allow rule matches inner cmd", timeoutSingle.action, "allow");
+
+test("timeout with flags also unwrapped",
+	decideCompound(timeoutCfg, "bash", { command: "timeout -k 5 60 node --test x.mts" }).action, "allow");
+
+// Deny rules see the wrapped command too
+const timeoutDenyCfg = makeCfg({ deny: ["Bash(node*)"], defaultAction: "allow" });
+const timeoutDeny = decideCompound(timeoutDenyCfg, "bash", { command: "timeout 120 node -e 'x'" });
+test("timeout-wrapped single → inner deny fires", timeoutDeny.action, "deny");
+
+// Read-only tier sees the wrapped command
+const timeoutReadonlyCfg = makeCfg({ defaultAction: "deny", bashReadOnlyAllowCwd: true, cwd: process.cwd() });
+const timeoutReadonly = decideCompound(timeoutReadonlyCfg, "bash", { command: "timeout 30 pwd" });
+test("timeout-wrapped pwd → read-only allow", timeoutReadonly.action, "allow");
+
+// Compound: each part is unwrapped independently
+const timeoutCompound = decideCompound(timeoutCfg, "bash", { command: "timeout 120 node --test a.mts && git push" });
+test("timeout-wrapped compound: first sub allow", timeoutCompound.breakdown[0].action, "allow");
+test("timeout-wrapped compound: second sub ask",  timeoutCompound.breakdown[1].action, "ask");
+
+// Unknown timeout shapes are analyzed as-is (fail conservative → ask)
+const timeoutMalformed = decideCompound(makeCfg({ allow: ["Bash(node --test *)"], defaultAction: "ask" }), "bash", { command: "timeout node --test x.mts" });
+test("timeout without duration → not unwrapped (ask)", timeoutMalformed.action, "ask");
 
 section("decideCompound — compound bash");
 
@@ -670,6 +700,42 @@ test("'iffy a' → unchanged",                    stripStructuralKeywords("iffy 
 test("'selectable b' → unchanged",              stripStructuralKeywords("selectable b"),          "selectable b");
 test("'fifo' → unchanged",                      stripStructuralKeywords("fifo"),                 "fifo");
 test("'elseif a b' → unchanged",                stripStructuralKeywords("elseif a b"),            "elseif a b");
+
+section("stripTimeoutPrefix");
+
+// The user's motivating shape: wrapper ignored, wrapped command analyzed
+// verbatim (internal spacing preserved).
+test("'timeout 120 node --test x.mts' → 'node --test x.mts'", stripTimeoutPrefix("timeout 120 node --test tests/python-unit.test.mts"), "node --test tests/python-unit.test.mts");
+
+// Plain number and unit-suffixed durations
+test("'timeout 30 npm test' → 'npm test'",            stripTimeoutPrefix("timeout 30 npm test"), "npm test");
+test("'timeout 90s curl ...' → 'curl ...'",           stripTimeoutPrefix("timeout 90s curl https://example.com"), "curl https://example.com");
+test("compound duration '2m30s'",                     stripTimeoutPrefix("timeout 2m30s make build"), "make build");
+
+// GNU timeout options before the duration
+test("'-k 5' kill-after with separate value",         stripTimeoutPrefix("timeout -k 5 30 cmd arg"), "cmd arg");
+test("'--kill-after=5' with = value",                 stripTimeoutPrefix("timeout --kill-after=5 30 cmd"), "cmd");
+test("'-s KILL' signal with separate value",          stripTimeoutPrefix("timeout -s KILL 30 cmd"), "cmd");
+test("'--signal=TERM' with = value",                  stripTimeoutPrefix("timeout --signal=TERM 30 cmd"), "cmd");
+test("'--preserve-status' flag",                      stripTimeoutPrefix("timeout --preserve-status 30 cmd"), "cmd");
+test("'-v --foreground' flags",                       stripTimeoutPrefix("timeout -v --foreground 60 cmd"), "cmd");
+test("'--' end-of-options marker",                    stripTimeoutPrefix("timeout -- 30 cmd"), "cmd");
+
+// Nested wrappers collapse
+test("nested 'timeout 5 timeout 10 cmd'",             stripTimeoutPrefix("timeout 5 timeout 10 cmd"), "cmd");
+
+// No command after the duration → returned unchanged (analyzed as-is)
+test("bare 'timeout 120' → unchanged",                stripTimeoutPrefix("timeout 120"), "timeout 120");
+
+// Conservative: unrecognized shapes are returned unchanged
+test("missing duration → unchanged",                  stripTimeoutPrefix("timeout node --test x"), "timeout node --test x");
+test("non-numeric duration → unchanged",              stripTimeoutPrefix("timeout soon cmd"), "timeout soon cmd");
+test("'timeoutless' not stripped (word boundary)",    stripTimeoutPrefix("timeoutless cmd"), "timeoutless cmd");
+test("command not starting with timeout → unchanged", stripTimeoutPrefix("echo timeout 30"), "echo timeout 30");
+test("leading whitespace preserved when no strip",    stripTimeoutPrefix("  echo hi"), "  echo hi");
+
+// Wrapper stripped inside structural-keyword chains too
+test("'do timeout 5 echo x' → 'echo x'",              stripStructuralKeywords("do timeout 5 echo x"), "echo x");
 
 // Trailing harmless redirects on a structural keyword must not turn it into a
 // command. Only /dev/null targets (and descriptor dups) are stripped; a

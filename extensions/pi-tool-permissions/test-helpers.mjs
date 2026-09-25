@@ -48,6 +48,7 @@ export {
 	stripLineContinuations,
 	splitTopLevelShell,
 	stripStructuralKeywords,
+	stripTimeoutPrefix,
 	decideCompound,
 	decideWithReason,
 	shouldClassifyWholeCompound,

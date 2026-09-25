@@ -2017,10 +2017,13 @@ export function splitTopLevelShell(cmd: string): SplitResult {
  *     plus iteration heads `for VAR in …` / `for VAR` / `for ((...))` /
  *     `select VAR in …` / `select VAR`.
  *   Prefix-strip (keyword stripped, residue re-evaluated): while, until,
- *     if, elif, and the leading-keyword forms of do/then/else.
+ *     if, elif, and the leading-keyword forms of do/then/else. A leading
+ *     `timeout [OPTION]... DURATION` wrapper is also stripped (see
+ *     `stripTimeoutPrefix`), so only the wrapped command is evaluated.
  *
  * Loops iteratively so nested forms like `do for y in b` (one split part in
- * nested loops) and `do while true` collapse in a single pass.
+ * nested loops), `do while true`, and `timeout 5 timeout 10 cmd` collapse in
+ * a single pass.
  *
  * `case` is not yet handled here — it requires splitter changes (see TODO.md).
  *
@@ -2056,9 +2059,76 @@ export function stripTrailingHarmlessRedirects(s: string): string {
 	return r;
 }
 
+/**
+ * Strip a leading `timeout [OPTION]... DURATION` wrapper from a command,
+ * returning the wrapped command for analysis. `timeout` is a pure wrapper: it
+ * runs the following command unchanged (bounded in time), so permission
+ * decisions should be made about the wrapped command, not the wrapper.
+ *
+ *   `timeout 120 node --test foo.mts`  →  `node --test foo.mts`
+ *
+ * Supported shapes (GNU coreutils timeout):
+ *   - Options before the duration: any `-x`/`--xyz` token, including the
+ *     value-taking options `-k`/`--kill-after` and `-s`/`--signal` when their
+ *     value is a separate token (`-k 5`). `--opt=value` and clustered short
+ *     forms are single tokens already.
+ *   - Duration: one or more `NUMBER[UNIT]` groups (`120`, `90s`, `2m30s`),
+ *     UNIT one of s/m/h/d (case-insensitive).
+ *   - An optional `--` end-of-options marker before the duration.
+ *
+ * Conservative: when the shape does not parse exactly (no duration token, a
+ * duration that is not a plain number+unit, or no command after it), the
+ * input is returned unchanged so an unrecognized form is analyzed as-is.
+ * Nested wrappers (`timeout 5 timeout 10 cmd`) are stripped iteratively.
+ *
+ * Used by `decideCompound()` on single commands and by
+ * `stripStructuralKeywords()` on each compound-split part so the inner
+ * command, not the wrapper, is matched against rules and implicit tiers.
+ */
+export function stripTimeoutPrefix(cmd: string): string {
+	let s = cmd.replace(/^\s+/, "");
+	for (;;) {
+		const rest = stripOneTimeout(s);
+		if (rest === null) break;
+		s = rest;
+	}
+	return s === cmd.replace(/^\s+/, "") ? cmd : s;
+}
+
+/** One pass of the timeout-wrapper strip; null when `s` does not start with a
+ * well-formed `timeout [opts] DURATION command...` wrapper. */
+function stripOneTimeout(s: string): string | null {
+	const tokRe = /\S+/g;
+	const first = tokRe.exec(s);
+	if (!first || first[0] !== "timeout") return null;
+	let m: RegExpExecArray | null;
+	// Option tokens (anything starting with `-`), value-taking ones consuming
+	// the following token. `--` (end-of-options) is consumed here too.
+	for (;;) {
+		m = tokRe.exec(s);
+		if (m === null) return null; // options/duration ran to end of string
+		const t = m[0];
+		if (!t.startsWith("-") || t === "-") break;
+		if (/^(-k|--kill-after|-s|--signal)$/.test(t)) {
+			const v = tokRe.exec(s);
+			if (v === null) return null;
+		}
+	}
+	// Duration: one or more NUMBER[UNIT] groups (compound forms like `2m30s`).
+	if (!/^(\d+(\.\d+)?[smhdSMHD]?)+$/.test(m[0])) return null;
+	// The wrapped command is everything after the duration token, verbatim.
+	const rest = s.slice(tokRe.lastIndex).replace(/^\s+/, "");
+	return rest.length > 0 ? rest : null;
+}
+
 export function stripStructuralKeywords(part: string): string | null {
 	let s = part.trim();
 	while (s.length > 0) {
+		// `timeout [opts] DURATION` is a pure wrapper around the command that
+		// follows: strip it so the inner command is analyzed (e.g. a compound
+		// part `timeout 120 node --test x` prompts on `node --test x`).
+		const noTimeout = stripTimeoutPrefix(s);
+		if (noTimeout !== s) { s = noTimeout; continue; }
 		// Trailing harmless redirects (e.g. `2>/dev/null`, `2>&1`) on a structural
 		// keyword must not turn it into a "command". Strip them for the structural
 		// checks only; real commands keep their redirects (file writes preserved).
@@ -2130,9 +2200,13 @@ export function decideCompound(
 	}
 
 	if (split.kind === "single") {
-		const effectiveInput = split.effectiveCmd != null
-			? { ...normalizedInput, command: split.effectiveCmd }
-			: normalizedInput;
+		const base = split.effectiveCmd != null ? split.effectiveCmd : cmd;
+		// `timeout [opts] DURATION` is a pure wrapper: analyze (and match rules
+		// against) the wrapped command, not the wrapper.
+		const singleCmd = stripTimeoutPrefix(base);
+		const effectiveInput = singleCmd === base
+			? (split.effectiveCmd != null ? { ...normalizedInput, command: split.effectiveCmd } : normalizedInput)
+			: { ...normalizedInput, command: singleCmd };
 		const d = decideWithReason(cfg, "bash", effectiveInput, mode);
 		return { action: d.action, isCompound: false, ambiguous: false, breakdown: [], reason: d.reason };
 	}
