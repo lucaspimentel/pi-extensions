@@ -10,6 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { LIMITS, PROTOCOL_VERSION } from "../extensions/python/limits.ts";
+import { buildBwrapArgs } from "../extensions/python/sandbox.ts";
 import {
 	boundHead,
 	boundTail,
@@ -25,15 +26,26 @@ import pythonExtension from "../extensions/python/index.ts";
 function makePi() {
 	const tools: any[] = [];
 	const handlers: Record<string, any> = {};
+	const listeners: Array<[string, (data: unknown) => void]> = [];
 	return {
 		tools,
 		handlers,
+		listeners,
 		registerTool(tool: any) {
 			tools.push(tool);
 		},
 		on(event: string, handler: any) {
 			handlers[event] = handler;
 			return () => {};
+		},
+		events: {
+			on(channel: string, handler: (data: unknown) => void) {
+				listeners.push([channel, handler]);
+				return () => {};
+			},
+			emit(channel: string, data: unknown) {
+				for (const [c, h] of listeners) if (c === channel) h(data);
+			},
 		},
 	};
 }
@@ -52,8 +64,13 @@ async function testRegistrationHasNoSideEffects() {
 	assert.equal(pi.tools[0].name, "python");
 	assert.equal(pi.tools[0].executionMode, "sequential", "tool must be sequential");
 	assert.ok(pi.handlers.tool_result, "tool_result handler registered");
+	assert.ok(pi.handlers.session_start, "session_start handler registered");
 	assert.ok(pi.handlers.session_shutdown, "session_shutdown handler registered");
 	assert.ok(pi.handlers.session_tree, "session_tree handler registered");
+	assert.ok(
+		pi.listeners.some(([c]) => c === "tool-permissions:mode"),
+		"subscribed to the tool-permissions:mode event",
+	);
 
 	// No child processes, sockets, or timers created by registration.
 	for (const r of resourcesAfter) {
@@ -321,6 +338,73 @@ async function testControllerStatics() {
 	console.log("  ✓ controller refuses disposed/aborted work and cleans up its directories");
 }
 
+// ── Workspace mount flag (allow-edits/yolo remount) ──────────────────────────
+
+function makeLaunchSpec(writableWorkspace?: boolean) {
+	return {
+		projectDir: "/fake/project",
+		scratchDir: "/fake/scratch",
+		workerPath: "/fake/worker.py",
+		bwrapPath: "/usr/bin/bwrap",
+		interpreterPath: "/usr/bin/python3",
+		...(writableWorkspace === undefined ? {} : { writableWorkspace }),
+	};
+}
+
+async function testWorkspaceMountFlag() {
+	/** Index of the argv entry binding the project dir at /workspace, or -1. */
+	function projectMountIndex(args: string[], flag: string): number {
+		for (let i = 0; i < args.length - 2; i++) {
+			if (args[i] === flag && args[i + 1] === "/fake/project" && args[i + 2] === "/workspace") return i;
+		}
+		return -1;
+	}
+
+	// Default (flag absent): read-only project mount.
+	const ro = buildBwrapArgs(makeLaunchSpec());
+	assert.notEqual(projectMountIndex(ro, "--ro-bind"), -1, "project must be --ro-bound by default");
+	assert.equal(projectMountIndex(ro, "--bind"), -1, "project must not be writable by default");
+
+	// writableWorkspace: true -> writable bind, never ro-bind.
+	const rw = buildBwrapArgs(makeLaunchSpec(true));
+	assert.notEqual(projectMountIndex(rw, "--bind"), -1, "project must be --bind when writable");
+	assert.equal(projectMountIndex(rw, "--ro-bind"), -1, "project must not use --ro-bind when writable");
+
+	// Controller stores the flag and reports it in status().
+	const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "py-unit-mount-"));
+	const rwController = new PythonSessionController({ projectDir: os.tmpdir(), runtimeRoot, writableWorkspace: true });
+	const st = await rwController.status();
+	assert.equal(st.workspaceMode, "read-write");
+	await rwController.dispose("test");
+	const roController = new PythonSessionController({ projectDir: os.tmpdir(), runtimeRoot });
+	const st2 = await roController.status();
+	assert.equal(st2.workspaceMode, "read-only");
+	await roController.dispose("test");
+	fs.rmSync(runtimeRoot, { recursive: true, force: true });
+	console.log("  ✓ /workspace mount is read-only by default and read-write with writableWorkspace");
+}
+
+// ── Permission-mode event wiring ─────────────────────────────────────────
+
+async function testPermissionModeEvent() {
+	const pi = makePi();
+	pythonExtension(pi as any);
+	const emit = (mode: unknown) => pi.events.emit("tool-permissions:mode", { mode });
+
+	// Unknown modes are ignored (mount stays read-only): no dispose, no crash.
+	emit("bogus");
+	emit(undefined);
+	emit(null);
+	emit(42);
+
+	// edits/yolo flip to writable, manual/auto flip back.
+	emit("edits");
+	emit("yolo");
+	emit("auto");
+	emit("manual");
+	console.log("  ✓ tool-permissions:mode events are consumed without crashing on any payload");
+}
+
 // ── Limits table sanity ──────────────────────────────────────────────────────
 
 function testLimits() {
@@ -349,6 +433,8 @@ const tests = [
 	testEncodeRequest,
 	testBoundHelpers,
 	testControllerStatics,
+	testWorkspaceMountFlag,
+	testPermissionModeEvent,
 	testLimits,
 ];
 

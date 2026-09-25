@@ -5,6 +5,7 @@ import {
 	cwdGlobPattern, normalizePathSep, normalizeMatchPath, inputForMatching, recomputeBreakdown,
 	loadConfigFromObjects,
 	suggestReadRoot, scratchRoots, readRootImplicitRules, writeRootImplicitRules,
+	pythonWritableWorkspace,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
 	classifyAction, classifierCacheKey, pickClassifierModel, rankModels, dedupeModels, hasPrice, modelLabel, pickableModels, autoStatusLabel, classifierAttribution,
 	buildActionContext, findGitRoot, leadingCdTarget, resolveAgainstCwd,
@@ -1324,5 +1325,14 @@ test("python execute: explicit allow rule reason",              decideWithReason
 test("parity: python implicit allow",   decide(pyDefault, "python", { code: "1+1" }), decideWithReason(pyDefault, "python", { code: "1+1" }).action);
 test("parity: python toolDefaults ask", decide(pyAsk, "python", { code: "1+1" }), decideWithReason(pyAsk, "python", { code: "1+1" }).action);
 test("parity: python reset",            decide(pyDefault, "python", { action: "reset" }), decideWithReason(pyDefault, "python", { action: "reset" }).action);
+
+section("pythonWritableWorkspace — mode → mount policy");
+
+// allow-edits and yolo grant a writable /workspace; manual and auto keep it
+// read-only (auto-mode behavior is deliberately deferred).
+test("pythonWritableWorkspace: edits",  pythonWritableWorkspace("edits"), true);
+test("pythonWritableWorkspace: yolo",   pythonWritableWorkspace("yolo"), true);
+test("pythonWritableWorkspace: manual", pythonWritableWorkspace("manual"), false);
+test("pythonWritableWorkspace: auto",   pythonWritableWorkspace("auto"), false);
 
 process.exit(summary() > 0 ? 1 : 0);

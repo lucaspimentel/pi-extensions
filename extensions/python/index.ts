@@ -25,6 +25,7 @@ import {
 	DEFAULT_MAX_LINES,
 	defineTool,
 	type ExtensionAPI,
+	type ExtensionContext,
 	formatSize,
 	keyHint,
 	truncateHead,
@@ -46,9 +47,10 @@ const pythonTool = defineTool({
 	description:
 		"Execute Python snippets in a persistent, sandboxed interpreter (Linux + bubblewrap). " +
 		"Variables, imports, functions, and classes persist across calls within the session. " +
-		"The project directory is mounted read-only at /workspace (modifying or deleting project " +
-		"files fails); /scratch is a writable scratch directory whose files persist across calls " +
-		"and resets, and outputs belong there. Standard library only, no package installs, no " +
+		"The project directory is mounted at /workspace (read-only, unless the session is in " +
+		"allow-edits or yolo permission mode, when it is writable); /scratch is a writable " +
+		"scratch directory whose files persist across calls and resets, and outputs belong " +
+		"there. Standard library only, no package installs, no " +
 		"network, no sockets, no input() (it returns EOF at once), no top-level await. " +
 		"Ordinary Python exceptions keep interpreter state (execution is not transactional); " +
 		"timeout, cancellation, output overflow, or a crash kill the interpreter and lose its " +
@@ -57,10 +59,10 @@ const pythonTool = defineTool({
 		"a worker. JSON results: print json.dumps(...) yourself; the final expression's repr " +
 		"is shown automatically.",
 	promptSnippet:
-		"Run Python snippets in a persistent bubblewrap-sandboxed interpreter with the project at read-only /workspace and writable /scratch",
+		"Run Python snippets in a persistent bubblewrap-sandboxed interpreter with the project at /workspace (read-only, writable in allow-edits/yolo mode) and writable /scratch",
 	promptGuidelines: [
 		"Use the `python` tool for persistent Python snippets, data analysis, and stdlib scripting; state (variables, imports, functions) survives across calls.",
-		"In the `python` tool, /workspace is the project (read-only) and /scratch is writable and persistent; write outputs to /scratch, never to /workspace.",
+		"In the `python` tool, /workspace is the project (read-only, writable in allow-edits/yolo permission mode) and /scratch is writable and persistent; write outputs to /scratch, never to /workspace.",
 		"An ordinary Python exception keeps interpreter state; a timeout, cancellation, or crash loses it. Use action=reset to clear state deliberately.",
 	],
 	parameters: Type.Object({
@@ -192,6 +194,18 @@ const pythonTool = defineTool({
 
 let controller: PythonSessionController | undefined;
 
+/**
+ * Whether the sandbox mounts /workspace read-write. Mirrors pi-tool-permissions'
+ * `pythonWritableWorkspace` (rules.ts): allow-edits and yolo modes grant it.
+ * Updated by the "tool-permissions:mode" event; defaults to read-only so the
+ * tool behaves correctly when pi-tool-permissions is not loaded. Deliberately
+ * duplicated (not imported) to keep the extensions decoupled.
+ */
+let writableWorkspace = false;
+
+/** Captured ExtensionContext, for notifications from bus events that carry none. */
+let lastCtx: ExtensionContext | undefined;
+
 function cwdRoot(cwd: string): string | { error: string } {
 	try {
 		return realpathSync(cwd);
@@ -203,14 +217,14 @@ function cwdRoot(cwd: string): string | { error: string } {
 function controllerFor(root: string | { error: string }): PythonSessionController | { error: string } {
 	if (typeof root !== "string") return root;
 	if (!controller) {
-		controller = new PythonSessionController({ projectDir: root });
+		controller = new PythonSessionController({ projectDir: root, writableWorkspace });
 		return controller;
 	}
 	if (controller.projectDir !== root) {
 		// The project context changed: state from the abandoned context must not
 		// leak into the new one. Scratch and logs go with the old context.
 		const old = controller;
-		controller = new PythonSessionController({ projectDir: root });
+		controller = new PythonSessionController({ projectDir: root, writableWorkspace });
 		void old.dispose("project_dir_changed");
 	}
 	return controller;
@@ -301,7 +315,7 @@ function renderStatus(st: StatusReport): string {
 	lines.push(`worker running: ${st.workerRunning ? "yes" : "no"} (generation ${st.generation})`);
 	if (st.lastResetReason) lines.push(`last reset reason: ${st.lastResetReason}`);
 	lines.push(
-		`paths: project ${st.paths.projectDir ?? "?"} -> /workspace (read-only); scratch ${st.paths.scratchDir ?? "(not allocated yet)"} -> /scratch (writable); logs ${st.paths.logDir ?? "(not allocated yet)"}`,
+		`paths: project ${st.paths.projectDir ?? "?"} -> /workspace (${st.workspaceMode}); scratch ${st.paths.scratchDir ?? "(not allocated yet)"} -> /scratch (writable); logs ${st.paths.logDir ?? "(not allocated yet)"}`,
 	);
 	lines.push("limits: " + JSON.stringify(st.limits));
 	return lines.join("\n");
@@ -311,6 +325,36 @@ function renderStatus(st: StatusReport): string {
 
 export default function pythonExtension(pi: ExtensionAPI) {
 	pi.registerTool(pythonTool);
+
+	// Track the session permission mode announced by pi-tool-permissions on the
+	// shared event bus (channel "tool-permissions:mode", payload { mode }). In
+	// allow-edits/yolo modes the sandbox remounts /workspace read-write; flipping
+	// the mode mid-session kills the running sandbox (state loss, reported by the
+	// normal teardown path) and the next execution starts one with the new mount.
+	// Subscription happens at init time, before session_start dispatch, so the
+	// initial { mode: "manual" } emission is always received. If
+	// pi-tool-permissions is not loaded, no event ever arrives and the sandbox
+	// stays read-only.
+	pi.events.on("tool-permissions:mode", (data) => {
+		const raw = (data as { mode?: unknown } | null | undefined)?.mode;
+		const desired = raw === "edits" || raw === "yolo";
+		// Ignore unknown modes: only edits/yolo flip the mount; manual/auto (and
+		// anything unrecognized) keep it read-only.
+		if (raw !== "edits" && raw !== "yolo" && raw !== "manual" && raw !== "auto") return;
+		if (desired === writableWorkspace) return;
+		writableWorkspace = desired;
+		const old = controller;
+		controller = undefined;
+		void old?.dispose("permission_mode_changed");
+		const mount = desired ? "read-write" : "read-only";
+		const message = `python sandbox: /workspace remounted ${mount} (interpreter state discarded)`;
+		lastCtx?.ui.notify(message, "info");
+	});
+
+	pi.on("session_start", (_event, ctx) => {
+		// Captured for notify() from the mode event above, which carries no context.
+		lastCtx = ctx;
+	});
 
 	// Mark this tool's failed results as Pi tool errors while keeping the
 	// structured details. (Returning an isError field from execute() does not
@@ -331,11 +375,15 @@ export default function pythonExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		const current = controller;
 		controller = undefined;
+		writableWorkspace = false;
+		lastCtx = undefined;
 		await current?.dispose("session_shutdown");
 	});
 	pi.on("session_tree", async () => {
 		const current = controller;
 		controller = undefined;
+		writableWorkspace = false;
+		lastCtx = undefined;
 		await current?.dispose("session_tree_change");
 	});
 }

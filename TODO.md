@@ -2,19 +2,17 @@
 
 > See also [`extensions/pi-tool-permissions/TODO.md`](extensions/pi-tool-permissions/TODO.md) for the pi-tool-permissions extension's own task list.
 
-- [ ] Python + pi-tool-permissions integration, step 1: make tool-permissions python-aware
-  - Today the `python` tool is a generic unknown tool to pi-tool-permissions: no match field in `getMatchField` (`extensions/pi-tool-permissions/rules.ts:1719` JSON.stringifies the whole input for unknown tools, so `Python(...)` rules are near-unusable), no implicit toolDefault, so every call falls to `defaultAction` (usually "ask") despite the sandbox being more restricted than the read-only bash tier that is already auto-allowed.
-  - Add an implicit `toolDefaults.python = "allow"` (all modes); explicit `toolDefaults: {"python": "ask"}` must keep winning in every mode (explicit entries beat implicit ones, see the explicit vs implicit toolDefaults split in `rules.ts` `decideWithReason`).
-  - `python reset`/`python status` are pure bookkeeping (like `allowNoopCd`) and should always allow.
-  - Optionally add a `python` match field (the `code` param) so users can write rules like `Python(*import socket*)`.
-  - Tests: `extensions/pi-tool-permissions/test-rules-and-decide.mjs`.
+- [x] Python + pi-tool-permissions integration, step 1: make tool-permissions python-aware (2026-09-25)
+  - Done: implicit allow for the sandboxed python tool in every mode, implemented as a dedicated branch in `decideWithReason` (after explicit `toolDefaults`, before the mode strategy) so it is never demoted below the auto-mode classifier. `python reset`/`status` always allow (bookkeeping, like `allowNoopCd`); explicit `toolDefaults.python` still wins for `execute` in every mode; explicit bare `Python` deny/ask rules keep normal precedence. Per design, `Python(x)` pattern rules are NOT supported (patterns would match the raw JSON of the input).
+  - `/permissions list` shows `python: implicit allow (sandboxed; override with toolDefaults.python)` or the explicit override value.
+  - Documented in the `index.ts` header block and README; 28 new tests in `test-rules-and-decide.mjs`.
 
-- [ ] Python + pi-tool-permissions integration, step 2: wire permission modes into the sandbox
-  - In allow-edits mode, mount `/workspace` read-write (currently hard-coded `--ro-bind` in `extensions/python/sandbox.ts:277`); manual/auto keep read-only or prompt.
-  - Trust framing: the ro mount is the kernel-level enforcement; switching to rw trusts python like Write/Edit, which is exactly edits mode's semantics. Document in the python README threat model.
-  - Cross-extension communication: pi-tool-permissions already emits custom events (`pi.events.emit("herdr:blocked", ...)` at `extensions/pi-tool-permissions/index.ts:749`); python listens for a `tool-permissions:mode` event, or share a module.
-  - bwrap mounts are fixed at launch, so a mode flip takes effect on relaunch: either notify + restart sandbox (state loss) or apply on next launch.
-  - Add an ask-dialog escalation option: "Switch to allow-edits and remount /workspace read-write".
+- [x] Python + pi-tool-permissions integration, step 2: wire permission modes into the sandbox (2026-09-25)
+  - Done: allow-edits and yolo modes mount `/workspace` read-write; manual and auto keep it read-only (auto-mode behavior deliberately deferred). pi-tool-permissions broadcasts the mode on pi's shared event bus (channel `tool-permissions:mode`, payload `{ mode }`) from `applyMode` and on `session_start`; the python extension subscribes at init, maps `edits`/`yolo` to a `writableWorkspace` launch-spec flag (`--bind` instead of `--ro-bind`), and on a flip mid-session disposes the running sandbox eagerly (state loss via the normal teardown path) with a UI notification. If pi-tool-permissions is not loaded, the sandbox stays read-only.
+  - The mapping lives in `pythonWritableWorkspace()` in pi-tool-permissions `rules.ts`; python duplicates the two-line mapping (not imported) to keep the extensions decoupled.
+  - Trust framing documented in the python README (new "Permission modes" section + threat-model bullet) and the pi-tool-permissions README ("Effect on the python tool"); the python tool's description/prompt guidelines now state the mount is read-only except in allow-edits/yolo.
+  - The ask-dialog escalation option ("Switch to allow-edits and remount /workspace read-write") was deliberately deferred.
+  - Tests: `buildBwrapArgs` mount-flag unit tests + mode-event wiring tests in `tests/python-unit.test.mts`; `pythonWritableWorkspace` cases in `test-rules-and-decide.mjs`.
 
 - [ ] Python + pi-tool-permissions integration, step 3: permission prompts for out-of-sandbox reads
   - Install a `sys.addaudithook` in `extensions/python/worker.py` for the `open` event before user code; any absolute path outside the known mount set raises a dedicated exception, worker returns a new protocol frame `{type:"result", status:"permission_needed", path}` (see `extensions/python/protocol.ts`).

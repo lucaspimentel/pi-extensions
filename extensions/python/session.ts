@@ -88,6 +88,8 @@ export interface StatusReport {
 	workerRunning: boolean;
 	generation: number;
 	lastResetReason?: string;
+	/** How /workspace is mounted: read-only, or read-write in allow-edits/yolo modes. */
+	workspaceMode: "read-only" | "read-write";
 	limits: Record<string, unknown>;
 	paths: {
 		projectDir?: string;
@@ -100,6 +102,8 @@ export interface StatusReport {
 
 export interface ControllerOptions {
 	projectDir: string;
+	/** Mount /workspace read-write (allow-edits/yolo permission modes). Default: read-only. */
+	writableWorkspace?: boolean;
 	/** Parent directory for scratch and log dirs; defaults under os.tmpdir(). */
 	runtimeRoot?: string;
 }
@@ -259,6 +263,7 @@ function collectDescendantPids(rootPid: number): number[] {
 
 export class PythonSessionController {
 	readonly projectDir: string;
+	readonly writableWorkspace: boolean;
 	private readonly runtimeRoot: string;
 	private scratchDir: string | null = null;
 	private logDir: string | null = null;
@@ -273,6 +278,7 @@ export class PythonSessionController {
 
 	constructor(options: ControllerOptions) {
 		this.projectDir = options.projectDir;
+		this.writableWorkspace = options.writableWorkspace === true;
 		this.runtimeRoot = options.runtimeRoot ?? defaultRuntimeRoot();
 	}
 
@@ -337,6 +343,7 @@ export class PythonSessionController {
 			workerRunning: this.worker !== null && !this.worker.closed,
 			generation: this.generation,
 			lastResetReason: this.lastResetReason ?? undefined,
+			workspaceMode: this.writableWorkspace ? "read-write" : "read-only",
 			limits,
 			paths: {
 				projectDir: this.projectDir,
@@ -669,6 +676,7 @@ export class PythonSessionController {
 			workerPath,
 			bwrapPath: deps.bwrapPath!,
 			interpreterPath: deps.interpreterPath,
+			writableWorkspace: this.writableWorkspace,
 		};
 		const child = spawnWorker(spec);
 		// Never let stdin EPIPE crash the process; execution paths handle it.

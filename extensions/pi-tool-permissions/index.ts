@@ -293,6 +293,13 @@
  *   hard_deny > soft_deny > allow verdict ordering is unchanged. See
  *   docs/permission-modes-design.md.
  *
+ *   Mode broadcast: every mode change (and the session_start reset to manual)
+ *   emits pi.events channel "tool-permissions:mode" with { mode }. The python
+ *   extension consumes this to remount its sandbox's /workspace read-write in
+ *   edits/yolo modes (see pythonWritableWorkspace in rules.ts). Flipping the
+ *   mode mid-session discards the python interpreter's state (the sandbox is
+ *   restarted with the new mount).
+ *
  *   Switch via:
  *     - Ctrl+Alt+P hotkey (cycles manual → allow edits → auto → yolo → manual)
  *     - /permissions mode [manual|allow-edits|auto|yolo]
@@ -428,6 +435,8 @@ import {
 import type { ClassifyResult, DefaultAction, ListAction, PermissionMode, ResolvedConfig } from "./rules.ts";
 
 const STATUS_KEY = "tool-permissions";
+/** Shared bus channel announcing the session permission mode; consumed by the python extension. */
+const MODE_EVENT_CHANNEL = "tool-permissions:mode";
 
 type Scope = "project" | "user";
 
@@ -568,6 +577,10 @@ export default function (pi: ExtensionAPI) {
 	 */
 	function applyMode(value: PermissionMode, ctx: ExtensionContext, notify = true): void {
 		mode = value;
+		// Broadcast the session mode on the shared event bus. The python
+		// extension subscribes to remount its sandbox's /workspace read-write in
+		// edits/yolo modes (see pythonWritableWorkspace in rules.ts).
+		pi.events.emit(MODE_EVENT_CHANNEL, { mode: value });
 		ctx.ui.setStatus(STATUS_KEY, modeStatusLabel(value, ctx));
 		if (notify) {
 			const label = value === "edits" ? "allow edits" : value;
@@ -631,6 +644,10 @@ export default function (pi: ExtensionAPI) {
 		cfg = loadConfig(ctx.cwd);
 		// Always reset the permission mode at session start. Never persisted.
 		mode = "manual";
+		// Announce the reset so the python extension remounts /workspace
+		// read-only (python registers its bus subscription at init time, before
+		// session_start dispatch, so ordering is safe).
+		pi.events.emit(MODE_EVENT_CHANNEL, { mode });
 		classifierDebugEnabled = false;
 		lastAutoStatusId = undefined;
 		// Session-only read grants reset with everything else.

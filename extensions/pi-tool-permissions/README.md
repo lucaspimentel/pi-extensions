@@ -733,6 +733,13 @@ The two former independent session toggles (allow-all-edits, auto mode) are cons
 
 The full design (precedence, invariants, sharp edges) lives in [`docs/permission-modes-design.md`](./docs/permission-modes-design.md). The `auto` rung's classifier layer is detailed in [Auto mode](#auto-mode) below.
 
+### Effect on the python tool
+
+Every mode change (and the `session_start` reset to `manual`) is broadcast on pi's shared event bus (channel `tool-permissions:mode`, payload `{ mode }`). The sandboxed `python` extension consumes this: in `edits` and `yolo` modes it mounts the project at `/workspace` **read-write**, so python code can modify project files like `Write`/`Edit` can. In `manual` and `auto` modes the mount stays read-only.
+
+- Flipping the mode mid-session kills the running python sandbox (interpreter state is discarded); the next execution starts one with the new mount, and a notification announces the remount.
+- The mode signal is a courtesy UX, not a security boundary: the mount flag itself is kernel-enforced, and a writable mount only exists because you explicitly switched into a mode that grants unprompted edits.
+
 ## Slash command
 
 ```

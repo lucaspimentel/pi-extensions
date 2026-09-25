@@ -200,6 +200,8 @@ export interface WorkerLaunchSpec {
 	workerPath: string;
 	bwrapPath: string;
 	interpreterPath: string;
+	/** Mount the project read-write (allow-edits/yolo permission modes). Default: read-only. */
+	writableWorkspace?: boolean;
 }
 
 /**
@@ -272,15 +274,19 @@ export function buildBwrapArgs(spec: WorkerLaunchSpec): string[] {
 		args.push("--ro-bind-try", realDir, realDir);
 	}
 
-	// Project (read-only), scratch (writable), worker code (read-only).
+	// Project (read-only by default; read-write in allow-edits/yolo permission
+	// modes, where the user explicitly granted unprompted edits), scratch
+	// (writable), worker code (read-only).
 	args.push(
-		"--ro-bind", spec.projectDir, "/workspace",
+		spec.writableWorkspace === true ? "--bind" : "--ro-bind",
+		spec.projectDir,
+		"/workspace",
 		"--bind", spec.scratchDir, "/scratch",
 		"--ro-bind", spec.workerPath, "/worker.py",
 	);
 
-	// Working directory: relative project writes fail by design (read-only);
-	// outputs belong under /scratch.
+	// Working directory: relative project writes fail while the mount is
+	// read-only; outputs belong under /scratch either way.
 	args.push("--chdir", "/workspace");
 
 	// Environment: clear everything inherited, supply only explicit runtime

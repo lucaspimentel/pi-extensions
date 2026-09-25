@@ -72,6 +72,7 @@ export {
 	findGitRoot,
 	leadingCdTarget,
 	resolveAgainstCwd,
+	pythonWritableWorkspace,
 	parseClassifierResponse,
 	verdictToAction,
 	classifierCacheKey,

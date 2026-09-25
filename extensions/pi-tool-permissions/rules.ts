@@ -42,6 +42,18 @@ export type Action = "allow" | "deny" | "ask" | "auto";
  */
 export type PermissionMode = "manual" | "edits" | "auto" | "yolo";
 
+/**
+ * Whether the python tool's sandbox should mount the project (/workspace)
+ * read-write. allow-edits and yolo modes grant it (the user explicitly asked
+ * for unprompted edits / no more prompts); manual and auto keep the read-only
+ * mount (auto-mode behavior is deliberately deferred). Consumed by the python
+ * extension, which duplicates this two-line mapping rather than importing it,
+ * so the extensions stay decoupled. Keep both in sync.
+ */
+export function pythonWritableWorkspace(mode: PermissionMode): boolean {
+	return mode === "edits" || mode === "yolo";
+}
+
 /** The three persistable rule-list actions (auto is not a rule list). */
 export type ListAction = "allow" | "deny" | "ask";
 

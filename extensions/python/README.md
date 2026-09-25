@@ -35,18 +35,35 @@ python(action?: "execute" | "reset" | "status", code?: string, timeoutSeconds?: 
 
 | Sandbox path | Host | Permissions |
 |---|---|---|
-| `/workspace` | the canonical project directory | read-only |
+| `/workspace` | the canonical project directory | read-only, or **read-write** in allow-edits/yolo permission modes (see below) |
 | `/scratch`   | a private scratch directory under the OS temp dir | writable |
 | `/tmp`       | namespace-private tmpfs | writable |
 
-Relative project writes fail (read-only mount); outputs belong under
-`/scratch`. Scratch files persist across executions and resets and are deleted
-when the session ends, reloads, is replaced, or navigates to another branch
-(and when the project directory changes). Abrupt host termination can leave
-temporary files despite best-effort cleanup.
+Relative project writes fail while the mount is read-only; outputs belong
+under `/scratch`. Scratch files persist across executions and resets and are
+deleted when the session ends, reloads, is replaced, or navigates to another
+branch (and when the project directory changes). Abrupt host termination can
+leave temporary files despite best-effort cleanup.
 
 The worker's stdout/stderr per execution are also streamed to log files under
 a logs directory (kept outside the worker-writable scratch mount).
+
+## Permission modes
+
+The `pi-tool-permissions` extension announces the session permission mode on
+pi's shared event bus (channel `tool-permissions:mode`). In **allow-edits**
+(`edits`) and **yolo** modes, `/workspace` is mounted **read-write**, so python
+code can modify project files the same way `Write`/`Edit` can in those modes.
+In `manual` and `auto` modes the mount stays read-only.
+
+- Flipping the mode mid-session kills the running sandbox (interpreter state is
+discarded, reported by the normal teardown path); the next execution starts a
+sandbox with the new mount. The remount is announced with a UI notification.
+- If `pi-tool-permissions` is not loaded, no mode events arrive and the sandbox
+stays read-only.
+- The mode signal is UX, not a security boundary: a stale read-only mount is
+always safe, and a writable mount only exists because the user explicitly
+switched into a mode that grants unprompted edits.
 
 ## Limits
 
@@ -122,6 +139,9 @@ keep working.
 
 - **Project files are readable, including secrets inside the mounted
   project.** If the sandbox can read a file, the executed code can too.
+- **In allow-edits/yolo permission modes, project files are also writable.**
+  The `/workspace` mount flips to read-write when the user explicitly switches
+  into those modes; the mount flag itself remains kernel-enforced.
 - **Other pi tools are unchanged and unrestricted.** This extension sandboxes
   only its own `python` tool; it does not sandbox pi, bash, or anything else.
 - Python-language restrictions and the protocol framing are **not security
