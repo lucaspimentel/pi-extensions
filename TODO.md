@@ -2,6 +2,15 @@
 
 > See also [`extensions/pi-tool-permissions/TODO.md`](extensions/pi-tool-permissions/TODO.md) for the pi-tool-permissions extension's own task list.
 
+- [ ] Python + permissions follow-up: manual smoke test of the interactive flows
+  - The dialog/notification paths are only partially covered by stub-based tests; run one interactive pi session (Linux + bubblewrap) exercising: edits-mode remount notify, out-of-sandbox read prompt -> grant (session/project/user) -> replay, denial memory, `/permissions reload` picking up hand-edited `readAllowPaths`, and `pi -p` (no-UI deny).
+
+- [ ] Python + permissions follow-up: decide auto-mode `/workspace` policy (deferred in step 2)
+  - Currently auto mode keeps the project mount read-only, with no opt-in flag (decided during the step-2 questionnaire: "read-only, defer decision"). The step-3 machinery now exists, so revisit: keep read-only, treat auto like edits/yolo, or add an explicit `autoMode` opt-in key.
+
+- [ ] Python + permissions follow-up: ask-dialog escalation option (deferred in step 2)
+  - When the user configured `toolDefaults.python = "ask"` and a python call prompts, offer "Switch to allow-edits and remount /workspace read-write" as an escalation option in the dialog (mirroring the existing "Switch to edits mode" options); requires re-emitting the mode event and a sandbox restart after the user picks it.
+
 - [x] Python + pi-tool-permissions integration, step 1: make tool-permissions python-aware (2026-09-25)
   - Done: implicit allow for the sandboxed python tool in every mode, implemented as a dedicated branch in `decideWithReason` (after explicit `toolDefaults`, before the mode strategy) so it is never demoted below the auto-mode classifier. `python reset`/`status` always allow (bookkeeping, like `allowNoopCd`); explicit `toolDefaults.python` still wins for `execute` in every mode; explicit bare `Python` deny/ask rules keep normal precedence. Per design, `Python(x)` pattern rules are NOT supported (patterns would match the raw JSON of the input).
   - `/permissions list` shows `python: implicit allow (sandboxed; override with toolDefaults.python)` or the explicit override value.
