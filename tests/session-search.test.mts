@@ -324,13 +324,15 @@ function contextFixture(): string {
 		const ts = `2026-09-22T10:${String(i).padStart(2, "0")}:00.000Z`;
 		const role = i % 2 === 1 ? "user" : "assistant";
 		if (i === 11) {
-			// a summary near the anchor, in chronological file position
+			// boilerplate + summary near the anchor, in chronological file position;
+			// the boilerplate sits INSIDE the window so the blocklist is exercised,
+			// not just window clipping
+			lines.push(msg("user", "<skill name=\"x\">injected junk</skill>", "2026-09-22T10:10:05.000Z", "m21"));
 			lines.push(line({ type: "custom_message", customType: "idle-summary", content: "recap of the work", timestamp: "2026-09-22T10:10:15.000Z", id: "m23", parentId: null }));
 		}
 		lines.push(msg(role, `message number ${i}`, ts, `m${i}`));
 	}
-	// tool results and boilerplate must be excluded from the window
-	lines.push(msg("user", "<skill name=\"x\">injected junk</skill>", "2026-09-22T10:10:30.000Z", "m21"));
+	// tool results must be excluded from the window
 	lines.push(line({ type: "message", id: "m22", timestamp: "2026-09-22T10:10:31.000Z", message: { role: "toolResult", content: [{ type: "text", text: "tool noise" }] } }));
 	return lines.join("\n");
 }

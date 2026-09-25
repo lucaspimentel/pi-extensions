@@ -15,6 +15,8 @@
  *     when over the total cap, entries farthest from the anchor are dropped
  */
 
+import { isBoilerplate } from "./parse.ts";
+
 export interface ContextItem {
 	ts: string;
 	kind: "user" | "assistant" | "summary";
@@ -40,7 +42,9 @@ function capText(text: string, cap: number): string {
 	return text.slice(0, cap) + " [...truncated]";
 }
 
-/** Collect user/assistant text and summary items, in file order. */
+/** Collect user/assistant text and summary items, in file order.
+ *  System-injected boilerplate (skill/skill prompts etc.) is excluded so it
+ *  does not spend the context budget: same rationale as the index blocklist. */
 export function collectItems(sessionContent: string): ContextItem[] {
 	const items: ContextItem[] = [];
 	for (const line of sessionContent.split("\n")) {
@@ -65,7 +69,7 @@ export function collectItems(sessionContent: string): ContextItem[] {
 					.join("\n");
 			}
 			text = text.trim();
-			if (!text) continue;
+			if (!text || isBoilerplate(text)) continue;
 			items.push({ ts, kind: role, text });
 		} else if (entry.type === "compaction" && typeof entry.summary === "string" && entry.summary.trim()) {
 			items.push({ ts, kind: "summary", text: entry.summary.trim(), source: "compaction" });
