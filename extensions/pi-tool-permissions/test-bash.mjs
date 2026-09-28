@@ -510,6 +510,24 @@ test("MSYS tilde path inside cwd → true",          isReadOnlyBashSubcommand("c
 test("MSYS path with dot segments inside cwd → true", isReadOnlyBashSubcommand("cat /c/Users/alice/proj/src/../README.md", WIN_CWD, MSYS_PATHS), true);
 test("MSYS path under drive-root cwd → true",         isReadOnlyBashSubcommand("cat /c/Windows/System32/drivers/etc/hosts", "C:/", MSYS_PATHS), true);
 
+section("isReadOnlyBashSubcommand — quoted backslash args (token-shape fix)");
+
+// A single-quoted backslash token like '\n' reaches the containment check as
+// literal backslash + n. It must resolve RELATIVE to cwd (what bash passes),
+// not as an absolute path '/n' after backslash-to-slash conversion.
+test("tr ':' '\\n' (POSIX cwd) → true",      isReadOnlyBashSubcommand("tr ':' '\\n'", CWD), true);
+test("tr ':' '\\n' (Windows cwd) → true",    isReadOnlyBashSubcommand("tr ':' '\\n'", WIN_CWD), true);
+test("tr x '\\n' → true",                    isReadOnlyBashSubcommand("tr x '\\n'", CWD), true);
+test("grep '\\d' ./f.txt → true",            isReadOnlyBashSubcommand("grep '\\d' ./f.txt", CWD), true);
+test("tr ':' '\\n' < in.txt → true",         isReadOnlyBashSubcommand("tr ':' '\\n' < in.txt", CWD), true);
+// Traversal via backslash-dot segments must still fail closed: '\..\..' → './../..' → outside cwd.
+test("tr '\\..\\..' x → false (traversal)",  isReadOnlyBashSubcommand("tr '\\..\\..' x", CWD), false);
+// Unambiguously Windows tokens keep the old behavior: separator conversion,
+// absolute path, outside cwd → rejected.
+test("tr x 'C:\\foo' → false (POSIX cwd)",   isReadOnlyBashSubcommand("tr x 'C:\\foo'", CWD), false);
+test("tr x 'C:\\foo' → false (Windows cwd)", isReadOnlyBashSubcommand("tr x 'C:\\foo'", WIN_CWD), false);
+test("tr x UNC path → false",                isReadOnlyBashSubcommand("tr x '\\\\\\\\server\\\\share'", CWD), false);
+
 section("isReadOnlyBashSubcommand — rejected cases");
 
 test("rm → not in safe lists",               isReadOnlyBashSubcommand("rm -rf .", WIN_CWD), false);
@@ -544,6 +562,11 @@ test("echo hello → allow (safe always)",              decide(roStrictCfg, "bas
 test("cat ./README.md → allow",                       decide(roStrictCfg, "bash", { command: "cat ./README.md" }), "allow");
 test("cat /etc/passwd → deny (path outside cwd)",    decide(roStrictCfg, "bash", { command: "cat /etc/passwd" }), "deny");
 test("rm -rf . → deny (not in safe lists)",           decide(roStrictCfg, "bash", { command: "rm -rf ." }), "deny");
+test("tr ':' '\\n' → allow (quoted backslash arg)",    decide(roStrictCfg, "bash", { command: "tr ':' '\\n'" }), "allow");
+test("PATH pipe to tr/wc → allow (real-world compound)", decide(
+	makeCfg({ defaultAction: "deny", bashReadOnlyAllowCwd: true, cwd: "/home/user/proj" }),
+	"bash", { command: "echo \"$PATH\" | tr ':' '\\n' | wc -l" }
+), "allow");
 
 const roOffCfg = makeCfg({ defaultAction: "deny", bashReadOnlyAllowCwd: false, cwd: WIN_CWD });
 test("pwd → deny when bashReadOnlyAllowCwd:false",    decide(roOffCfg, "bash", { command: "pwd" }), "deny");

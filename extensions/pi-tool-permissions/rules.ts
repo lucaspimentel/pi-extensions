@@ -1286,7 +1286,23 @@ function pathInsideAllowedRoots(p: string, cwd: string, roots: readonly string[]
 	const colon = p.indexOf(":");
 	if (colon > 1) return false;
 	try {
-		const normalized = normalizeMatchPath(p, cwd, options);
+		// Backslash handling by token shape, not by platform: `normalizePathSep`
+		// converts backslashes to slashes unconditionally, which turns a quoted
+		// shell token like '\n' (literal backslash + n) into '/n', i.e. an
+		// absolute path that wrongly fails the containment check. Backslash is a
+		// separator only when the token is unambiguously a Windows path: a drive
+		// prefix or a UNC prefix. For every other token, convert backslashes to
+		// slashes but force a RELATIVE interpretation, so '\n' resolves to
+		// cwd/n (what bash actually passes) on POSIX and Windows alike. Tokens
+		// containing '..' still resolve outside cwd after the conversion, so
+		// traversal attempts keep failing closed.
+		const winish = /^[A-Za-z]:(?=\/|$)/.test(p) || p.startsWith("\\\\");
+		let candidate = p;
+		if (!winish && p.includes("\\")) {
+			const slashed = p.replace(/\\/g, "/");
+			candidate = slashed.startsWith("/") ? `.${slashed}` : slashed;
+		}
+		const normalized = normalizeMatchPath(candidate, cwd, options);
 		const cwdNorm = normalizeMatchPath(".", cwd, options);
 		const caseInsensitive = isWindowsAbsolutePath(cwdNorm);
 		const comparable = caseInsensitive ? normalized.toLowerCase() : normalized;
