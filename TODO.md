@@ -2,6 +2,12 @@
 
 > See also [`extensions/pi-tool-permissions/TODO.md`](extensions/pi-tool-permissions/TODO.md) for the pi-tool-permissions extension's own task list.
 
+- [ ] Node.js equivalent of the python extension: sandboxed persistent `node` tool
+  - Rationale: ~70% of `extensions/python/` is language-agnostic (`sandbox.ts` bwrap/seccomp/mounts, `limits.ts`, `protocol.ts` framing, most of `session.ts` lifecycle + permission-mode/read-root wiring); only the worker is Python-specific. Concrete use case: this repo is TypeScript, so a persistent JS context with the project mounted at `/workspace` can exercise extension modules and pi's shared event bus directly.
+  - Worker: persistent `vm.createContext` + `vm.runInContext` (~400-600 lines, mirroring `worker.py`'s frame protocol); "final-expression repr" needs a trailing-expression transform or should be dropped for v1 (print it yourself instead).
+  - v1 scope cuts the out-of-sandbox read-prompt flow: Node has no `sys.addaudithook` equivalent; the best mapping is `node --permission --allow-fs-read=<mount>` + catching `ERR_ACCESS_DENIED` (carries the path) feeding the existing prompt/replay plumbing, but the flag is still experimental in Node 22 and the flow is the most intricate part of the python extension (see pi-tool-permissions step 3). Fail closed with an informative error for v1; give the prompt flow its own pass later.
+  - Seccomp policy, namespace setup, threat model, and permission-mode/read-root relaunch wiring carry over unchanged.
+
 - [ ] Python + permissions follow-up: manual smoke test of the interactive flows
   - The dialog/notification paths are only partially covered by stub-based tests; run one interactive pi session (Linux + bubblewrap) exercising: edits-mode remount notify, out-of-sandbox read prompt -> grant (session/project/user) -> replay, denial memory, `/permissions reload` picking up hand-edited `readAllowPaths`, and `pi -p` (no-UI deny).
 
