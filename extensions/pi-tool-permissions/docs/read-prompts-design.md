@@ -4,6 +4,12 @@ How reads of unmounted paths in the sandboxed python tool surface a permission
 prompt instead of a bare `FileNotFoundError`, and how grants flow back into the
 sandbox.
 
+> Scope: this design is specific to the python tool, which uses
+> `sys.addaudithook` to detect out-of-sandbox reads. The node tool has no
+> equivalent (node's `--permission` flag is still experimental), so its
+> out-of-sandbox reads fail closed with the kernel's own error instead of
+> prompting. See `../../node/README.md`.
+
 ## Problem
 
 The python sandbox mounts only the project (`/workspace`, read-only or

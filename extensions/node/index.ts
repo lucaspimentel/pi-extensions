@@ -215,13 +215,13 @@ let controller: NodeSessionController | undefined;
 
 /**
  * Whether the sandbox mounts /workspace read-write. Mirrors pi-tool-permissions'
- * writable-workspace mapping (rules.ts): allow-edits and yolo modes grant it.
- * Updated by the "tool-permissions:mode" event; defaults to read-only so the
- * tool behaves correctly when pi-tool-permissions is not loaded. Deliberately
- * duplicated (not imported) to keep the extensions decoupled. NOTE: the
- * pi-tool-permissions side of this mapping does not know about the node tool
- * yet (the python branch is `pythonWritableWorkspace`); until it is extended,
- * node relies on this duplicated mapping exactly like python does.
+ * `sandboxWritableWorkspace` (rules.ts), shared with the python tool:
+ * allow-edits and yolo modes grant it. pi-tool-permissions knows the node tool
+ * (it is in `SANDBOXED_TOOLS`, giving it the same implicit allow and
+ * reset/status bookkeeping treatment as python). Updated by the
+ * "tool-permissions:mode" event; defaults to read-only so the tool behaves
+ * correctly when pi-tool-permissions is not loaded. Deliberately duplicated
+ * (not imported) to keep the extensions decoupled.
  */
 let writableWorkspace = false;
 

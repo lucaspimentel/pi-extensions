@@ -5,7 +5,7 @@ import {
 	cwdGlobPattern, normalizePathSep, normalizeMatchPath, inputForMatching, recomputeBreakdown,
 	loadConfigFromObjects,
 	suggestReadRoot, scratchRoots, readRootImplicitRules, writeRootImplicitRules,
-	pythonWritableWorkspace,
+	sandboxWritableWorkspace, SANDBOXED_TOOLS,
 	verdictToAction, parseClassifierResponse, buildClassifierPrompt, describeAction,
 	classifyAction, classifierCacheKey, pickClassifierModel, rankModels, dedupeModels, hasPrice, modelLabel, pickableModels, autoStatusLabel, classifierAttribution,
 	buildActionContext, findGitRoot, leadingCdTarget, resolveAgainstCwd,
@@ -1326,13 +1326,71 @@ test("parity: python implicit allow",   decide(pyDefault, "python", { code: "1+1
 test("parity: python toolDefaults ask", decide(pyAsk, "python", { code: "1+1" }), decideWithReason(pyAsk, "python", { code: "1+1" }).action);
 test("parity: python reset",            decide(pyDefault, "python", { action: "reset" }), decideWithReason(pyDefault, "python", { action: "reset" }).action);
 
-section("pythonWritableWorkspace — mode → mount policy");
+section("decideWithReason — node tool (sandboxed, implicit allow)");
+
+// The node tool mirrors python exactly: sandboxed, implicit allow in every
+// mode, toolDefaults.node wins for execute, reset/status are unconditional
+// bookkeeping allows, explicit deny/ask rules always win.
+
+const nodeDefault = makeCfg({ defaultAction: "ask" });
+test("node execute: implicit allow in manual",        decideWithReason(nodeDefault, "node", { code: "1+1" }).action, "allow");
+test("node execute: implicit allow reason",           decideWithReason(nodeDefault, "node", { code: "1+1" }).reason, "sandboxed node tool (implicit allow; override with toolDefaults.node)");
+test("node execute: implicit allow in edits",         decideWithReason(nodeDefault, "node", { code: "1+1" }, "edits").action, "allow");
+test("node execute: implicit allow in auto (no classifier)", decideWithReason(nodeDefault, "node", { code: "1+1" }, "auto").action, "allow");
+test("node execute: implicit allow in yolo",          decideWithReason(nodeDefault, "node", { code: "1+1" }, "yolo").action, "allow");
+test("node execute: missing action means execute",    decideWithReason(nodeDefault, "node", {}).action, "allow");
+
+test("node reset: implicit allow",                    decideWithReason(nodeDefault, "node", { action: "reset" }).action, "allow");
+test("node status: implicit allow",                   decideWithReason(nodeDefault, "node", { action: "status" }).action, "allow");
+test("node reset: reason",                            decideWithReason(nodeDefault, "node", { action: "reset" }).reason, "node reset/status (bookkeeping, no code execution)");
+
+// Explicit toolDefaults.node wins for execute in every mode.
+const nodeAsk = makeCfg({ toolDefaults: { node: "ask" } });
+const nodeDeny = makeCfg({ toolDefaults: { node: "deny" } });
+test("node execute: toolDefaults ask wins (manual)",  decideWithReason(nodeAsk, "node", { code: "1+1" }).action, "ask");
+test("node execute: toolDefaults ask wins (auto)",    decideWithReason(nodeAsk, "node", { code: "1+1" }, "auto").action, "ask");
+test("node execute: toolDefaults ask reason",         decideWithReason(nodeAsk, "node", { code: "1+1" }).reason, "toolDefaults.node = ask");
+test("node execute: toolDefaults deny wins",          decideWithReason(nodeDeny, "node", { code: "1+1" }).action, "deny");
+test("node execute: toolDefaults allow wins",         decideWithReason(makeCfg({ toolDefaults: { node: "allow" } }), "node", { code: "1+1" }).action, "allow");
+test("node reset/status: always allowed despite toolDefaults ask", decideWithReason(nodeAsk, "node", { action: "reset" }).action, "allow");
+test("node reset/status: status allowed despite toolDefaults ask", decideWithReason(nodeAsk, "node", { action: "status" }).action, "allow");
+test("node reset/status: always allowed despite toolDefaults deny", decideWithReason(nodeDeny, "node", { action: "reset" }).action, "allow");
+
+// Explicit bare Node rules follow normal precedence (deny > ask > allow) and
+// win over both the implicit allow and reset/status bookkeeping. The bare
+// form also matches the lowercase tool name ("node" rules are equivalent).
+const nodeAskRule = makeCfg({ ask: ["Node"] });
+const nodeDenyRule = makeCfg({ deny: ["Node"] });
+const nodeAllowRule = makeCfg({ allow: ["Node"] });
+test("node execute: explicit ask rule beats implicit allow",  decideWithReason(nodeAskRule, "node", { code: "1+1" }).action, "ask");
+test("node execute: explicit ask rule reason",                decideWithReason(nodeAskRule, "node", { code: "1+1" }).reason, "matched ask rule 'Node'");
+test("node reset: explicit ask rule wins (noopCd precedent)", decideWithReason(nodeAskRule, "node", { action: "reset" }).action, "ask");
+test("node execute: explicit deny rule beats everything",     decideWithReason(nodeDenyRule, "node", { code: "1+1" }).action, "deny");
+test("node reset: explicit deny rule wins",                   decideWithReason(nodeDenyRule, "node", { action: "reset" }).action, "deny");
+test("node execute: explicit allow rule matches",             decideWithReason(nodeAllowRule, "node", { code: "1+1" }).action, "allow");
+test("node execute: explicit allow rule reason",              decideWithReason(nodeAllowRule, "node", { code: "1+1" }).reason, "matched allow rule 'Node'");
+test("node: lowercase rule matches the bare tool",            decide(makeCfg({ deny: ["node"] }), "node", { code: "1+1" }), "deny");
+
+// Parity: decide() is a thin wrapper over decideWithReason().
+test("parity: node implicit allow",   decide(nodeDefault, "node", { code: "1+1" }), decideWithReason(nodeDefault, "node", { code: "1+1" }).action);
+test("parity: node toolDefaults ask", decide(nodeAsk, "node", { code: "1+1" }), decideWithReason(nodeAsk, "node", { code: "1+1" }).action);
+test("parity: node reset",            decide(nodeDefault, "node", { action: "reset" }), decideWithReason(nodeDefault, "node", { action: "reset" }).action);
+
+section("SANDBOXED_TOOLS — sandboxed tool registry");
+
+test("SANDBOXED_TOOLS: python",     SANDBOXED_TOOLS.has("python"), true);
+test("SANDBOXED_TOOLS: node",       SANDBOXED_TOOLS.has("node"), true);
+test("SANDBOXED_TOOLS: bash",       SANDBOXED_TOOLS.has("bash"), false);
+test("SANDBOXED_TOOLS: normalized", SANDBOXED_TOOLS.has("Node"), false);
+
+section("sandboxWritableWorkspace — mode → mount policy");
 
 // allow-edits and yolo grant a writable /workspace; manual and auto keep it
-// read-only (auto-mode behavior is deliberately deferred).
-test("pythonWritableWorkspace: edits",  pythonWritableWorkspace("edits"), true);
-test("pythonWritableWorkspace: yolo",   pythonWritableWorkspace("yolo"), true);
-test("pythonWritableWorkspace: manual", pythonWritableWorkspace("manual"), false);
-test("pythonWritableWorkspace: auto",   pythonWritableWorkspace("auto"), false);
+// read-only (auto-mode behavior is deliberately deferred). The mapping is
+// shared by the python and node tools.
+test("sandboxWritableWorkspace: edits",  sandboxWritableWorkspace("edits"), true);
+test("sandboxWritableWorkspace: yolo",   sandboxWritableWorkspace("yolo"), true);
+test("sandboxWritableWorkspace: manual", sandboxWritableWorkspace("manual"), false);
+test("sandboxWritableWorkspace: auto",   sandboxWritableWorkspace("auto"), false);
 
 process.exit(summary() > 0 ? 1 : 0);

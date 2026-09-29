@@ -225,10 +225,11 @@ let controller: PythonSessionController | undefined;
 
 /**
  * Whether the sandbox mounts /workspace read-write. Mirrors pi-tool-permissions'
- * `pythonWritableWorkspace` (rules.ts): allow-edits and yolo modes grant it.
- * Updated by the "tool-permissions:mode" event; defaults to read-only so the
- * tool behaves correctly when pi-tool-permissions is not loaded. Deliberately
- * duplicated (not imported) to keep the extensions decoupled.
+ * `sandboxWritableWorkspace` (rules.ts), shared with the node tool: allow-edits
+ * and yolo modes grant it. Updated by the "tool-permissions:mode" event;
+ * defaults to read-only so the tool behaves correctly when
+ * pi-tool-permissions is not loaded. Deliberately duplicated (not imported)
+ * to keep the extensions decoupled.
  */
 let writableWorkspace = false;
 

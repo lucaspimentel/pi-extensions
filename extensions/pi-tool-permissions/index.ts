@@ -216,17 +216,18 @@
  *   allowNoopCd (default: true)
  *     Silently allows no-op `cd` commands (cd to cwd). Explicit ask rules are
  *     checked first and win; deny rules always win.
- *   python (automatic, no config key)
- *     The sandboxed `python` tool is implicitly allowed in every mode (manual,
- *     edits, auto, yolo): it runs inside a bubblewrap sandbox with no network,
- *     a read-only project mount, and no host mounts, so it is strictly more
- *     restricted than the read-only bash tier. `python reset`/`python status`
- *     run no code and are always allowed, even over toolDefaults.python = ask.
- *     `execute` can still be gated with an explicit "toolDefaults":
- *     { "python": "ask" | "deny" }, which wins in every mode. Bare allow/deny/ask
- *     rules (`Python`) work with normal precedence (deny > ask > allow); note
- *     pattern rules like `Python(x)` are NOT supported for python (patterns
- *     would match the raw JSON of the input, not the code).
+ *   python, node (automatic, no config key)
+ *     The sandboxed interpreter tools are implicitly allowed in every mode
+ *     (manual, edits, auto, yolo): they run inside a bubblewrap sandbox with
+ *     no network, a read-only project mount, and no host mounts, so they are
+ *     strictly more restricted than the read-only bash tier. Each tool's
+ *     `reset`/`status` actions run no code and are always allowed, even over
+ *     toolDefaults.<tool> = ask. `execute` can still be gated with an explicit
+ *     "toolDefaults": { "python": "ask" | "deny", "node": "ask" | "deny" },
+ *     which wins in every mode. Bare allow/deny/ask rules (`Python`, `Node`)
+ *     work with normal precedence (deny > ask > allow); note pattern rules
+ *     like `Python(x)` are NOT supported for these tools (patterns would match
+ *     the raw JSON of the input, not the code).
  *
  * Redirected Bash commands (write-risk):
  *   A Bash command containing a top-level *file* output redirection (>, >>, 2>,
@@ -295,14 +296,15 @@
  *
  *   Mode broadcast: every mode change (and the session_start reset to manual)
  *   emits pi.events channel "tool-permissions:mode" with { mode, readRoots }.
- *   The python extension consumes this to remount its sandbox's /workspace
- *   read-write in edits/yolo modes (see pythonWritableWorkspace in rules.ts)
- *   and to mount the effective read roots (readAllowPaths + session grants +
- *   readAllowScratch, i.e. sessionCfg().readRoots) read-only at their host
- *   paths. The event is also re-emitted whenever a read-root grant is added
- *   (dialog escalation, session or persisted) and on config reload. Flipping
- *   the mode or changing roots mid-session discards the python interpreter's
- *   state (the sandbox is restarted with the new mounts).
+ *   The sandboxed extensions (python, node) consume this to remount their
+ *   sandbox's /workspace read-write in edits/yolo modes (see
+ *   sandboxWritableWorkspace in rules.ts) and to mount the effective read
+ *   roots (readAllowPaths + session grants + readAllowScratch, i.e.
+ *   sessionCfg().readRoots) read-only at their host paths. The event is also
+ *   re-emitted whenever a read-root grant is added (dialog escalation,
+ *   session or persisted) and on config reload. Flipping the mode or changing
+ *   roots mid-session discards the sandboxed interpreter's state (the sandbox
+ *   is restarted with the new mounts).
  *
  *   Python read prompts: when sandboxed python code reads a path outside the
  *   mounted roots, the python extension emits "tool-permissions:prompt"
@@ -435,6 +437,7 @@ import {
 	recomputeBreakdown,
 	resolveAgainstCwd,
 	saveProjectConfig,
+	SANDBOXED_TOOLS,
 	saveUserConfig,
 	scratchRoots,
 	shouldClassifyWholeCompound,
@@ -447,7 +450,7 @@ import {
 import type { ClassifyResult, DefaultAction, ListAction, PermissionMode, ResolvedConfig } from "./rules.ts";
 
 const STATUS_KEY = "tool-permissions";
-/** Shared bus channel announcing the session permission mode; consumed by the python extension. */
+/** Shared bus channel announcing the session permission mode; consumed by the sandboxed extensions (python, node). */
 const MODE_EVENT_CHANNEL = "tool-permissions:mode";
 
 type Scope = "project" | "user";
@@ -554,14 +557,14 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Broadcast the full python-sandbox state on the shared event bus: the
-	 * session permission mode plus the effective read roots. The python
-	 * extension consumes this to remount /workspace (edits/yolo) and to mount
-	 * the read roots read-only (step 2.5). One event carries the complete
-	 * state, so every emission point calls this and the consumer treats each
-	 * event as a single relaunch decision (no debounce needed).
+	 * Broadcast the full sandbox state on the shared event bus: the session
+	 * permission mode plus the effective read roots. The sandboxed extensions
+	 * (python, node) consume this to remount /workspace (edits/yolo) and to
+	 * mount the read roots read-only. One event carries the complete state, so
+	 * every emission point calls this and the consumer treats each event as a
+	 * single relaunch decision (no debounce needed).
 	 */
-	function emitPythonModeEvent(): void {
+	function emitModeEvent(): void {
 		pi.events.emit(MODE_EVENT_CHANNEL, { mode, readRoots: sessionCfg().readRoots });
 	}
 
@@ -604,10 +607,11 @@ export default function (pi: ExtensionAPI) {
 	function applyMode(value: PermissionMode, ctx: ExtensionContext, notify = true): void {
 		mode = value;
 		// Broadcast the session mode (plus the effective read roots) on the
-		// shared event bus. The python extension subscribes to remount its
-		// sandbox's /workspace read-write in edits/yolo modes and to mount the
-		// read roots read-only (see pythonWritableWorkspace in rules.ts).
-		emitPythonModeEvent();
+		// shared event bus. The sandboxed extensions (python, node) subscribe to
+		// remount their sandbox's /workspace read-write in edits/yolo modes and
+		// to mount the read roots read-only (see sandboxWritableWorkspace in
+		// rules.ts).
+		emitModeEvent();
 		ctx.ui.setStatus(STATUS_KEY, modeStatusLabel(value, ctx));
 		if (notify) {
 			const label = value === "edits" ? "allow edits" : value;
@@ -662,8 +666,8 @@ export default function (pi: ExtensionAPI) {
 	const reload = (cwd: string, ctx?: ExtensionContext) => {
 		cfg = loadConfig(cwd);
 		// Re-broadcast: the reloaded config may have different readAllowPaths,
-		// which the python sandbox mounts read-only.
-		if (ctx) emitPythonModeEvent();
+		// which the sandboxed tools mount read-only.
+		if (ctx) emitModeEvent();
 		ctx?.ui.notify(
 			`Tool permissions reloaded (default=${cfg.defaultAction}, allow=${cfg.allow.length}, deny=${cfg.deny.length}, ask=${cfg.ask.length}, toolDefaults=${Object.keys(cfg.toolDefaults).length})`,  
 			"info",
@@ -678,11 +682,11 @@ export default function (pi: ExtensionAPI) {
 		sessionReadRoots = [];
 		classifierDebugEnabled = false;
 		lastAutoStatusId = undefined;
-		// Announce the reset (mode + roots) so the python extension remounts
-		// /workspace read-only and drops session-granted roots (python registers
-		// its bus subscription at init time, before session_start dispatch, so
+		// Announce the reset (mode + roots) so the sandboxed extensions remount
+		// /workspace read-only and drop session-granted roots (they register
+		// their bus subscription at init time, before session_start dispatch, so
 		// ordering is safe).
-		emitPythonModeEvent();
+		emitModeEvent();
 		ctx.ui.setStatus(STATUS_KEY, "");
 		promptCtx = ctx;
 	});
@@ -733,7 +737,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (choice.startsWith("Allow reads from") && choice.endsWith("(this session)")) {
 				if (!sessionReadRoots.includes(root)) sessionReadRoots.push(root);
-				emitPythonModeEvent();
+				emitModeEvent();
 				respond("allow");
 				return;
 			}
@@ -744,7 +748,7 @@ export default function (pi: ExtensionAPI) {
 					saveProjectConfig(ctx.cwd, raw);
 					cfg = loadConfig(ctx.cwd);
 				}
-				emitPythonModeEvent();
+				emitModeEvent();
 				respond("allow");
 				return;
 			}
@@ -755,7 +759,7 @@ export default function (pi: ExtensionAPI) {
 					saveUserConfig(raw);
 					cfg = loadConfig(ctx.cwd);
 				}
-				emitPythonModeEvent();
+				emitModeEvent();
 				respond("allow");
 				return;
 			}
@@ -921,9 +925,9 @@ export default function (pi: ExtensionAPI) {
 							act: async () => {
 								sessionScratch = true;
 								// Scratch roots are now granted: re-broadcast so the
-								// python sandbox mounts them read-only. (It skips the
+								// sandboxed tools mount them read-only. (They skip the
 								// reserved /tmp mount itself; /var/tmp and $TMPDIR apply.)
-								emitPythonModeEvent();
+								emitModeEvent();
 								return escalateProceed(toolName, input, m);
 							},
 						});
@@ -935,7 +939,7 @@ export default function (pi: ExtensionAPI) {
 									raw.readAllowScratch = true;
 									saveProjectConfig(ctx.cwd, raw);
 									cfg = loadConfig(ctx.cwd);
-									emitPythonModeEvent();
+									emitModeEvent();
 									return escalateProceed(toolName, input, m);
 								},
 							});
@@ -948,7 +952,7 @@ export default function (pi: ExtensionAPI) {
 									raw.readAllowScratch = true;
 									saveUserConfig(raw);
 									cfg = loadConfig(ctx.cwd);
-									emitPythonModeEvent();
+									emitModeEvent();
 									return escalateProceed(toolName, input, m);
 								},
 							});
@@ -971,9 +975,9 @@ export default function (pi: ExtensionAPI) {
 							const trimmed = edited.trim();
 							if (!trimmed) return true;
 							if (!sessionReadRoots.includes(trimmed)) sessionReadRoots.push(trimmed);
-							// New session read root: re-broadcast so the python sandbox
-							// mounts it read-only.
-							emitPythonModeEvent();
+							// New session read root: re-broadcast so the sandboxed tools
+							// mount it read-only.
+							emitModeEvent();
 							return escalateProceed(toolName, input, m);
 						},
 					});
@@ -989,7 +993,7 @@ export default function (pi: ExtensionAPI) {
 								raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), trimmed]);
 								saveProjectConfig(ctx.cwd, raw);
 								cfg = loadConfig(ctx.cwd);
-								emitPythonModeEvent();
+								emitModeEvent();
 								return escalateProceed(toolName, input, m);
 							},
 						});
@@ -1006,7 +1010,7 @@ export default function (pi: ExtensionAPI) {
 								raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), trimmed]);
 								saveUserConfig(raw);
 								cfg = loadConfig(ctx.cwd);
-								emitPythonModeEvent();
+								emitModeEvent();
 								return escalateProceed(toolName, input, m);
 							},
 						});
@@ -1489,6 +1493,18 @@ export default function (pi: ExtensionAPI) {
 					const tag = sourceTag(action, r);
 					return tag ? `  ${tag} ${r}` : `  - ${r}`;
 				};
+				// Sandbox status: one combined line while every sandboxed interpreter
+				// tool (python, node) uses the implicit allow; a tool with an explicit
+				// toolDefaults entry gets its own line instead.
+				const sandboxedTools = [...SANDBOXED_TOOLS];
+				const sandboxedLines =
+					sandboxedTools.every((t) => cfg.explicitToolDefaults[t] === undefined)
+						? [`sandboxed tools: ${sandboxedTools.join(", ")} (implicit allow; override with toolDefaults.<tool>)`]
+						: sandboxedTools.map((t) =>
+							cfg.explicitToolDefaults[t] === undefined
+								? `  - ${t}: implicit allow (sandboxed)`
+								: `${t}: ${cfg.explicitToolDefaults[t]} (toolDefaults.${t})`,
+						);
 				const lines = [
 					`default: ${cfg.defaultAction}`,
 					`readAllowCwd: ${cfg.implicit.readAllowCwd}`,
@@ -1536,9 +1552,7 @@ export default function (pi: ExtensionAPI) {
 					...tdEntries.map(([k, v]) =>
 						implicitTDKeys.has(k) ? `  [implicit] ${k} -> ${v}` : `  - ${k} -> ${v}`
 					),
-					cfg.explicitToolDefaults["python"] === undefined
-						? `python: implicit allow (sandboxed; override with toolDefaults.python)`
-						: `python: ${cfg.explicitToolDefaults["python"]} (toolDefaults.python)`,
+					...sandboxedLines,
 				];
 				ctx.ui.notify(lines.join("\n"), "info");
 				return;

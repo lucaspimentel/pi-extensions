@@ -43,14 +43,23 @@ export type Action = "allow" | "deny" | "ask" | "auto";
 export type PermissionMode = "manual" | "edits" | "auto" | "yolo";
 
 /**
- * Whether the python tool's sandbox should mount the project (/workspace)
- * read-write. allow-edits and yolo modes grant it (the user explicitly asked
- * for unprompted edits / no more prompts); manual and auto keep the read-only
- * mount (auto-mode behavior is deliberately deferred). Consumed by the python
- * extension, which duplicates this two-line mapping rather than importing it,
- * so the extensions stay decoupled. Keep both in sync.
+ * The sandboxed interpreter tools: the python and node extensions. Both run
+ * model code inside a bubblewrap sandbox (no network, read-only project mount,
+ * no host mounts), so both get the implicit allow and the reset/status
+ * bookkeeping treatment in `decideWithReason`. See the branches there.
  */
-export function pythonWritableWorkspace(mode: PermissionMode): boolean {
+export const SANDBOXED_TOOLS = new Set(["python", "node"]);
+
+/**
+ * Whether a sandboxed tool's mount of the project (/workspace) is read-write.
+ * allow-edits and yolo modes grant it (the user explicitly asked for
+ * unprompted edits / no more prompts); manual and auto keep the read-only
+ * mount (auto-mode behavior is deliberately deferred). Applies identically to
+ * the python and node tools. Consumed by the sandboxed extensions, each of
+ * which duplicates this two-line mapping rather than importing it, so the
+ * extensions stay decoupled. Keep all copies in sync.
+ */
+export function sandboxWritableWorkspace(mode: PermissionMode): boolean {
 	return mode === "edits" || mode === "yolo";
 }
 
@@ -2741,13 +2750,14 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// bypassed by an implicit allow.
 	const askRule = matched(cfg.ask);
 	if (askRule !== undefined) return { action: "ask", reason: `matched ask rule '${askRule}'` };
-	// python reset/status are pure bookkeeping (they start no execution and run
-	// no code, like no-op `cd`): always allowed, even over an explicit
-	// toolDefaults.python = "ask". Explicit ask/deny rules above still win.
-	if (normalizeTool(toolName) === "python") {
-		const pyAction = String(input.action ?? "execute");
-		if (pyAction === "reset" || pyAction === "status")
-			return { action: "allow", reason: "python reset/status (bookkeeping, no code execution)" };
+	// Sandboxed-tool reset/status are pure bookkeeping (they start no execution
+	// and run no code, like no-op `cd`): always allowed, even over an explicit
+	// toolDefaults.<tool> = "ask". Explicit ask/deny rules above still win.
+	const toolForBookkeeping = normalizeTool(toolName);
+	if (SANDBOXED_TOOLS.has(toolForBookkeeping)) {
+		const sandboxAction = String(input.action ?? "execute");
+		if (sandboxAction === "reset" || sandboxAction === "status")
+			return { action: "allow", reason: `${toolForBookkeeping} reset/status (bookkeeping, no code execution)` };
 	}
 	// Read-only bash auto-allow short-circuit. When the auto layer is engaged
 	// (auto mode) AND classifyAllShell is set, route read-only bash
@@ -2824,15 +2834,15 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// implicit write guard, which must NOT short-circuit the mode strategy.
 	const td = cfg.explicitToolDefaults[tool];
 	if (td !== undefined) return { action: td, reason: `toolDefaults.${tool} = ${td}` };
-	// The sandboxed python tool is allowed implicitly in every mode: it runs in
-	// a bubblewrap sandbox (no network, read-only project mount, no host
-	// mounts), so it is strictly more restricted than the read-only bash tier.
-	// This is a dedicated branch rather than an implicitToolDefaults entry
+	// The sandboxed tools (python, node) are allowed implicitly in every mode:
+	// they run in a bubblewrap sandbox (no network, read-only project mount, no
+	// host mounts), so they are strictly more restricted than the read-only bash
+	// tier. This is a dedicated branch rather than an implicitToolDefaults entry
 	// because implicit entries are demoted below the classifier in auto mode;
-	// python must never be classified. Explicit toolDefaults.python still wins
-	// for execute in every mode (checked above).
-	if (tool === "python")
-		return { action: "allow", reason: "sandboxed python tool (implicit allow; override with toolDefaults.python)" };
+	// sandboxed tools must never be classified. Explicit toolDefaults.<tool>
+	// still wins for execute in every mode (checked above).
+	if (SANDBOXED_TOOLS.has(tool))
+		return { action: "allow", reason: `sandboxed ${tool} tool (implicit allow; override with toolDefaults.${tool})` };
 	// Mode strategy for the non-explicit remainder. Layering rationale (see
 	// docs/permission-modes-design.md):
 	//

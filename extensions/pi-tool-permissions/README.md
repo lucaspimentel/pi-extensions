@@ -543,26 +543,29 @@ Or disable the default entirely:
 { "toolDefaults": { "write": "allow" } }
 ```
 
-#### `python` (automatic, no config key)
+#### `python` and `node` (automatic, no config key)
 
-The sandboxed `python` tool is implicitly **allowed in every permission mode** (manual, edits,
-auto, yolo). It runs inside a bubblewrap sandbox with no network, a read-only project mount,
-and no host mounts, so it is strictly more restricted than the read-only bash tier that is
-already auto-allowed. It is a built-in tier, not a config flag, and it is never screened by
-the auto-mode classifier.
+The sandboxed interpreter tools (`python`, `node`) are implicitly **allowed in every permission
+mode** (manual, edits, auto, yolo). Each runs model-submitted code inside a bubblewrap sandbox
+with no network, a read-only project mount, and no host mounts, so they are strictly more
+restricted than the read-only bash tier that is already auto-allowed. This is a built-in tier,
+not a config flag, and it is never screened by the auto-mode classifier.
 
-- `python` `execute` (the default action): implicitly allowed unless you set an explicit
-  `toolDefaults.python`, which wins in every mode:
+- `execute` (the default action for both tools): implicitly allowed unless you set an explicit
+  `toolDefaults` entry, which wins in every mode:
   ```json
-  { "toolDefaults": { "python": "ask" } }
+  { "toolDefaults": { "python": "ask", "node": "ask" } }
   ```
-- `python` `reset` / `status`: pure bookkeeping (they run no code and touch nothing), so they
-  are **always** allowed, even when `toolDefaults.python` is `"ask"`. Explicit `deny`/`ask`
-  rules still win over them.
-- Bare `Python` allow/deny/ask rules work with normal precedence (`deny > ask > allow`), so a
-  deny rule like `"Python"` blocks every python call. Pattern rules like `Python(x)` are
-  **not** supported for python: patterns would match the raw JSON of the tool input, not the
-  submitted code.
+- `reset` / `status`: pure bookkeeping (they run no code and touch nothing), so they are
+  **always** allowed, even when the matching `toolDefaults` entry is `"ask"`. Explicit
+  `deny`/`ask` rules still win over them.
+- Bare `Python` / `Node` allow/deny/ask rules work with normal precedence (`deny > ask >
+  allow`), so a deny rule like `"Node"` blocks every node call. Pattern rules like `Python(x)`
+  are **not** supported for these tools: patterns would match the raw JSON of the tool input,
+  not the submitted code.
+- The node tool's sandbox differs from python's in isolation details that do not change its
+  permission treatment (no seccomp policy, no out-of-sandbox read prompts: reads fail closed).
+  See [`extensions/node/README.md`](../node/README.md).
 
 #### `toolDefaults` map
 
@@ -584,14 +587,14 @@ allow/deny/ask lists but **before** `defaultAction`:
 For each tool call, the first matching slot wins:
 
 ```
-deny  >  ask  >  allow  >  toolDefaults  >  python implicit allow  >  auto (if session toggle on)  >  defaultAction
+deny  >  ask  >  allow  >  toolDefaults  >  sandboxed-tool implicit allow (python, node)  >  auto (if session toggle on)  >  defaultAction
 ```
 
 So a `deny` rule always overrides an `allow` rule, and an explicit `allow` rule always overrides
 a `toolDefaults` entry (which is how `Write(./output/*)` in allow can opt out of the implicit
-`write → ask` default). The sandboxed `python` tool sits between `toolDefaults` and the mode
-strategies: explicit `toolDefaults.python` wins over it in every mode, and it wins over
-`defaultAction` and the auto-mode classifier.
+`write → ask` default). The sandboxed tools (`python`, `node`) sit between `toolDefaults` and the
+mode strategies: explicit `toolDefaults.python` / `toolDefaults.node` win over them in every
+mode, and they win over `defaultAction` and the auto-mode classifier.
 
 ## Interactive prompt
 
@@ -737,19 +740,23 @@ The two former independent session toggles (allow-all-edits, auto mode) are cons
 
 The full design (precedence, invariants, sharp edges) lives in [`docs/permission-modes-design.md`](./docs/permission-modes-design.md). The `auto` rung's classifier layer is detailed in [Auto mode](#auto-mode) below.
 
-### Effect on the python tool
+### Effect on the sandboxed tools (python, node)
 
-Every mode change (and the `session_start` reset to `manual`) is broadcast on pi's shared event bus (channel `tool-permissions:mode`, payload `{ mode, readRoots }`). The sandboxed `python` extension consumes this in two ways:
+Every mode change (and the `session_start` reset to `manual`) is broadcast on pi's shared event bus (channel `tool-permissions:mode`, payload `{ mode, readRoots }`). The sandboxed `python` and `node` extensions consume this identically:
 
-- In `edits` and `yolo` modes it mounts the project at `/workspace` **read-write**, so python code can modify project files like `Write`/`Edit` can. In `manual` and `auto` modes the mount stays read-only.
-- The effective read roots (persisted `readAllowPaths`, session grants, and scratch roots when `readAllowScratch` is on) are mounted into the sandbox **read-only at their host paths, in every mode** — python can read anything you already granted to `Read`/bash. Roots colliding with reserved sandbox mounts (notably `/tmp`, whose private tmpfs is never shadowed) or covered by the project mount are skipped, with the reason announced in a notification.
+- In `edits` and `yolo` modes they mount the project at `/workspace` **read-write**, so sandboxed code can modify project files like `Write`/`Edit` can. In `manual` and `auto` modes the mount stays read-only.
+- The effective read roots (persisted `readAllowPaths`, session grants, and scratch roots when `readAllowScratch` is on) are mounted into the sandbox **read-only at their host paths, in every mode** — sandboxed code can read anything you already granted to `Read`/bash. Roots colliding with reserved sandbox mounts (notably `/tmp`, whose private tmpfs is never shadowed) or covered by the project mount are skipped, with the reason announced in a notification.
 
-- Flipping the mode or changing the read roots mid-session kills the running python sandbox (interpreter state is discarded); the next execution starts one with the new mounts, and a notification announces the change. The event is re-emitted whenever a read-root grant is added (dialog escalation, session or persisted) and on `/permissions reload`.
+- Flipping the mode or changing the read roots mid-session kills the running sandbox (interpreter state is discarded); the next execution starts one with the new mounts, and a notification announces the change. The event is re-emitted whenever a read-root grant is added (dialog escalation, session or persisted) and on `/permissions reload`.
 - The mode signal is a courtesy UX, not a security boundary: the mount flags themselves are kernel-enforced, and a writable mount only exists because you explicitly switched into a mode that grants unprompted edits.
+
+Node-specific runtime deltas that do not change this treatment (no seccomp policy, no read prompts, prlimit-based limits) are documented in [`extensions/node/README.md`](../node/README.md).
 
 ### Out-of-sandbox read prompts
 
 When sandboxed python code reads a path outside every mounted root, the python extension emits `tool-permissions:prompt` `{ id, path }` and awaits the correlated `tool-permissions:promptResult` `{ id, outcome }`. This extension renders the dialog (mirroring the read-root escalation options): allow reads from the covering directory for **this session**, the **project** config, or the **user** config, or **deny**. On allow, the grant is persisted through the normal `readAllowPaths` machinery and the mode event is re-broadcast **before** the verdict, so the python sandbox is remounted before its code replays. Non-interactive contexts (no UI) deny immediately. See `docs/read-prompts-design.md` for the full design.
+
+This flow is python-specific: the node tool has no audit-hook equivalent (node's `--permission` flag is still experimental), so out-of-mount reads there fail closed with the kernel's own error instead of prompting. See [`extensions/node/README.md`](../node/README.md).
 
 ## Slash command
 
