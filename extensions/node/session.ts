@@ -689,6 +689,7 @@ export class NodeSessionController {
 			workerPath,
 			bwrapPath: deps.bwrapPath!,
 			prlimitPath: deps.prlimitPath!,
+			seccompLauncherPath: deps.seccompLauncherPath!,
 			interpreterPath: deps.interpreterPath,
 			writableWorkspace: this.writableWorkspace,
 			readRoots: this.readRoots,

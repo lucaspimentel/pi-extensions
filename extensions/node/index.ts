@@ -9,10 +9,11 @@
  * and full teardown on timeout/cancel/crash.
  *
  * Deltas vs the python tool (see README.md for the complete version):
- * - No seccomp policy: node has no stdlib FFI to load libseccomp. External
- *   network is still blocked by the network namespace, and no host Unix
- *   socket is ever mounted; a socket inside the mounted project or read
- *   roots is, however, connectable.
+ * - Seccomp via a compiled launcher: node has no stdlib FFI, so a tiny C
+ *   launcher (seccomp-launch.c, compiled on demand) installs the same
+ *   libseccomp policy as worker.py (socket/socketpair/ptrace/... blocked
+ *   with EPERM) before exec'ing the interpreter. bwrap --seccomp is broken
+ *   on this kernel, and no host Unix socket is ever mounted.
  * - No out-of-sandbox read prompts: reads outside the mounts fail closed
  *   with the kernel's own error. (Node's experimental --permission flag is
  *   the candidate for a later prompt flow.)

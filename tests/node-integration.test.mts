@@ -560,19 +560,19 @@ test("connections to a host loopback TCP listener fail (network namespace)", asy
 		);
 		assert.equal(r.status, "ok");
 		assert.ok(!r.stdout.includes("TCP-CONNECTED"), `loopback connect must fail; got: ${r.stdout}`);
-		assert.ok(r.stdout.includes("tcp-blocked") || r.stdout.includes("tcp-timeout"), `loopback connect must fail; got: ${r.stdout}`);
+		// seccomp rejects socket() with EPERM before the netns is even relevant.
+		assert.ok(r.stdout.includes("tcp-blocked EPERM"), `socket() must be blocked with EPERM; got: ${r.stdout}`);
 	} finally {
 		await c.dispose("test");
 		server.close();
 	}
 });
 
-test("a Unix socket inside the mounted project is connectable (documented delta vs python)", async () => {
-	// The python tool's seccomp policy blocks socket() outright, so even a
-	// project-local Unix socket is unreachable there. The node tool has no
-	// seccomp (see README threat model); the network namespace only blocks
-	// AF_INET/AF_INET6. This test pins the documented behavior so a future
-	// hardening step (bwrap --seccomp) flips it deliberately.
+test("a Unix socket inside the mounted project is blocked by seccomp (parity with python)", async () => {
+	// The seccomp launcher installs the same policy as worker.py: socket() is
+	// rejected with EPERM before the address family matters, so even a
+	// project-local Unix socket is unreachable. This used to be a documented
+	// delta (netns-only hardening); the launcher flipped it deliberately.
 	const projectDir = makeProject();
 	const sockPath = path.join(projectDir, "host.sock");
 	const server = net.createServer(() => {});
@@ -591,7 +591,7 @@ test("a Unix socket inside the mounted project is connectable (documented delta 
 			undefined,
 		);
 		assert.equal(r.status, "ok");
-		assert.ok(r.stdout.includes("UNIX-CONNECTED"), `project-local unix socket must be connectable per the documented delta; got: ${r.stdout}`);
+		assert.ok(r.stdout.includes("unix-blocked EPERM"), `socket() must be blocked with EPERM by the seccomp launcher; got: ${r.stdout}`);
 	} finally {
 		await c.dispose("test");
 		server.close();

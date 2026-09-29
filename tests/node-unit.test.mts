@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { LIMITS, PROTOCOL_VERSION } from "../extensions/node/limits.ts";
-import { buildBwrapArgs, filterMountableReadRoots, interpreterBinds, resolveInterpreter } from "../extensions/node/sandbox.ts";
+import { buildBwrapArgs, compileLauncher, filterMountableReadRoots, findLibseccomp, interpreterBinds, launcherCachePath, launcherSourcePath, resolveInterpreter } from "../extensions/node/sandbox.ts";
 import {
 	boundHead,
 	boundTail,
@@ -347,6 +347,7 @@ function makeLaunchSpec(overrides: Record<string, unknown> = {}) {
 		workerPath: "/fake/worker.mjs",
 		bwrapPath: "/usr/bin/bwrap",
 		prlimitPath: "/usr/bin/prlimit",
+		seccompLauncherPath: "/tmp/pi-node-tool-cache/seccomp-launch",
 		interpreterPath: "/usr/bin/node",
 		...overrides,
 	};
@@ -415,14 +416,41 @@ function testBwrapArgvShape() {
 		["/usr/bin/prlimit", `--as=${LIMITS.rlimitAsBytes}`, `--fsize=${LIMITS.rlimitFsizeBytes}`, `--nofile=${LIMITS.rlimitNofile}`, "--core=0", "--"],
 		"prlimit must apply the documented rlimits",
 	);
-	assert.equal(tail[7], `--max-old-space-size=${LIMITS.maxOldSpaceSizeMb}`, "heap cap flag required");
-	assert.equal(tail[8], "/worker.mjs", "worker entrypoint");
-	assert.equal(tail[9], String(LIMITS.maxReprBytes), "repr limit argument");
+	assert.equal(tail[6], "/seccomp-launch", "seccomp launcher must sit between prlimit and the interpreter (bound 1:1: the host temp dir is shadowed by the sandbox tmpfs)");
+	const launcherMount = args.findIndex((a, i) => a === "--ro-bind" && args[i + 2] === "/seccomp-launch");
+	assert.notEqual(launcherMount, -1, "launcher binary must be bound 1:1 into the sandbox");
+	assert.equal(args[launcherMount + 1], spec.seccompLauncherPath, "launcher bind source must be the compiled cache path");
+	assert.equal(tail[7], spec.interpreterPath, "launcher execs the interpreter");
+	assert.equal(tail[8], `--max-old-space-size=${LIMITS.maxOldSpaceSizeMb}`, "heap cap flag required");
+	assert.equal(tail[9], "/worker.mjs", "worker entrypoint");
+	assert.equal(tail[10], String(LIMITS.maxReprBytes), "repr limit argument");
 
 	// Environment is cleared; only the explicit runtime values are set.
 	assert.ok(joined.includes("--clearenv"));
 	assert.ok(!joined.includes("NODE_OPTIONS"));
-	console.log("  ✓ bwrap argv: namespaces, mounts, brew bind, prlimit wrapper, cleared env");
+	console.log("  ✓ bwrap argv: namespaces, mounts, brew bind, prlimit + seccomp launcher, cleared env");
+}
+
+function testLauncherCompileCache() {
+	const source = "// synthetic launcher source v1\n";
+	const p1 = launcherCachePath(source);
+	assert.ok(p1.split(path.sep).some((seg) => seg.startsWith(process.arch + "-")), "cache path must be arch-keyed");
+	assert.ok(p1.includes(os.tmpdir()), "cache must live under the OS temp dir (persists across sessions, outside the runtime root)");
+	// A source change must change the cache key (recompile trigger).
+	const p2 = launcherCachePath(source + "\n// v2");
+	assert.notEqual(p1, p2, "source changes must produce a new cache key");
+	assert.equal(path.basename(path.join(p1, "seccomp-launch")), "seccomp-launch");
+
+	// The repo's real launcher source must exist and compile cleanly.
+	const src = launcherSourcePath();
+	assert.ok(src !== null && fs.existsSync(src), "seccomp-launch.c must ship next to the extension");
+	const compiled = compileLauncher(fs.readFileSync(src!, "utf8"));
+	assert.ok(compiled.ok === true, `launcher must compile on this machine: ${compiled.diagnostic}`);
+	assert.ok(fs.existsSync(compiled.launcherPath!), "compiled launcher binary must exist");
+
+	// libseccomp must be locatable (same runtime dependency as python).
+	assert.ok(findLibseccomp() !== null, "libseccomp.so.2 must be found");
+	console.log("  ✓ seccomp launcher: cache keying, source present, compiles clean, libseccomp found");
 }
 
 async function testWorkspaceMountFlag() {
@@ -647,6 +675,7 @@ const tests = [
 	testControllerStatics,
 	testInterpreterBinds,
 	testBwrapArgvShape,
+	testLauncherCompileCache,
 	testWorkspaceMountFlag,
 	testFilterMountableReadRoots,
 	testReadRootBinds,

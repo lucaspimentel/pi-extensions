@@ -16,6 +16,16 @@ shared mechanics briefly and the node-specific deltas in full.
 - `prlimit` (util-linux): applies the worker's rlimits; installed by default
   on most distros. The node worker cannot set its own rlimits (node has no
   setrlimit API), so the sandbox launches it through `/usr/bin/prlimit`.
+- `libseccomp2` (runtime shared object only, no dev package): provides the
+  worker's syscall policy, same as the python tool. The sandbox launches node
+  through a compiled seccomp launcher (see below) that links against
+  `libseccomp.so.2`.
+- A C compiler (`cc`, `gcc`, or `clang`): compiles the seccomp launcher on
+  first use into a per-arch cache under the OS temp dir (keyed by source
+  hash, reused across sessions; nothing is committed). If no compiler is
+  found, the launcher cannot be built, or the policy cannot be installed, the
+  node tool fails closed with an actionable diagnostic, matching the python
+  tool's stance that socket blocking is a required restriction.
 - Node.js 20+: the running pi binary itself by default (symlink-resolved);
   override with the `PI_NODE_TOOL_INTERPRETER` environment variable
   (user-controlled, never model-controlled). Homebrew installs are supported:
@@ -155,19 +165,25 @@ spawned as argv arrays), mirroring the python tool:
 
 ### Deltas vs the python tool
 
-- **No seccomp policy.** worker.py loads system libseccomp via ctypes and
-  blocks `socket`, `socketpair`, `ptrace`, `bpf`, and related syscalls. Node
-  has no stdlib FFI, so the node worker has no equivalent. Consequences:
-  - External network remains impossible (network namespace blocks
-    AF_INET/AF_INET6, for the worker and any process it spawns).
-  - No host Unix-domain socket is ever mounted, so host sockets are
-    unreachable through the filesystem. **A socket inside the mounted
-    project or read roots, however, is connectable** (pinned by an
-    integration test so a future hardening step flips it deliberately).
-  - `ptrace`/`bpf`-class syscalls are not blocked; the pid namespace and
-    dropped capabilities remain the defense there.
-  - Candidate future hardening: `bwrap --seccomp <fd>` with a BPF program
-    pre-generated in the parent (no in-worker FFI needed).
+- **Seccomp via a compiled launcher, not in-worker libseccomp.** worker.py
+  loads system libseccomp via ctypes from inside the sandbox and blocks
+  `socket`, `socketpair`, `ptrace`, `bpf`, `userfaultfd`, `perf_event_open`,
+  `process_vm_readv/writev`, `kexec_load/file_load`, `open_by_handle_at`, and
+  `name_to_handle_at` with EPERM. Node has no stdlib FFI, so the node worker
+  runs under the identical policy installed by `seccomp-launch.c`: a tiny
+  compiled launcher between prlimit and the interpreter that initializes the
+  libseccomp policy and then execs node. It is needed because `bwrap
+  --seccomp` is unusable here (on this WSL2 kernel its prctl(PR_SET_SECCOMP)
+  reports EINVAL even for a known-good libseccomp-exported BPF program, while
+  installs from inside the bwrap user namespace work, which is exactly the
+  launcher's position). Consequences:
+  - `socket()` is rejected with EPERM before the address family matters:
+    external network (already blocked by the network namespace) and Unix
+    sockets inside the mounted project or read roots are all unreachable,
+    restoring parity with python (integration tests pin the EPERM).
+  - Any process the worker spawns inherits the filter, as in python.
+  - The policy is a required restriction: missing compiler, missing
+    libseccomp, or a failing install fail closed with a diagnostic.
 - **No out-of-sandbox read prompts.** Node has no audit-hook equivalent
   (`sys.addaudithook` is python-only). Reads outside the mounts fail closed
   with the kernel's own error. Node's experimental `--permission` flag is the
@@ -193,10 +209,9 @@ working.
   escapes from the vm into the worker process. The isolation boundary is the
   bubblewrap sandbox around the worker, not the vm context. (The python
   worker has the same property; `eval` escapes are equally available there.)
-- **A Unix-domain socket inside the mounted project or read roots is
-  connectable** (no seccomp; see Deltas above). Keep listening sockets out of
-  the project while untrusted code runs, or grant no read roots you do not
-  trust.
+- **Unix-domain sockets are unreachable, including inside the mounted
+  project and read roots** (seccomp blocks `socket()` outright, like python).
+  Subprocesses inherit the filter.
 - Other pi tools are unchanged and unrestricted; this extension sandboxes
   only its own `node` tool.
 - The sandbox shares the host kernel; a kernel escape would compromise the
