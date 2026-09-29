@@ -25,6 +25,7 @@
       "./extensions/slack-via-claude.ts",
       "./extensions/ollama-models.ts",
       "./extensions/python",
+      "./extensions/node",
       "./extensions/session-search"
     ],
     "skills": [
@@ -32,7 +33,8 @@
     ]
   },
   "scripts": {
-    "test:python": "node --test tests/python-unit.test.mts tests/python-integration.test.mts"
+    "test:python": "node --test tests/python-unit.test.mts tests/python-integration.test.mts",
+    "test:node": "node --test tests/node-unit.test.mts tests/node-integration.test.mts"
   },
   "dependencies": {
     "html-to-text": "^9.0.5"

@@ -69,8 +69,20 @@ interaction) carry over almost verbatim.
 - **Context globals**: an empty vm context has nothing; inject console, the
   process shim, timers (`setTimeout`/`setInterval`/`setImmediate` and clear
   counterparts), `queueMicrotask`, `structuredClone`, `Buffer`, `URL`,
-  `TextEncoder`/`TextDecoder`. No `require`, no `import` (validated:
-  `typeof require === 'undefined'` in the context).
+  `TextEncoder`/`TextDecoder`. No `import` (dynamic `import()` is unavailable
+  in vm scripts without an `importModuleDynamically` callback).
+  AMENDMENT (2026-09-28, during implementation): the prototype shipped with no
+  `require`, which means user code had NO file I/O at all (no `fs`), unlike
+  python where the full stdlib is available; /scratch and the mounted read
+  roots would have been unreachable from user code. v1 therefore injects
+  `require` built on `module.createRequire("/workspace/")`: node builtins
+  (`fs`, `path`, `crypto`, ...) load directly, and project files load by path
+  or via the project's `node_modules`. The kernel mounts remain the read
+  boundary (an absolute require outside the mounts fails with the kernel's
+  own error). Documented weakening vs python: python's seccomp blocks
+  `socket()` even for subprocesses, while the node sandbox (netns-only, see
+  open question 1) can connect to a Unix-domain socket that lives inside the
+  mounted project or read roots.
 
 ## fd layout (identical to worker.py)
 
