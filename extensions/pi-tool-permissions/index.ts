@@ -51,7 +51,7 @@
  *     "readAllowScratch": false,
  *     "writeAllowPaths": ["/tmp"],
  *     "bashAllowRedirectsTo": ["/tmp"],   // deprecated alias for writeAllowPaths
- *     "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr", "find": "readonly-find" },
+ *     "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr", "find": "readonly-find", "awk": "readonly-awk" },
  *     "autoMode": {                       // used when the session auto toggle is on
  *       "classifier": { "provider": "anthropic", "model": "claude-haiku-4-5" },
  *       "environment": ["Trusted repo: github.com/lucaspimentel/*"],
@@ -140,24 +140,30 @@
  *     Unix null device — writes are discarded) are likewise NOT file writes and
  *     stay auto-allowable, so `cmd 2>/dev/null` is not blocked.
  *     Disable with "bashReadOnlyAllowCwd": false.
- *   bashValidators (default: { duckdb: "readonly-duckdb", mlr: "readonly-mlr", find: "readonly-find" })
+ *   bashValidators (default: { duckdb: "readonly-duckdb", mlr: "readonly-mlr", find: "readonly-find", awk: "readonly-awk" })
  *     Maps a bash command name to a built-in validator that proves the command
  *     read-only, so tools whose risk lives inside program text or expression
  *     primaries (SQL in `duckdb -c "..."`, DSL in `mlr` verbs, `find`
- *     expressions) can run read-only without permission prompts. The duckdb,
- *     mlr, and find readonly validators are enabled by default, no config
- *     needed. readonly-find accepts the read-only GNU find primaries (name,
+ *     expressions, `awk` programs) can run read-only without permission
+ *     prompts. The duckdb, mlr, find, and awk readonly validators are
+ *     enabled by default, no config needed. readonly-find accepts the read-only GNU find primaries (name,
  *     type, mtime and friends, -print/-print0/-ls, operators) and requires
  *     starting paths and -newer/-samefile reference files to resolve inside
  *     cwd or the configured read roots; it declines -delete, -exec* (-exec,
  *     -execdir, -ok, -okdir), the output-writing primaries (-fls, -fprint*,
- *     -fprintf), any unknown primary, and paths outside cwd/read roots. A
- *     value of "none" (sentinel,
- *     lowercase) disables the mapping for that command, e.g. to turn off the
- *     built-in duckdb validator while keeping mlr default-on:
+ *     -fprintf), any unknown primary, and paths outside cwd/read roots.
+ *     readonly-awk accepts flag-whitelisted invocations (-F/-v/-e, with -v
+ *     values restricted to simple constants) whose scanned program text has
+ *     no side-effect vectors (system(...), getline, output redirection and
+ *     |& coprocesses, gawk @include/@load) and whose input files resolve
+ *     inside cwd or the read roots; it declines -f/-i/-l/-E/--exec, unknown
+ *     flags, var=value positional assignments, and program-less invocations.
+ *     A value of "none" (sentinel, lowercase) disables the mapping for that
+ *     command, e.g. to turn off the built-in duckdb validator while keeping
+ *     the other defaults on:
  *       "bashValidators": { "duckdb": "none" }
  *     Custom mappings merge per command (project over user over defaults):
- *       "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr", "find": "readonly-find" }
+ *       "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr", "find": "readonly-find", "awk": "readonly-awk" }
  *     A validator is a positive safety proof, not a deny mechanism: when it
  *     cannot prove the command read-only (unknown flag, write statement,
  *     positional database file, input path resolving outside cwd and the

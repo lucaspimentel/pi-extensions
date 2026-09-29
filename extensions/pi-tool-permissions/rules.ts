@@ -1610,6 +1610,108 @@ function validateReadOnlyFind(tokens: string[], cwd: string, readRoots: readonly
 	return true;
 }
 
+/**
+ * Unsafe characters/words in an awk `-v` assignment value. POSIX parses the
+ * value as a full assignment expression, so it can invoke functions; only
+ * simple constants are allowed.
+ */
+function isUnsafeAwkAssignmentValue(v: string): boolean {
+	if (v.includes("(") || v.includes("`")) return true;
+	if (v.includes("|") || v.includes(">")) return true;
+	return /\bsystem\b/i.test(v);
+}
+
+/**
+ * Side-effect vectors inside awk program text (from `-e` or the first
+ * positional argument): function calls, input redirection, output
+ * redirection/coprocesses, and dynamic code loading.
+ */
+function awkProgramHasSideEffects(program: string): boolean {
+	// system() call.
+	if (/\bsystem\s*\(/i.test(program)) return true;
+	// getline from a file or command.
+	if (/\bgetline\b/.test(program)) return true;
+	// gawk dynamic code loading.
+	if (/@(?:include|load)\b/.test(program)) return true;
+	// Output redirection and coprocesses: `> "file"`, `>> "file"`,
+	// `| "cmd"`, `|& "cmd"`. `>` and `|` are also comparison/regex
+	// characters, so only reject when followed by a quote or `&` (a
+	// redirect target or coprocess command) to avoid rejecting `$1 > 5`
+	// or `/<|>/`; the rare false positive just declines to ask.
+	if (/[>|]\s*(?="|&)/.test(program)) return true;
+	return false;
+}
+
+/**
+ * Validate an `awk` invocation as read-only.
+ *
+ * Rules:
+ *  1. Flags are whitelist-only: `-F` (field-separator regex), `-v`
+ *     (assignment), and `-e` (program text). Attached short forms are
+ *     accepted for `-F` (`-F:`) and `-v` (`-vx=3`, value scanned like a
+ *     separate `-v` value). `-f`/`-i`/`-l` (program loaded from a file:
+ *     unscannable or gawk code-loading), `-E`/`--exec` (remaining args
+ *     treated as program), and any unknown flag fail.
+ *  2. A `-v` value must be a simple constant: reject `(`, backtick, `|`,
+ *     `>`, or the word `system` (POSIX parses the value as a full
+ *     assignment expression which can invoke functions).
+ *  3. The program text (all `-e` values and the first positional argument)
+ *     must not contain side-effect vectors: `system(...)`, `getline`,
+ *     output redirection (`print > "file"`, `print >> "file"`,
+ *     `print ... | "cmd"`, `|&` coprocess), or gawk `@include` / `@load`.
+ *     Missing program text (flags only, e.g. `awk -F:`) fails, mirroring
+ *     the duckdb validator's no-SQL decline.
+ *  4. `var=value` positional assignments fail outright (POSIX parses them
+ *     as full assignment expressions which can invoke functions).
+ *  5. Positional arguments after the program are input files and must
+ *     resolve inside cwd or one of the allowed read roots (covers
+ *     `awk '{print}' /etc/passwd`).
+ *
+ * Known false positives (safe: they decline to ask rather than allow):
+ * `>` or `|` followed by a quote inside the program, e.g. the string
+ * comparison `$1 > "abc"`, is indistinguishable
+ * from output redirection at this granularity and declines.
+ *
+ * Shell-level redirects were already screened by stripExemptRedirects before
+ * tokenization; the awk program is usually the whole shell token after
+ * quote-stripping, so it is scanned directly rather than via
+ * singleQuotedLiterals.
+ */
+function validateReadOnlyAwk(tokens: string[], cwd: string, readRoots: readonly string[]): boolean {
+	const programs: string[] = [];
+	let valueFor: string | null = null; // flag currently consuming a value token
+	let sawProgram = false;
+	for (let i = 1; i < tokens.length; i++) {
+		const tok = tokens[i];
+		if (valueFor !== null) {
+			if (valueFor === "-e") programs.push(tok);
+			else if (valueFor === "-v" && isUnsafeAwkAssignmentValue(tok)) return false;
+			// `-F` values are field-separator regexes; safe.
+			valueFor = null;
+			continue;
+		}
+		if (tok.startsWith("-") && tok.length > 1) {
+			if (tok === "-F" || tok === "-v" || tok === "-e") { valueFor = tok; continue; }
+			// Attached short forms: `-F:` (separator) and `-vx=3` (assignment).
+			if (/^-F./.test(tok)) continue;
+			if (/^-v[A-Za-z_]\w*=/.test(tok) && isUnsafeAwkAssignmentValue(tok.slice(2))) return false;
+			return false; // unknown or program-loading flag (-f, -i, -l, -E, --exec, ...)
+		}
+		// Positional argument.
+		if (/^[A-Za-z_]\w*=/.test(tok)) return false; // var=value assignment expression
+		if (!sawProgram) {
+			programs.push(tok); // first positional is the program text
+			sawProgram = true;
+			continue;
+		}
+		// Subsequent positionals are input files.
+		if (!pathInsideAllowedRoots(tok, cwd, readRoots)) return false;
+	}
+	if (valueFor !== null) return false; // dangling flag value
+	if (programs.length === 0) return false; // no program text — fail safe
+	return programs.every((p) => !awkProgramHasSideEffects(p));
+}
+
 type BashValidator = (tokens: string[], cwd: string, readRoots: readonly string[]) => boolean;
 
 /**
@@ -1622,6 +1724,7 @@ export const BASH_VALIDATORS: Record<string, BashValidator> = {
 	"readonly-duckdb": validateReadOnlyDuckdb,
 	"readonly-mlr": validateReadOnlyMlr,
 	"readonly-find": validateReadOnlyFind,
+	"readonly-awk": validateReadOnlyAwk,
 };
 
 /**
@@ -1640,6 +1743,7 @@ export const DEFAULT_BASH_VALIDATORS: Record<string, string> = {
 	duckdb: "readonly-duckdb",
 	mlr: "readonly-mlr",
 	find: "readonly-find",
+	awk: "readonly-awk",
 };
 
 /**

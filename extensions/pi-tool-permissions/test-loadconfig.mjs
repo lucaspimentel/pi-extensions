@@ -135,7 +135,7 @@ test("implicit mirror reflects merge",          JSON.stringify(validatorsMerged.
 const validatorsUserOnly = loadConfigFromObjects({ bashValidators: { duckdb: "readonly-duckdb" } }, {}, CWD);
 test("user-only value used when project omits", validatorsUserOnly.bashValidators["duckdb"], "readonly-duckdb");
 const validatorsEmpty = loadConfigFromObjects({}, {}, CWD);
-test("defaults present without config",         JSON.stringify(validatorsEmpty.bashValidators), JSON.stringify({ duckdb: "readonly-duckdb", mlr: "readonly-mlr", find: "readonly-find" }));
+test("defaults present without config",         JSON.stringify(validatorsEmpty.bashValidators), JSON.stringify({ duckdb: "readonly-duckdb", mlr: "readonly-mlr", find: "readonly-find", awk: "readonly-awk" }));
 test("defaults in implicit mirror too",         JSON.stringify(validatorsEmpty.implicit.bashValidators), JSON.stringify(validatorsEmpty.bashValidators));
 
 section("bashValidators sentinel \"none\" and defaults layering");

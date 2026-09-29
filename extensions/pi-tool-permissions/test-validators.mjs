@@ -15,7 +15,7 @@ const CWD = "/tmp/proj";
 
 const validatorCfg = (extra = {}) => makeCfg({
 	defaultAction: "ask",
-	bashValidators: { duckdb: "readonly-duckdb", mlr: "readonly-mlr", find: "readonly-find" },
+	bashValidators: { duckdb: "readonly-duckdb", mlr: "readonly-mlr", find: "readonly-find", awk: "readonly-awk" },
 	cwd: CWD,
 	...extra,
 });
@@ -28,6 +28,7 @@ section("BASH_VALIDATORS registry");
 test("readonly-duckdb is registered",   typeof BASH_VALIDATORS["readonly-duckdb"], "function");
 test("readonly-mlr is registered",      typeof BASH_VALIDATORS["readonly-mlr"], "function");
 test("readonly-find is registered",     typeof BASH_VALIDATORS["readonly-find"], "function");
+test("readonly-awk is registered",      typeof BASH_VALIDATORS["readonly-awk"], "function");
 
 section("validatorApprovedBashReason — direct");
 
@@ -39,6 +40,8 @@ test("empty command returns null",                    validatorApprovedBashReaso
 test("case-insensitive command lookup",               validatorApprovedBashReason("DuckDB -c \"SELECT 1\"", CWD, { duckdb: "readonly-duckdb" }), "validated read-only duckdb (bashValidators.readonly-duckdb)");
 test("find read-only expression returns reason",       validatorApprovedBashReason("find . -name x", CWD, { find: "readonly-find" }), "validated read-only find (bashValidators.readonly-find)");
 test("find -delete returns null",                      validatorApprovedBashReason("find . -name x -delete", CWD, { find: "readonly-find" }), null);
+test("awk simple program returns reason",               validatorApprovedBashReason("awk '{print $1}' data.csv", CWD, { awk: "readonly-awk" }), "validated read-only awk (bashValidators.readonly-awk)");
+test("awk system() returns null",                       validatorApprovedBashReason("awk 'BEGIN{system(\"id\")}'", CWD, { awk: "readonly-awk" }), null);
 
 section("validators — allow cases");
 
@@ -57,6 +60,10 @@ test("find multiple paths + filters",            decide(validatorCfg(), "Bash", 
 test("find -maxdepth + -print0",                  decide(validatorCfg(), "Bash", { command: "find . -maxdepth 2 -print0" }), "allow");
 test("find parenthesized expression",            decide(validatorCfg(), "Bash", { command: "find . \\( -name '*.ts' -o -name '*.js' \\) -print" }), "allow");
 test("find -newermt timestamp literal",           decide(validatorCfg(), "Bash", { command: "find . -newermt 2024-01-01 -print" }), "allow");
+test("awk simple program",                        decide(validatorCfg(), "Bash", { command: "awk '{print $1}' data.csv" }), "allow");
+test("awk -v constant assignment",                decide(validatorCfg(), "Bash", { command: "awk -v x=3 'BEGIN{print x}'" }), "allow");
+test("awk stdin, no input files",                 decide(validatorCfg(), "Bash", { command: "awk '{print NR}'" }), "allow");
+test("awk attached -F: separator",                decide(validatorCfg(), "Bash", { command: "awk -F: '{print $NF}' data.csv" }), "allow");
 
 section("validators — decline cases fall through to ask (not deny)");
 
@@ -86,6 +93,18 @@ test("find unknown primary",                     decide(validatorCfg(), "Bash", 
 test("find -newer reference outside cwd",        decide(validatorCfg(), "Bash", { command: "find . -newer /etc/passwd -print" }), "ask");
 test("declined validator falls to defaultAction reason", decideWithReason(validatorCfg(), "Bash", { command: "duckdb -c \"COPY t TO 'out.csv'\"" }, "manual").reason, "no matching rule; defaultAction = ask");
 test("declined find falls to defaultAction reason",      decideWithReason(validatorCfg(), "Bash", { command: "find . -name x -delete" }, "manual").reason, "no matching rule; defaultAction = ask");
+test("awk system()",                              decide(validatorCfg(), "Bash", { command: "awk 'BEGIN{system(\"rm -rf /\")}'" }), "ask");
+test("awk getline",                               decide(validatorCfg(), "Bash", { command: "awk 'BEGIN{getline < \"/etc/passwd\"}'" }), "ask");
+test("awk print redirect in program",             decide(validatorCfg(), "Bash", { command: "awk '{print > \"out.txt\"}' f.csv" }), "ask");
+test("awk pipe to command in program",            decide(validatorCfg(), "Bash", { command: "awk '{print | \"sort\"}' f.csv" }), "ask");
+test("awk -f program file",                       decide(validatorCfg(), "Bash", { command: "awk -f prog.awk data.csv" }), "ask");
+test("awk -E / --exec",                           decide(validatorCfg(), "Bash", { command: "awk --exec '{print}'" }), "ask");
+test("awk unknown flag",                          decide(validatorCfg(), "Bash", { command: "awk -Z '{print}' data.csv" }), "ask");
+test("awk var=value positional",                  decide(validatorCfg(), "Bash", { command: "awk '{print $1}' foo=bar" }), "ask");
+test("awk -v value with command substitution",    decide(validatorCfg(), "Bash", { command: "awk -v x='$(reboot)' 'BEGIN{print x}'" }), "ask");
+test("awk -F: with no program",                   decide(validatorCfg(), "Bash", { command: "awk -F:" }), "ask");
+test("awk input file outside cwd",                decide(validatorCfg(), "Bash", { command: "awk '{print $1}' /etc/passwd" }), "ask");
+test("declined awk falls to defaultAction reason",        decideWithReason(validatorCfg(), "Bash", { command: "awk 'BEGIN{system(\"id\")}'" }, "manual").reason, "no matching rule; defaultAction = ask");
 
 section("validators: read roots (readAllowPaths)");
 
@@ -100,6 +119,9 @@ test("dot-segment escape does not match /tmp root",     decide(withTmpRoot, "Bas
 test("URL still declines with /tmp root",               decide(withTmpRoot, "Bash", { command: "duckdb -c \"SELECT * FROM 'https://example.com/f.csv'\"" }), "ask");
 test("find /tmp path declines without roots",            decide(validatorCfg(), "Bash", { command: "find /tmp -name x" }), "ask");
 test("find /tmp path allows with /tmp root",             decide(withTmpRoot, "Bash", { command: "find /tmp -name x" }), "allow");
+test("awk /etc/passwd declines without roots",            decide(validatorCfg(), "Bash", { command: "awk -F: '{print $NF}' /etc/passwd" }), "ask");
+test("awk /etc/passwd allows with /etc root",             decide(validatorCfg({ readRoots: ["/etc"] }), "Bash", { command: "awk -F: '{print $NF}' /etc/passwd" }), "allow");
+test("direct validatorApprovedBashReason with /etc root", validatorApprovedBashReason("awk -F: '{print $NF}' /etc/passwd", CWD, { awk: "readonly-awk" }, [], ["/etc"]), "validated read-only awk (bashValidators.readonly-awk)");
 test("direct validatorApprovedBashReason with read root", validatorApprovedBashReason("mlr --from /tmp/x cut -f x", CWD, { mlr: "readonly-mlr" }, [], ["/tmp"]), "validated read-only mlr (bashValidators.readonly-mlr)");
 test("direct validatorApprovedBashReason without roots",  validatorApprovedBashReason("mlr --from /tmp/x cut -f x", CWD, { mlr: "readonly-mlr" }, []), null);
 
@@ -114,6 +136,10 @@ test("no bashValidators key → default find allow",  decide(bareCfg, "Bash", { 
 test("no bashValidators key → find -delete still asks (negative control)", decide(bareCfg, "Bash", { command: "find . -name x -delete" }), "ask");
 test("none sentinel → duckdb falls through to ask", decide(loadConfigFromObjects({ bashValidators: { duckdb: "none" } }, {}, CWD), "Bash", { command: "duckdb -c \"SELECT * FROM 'data.csv'\"" }), "ask");
 test("none sentinel → find falls through to ask",   decide(loadConfigFromObjects({ bashValidators: { find: "none" } }, {}, CWD), "Bash", { command: "find . -name x" }), "ask");
+test("no bashValidators key → default awk allow",   decide(bareCfg, "Bash", { command: "awk '{print $1}' data.csv" }), "allow");
+test("no bashValidators key → awk system() still asks (negative control)", decide(bareCfg, "Bash", { command: "awk 'BEGIN{system(\"id\")}'" }), "ask");
+test("find none sentinel keeps awk default-on",     decide(loadConfigFromObjects({ bashValidators: { find: "none" } }, {}, CWD), "Bash", { command: "awk '{print $1}' data.csv" }), "allow");
+test("none sentinel → awk falls through to ask",    decide(loadConfigFromObjects({ bashValidators: { awk: "none" } }, {}, CWD), "Bash", { command: "awk '{print $1}' data.csv" }), "ask");
 
 const emptyDefaultCfg = makeCfg({ defaultAction: "ask", cwd: CWD, bashValidators: {} });
 test("no validators configured → ask",          decide(emptyDefaultCfg, "Bash", { command: "duckdb -c \"SELECT 1\"" }), "ask");
@@ -156,5 +182,7 @@ test("compound: mlr decline in pipe",           decideCompound(compoundCfg, "bas
 test("compound: ls && validated find",           decideCompound(compoundCfg, "bash", { command: "ls && find . -name x" }).action, "allow");
 test("compound: ls && find -delete",             decideCompound(compoundCfg, "bash", { command: "ls && find . -name x -delete" }).action, "ask");
 test("compound: find pipe into xargs rm",        decideCompound(compoundCfg, "bash", { command: "find . -print0 | xargs -0 rm" }).action, "ask");
+test("compound: ls && validated awk",             decideCompound(compoundCfg, "bash", { command: "ls && awk '{print $1}' data.csv" }).action, "allow");
+test("compound: ls && awk system()",              decideCompound(compoundCfg, "bash", { command: "ls && awk 'BEGIN{system(\"id\")}'" }).action, "ask");
 
 summary() && process.exit(1);
