@@ -814,3 +814,8 @@ for (const dir of tempDirs) {
 		/* ignore */
 	}
 }
+
+// Exit explicitly: killed-sandbox child handles can keep the event loop alive
+// when stdout is piped (node --test runs this file as a child), so the
+// process would otherwise hang after a fully passing run.
+process.exit(0);
