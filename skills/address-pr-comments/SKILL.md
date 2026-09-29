@@ -178,7 +178,18 @@ Distinguish two kinds of replies:
        ```bash
        gh api repos/OWNER/REPO/pulls/PR_NUMBER/comments -f body="REPLY" -F in_reply_to=COMMENT_ID
        ```
-     - If resolving, use GraphQL mutation:
+       `COMMENT_ID` must be the **numeric** comment ID, not the GraphQL node
+       ID (`PRRC_...`). Convert it first:
+       ```bash
+       gh api graphql -f query='
+       query {
+         node(id: "PRRC_COMMENT_NODE_ID") {
+           ... on PullRequestReviewComment { databaseId }
+         }
+       }' --jq '.data.node.databaseId'
+       ```
+     - If resolving, use GraphQL mutation (`THREAD_ID` is the GraphQL node ID
+       from the reviewThreads query, `PRRT_...`):
        ```bash
        gh api graphql -f query='
        mutation($threadId: ID!) {
