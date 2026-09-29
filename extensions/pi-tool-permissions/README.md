@@ -654,6 +654,8 @@ In compound Bash prompts, each subcommand's dialog shows its own why (see [Compo
 
 Every permission dialog also offers mode-switch choices: **"Switch to \"allow edits\" mode (this session)"** (Write/Edit dialogs only), **"Switch to auto mode (this session)"**, and **"Switch to yolo mode (this session)"** (see [Permission modes](#permission-modes) below). Each appears only when its mode isn't already active, at the **bottom** of the choice list, so **"Allow once"** stays the default (pi's selector starts on the first item).
 
+Sandboxed-tool dialogs (`python`, `node`) additionally offer **"Switch to \"allow edits\" and remount /workspace read-write (this session)"** when the prompt was caused by `toolDefaults.<tool> = "ask"` in manual mode. A plain mode switch cannot authorize such a call (explicit `toolDefaults` win in every mode), so this dedicated option switches the mode, remounts the sandbox's `/workspace` read-write via the mode event, and authorizes that call; later calls keep prompting until the `toolDefaults` entry is changed or an allow rule is saved.
+
 Each compound prompt's dialog also shows the `Why:` line for the subcommand currently being confirmed, e.g. `Why: matched ask rule 'Bash(git push*)'` or the classifier's attribution when auto mode screened that step.
 
 Choosing **always** opens a second selector asking *where* to save the rule:

@@ -320,6 +320,10 @@
  *     - Ctrl+Alt+P hotkey (cycles manual → allow edits → auto → yolo → manual)
  *     - /permissions mode [manual|allow-edits|auto|yolo]
  *     - "Switch to \"allow edits\" mode (this session)" in Write/Edit dialogs
+ *     - "Switch to \"allow edits\" and remount /workspace read-write (this
+ *       session)" in sandboxed-tool dialogs when toolDefaults.<tool> = "ask"
+ *       caused the prompt in manual mode (switches mode AND authorizes the
+ *       call, since explicit toolDefaults win in every mode)
  *     - "Switch to auto mode" / "Switch to yolo mode" in any permission dialog
  *
  *   Footer status key (blank for manual): `✏️ allow edits`, `🤖 auto: <model-id>`
@@ -1232,9 +1236,21 @@ export default function (pi: ExtensionAPI) {
 			// Read-root escalation options (scratch grant / suggested read root) are
 			// injected right after "Allow once"; they are empty unless the ask was
 			// caused by read-root containment and a grant would flip it to allow.
+			// Sandboxed-tool dialogs additionally get the allow-edits escalation when
+			// the ask was caused by toolDefaults.<tool> = "ask" in manual mode: a
+			// plain mode switch cannot authorize the call (explicit toolDefaults win
+			// in every mode), so this dedicated option switches the mode, remounts
+			// /workspace read-write via the mode event, and authorizes this call.
 			const autoSwitch = mode !== "auto" ? ["Switch to auto mode (this session)"] : [];
 			const yoloSwitch = mode !== "yolo" ? ["Switch to yolo mode (this session)"] : [];
 			const editsSwitch = isWriteOrEdit && mode !== "edits" ? ['Switch to "allow edits" mode (this session)'] : [];
+			const sandboxEscalation =
+				mode === "manual" &&
+				SANDBOXED_TOOLS.has(toolNorm) &&
+				staticReason === `toolDefaults.${toolNorm} = ask`;
+			const sandboxEscalationSwitch = sandboxEscalation
+				? ['Switch to "allow edits" and remount /workspace read-write (this session)']
+				: [];
 			const escalations = escalationOptions(event.toolName, matchInput, mode);
 			const escalationLabels = escalations.map((e) => e.label);
 			const choices = isWriteOrEdit
@@ -1248,7 +1264,7 @@ export default function (pi: ExtensionAPI) {
 						...autoSwitch,
 						...yoloSwitch,
 				  ]
-				: ["Allow once", ...escalationLabels, "Allow always (save rule)", "Deny once", "Deny always (save rule)", ...autoSwitch, ...yoloSwitch];
+				: ["Allow once", ...escalationLabels, "Allow always (save rule)", "Deny once", "Deny always (save rule)", ...sandboxEscalationSwitch, ...autoSwitch, ...yoloSwitch];
 
 			const choice = await ctx.ui.select(title, choices);
 
@@ -1257,6 +1273,16 @@ export default function (pi: ExtensionAPI) {
 			if (escalationLabels.includes(choice ?? "")) {
 				if (await applyEscalationChoice(escalations, choice)) return undefined;
 				return { block: true, reason: "read-root grant did not authorize this action" };
+			}
+
+			if (choice === 'Switch to "allow edits" and remount /workspace read-write (this session)') {
+				// Sandbox escalation (toolDefaults.<tool> = "ask", manual mode): the
+				// mode event makes the sandboxed extensions remount /workspace
+				// read-write and restart their sandbox; returning undefined allows
+				// this call, which then runs in the fresh writable sandbox. Later
+				// calls keep prompting (explicit toolDefaults still win).
+				applyMode("edits", ctx);
+				return undefined;
 			}
 
 			if (choice === 'Switch to "allow edits" mode (this session)') {
