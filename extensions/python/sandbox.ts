@@ -200,7 +200,7 @@ export interface WorkerLaunchSpec {
 	workerPath: string;
 	bwrapPath: string;
 	interpreterPath: string;
-	/** Mount the project read-write (allow-edits/yolo permission modes). Default: read-only. */
+	/** Mount the project read-write (allow-edits/auto/yolo permission modes). Default: read-only. */
 	writableWorkspace?: boolean;
 	/** Host read-root directories to mount read-only 1:1 (pre-filtered by filterMountableReadRoots). */
 	readRoots?: readonly string[];
@@ -355,7 +355,7 @@ export function buildBwrapArgs(spec: WorkerLaunchSpec): string[] {
 		args.push("--ro-bind-try", realDir, realDir);
 	}
 
-	// Project (read-only by default; read-write in allow-edits/yolo permission
+	// Project (read-only by default; read-write in allow-edits/auto/yolo permission
 	// modes, where the user explicitly granted unprompted edits), scratch
 	// (writable), worker code (read-only).
 	args.push(

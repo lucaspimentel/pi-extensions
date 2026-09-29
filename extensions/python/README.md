@@ -35,7 +35,7 @@ python(action?: "execute" | "reset" | "status", code?: string, timeoutSeconds?: 
 
 | Sandbox path | Host | Permissions |
 |---|---|---|
-| `/workspace` | the canonical project directory | read-only, or **read-write** in allow-edits/yolo permission modes (see below) |
+| `/workspace` | the canonical project directory | read-only, or **read-write** in allow-edits/auto/yolo permission modes (see below) |
 | `/scratch`   | a private scratch directory under the OS temp dir | writable |
 | `/tmp`       | namespace-private tmpfs | writable |
 | granted read roots | their host paths, 1:1 | read-only (see below) |
@@ -55,10 +55,11 @@ The `pi-tool-permissions` extension announces the session permission mode and
 read roots on pi's shared event bus (channel `tool-permissions:mode`, payload
 `{ mode, readRoots }`). Two things follow:
 
-- In **allow-edits** (`edits`) and **yolo** modes, `/workspace` is mounted
-**read-write**, so python code can modify project files the same way
-`Write`/`Edit` can in those modes. In `manual` and `auto` modes the mount stays
-read-only.
+- In **allow-edits** (`edits`), **auto**, and **yolo** modes, `/workspace` is
+mounted **read-write**, so python code can modify project files the same way
+`Write`/`Edit` can in those modes. In **auto** mode this is paired with
+classifier screening of every execution ("writable + classified": each call
+costs one classifier round trip). In `manual` mode the mount stays read-only.
 - The effective read roots (persisted `readAllowPaths`, session grants, and
 scratch roots when `readAllowScratch` is on) are mounted **read-only at their
 host paths, 1:1, in every mode** — the user already granted them to
@@ -79,7 +80,8 @@ project is kept (it also grants sibling directories).
 stays read-only with no extra mounts.
 - The mode/root signal is UX, not a security boundary: a stale read-only mount
 is always safe, and a writable mount only exists because the user explicitly
-switched into a mode that grants unprompted edits.
+switched into a mode that grants unprompted edits (edits/yolo) or turns
+execution over to the classifier (auto).
 
 ## Out-of-sandbox read prompts
 
@@ -186,9 +188,11 @@ keep working.
 
 - **Project files are readable, including secrets inside the mounted
   project.** If the sandbox can read a file, the executed code can too.
-- **In allow-edits/yolo permission modes, project files are also writable.**
-  The `/workspace` mount flips to read-write when the user explicitly switches
-  into those modes; the mount flag itself remains kernel-enforced.
+- **In allow-edits/auto/yolo permission modes, project files are also
+  writable.** The `/workspace` mount flips to read-write in those modes; in
+  auto mode every execution is screened by the permissions classifier first,
+  which screens code, not outcomes. The mount flag itself remains
+  kernel-enforced.
 - **Other pi tools are unchanged and unrestricted.** This extension sandboxes
   only its own `python` tool; it does not sandbox pi, bash, or anything else.
 - Python-language restrictions and the protocol framing are **not security

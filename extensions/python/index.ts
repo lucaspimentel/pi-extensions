@@ -49,7 +49,7 @@ const pythonTool = defineTool({
 		"Execute Python snippets in a persistent, sandboxed interpreter (Linux + bubblewrap). " +
 		"Variables, imports, functions, and classes persist across calls within the session. " +
 		"The project directory is mounted at /workspace (read-only, unless the session is in " +
-		"allow-edits or yolo permission mode, when it is writable); /scratch is a writable " +
+		"allow-edits, auto, or yolo permission mode, when it is writable); /scratch is a writable " +
 		"scratch directory whose files persist across calls and resets, and outputs belong " +
 		"there. Read roots granted via tool-permissions (readAllowPaths and friends) are " +
 		"mounted read-only at their host paths, so files outside the project are readable " +
@@ -64,10 +64,10 @@ const pythonTool = defineTool({
 		"a worker. JSON results: print json.dumps(...) yourself; the final expression's repr " +
 		"is shown automatically.",
 	promptSnippet:
-		"Run Python snippets in a persistent bubblewrap-sandboxed interpreter with the project at /workspace (read-only, writable in allow-edits/yolo mode) and writable /scratch",
+		"Run Python snippets in a persistent bubblewrap-sandboxed interpreter with the project at /workspace (read-only, writable in allow-edits/auto/yolo mode) and writable /scratch",
 	promptGuidelines: [
 		"Use the `python` tool for persistent Python snippets, data analysis, and stdlib scripting; state (variables, imports, functions) survives across calls.",
-		"In the `python` tool, /workspace is the project (read-only, writable in allow-edits/yolo permission mode) and /scratch is writable and persistent; write outputs to /scratch, never to /workspace. Files under tool-permissions read roots are readable at their host paths; run `python status` to list them.",
+		"In the `python` tool, /workspace is the project (read-only, writable in allow-edits/auto/yolo permission mode) and /scratch is writable and persistent; write outputs to /scratch, never to /workspace. Files under tool-permissions read roots are readable at their host paths; run `python status` to list them.",
 		"An ordinary Python exception keeps interpreter state; a timeout, cancellation, or crash loses it. Use action=reset to clear state deliberately.",
 	],
 	parameters: Type.Object({
@@ -225,8 +225,9 @@ let controller: PythonSessionController | undefined;
 
 /**
  * Whether the sandbox mounts /workspace read-write. Mirrors pi-tool-permissions'
- * `sandboxWritableWorkspace` (rules.ts), shared with the node tool: allow-edits
- * and yolo modes grant it. Updated by the "tool-permissions:mode" event;
+ * `sandboxWritableWorkspace` (rules.ts), shared with the node tool:
+ * allow-edits, auto, and yolo modes grant it (in auto mode every execution is
+ * classifier-screened). Updated by the "tool-permissions:mode" event;
  * defaults to read-only so the tool behaves correctly when
  * pi-tool-permissions is not loaded. Deliberately duplicated (not imported)
  * to keep the extensions decoupled.
@@ -451,8 +452,8 @@ export default function pythonExtension(pi: ExtensionAPI) {
 
 	// Track the session permission mode and read roots announced by
 	// pi-tool-permissions on the shared event bus (channel
-	// "tool-permissions:mode", payload { mode, readRoots }). In allow-edits/yolo
-	// modes the sandbox remounts /workspace read-write; the read roots are
+	// "tool-permissions:mode", payload { mode, readRoots }). In allow-edits,
+	// auto, and yolo modes the sandbox remounts /workspace read-write; the read roots are
 	// mounted read-only 1:1 in every mode. Any change kills the running sandbox
 	// (state loss, reported by the normal teardown path) and the next execution
 	// starts one with the new mounts. One event carries the full state, so each
@@ -463,10 +464,12 @@ export default function pythonExtension(pi: ExtensionAPI) {
 	pi.events.on("tool-permissions:mode", (data) => {
 		const payload = (data ?? {}) as { mode?: unknown; readRoots?: unknown };
 		const raw = payload.mode;
-		// Ignore unknown modes: only edits/yolo flip the mount; manual/auto (and
-		// anything unrecognized) keep it read-only.
+		// Ignore unknown modes: only manual (and anything unrecognized) keeps
+		// the mount read-only; edits/auto/yolo flip it writable. In auto mode
+		// pi-tool-permissions screens every execution with the classifier
+		// ("writable + classified").
 		if (raw !== "edits" && raw !== "yolo" && raw !== "manual" && raw !== "auto") return;
-		const desiredWritable = raw === "edits" || raw === "yolo";
+		const desiredWritable = raw === "edits" || raw === "yolo" || raw === "auto";
 		// readRoots absent or malformed (e.g. an older pi-tool-permissions) means
 		// "no root mounts", never "keep whatever was mounted".
 		const candidateRoots = Array.isArray(payload.readRoots) ? (payload.readRoots as unknown[]) : [];

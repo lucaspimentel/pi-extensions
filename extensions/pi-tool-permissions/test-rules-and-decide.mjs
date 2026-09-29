@@ -665,8 +665,20 @@ test("describeAction: read shows path",
 	describeAction("read", { path: "./f.ts" }), "Tool: read\nPath: ./f.ts");
 test("describeAction: web_fetch shows url",
 	describeAction("web_fetch", { url: "https://x.com" }), "Tool: web_fetch\nURL: https://x.com");
+test("describeAction: python shows action + full code",
+	describeAction("python", { action: "execute", code: "x = 1\nprint(x)" }), "Tool: python\nAction: execute\nCode: x = 1\nprint(x)");
+test("describeAction: node shows action + full code",
+	describeAction("node", { code: "require('fs').readFileSync('/tmp/f')" }), "Tool: node\nAction: execute\nCode: require('fs').readFileSync('/tmp/f')");
+test("describeAction: python missing action defaults to execute",
+	describeAction("python", { code: "1" }), "Tool: python\nAction: execute\nCode: 1");
 test("describeAction: unknown tool → JSON",
 	describeAction("custom", { foo: 1 }).includes("Input:"), true);
+
+// buildActionContext: sandboxed tools get the static confinement facts
+test("buildActionContext: sandboxed tools state the sandbox confinement",
+	buildActionContext("python", { code: "1+1" }, "/repo").some((l) => l.includes("kernel sandbox") && l.includes("no network")), true);
+test("buildActionContext: node gets the same confinement line",
+	buildActionContext("node", { code: "1+1" }, "/repo").some((l) => l.includes("/workspace")), true);
 
 // buildClassifierPrompt contains the NL lists + action description
 {
@@ -1288,13 +1300,16 @@ const pyDefault = makeCfg({ defaultAction: "ask" });
 test("python execute: implicit allow in manual",        decideWithReason(pyDefault, "python", { code: "1+1" }).action, "allow");
 test("python execute: implicit allow reason",           decideWithReason(pyDefault, "python", { code: "1+1" }).reason, "sandboxed python tool (implicit allow; override with toolDefaults.python)");
 test("python execute: implicit allow in edits",         decideWithReason(pyDefault, "python", { code: "1+1" }, "edits").action, "allow");
-test("python execute: implicit allow in auto (no classifier)", decideWithReason(pyDefault, "python", { code: "1+1" }, "auto").action, "allow");
+test("python execute: auto mode demotes to the classifier sentinel", decideWithReason(pyDefault, "python", { code: "1+1" }, "auto").action, "auto");
+test("python execute: auto sentinel reason",            decideWithReason(pyDefault, "python", { code: "1+1" }, "auto").reason, "auto mode: sandboxed python code screened by the classifier");
 test("python execute: implicit allow in yolo",          decideWithReason(pyDefault, "python", { code: "1+1" }, "yolo").action, "allow");
 test("python execute: missing action means execute",    decideWithReason(pyDefault, "python", {}).action, "allow");
 
 test("python reset: implicit allow",                    decideWithReason(pyDefault, "python", { action: "reset" }).action, "allow");
 test("python status: implicit allow",                   decideWithReason(pyDefault, "python", { action: "status" }).action, "allow");
 test("python reset: reason",                            decideWithReason(pyDefault, "python", { action: "reset" }).reason, "python reset/status (bookkeeping, no code execution)");
+test("python reset: still allowed in auto mode",        decideWithReason(pyDefault, "python", { action: "reset" }, "auto").action, "allow");
+test("python status: still allowed in auto mode",       decideWithReason(pyDefault, "python", { action: "status" }, "auto").action, "allow");
 
 // Explicit toolDefaults.python wins for execute in every mode.
 const pyAsk = makeCfg({ toolDefaults: { python: "ask" } });
@@ -1336,13 +1351,16 @@ const nodeDefault = makeCfg({ defaultAction: "ask" });
 test("node execute: implicit allow in manual",        decideWithReason(nodeDefault, "node", { code: "1+1" }).action, "allow");
 test("node execute: implicit allow reason",           decideWithReason(nodeDefault, "node", { code: "1+1" }).reason, "sandboxed node tool (implicit allow; override with toolDefaults.node)");
 test("node execute: implicit allow in edits",         decideWithReason(nodeDefault, "node", { code: "1+1" }, "edits").action, "allow");
-test("node execute: implicit allow in auto (no classifier)", decideWithReason(nodeDefault, "node", { code: "1+1" }, "auto").action, "allow");
+test("node execute: auto mode demotes to the classifier sentinel", decideWithReason(nodeDefault, "node", { code: "1+1" }, "auto").action, "auto");
+test("node execute: auto sentinel reason",            decideWithReason(nodeDefault, "node", { code: "1+1" }, "auto").reason, "auto mode: sandboxed node code screened by the classifier");
 test("node execute: implicit allow in yolo",          decideWithReason(nodeDefault, "node", { code: "1+1" }, "yolo").action, "allow");
 test("node execute: missing action means execute",    decideWithReason(nodeDefault, "node", {}).action, "allow");
 
 test("node reset: implicit allow",                    decideWithReason(nodeDefault, "node", { action: "reset" }).action, "allow");
 test("node status: implicit allow",                   decideWithReason(nodeDefault, "node", { action: "status" }).action, "allow");
 test("node reset: reason",                            decideWithReason(nodeDefault, "node", { action: "reset" }).reason, "node reset/status (bookkeeping, no code execution)");
+test("node reset: still allowed in auto mode",        decideWithReason(nodeDefault, "node", { action: "reset" }, "auto").action, "allow");
+test("node status: still allowed in auto mode",       decideWithReason(nodeDefault, "node", { action: "status" }, "auto").action, "allow");
 
 // Explicit toolDefaults.node wins for execute in every mode.
 const nodeAsk = makeCfg({ toolDefaults: { node: "ask" } });
@@ -1385,12 +1403,13 @@ test("SANDBOXED_TOOLS: normalized", SANDBOXED_TOOLS.has("Node"), false);
 
 section("sandboxWritableWorkspace — mode → mount policy");
 
-// allow-edits and yolo grant a writable /workspace; manual and auto keep it
-// read-only (auto-mode behavior is deliberately deferred). The mapping is
-// shared by the python and node tools.
+// allow-edits, auto, and yolo grant a writable /workspace; manual keeps it
+// read-only. In auto mode the sandbox is writable because every execution is
+// screened by the classifier ("writable + classified"). The mapping is shared
+// by the python and node tools.
 test("sandboxWritableWorkspace: edits",  sandboxWritableWorkspace("edits"), true);
 test("sandboxWritableWorkspace: yolo",   sandboxWritableWorkspace("yolo"), true);
 test("sandboxWritableWorkspace: manual", sandboxWritableWorkspace("manual"), false);
-test("sandboxWritableWorkspace: auto",   sandboxWritableWorkspace("auto"), false);
+test("sandboxWritableWorkspace: auto",   sandboxWritableWorkspace("auto"), true);
 
 process.exit(summary() > 0 ? 1 : 0);

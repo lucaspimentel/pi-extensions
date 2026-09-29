@@ -44,23 +44,25 @@ export type PermissionMode = "manual" | "edits" | "auto" | "yolo";
 
 /**
  * The sandboxed interpreter tools: the python and node extensions. Both run
- * model code inside a bubblewrap sandbox (no network, read-only project mount,
- * no host mounts), so both get the implicit allow and the reset/status
- * bookkeeping treatment in `decideWithReason`. See the branches there.
+ * model code inside a bubblewrap sandbox (no network, confined project mount,
+ * no host mounts), so both get the implicit allow (manual/edits/yolo; auto
+ * demotes execute to the classifier) and the reset/status bookkeeping
+ * treatment in `decideWithReason`. See the branches there.
  */
 export const SANDBOXED_TOOLS = new Set(["python", "node"]);
 
 /**
  * Whether a sandboxed tool's mount of the project (/workspace) is read-write.
- * allow-edits and yolo modes grant it (the user explicitly asked for
- * unprompted edits / no more prompts); manual and auto keep the read-only
- * mount (auto-mode behavior is deliberately deferred). Applies identically to
- * the python and node tools. Consumed by the sandboxed extensions, each of
- * which duplicates this two-line mapping rather than importing it, so the
+ * allow-edits, auto, and yolo modes grant it: edits and yolo because the user
+ * explicitly asked for unprompted edits / no more prompts, auto because every
+ * sandboxed execution is screened by the classifier there ("writable +
+ * classified"). Manual keeps the read-only mount. Applies identically to the
+ * python and node tools. Consumed by the sandboxed extensions, each of which
+ * duplicates this two-line mapping rather than importing it, so the
  * extensions stay decoupled. Keep all copies in sync.
  */
 export function sandboxWritableWorkspace(mode: PermissionMode): boolean {
-	return mode === "edits" || mode === "yolo";
+	return mode === "edits" || mode === "yolo" || mode === "auto";
 }
 
 /** The three persistable rule-list actions (auto is not a rule list). */
@@ -2414,6 +2416,8 @@ export function classifierAttribution(modelId: string | undefined, reason: strin
 export function describeAction(toolName: string, input: Record<string, unknown>): string {
 	const t = normalizeTool(toolName);
 	if (t === "bash" || t === "pwsh") return `Tool: ${toolName}\nCommand: ${String(input.command ?? "")}`;
+	if (t === "python" || t === "node")
+		return `Tool: ${toolName}\nAction: ${String(input.action ?? "execute")}\nCode: ${String(input.code ?? "")}`;
 	if (t === "read" || t === "write" || t === "edit" || t === "grep" || t === "glob" || t === "ls" || t === "find")
 		return `Tool: ${toolName}\nPath: ${String(input.path ?? "")}`;
 	if (t === "webfetch") return `Tool: ${toolName}\nURL: ${String(input.url ?? "")}`;
@@ -2583,6 +2587,15 @@ export function buildActionContext(
 			lines.push(`Command runs in: ${resolved}`);
 			inRepo("That directory", resolved);
 		}
+	}
+	if (t === "python" || t === "node") {
+		// Static confinement facts: the classifier should weigh sandboxed code
+		// against what the sandbox actually permits. Kept mode-agnostic because
+		// the context lines feed the cache key; the writable-mode list is the
+		// shared mapping's truth.
+		lines.push(
+			"The code runs inside a kernel sandbox: no network access, the project is mounted at /workspace (read-only except in allow-edits/auto/yolo permission modes), and /scratch is a writable scratch directory",
+		);
 	}
 	return lines;
 }
@@ -2834,15 +2847,22 @@ export function decideWithReason(cfg: ResolvedConfig, toolName: string, input: R
 	// implicit write guard, which must NOT short-circuit the mode strategy.
 	const td = cfg.explicitToolDefaults[tool];
 	if (td !== undefined) return { action: td, reason: `toolDefaults.${tool} = ${td}` };
-	// The sandboxed tools (python, node) are allowed implicitly in every mode:
-	// they run in a bubblewrap sandbox (no network, read-only project mount, no
-	// host mounts), so they are strictly more restricted than the read-only bash
-	// tier. This is a dedicated branch rather than an implicitToolDefaults entry
-	// because implicit entries are demoted below the classifier in auto mode;
-	// sandboxed tools must never be classified. Explicit toolDefaults.<tool>
-	// still wins for execute in every mode (checked above).
-	if (SANDBOXED_TOOLS.has(tool))
+	// The sandboxed tools (python, node) are allowed implicitly in manual, edits,
+	// and yolo modes: they run in a bubblewrap sandbox (no network, confined
+	// project mount, no host mounts), so they are strictly more restricted than
+	// the read-only bash tier. In auto mode they are demoted to the "auto"
+	// sentinel instead ("writable + classified"): the mount becomes read-write
+	// (see sandboxWritableWorkspace) and every execute is screened by the
+	// classifier via the tool_call handler, mirroring the write-guard demotion.
+	// This is a dedicated branch rather than an implicitToolDefaults entry so
+	// the non-auto modes never reach the classifier. Explicit
+	// toolDefaults.<tool> still wins for execute in every mode (checked above);
+	// reset/status stay unconditional bookkeeping allows (branch above).
+	if (SANDBOXED_TOOLS.has(tool)) {
+		if (mode === "auto")
+			return { action: "auto", reason: `auto mode: sandboxed ${tool} code screened by the classifier` };
 		return { action: "allow", reason: `sandboxed ${tool} tool (implicit allow; override with toolDefaults.${tool})` };
+	}
 	// Mode strategy for the non-explicit remainder. Layering rationale (see
 	// docs/permission-modes-design.md):
 	//

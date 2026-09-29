@@ -62,7 +62,7 @@ protocol channel.
 
 | Sandbox path | Host | Permissions |
 |---|---|---|
-| `/workspace` | the canonical project directory | read-only, or **read-write** in allow-edits/yolo permission modes |
+| `/workspace` | the canonical project directory | read-only, or **read-write** in allow-edits/auto/yolo permission modes |
 | `/scratch`   | a private scratch directory under the OS temp dir | writable |
 | `/tmp`       | namespace-private tmpfs | writable |
 | granted read roots | their host paths, 1:1 | read-only |
@@ -78,8 +78,10 @@ mount).
 
 Identical to the python tool: pi-tool-permissions announces the session mode
 and read roots on the shared event bus (`tool-permissions:mode`, payload
-`{ mode, readRoots }`). In allow-edits/yolo modes `/workspace` is mounted
-read-write; the effective read roots are mounted read-only 1:1 in every mode.
+`{ mode, readRoots }`). In allow-edits/auto/yolo modes `/workspace` is mounted
+read-write; in auto mode pi-tool-permissions also screens every execution with
+its classifier ("writable + classified"), which is what justifies the writable
+mount there. The effective read roots are mounted read-only 1:1 in every mode.
 Any change kills the running sandbox (state loss) and the next execution
 starts a fresh one, announced with a UI notification. If pi-tool-permissions
 is not loaded, the sandbox stays read-only with no extra mounts. The mode
@@ -183,7 +185,9 @@ working.
 - **Project files are readable, including secrets inside the mounted
   project.** If the sandbox can read a file, the executed code can too (it
   has `require('fs')`).
-- **In allow-edits/yolo permission modes, project files are also writable.**
+- **In allow-edits/auto/yolo permission modes, project files are also
+  writable.** In auto mode every execution is screened by the permissions
+  classifier first, which screens code, not outcomes.
 - **The vm module is convenience, not a security boundary.** Host-realm
   objects injected into the context (console, timers, require) enable full
   escapes from the vm into the worker process. The isolation boundary is the

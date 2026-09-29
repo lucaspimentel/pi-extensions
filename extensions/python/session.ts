@@ -92,7 +92,7 @@ export interface StatusReport {
 	workerRunning: boolean;
 	generation: number;
 	lastResetReason?: string;
-	/** How /workspace is mounted: read-only, or read-write in allow-edits/yolo modes. */
+	/** How /workspace is mounted: read-only, or read-write in allow-edits/auto/yolo modes. */
 	workspaceMode: "read-only" | "read-write";
 	/** Host read-root directories mounted read-only 1:1. */
 	readRoots: string[];
@@ -108,7 +108,7 @@ export interface StatusReport {
 
 export interface ControllerOptions {
 	projectDir: string;
-	/** Mount /workspace read-write (allow-edits/yolo permission modes). Default: read-only. */
+	/** Mount /workspace read-write (allow-edits/auto/yolo permission modes). Default: read-only. */
 	writableWorkspace?: boolean;
 	/** Host read-root directories to mount read-only 1:1 (pre-filtered). Default: none. */
 	readRoots?: readonly string[];

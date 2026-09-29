@@ -504,7 +504,8 @@ async function testPermissionModeEvent() {
 	emit(null);
 	emit(42);
 
-	// edits/yolo flip to writable, manual/auto flip back.
+	// edits/auto/yolo flip to writable (auto = writable + classifier-screened),
+	// manual flips back to read-only.
 	emit({ mode: "edits" });
 	emit({ mode: "yolo" });
 	emit({ mode: "auto" });

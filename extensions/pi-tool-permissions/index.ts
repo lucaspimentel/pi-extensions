@@ -217,11 +217,13 @@
  *     Silently allows no-op `cd` commands (cd to cwd). Explicit ask rules are
  *     checked first and win; deny rules always win.
  *   python, node (automatic, no config key)
- *     The sandboxed interpreter tools are implicitly allowed in every mode
- *     (manual, edits, auto, yolo): they run inside a bubblewrap sandbox with
- *     no network, a read-only project mount, and no host mounts, so they are
- *     strictly more restricted than the read-only bash tier. Each tool's
- *     `reset`/`status` actions run no code and are always allowed, even over
+ *     The sandboxed interpreter tools are implicitly allowed in manual, edits,
+ *     and yolo modes: they run inside a bubblewrap sandbox with no network, a
+ *     confined project mount, and no host mounts, so they are strictly more
+ *     restricted than the read-only bash tier. In auto mode the mount becomes
+ *     read-write and every execute is screened by the classifier instead
+ *     ("writable + classified"). Each tool's `reset`/`status` actions run no
+ *     code and are always allowed in every mode, even over
  *     toolDefaults.<tool> = ask. `execute` can still be gated with an explicit
  *     "toolDefaults": { "python": "ask" | "deny", "node": "ask" | "deny" },
  *     which wins in every mode. Bare allow/deny/ask rules (`Python`, `Node`)
@@ -297,7 +299,7 @@
  *   Mode broadcast: every mode change (and the session_start reset to manual)
  *   emits pi.events channel "tool-permissions:mode" with { mode, readRoots }.
  *   The sandboxed extensions (python, node) consume this to remount their
- *   sandbox's /workspace read-write in edits/yolo modes (see
+ *   sandbox's /workspace read-write in edits/auto/yolo modes (see
  *   sandboxWritableWorkspace in rules.ts) and to mount the effective read
  *   roots (readAllowPaths + session grants + readAllowScratch, i.e.
  *   sessionCfg().readRoots) read-only at their host paths. The event is also
@@ -559,7 +561,7 @@ export default function (pi: ExtensionAPI) {
 	/**
 	 * Broadcast the full sandbox state on the shared event bus: the session
 	 * permission mode plus the effective read roots. The sandboxed extensions
-	 * (python, node) consume this to remount /workspace (edits/yolo) and to
+	 * (python, node) consume this to remount /workspace (edits/auto/yolo) and to
 	 * mount the read roots read-only. One event carries the complete state, so
 	 * every emission point calls this and the consumer treats each event as a
 	 * single relaunch decision (no debounce needed).
@@ -608,7 +610,7 @@ export default function (pi: ExtensionAPI) {
 		mode = value;
 		// Broadcast the session mode (plus the effective read roots) on the
 		// shared event bus. The sandboxed extensions (python, node) subscribe to
-		// remount their sandbox's /workspace read-write in edits/yolo modes and
+		// remount their sandbox's /workspace read-write in edits/auto/yolo modes and
 		// to mount the read roots read-only (see sandboxWritableWorkspace in
 		// rules.ts).
 		emitModeEvent();

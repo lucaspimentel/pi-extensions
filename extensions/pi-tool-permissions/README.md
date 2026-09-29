@@ -545,20 +545,21 @@ Or disable the default entirely:
 
 #### `python` and `node` (automatic, no config key)
 
-The sandboxed interpreter tools (`python`, `node`) are implicitly **allowed in every permission
-mode** (manual, edits, auto, yolo). Each runs model-submitted code inside a bubblewrap sandbox
-with no network, a read-only project mount, and no host mounts, so they are strictly more
-restricted than the read-only bash tier that is already auto-allowed. This is a built-in tier,
-not a config flag, and it is never screened by the auto-mode classifier.
+The sandboxed interpreter tools (`python`, `node`) are implicitly **allowed in manual, edits,
+and yolo modes**. Each runs model-submitted code inside a bubblewrap sandbox with no network, a
+confined project mount, and no host mounts, so they are strictly more restricted than the
+read-only bash tier that is already auto-allowed. This is a built-in tier, not a config flag.
 
-- `execute` (the default action for both tools): implicitly allowed unless you set an explicit
-  `toolDefaults` entry, which wins in every mode:
+- `execute` (the default action for both tools): implicitly allowed in manual/edits/yolo unless
+  you set an explicit `toolDefaults` entry, which wins in every mode. **In auto mode** the
+  implicit allow is demoted: the sandbox mount becomes read-write and every execution is
+  screened by the classifier ("writable + classified") like everything else in that mode:
   ```json
   { "toolDefaults": { "python": "ask", "node": "ask" } }
   ```
 - `reset` / `status`: pure bookkeeping (they run no code and touch nothing), so they are
-  **always** allowed, even when the matching `toolDefaults` entry is `"ask"`. Explicit
-  `deny`/`ask` rules still win over them.
+  **always** allowed, even in auto mode and even when the matching `toolDefaults` entry is
+  `"ask"`. Explicit `deny`/`ask` rules still win over them.
 - Bare `Python` / `Node` allow/deny/ask rules work with normal precedence (`deny > ask >
   allow`), so a deny rule like `"Node"` blocks every node call. Pattern rules like `Python(x)`
   are **not** supported for these tools: patterns would match the raw JSON of the tool input,
@@ -587,14 +588,16 @@ allow/deny/ask lists but **before** `defaultAction`:
 For each tool call, the first matching slot wins:
 
 ```
-deny  >  ask  >  allow  >  toolDefaults  >  sandboxed-tool implicit allow (python, node)  >  auto (if session toggle on)  >  defaultAction
+deny  >  ask  >  allow  >  toolDefaults  >  sandboxed-tool implicit allow (python, node; auto demotes to the classifier)  >  auto (if session toggle on)  >  defaultAction
 ```
 
 So a `deny` rule always overrides an `allow` rule, and an explicit `allow` rule always overrides
 a `toolDefaults` entry (which is how `Write(./output/*)` in allow can opt out of the implicit
 `write → ask` default). The sandboxed tools (`python`, `node`) sit between `toolDefaults` and the
 mode strategies: explicit `toolDefaults.python` / `toolDefaults.node` win over them in every
-mode, and they win over `defaultAction` and the auto-mode classifier.
+mode, and they win over `defaultAction` and the auto-mode classifier. In auto mode the
+sandboxed implicit allow resolves to the classifier sentinel instead, so sandboxed code is
+screened like every other fallthrough.
 
 ## Interactive prompt
 
@@ -723,9 +726,9 @@ The two former independent session toggles (allow-all-edits, auto mode) are cons
 
 | Mode | Non-explicit strategy | Footer indicator |
 | ---- | --------------------- | ---------------- |
-| `manual` | Fallthroughs use `defaultAction`; the implicit `write → ask` guard prompts for Write/Edit | *(blank)* |
+| `manual` | Fallthroughs use `defaultAction`; the implicit `write → ask` guard prompts for Write/Edit; the sandboxed tools stay read-only with the implicit allow | *(blank)* |
 | `edits` ("allow edits") | Write/Edit silently allowed (the implicit guard resolves to allow); everything else like `manual` | `✏️ allow edits` |
-| `auto` | An LLM classifier screens fallthroughs, including Write/Edit (the implicit guard is demoted below the classifier) | `🤖 auto: <model-id>` |
+| `auto` | An LLM classifier screens fallthroughs, including Write/Edit and sandboxed-tool executions (the implicit guard and the sandboxed implicit allow are demoted below the classifier; the sandbox mount becomes read-write) | `🤖 auto: <model-id>` |
 | `yolo` | Allow everything not explicitly denied/asked/configured; the classifier never runs | `💀 yolo` |
 
 ### Ways to switch
@@ -744,7 +747,7 @@ The full design (precedence, invariants, sharp edges) lives in [`docs/permission
 
 Every mode change (and the `session_start` reset to `manual`) is broadcast on pi's shared event bus (channel `tool-permissions:mode`, payload `{ mode, readRoots }`). The sandboxed `python` and `node` extensions consume this identically:
 
-- In `edits` and `yolo` modes they mount the project at `/workspace` **read-write**, so sandboxed code can modify project files like `Write`/`Edit` can. In `manual` and `auto` modes the mount stays read-only.
+- In `edits`, `auto`, and `yolo` modes they mount the project at `/workspace` **read-write**, so sandboxed code can modify project files like `Write`/`Edit` can. In `auto` mode this is paired with classifier screening of every execution ("writable + classified"); in `manual` mode the mount stays read-only.
 - The effective read roots (persisted `readAllowPaths`, session grants, and scratch roots when `readAllowScratch` is on) are mounted into the sandbox **read-only at their host paths, in every mode** — sandboxed code can read anything you already granted to `Read`/bash. Roots colliding with reserved sandbox mounts (notably `/tmp`, whose private tmpfs is never shadowed) or covered by the project mount are skipped, with the reason announced in a notification.
 
 - Flipping the mode or changing the read roots mid-session kills the running sandbox (interpreter state is discarded); the next execution starts one with the new mounts, and a notification announces the change. The event is re-emitted whenever a read-root grant is added (dialog escalation, session or persisted) and on `/permissions reload`.
@@ -811,7 +814,7 @@ deny > ask > allow > toolDefaults > mode strategy (auto → classifier) > defaul
 
 - `deny` rules block *before* the classifier is consulted (neither the classifier nor user intent can override).
 - `ask` rules always prompt (the classifier cannot auto-approve a matching action).
-- Explicit `toolDefaults` win over the classifier: a per-tool deterministic action from config is never screened by the LLM. (The *implicit* `write → ask` guard is different: in auto mode it is demoted below the classifier so Write/Edit calls are screened, repo edits silently allow via the default NL allow list, and out-of-repo writes soft-deny to a prompt.)
+- Explicit `toolDefaults` win over the classifier: a per-tool deterministic action from config is never screened by the LLM. (The *implicit* `write → ask` guard is different: in auto mode it is demoted below the classifier so Write/Edit calls are screened, repo edits silently allow via the default NL allow list, and out-of-repo writes soft-deny to a prompt. The sandboxed `python`/`node` implicit allow is demoted the same way: in auto mode the sandbox becomes writable and every execution's code is screened by the classifier.)
 - The classifier only decides for actions that fall through all of those: true unknowns.
 
 When an action matches more than one NL list, the more-severe verdict wins: **`hard_deny > soft_deny > allow`** (the classifier emits a single verdict, so precedence is enforced by the prompt instruction, not by code). This mirrors the static `deny > ask > allow` chain — there is no `allow`-overrides-`deny` escape hatch at the classifier layer.
