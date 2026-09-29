@@ -195,7 +195,7 @@ const pythonTool = defineTool({
 		const duration =
 			typeof details?.durationMs === "number" ? ` ${(details.durationMs / 1000).toFixed(1)}s` : "";
 		const failed = FAILURE_STATUSES.has(status as never);
-		const label = status === "python_error" ? "error" : status;
+		const label = status === "runtime_error" ? "error" : status;
 		const glyph = failed ? theme.fg("error", "✗") : theme.fg("success", "✓");
 		const header = `${glyph} python ${label}${theme.fg("muted", duration)}`;
 

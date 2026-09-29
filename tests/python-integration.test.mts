@@ -171,7 +171,7 @@ test("syntax errors return a structured traceback and preserve state", async () 
 	try {
 		await c.execute("kept = 'intact'", undefined, undefined);
 		const r = await c.execute("def broken(:\n    pass", undefined, undefined);
-		assert.equal(r.status, "python_error");
+		assert.equal(r.status, "runtime_error");
 		assert.ok(r.exception);
 		assert.equal(r.exception.type, "SyntaxError");
 		assert.ok(r.exception.traceback.includes("SyntaxError"));
@@ -191,7 +191,7 @@ test("runtime exceptions preserve state mutated before the error", async () => {
 			undefined,
 			undefined,
 		);
-		assert.equal(r.status, "python_error");
+		assert.equal(r.status, "runtime_error");
 		assert.equal(r.exception.type, "ValueError");
 		assert.equal(r.exception.message, "boom");
 		assert.ok(r.exception.traceback.includes("ValueError"));
@@ -235,7 +235,7 @@ test("explicit reset clears interpreter state but preserves scratch files", asyn
 		assert.equal(fs.existsSync(scratchHost + "/keepme.txt"), true, "scratch survives reset");
 
 		const r = await c.execute("print(marker)", undefined, undefined);
-		assert.equal(r.status, "python_error", "interpreter state must be gone");
+		assert.equal(r.status, "runtime_error", "interpreter state must be gone");
 		assert.equal(r.exception.type, "NameError");
 		const r2 = await c.execute("open('/scratch/keepme.txt').read()", undefined, undefined);
 		assert.equal(r2.repr, "'kept'");
@@ -259,7 +259,7 @@ test("infinite loop stops at the requested deadline; state loss is reported", as
 		assert.equal(r2.stateLost, true);
 		assert.ok(elapsed < 15_000, `timeout must take about 1s, took ${elapsed}ms`);
 		const r3 = await c.execute("print(lost)", undefined, undefined);
-		assert.equal(r3.status, "python_error", "state must be gone after timeout");
+		assert.equal(r3.status, "runtime_error", "state must be gone after timeout");
 		assert.equal(r3.exception.type, "NameError");
 		assert.ok(r3.generation > gen1, "fresh worker generation after timeout");
 	} finally {
@@ -366,10 +366,10 @@ test("memory limit (RLIMIT_AS) raises without host exhaustion or a hang", async 
 	try {
 		const r = await c.execute("x = bytearray(600 * 1024 * 1024)", undefined, undefined);
 		assert.ok(
-			r.status === "python_error" || r.status === "worker_error",
-			`expected python_error or worker_error, got ${r.status}`,
+			r.status === "runtime_error" || r.status === "worker_error",
+			`expected runtime_error or worker_error, got ${r.status}`,
 		);
-		if (r.status === "python_error") {
+		if (r.status === "runtime_error") {
 			assert.equal(r.exception.type, "MemoryError");
 			// Worker should still be usable after a clean MemoryError.
 			const r2 = await c.execute("40 + 2", undefined, undefined);
@@ -588,7 +588,7 @@ test("independent controller instances are isolated from one another", async () 
 		const st2 = await c2.status();
 		assert.notEqual(st1.paths.scratchDir, st2.paths.scratchDir, "scratch dirs must differ");
 		const r = await c2.execute("print(shared)", undefined, undefined);
-		assert.equal(r.status, "python_error", "namespaces must be independent");
+		assert.equal(r.status, "runtime_error", "namespaces must be independent");
 	} finally {
 		await c1.dispose("test");
 		await c2.dispose("test");

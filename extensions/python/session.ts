@@ -30,7 +30,7 @@ import {
 	decodeFrame,
 	encodeRequest,
 	FrameStream,
-	type PythonExceptionInfo,
+	type RuntimeErrorInfo,
 	type ResultFrame,
 	type WorkerFrame,
 } from "./protocol.ts";
@@ -43,7 +43,7 @@ import {
 
 export type ExecutionStatus =
 	| "ok"
-	| "python_error"
+	| "runtime_error"
 	| "permission_needed"
 	| "timeout"
 	| "cancelled"
@@ -53,7 +53,7 @@ export type ExecutionStatus =
 
 /** Statuses whose tool results are marked as errors toward the model. */
 export const FAILURE_STATUSES: ReadonlySet<ExecutionStatus> = new Set([
-	"python_error",
+	"runtime_error",
 	"permission_needed",
 	"timeout",
 	"cancelled",
@@ -72,7 +72,7 @@ export interface ExecutionResult {
 	excerptTruncated: boolean;
 	repr: string | null;
 	reprTruncated: boolean;
-	exception: PythonExceptionInfo | null;
+	exception: RuntimeErrorInfo | null;
 	/** True when the interpreter and its namespace were destroyed. */
 	stateLost: boolean;
 	stateLostReason?: string;
@@ -768,7 +768,7 @@ export class PythonSessionController {
 		switch (frame.type) {
 			case "ready": {
 				if (!handle.readyOk) {
-					if (!frame.pythonVersion) {
+					if (!frame.runtimeVersion) {
 						readyResolve?.({ ok: false, diagnostic: "worker sent a ready frame without a version" });
 						return;
 					}

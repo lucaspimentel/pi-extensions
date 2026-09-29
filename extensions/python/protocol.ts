@@ -15,7 +15,7 @@
 import { LIMITS, PROTOCOL_VERSION } from "./limits.ts";
 
 /** Exception details returned for ordinary Python errors. */
-export interface PythonExceptionInfo {
+export interface RuntimeErrorInfo {
 	type: string;
 	message: string;
 	traceback: string;
@@ -25,7 +25,7 @@ export interface PythonExceptionInfo {
 export interface ReadyFrame {
 	type: "ready";
 	protocol: number;
-	pythonVersion: string;
+	runtimeVersion: string;
 }
 
 /** Worker -> parent: one executed request finished without killing the worker. */
@@ -33,12 +33,12 @@ export interface ResultFrame {
 	type: "result";
 	protocol: number;
 	id: number;
-	status: "ok" | "python_error" | "permission_needed";
+	status: "ok" | "runtime_error" | "permission_needed";
 	/** Set only for status "permission_needed": the requested out-of-sandbox path. */
 	path?: string;
 	repr: string | null;
 	reprTruncated: boolean;
-	exception: PythonExceptionInfo | null;
+	exception: RuntimeErrorInfo | null;
 	/** Live non-zombie processes in the sandbox besides pid 1 and the worker. */
 	sandboxProcesses: number;
 }
@@ -93,19 +93,19 @@ export function decodeFrame(line: string): FrameDecodeResult {
 	}
 	switch (raw.type) {
 		case "ready": {
-			if (!isBoundedString(raw.pythonVersion, 128)) {
-				return { ok: false, error: "ready frame has invalid pythonVersion" };
+			if (!isBoundedString(raw.runtimeVersion, 128)) {
+				return { ok: false, error: "ready frame has invalid runtimeVersion" };
 			}
 			return {
 				ok: true,
-				frame: { type: "ready", protocol: PROTOCOL_VERSION, pythonVersion: raw.pythonVersion },
+				frame: { type: "ready", protocol: PROTOCOL_VERSION, runtimeVersion: raw.runtimeVersion },
 			};
 		}
 		case "result": {
 			if (!Number.isInteger(raw.id) || (raw.id as number) < 0) {
 				return { ok: false, error: "result frame has invalid id" };
 			}
-			if (raw.status !== "ok" && raw.status !== "python_error" && raw.status !== "permission_needed") {
+			if (raw.status !== "ok" && raw.status !== "runtime_error" && raw.status !== "permission_needed") {
 				return { ok: false, error: "result frame has invalid status" };
 			}
 			if (raw.status === "permission_needed") {
@@ -123,7 +123,7 @@ export function decodeFrame(line: string): FrameDecodeResult {
 			if (!Number.isInteger(sandboxProcesses) || (sandboxProcesses as number) < 0) {
 				return { ok: false, error: "result frame has invalid sandboxProcesses" };
 			}
-			let exception: PythonExceptionInfo | null = null;
+			let exception: RuntimeErrorInfo | null = null;
 			if (raw.exception !== null) {
 				const e = raw.exception;
 				if (

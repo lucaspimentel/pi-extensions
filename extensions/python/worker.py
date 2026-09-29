@@ -191,7 +191,7 @@ def execute_code(namespace, code, repr_limit):
         tree = ast.parse(code, "<python>", "exec")
     except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
         return {
-            "status": "python_error",
+            "status": "runtime_error",
             "repr": None,
             "reprTruncated": False,
             "exception": format_exception(exc),
@@ -240,7 +240,7 @@ def execute_code(namespace, code, repr_limit):
                 "sandboxProcesses": count_live_others(),
             }
         return {
-            "status": "python_error",
+            "status": "runtime_error",
             "repr": None,
             "reprTruncated": False,
             "exception": format_exception(exc),
@@ -474,7 +474,7 @@ def main():
         {
             "type": "ready",
             "protocol": PROTOCOL_VERSION,
-            "pythonVersion": "%d.%d.%d" % sys.version_info[:3],
+            "runtimeVersion": "%d.%d.%d" % sys.version_info[:3],
         }
     )
 
@@ -523,7 +523,7 @@ def main():
             except BaseException as exc:  # defensive: report, keep worker alive
                 try:
                     payload = {
-                        "status": "python_error",
+                        "status": "runtime_error",
                         "repr": None,
                         "reprTruncated": False,
                         "exception": {

@@ -174,7 +174,7 @@ function testErrorMarking() {
 
 function testDecodeFrame() {
 	// Valid frames.
-	const ready = decodeFrame(JSON.stringify({ type: "ready", protocol: 1, pythonVersion: "3.10.12" }));
+	const ready = decodeFrame(JSON.stringify({ type: "ready", protocol: 1, runtimeVersion: "3.10.12" }));
 	assert.ok(ready.ok && ready.frame.type === "ready");
 	const result = decodeFrame(
 		JSON.stringify({
@@ -195,7 +195,7 @@ function testDecodeFrame() {
 	const cases: [string, string][] = [
 		["not json", "valid JSON"],
 		["[1,2,3]", "not an object"],
-		[JSON.stringify({ type: "ready", protocol: 2, pythonVersion: "3" }), "protocol version"],
+		[JSON.stringify({ type: "ready", protocol: 2, runtimeVersion: "3" }), "protocol version"],
 		[JSON.stringify({ type: "result", protocol: 1, id: -1, status: "ok", repr: null, reprTruncated: false, exception: null }), "invalid id"],
 		[JSON.stringify({ type: "result", protocol: 1, id: 1, status: "weird", repr: null, reprTruncated: false, exception: null }), "invalid status"],
 		[JSON.stringify({ type: "result", protocol: 1, id: 1, status: "ok", repr: "x".repeat(LIMITS.maxReprBytes + 1), reprTruncated: false, exception: null }), "oversized repr"],
@@ -204,7 +204,7 @@ function testDecodeFrame() {
 				type: "result",
 				protocol: 1,
 				id: 1,
-				status: "python_error",
+				status: "runtime_error",
 				repr: null,
 				reprTruncated: false,
 				exception: { type: "E", message: "m", traceback: "t".repeat(LIMITS.maxTracebackBytes + 1) },
@@ -214,7 +214,7 @@ function testDecodeFrame() {
 		[JSON.stringify({ type: "bogus", protocol: 1 }), "unknown type"],
 		[JSON.stringify({ type: "error", protocol: 1, id: "x", message: "m" }), "invalid error id"],
 		[JSON.stringify({ type: "error", protocol: 1, id: null, message: 5 }), "invalid message type"],
-		[JSON.stringify({ type: "ready", protocol: 1, pythonVersion: 3 }), "invalid pythonVersion"],
+		[JSON.stringify({ type: "ready", protocol: 1, runtimeVersion: 3 }), "invalid runtimeVersion"],
 	];
 	for (const [input, label] of cases) {
 		const out = decodeFrame(input);
