@@ -2,7 +2,8 @@
 
 > See also [`extensions/pi-tool-permissions/TODO.md`](extensions/pi-tool-permissions/TODO.md) for the pi-tool-permissions extension's own task list.
 
-- [ ] Cleanup: delete `prototypes/node-worker/` once the node.js worker extension lands (throwaway prototype + design doc per the prototype skill; fold anything still needed into `extensions/node/` and the design doc's content into the extension README first). DESIGN.md's validated-decision content is now duplicated in `extensions/node/README.md`; before deleting, verify nothing in DESIGN.md is still unique.
+- [x] Cleanup: delete `prototypes/node-worker/` (2026-09-29)
+  - Done: prototype worker, harness, and DESIGN.md removed. DESIGN.md's validated decisions were already folded into `extensions/node/README.md`; the one implementation-internal subtlety not in the README (the fd-0 ENXIO detail: `open('/proc/self/fd/0')` fails on child_process pipes, so the worker reads fd 0 directly) lives in `extensions/node/worker.mjs`'s header comments. `npx tsc --noEmit` and both test suites unaffected (no source changes).
 
 - [x] Node.js equivalent of the python extension, step 1: `extensions/node/` with full sandbox (2026-09-28)
   - Done: `extensions/node/` (limits.ts, protocol.ts, sandbox.ts, session.ts, index.ts, worker.mjs) registered in package.json; `node` tool with execute/reset/status mirroring python's contract. Sandbox: bubblewrap namespaces + mounts identical to python, with node-specific interpreter binding (brew installs bind `/home/linuxbrew` read-only: symlink-chain binary + shared libs in `/home/linuxbrew/opt/*`), worker launched through `/usr/bin/prlimit` (`--as=2GiB --fsize=16MiB --nofile=128 --core=0`) because node cannot set its own rlimits, plus `--max-old-space-size=512`. RLIMIT_AS is 2 GiB, not python's 512 MiB: measured on node 26, 512 MiB and 1 GiB kill node at startup (V8 CodeRange reservation fails); the 512 MiB old-space cap is the effective heap ceiling.
