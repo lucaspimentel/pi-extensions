@@ -408,14 +408,14 @@ Caveats:
 
 **Deprecated alias:** `bashAllowRedirectsTo` is still read, but only when `writeAllowPaths` is absent in *both* scopes (it keeps its old project-wins scalar merge and feeds the same resolved write-root list). A debug warning appears in `/permissions list` when the alias is used; rename it to `writeAllowPaths`.
 
-#### `bashValidators` (default: `{ "duckdb": "readonly-duckdb", "mlr": "readonly-mlr" }`)
+#### `bashValidators` (default: `{ "duckdb": "readonly-duckdb", "mlr": "readonly-mlr", "find": "readonly-find" }`)
 
-Maps a Bash command name to a built-in **validator** that proves the command is read-only, so tools whose risk lives inside *program text* (SQL in `duckdb -c "..."`, DSL in `mlr` verbs) can run read-only data analysis without permission prompts. An argv-based path check cannot see the SQL or the DSL, so these tools would otherwise always prompt.
+Maps a Bash command name to a built-in **validator** that proves the command is read-only, so tools whose risk lives inside *program text* or *expression primaries* (SQL in `duckdb -c "..."`, DSL in `mlr` verbs, `find` expressions) can run read-only data analysis without permission prompts. An argv-based path check cannot see the SQL, the DSL, or the expression, so these tools would otherwise always prompt.
 
-Both built-in validators are **enabled by default**: `duckdb` and `mlr` are validated read-only out of the box, no config needed.
+All built-in validators are **enabled by default**: `duckdb`, `mlr`, and `find` are validated read-only out of the box, no config needed.
 
 ```json
-{ "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr" } }
+{ "bashValidators": { "duckdb": "readonly-duckdb", "mlr": "readonly-mlr", "find": "readonly-find" } }
 ```
 
 Project keys override user keys per-command (`mergeConfig` merges the maps key-by-key, with the defaults at the bottom).
@@ -448,15 +448,17 @@ Semantics:
 
 What each validator accepts and declines:
 
-| | `readonly-duckdb` | `readonly-mlr` |
-| --- | --- | --- |
-| Flags | Only a vetted allowlist (`-csv`, `--json`, `-header`, `-c`, `-nullvalue`, …); any unknown flag (including `-f` script execution) declines | All flags pass except `-f` on `put`/`filter` (loads unscannable DSL from a file); `--from`/`--mfrom` values must resolve inside cwd |
-| SQL/DSL writes | `COPY`, `EXPORT`, `ATTACH`, `INSTALL`, `LOAD`, and dot-commands (`.output`, `.open`, `.import`, `.read`) decline | In-DSL file writes decline: `tee`, and `print`/`emit`/`dump` with a `>` target |
-| Positional arguments | Any positional argument (a database file opened read-write) declines | Non-flag tokens that look like paths must resolve inside cwd |
+| | `readonly-duckdb` | `readonly-mlr` | `readonly-find` |
+| --- | --- | --- | --- |
+| Flags | Only a vetted allowlist (`-csv`, `--json`, `-header`, `-c`, `-nullvalue`, …); any unknown flag (including `-f` script execution) declines | All flags pass except `-f` on `put`/`filter` (loads unscannable DSL from a file); `--from`/`--mfrom` values must resolve inside cwd | Unknown primaries decline (read-only allowlist: `-name`, `-type`, `-mtime`, `-print`/`-print0`/`-ls`, the logical operators, …) |
+| SQL/DSL writes | `COPY`, `EXPORT`, `ATTACH`, `INSTALL`, `LOAD`, and dot-commands (`.output`, `.open`, `.import`, `.read`) decline | In-DSL file writes decline: `tee`, and `print`/`emit`/`dump` with a `>` target | Write/execute primaries decline: `-delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, and the output-writing primaries `-fls`, `-fprint`, `-fprint0`, `-fprintf` |
+| Positional arguments | Any positional argument (a database file opened read-write) declines | Non-flag tokens that look like paths must resolve inside cwd | Starting paths and `-newer`/`-samefile` reference files must resolve inside cwd or a read root |
 
 Known false positives (both safe — they decline to ask rather than allow): a literal argument containing the word `tee` (e.g. a file named `tee.csv`), and unquoted SQL (`duckdb -c SELECT 1` leaves a stray positional `1`). Agents quote SQL anyway.
 
 For structured data analysis prefer `duckdb` and `mlr`; plain `awk` is a possible future validator but is not yet built in — add an explicit allow rule for it if needed.
+
+**`readonly-find` and broad `Bash(find *)` allow rules.** A broad `Bash(find *)` allow wildcard matches every find invocation, including destructive ones (`-delete`, `-exec rm …`), so it previously required belt-and-braces `ask` rules like `find * -delete*` and `find * -exec*` on top to restore prompting. With `readonly-find` enabled by default, those belt-and-braces ask rules are no longer needed: the validator proves each find expression read-only before it can be silently allowed, and a `-delete`/`-exec`/`-ok`/output-primary command falls through to `ask` regardless of any `find` allow wildcard. The `"none"` sentinel (`{ "bashValidators": { "find": "none" } }`) restores the old prompt-everything behavior for find if you prefer to rely on your own rules.
 
 #### Redirected Bash commands (write-risk)
 

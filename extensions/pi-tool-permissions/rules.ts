@@ -1494,6 +1494,122 @@ function validateReadOnlyMlr(tokens: string[], cwd: string, readRoots: readonly 
 	return true;
 }
 
+/**
+ * `find` primaries that write, execute, or destroy. Any of these fails the
+ * readonly-find validator outright, no matter where they appear.
+ */
+const FIND_WRITE_PRIMARIES = new Set([
+	"-delete", "-exec", "-execdir", "-ok", "-okdir",
+	"-fls", "-fprint", "-fprint0", "-fprintf",
+]);
+
+/**
+ * `find` primaries that reference a file: the flag's value is an input file
+ * (mtime/timestamp reference, not a write target) and must resolve inside
+ * cwd or one of the allowed read roots. `-newerXY` with `t` as the second
+ * letter (`-newermt 2024-01-01`) takes a timestamp literal instead and is
+ * handled separately.
+ */
+const FIND_FILE_ARG_PRIMARIES = new Set(["-newer", "-anewer", "-cnewer", "-samefile"]);
+
+/**
+ * Known read-only `find` primaries. Value is the flag's arity: 0 = takes no
+ * argument, 1 = the next token is the primary's value (consumed so values
+ * like `-mtime -7` or `-perm -444` are not mistaken for primaries).
+ * Intentionally an allowlist: a primary not listed here (including every
+ * write/execute primary) fails validation, so newly-added GNU find actions
+ * fail safe rather than silently passing. `-fstype` is a harmless filter
+ * (it tests the filesystem type), not a mount operation.
+ */
+const FIND_SAFE_PRIMARIES: Record<string, 0 | 1> = {
+	// Global options (may appear before or after the paths).
+	"-H": 0, "-L": 0, "-P": 0,
+	"-daystart": 0, "-depth": 0, "-d": 0, "-follow": 0, "-mount": 0, "-xdev": 0,
+	"-maxdepth": 1, "-mindepth": 1, "-regextype": 1,
+	"-warn": 0, "-nowarn": 0, "-noleaf": 0,
+	"-help": 0, "--help": 0, "-version": 0, "--version": 0,
+	// Tests (all read-only predicates).
+	"-amin": 1, "-atime": 1, "-cmin": 1, "-ctime": 1, "-mmin": 1, "-mtime": 1,
+	"-empty": 0, "-executable": 0, "-false": 0, "-true": 0,
+	"-readable": 0, "-writable": 0,
+	"-fstype": 1, "-gid": 1, "-uid": 1, "-group": 1, "-user": 1,
+	"-ilname": 1, "-iname": 1, "-inum": 1, "-ipath": 1, "-iregex": 1, "-iwholename": 1,
+	"-links": 1, "-lname": 1, "-name": 1, "-nogroup": 0, "-nouser": 0,
+	"-path": 1, "-perm": 1, "-regex": 1, "-size": 1, "-type": 1, "-xtype": 1,
+	"-used": 1, "-wholename": 1,
+	// Actions that only write to stdout.
+	"-ls": 0, "-print": 0, "-print0": 0, "-printf": 1, "-prune": 0, "-quit": 0,
+	// Operators.
+	"-a": 0, "-o": 0, "-and": 0, "-or": 0, "-not": 0,
+};
+
+/**
+ * Validate a `find` invocation as read-only.
+ *
+ * Rules:
+ *  1. Any write/execute primary fails: `-delete`, `-exec`, `-execdir`,
+ *     `-ok`, `-okdir`, and the output-writing primaries `-fls`, `-fprint`,
+ *     `-fprint0`, `-fprintf`.
+ *  2. Any unknown primary (an argument starting with `-` that is not in
+ *     FIND_SAFE_PRIMARIES or the `-newerXY` family) fails, so newly-added
+ *     or platform-specific primaries fail safe rather than passing.
+ *  3. Every positional starting path must resolve inside cwd or one of the
+ *     allowed read roots (`find / -name x` declines; `find . -name x` and
+ *     `find src lib -name x` pass). Expression primaries and their pattern
+ *     values (`-name '*.ts'`, `-perm -444`) are not paths and are skipped;
+ *     only unconsumed non-flag tokens outside the `(`/`)`/`!`/`,` operators
+ *     are treated as starting paths.
+ *  4. The file argument of `-newer` / `-anewer` / `-cnewer` / `-samefile` and
+ *     the file variants of `-newerXY` (e.g. `-neweram ref.txt`) must resolve
+ *     inside cwd or a read root. The timestamp variants (`-newermt 2024-01-01`)
+ *     take a literal timestamp and are not containment-checked.
+ *
+ * Shell-level redirects were already screened by stripExemptRedirects before
+ * tokenization, and compound commands are split per-subcommand upstream, so
+ * `find ... -print0 | xargs -0 rm` prompts via the xargs half.
+ */
+function validateReadOnlyFind(tokens: string[], cwd: string, readRoots: readonly string[]): boolean {
+	// Primary currently consuming a value token, and whether that value is a
+	// containment-checked file reference (vs a pattern/timestamp literal).
+	let valueFor: string | null = null;
+	let valueIsFile = false;
+	for (let i = 1; i < tokens.length; i++) {
+		const tok = tokens[i];
+		if (valueFor !== null) {
+			if (valueIsFile && !pathInsideAllowedRoots(tok, cwd, readRoots)) return false;
+			valueFor = null;
+			valueIsFile = false;
+			continue;
+		}
+		if (tok.startsWith("-") && tok.length > 1) {
+			if (FIND_WRITE_PRIMARIES.has(tok)) return false; // write/execute primary
+			if (FIND_FILE_ARG_PRIMARIES.has(tok) || /^-newer[aAmcB]$/.test(tok)) {
+				valueFor = tok;
+				valueIsFile = true; // file reference: containment-check the value
+				continue;
+			}
+			if (/^-newer[aAmcB]t$/.test(tok)) {
+				valueFor = tok; // timestamp literal: consume, no containment check
+				continue;
+			}
+			const arity = FIND_SAFE_PRIMARIES[tok];
+			if (arity === undefined) return false; // unknown primary — fail safe
+			if (arity === 1) valueFor = tok;
+			continue;
+		}
+		// Expression operators are not paths.
+		if (tok === "(" || tok === ")" || tok === "!" || tok === ",") continue;
+		// Any other unconsumed non-flag token is a positional starting path.
+		// LooksFileish is implied: expression primaries all start with `-` (or
+		// are operators), so a bare positional token is always a path, and
+		// pathInsideAllowedRoots resolves relative paths (".", "src") against
+		// cwd while catching absolute paths ("/") and ".." escapes.
+		if (!pathInsideAllowedRoots(tok, cwd, readRoots)) return false;
+	}
+	if (valueFor !== null) return false; // dangling primary value
+	return true;
+}
+
 type BashValidator = (tokens: string[], cwd: string, readRoots: readonly string[]) => boolean;
 
 /**
@@ -1505,6 +1621,7 @@ type BashValidator = (tokens: string[], cwd: string, readRoots: readonly string[
 export const BASH_VALIDATORS: Record<string, BashValidator> = {
 	"readonly-duckdb": validateReadOnlyDuckdb,
 	"readonly-mlr": validateReadOnlyMlr,
+	"readonly-find": validateReadOnlyFind,
 };
 
 /**
@@ -1522,6 +1639,7 @@ export const BASH_VALIDATOR_NONE = "none";
 export const DEFAULT_BASH_VALIDATORS: Record<string, string> = {
 	duckdb: "readonly-duckdb",
 	mlr: "readonly-mlr",
+	find: "readonly-find",
 };
 
 /**

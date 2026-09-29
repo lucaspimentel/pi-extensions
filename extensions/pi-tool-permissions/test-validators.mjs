@@ -15,7 +15,7 @@ const CWD = "/tmp/proj";
 
 const validatorCfg = (extra = {}) => makeCfg({
 	defaultAction: "ask",
-	bashValidators: { duckdb: "readonly-duckdb", mlr: "readonly-mlr" },
+	bashValidators: { duckdb: "readonly-duckdb", mlr: "readonly-mlr", find: "readonly-find" },
 	cwd: CWD,
 	...extra,
 });
@@ -27,6 +27,7 @@ section("BASH_VALIDATORS registry");
 
 test("readonly-duckdb is registered",   typeof BASH_VALIDATORS["readonly-duckdb"], "function");
 test("readonly-mlr is registered",      typeof BASH_VALIDATORS["readonly-mlr"], "function");
+test("readonly-find is registered",     typeof BASH_VALIDATORS["readonly-find"], "function");
 
 section("validatorApprovedBashReason — direct");
 
@@ -36,6 +37,8 @@ test("unmapped command returns null",                 validatorApprovedBashReaso
 test("unknown validator name returns null",           validatorApprovedBashReason("duckdb -c \"SELECT 1\"", CWD, { duckdb: "readonly-nonsense" }), null);
 test("empty command returns null",                    validatorApprovedBashReason("", CWD, { duckdb: "readonly-duckdb" }), null);
 test("case-insensitive command lookup",               validatorApprovedBashReason("DuckDB -c \"SELECT 1\"", CWD, { duckdb: "readonly-duckdb" }), "validated read-only duckdb (bashValidators.readonly-duckdb)");
+test("find read-only expression returns reason",       validatorApprovedBashReason("find . -name x", CWD, { find: "readonly-find" }), "validated read-only find (bashValidators.readonly-find)");
+test("find -delete returns null",                      validatorApprovedBashReason("find . -name x -delete", CWD, { find: "readonly-find" }), null);
 
 section("validators — allow cases");
 
@@ -49,6 +52,11 @@ test("mlr stats1",                              decide(validatorCfg(), "Bash", {
 test("mlr cut",                                 decide(validatorCfg(), "Bash", { command: "mlr cut -f x,y data.csv" }), "allow");
 test("mlr put with inline DSL",                 decide(validatorCfg(), "Bash", { command: "mlr put '$x > 3' data.csv" }), "allow");
 test("mlr nested path inside cwd",              decide(validatorCfg(), "Bash", { command: "mlr cat data/sub/file.csv" }), "allow");
+test("find -name pattern",                       decide(validatorCfg(), "Bash", { command: "find . -name '*.ts'" }), "allow");
+test("find multiple paths + filters",            decide(validatorCfg(), "Bash", { command: "find src lib -type f -mtime -7" }), "allow");
+test("find -maxdepth + -print0",                  decide(validatorCfg(), "Bash", { command: "find . -maxdepth 2 -print0" }), "allow");
+test("find parenthesized expression",            decide(validatorCfg(), "Bash", { command: "find . \\( -name '*.ts' -o -name '*.js' \\) -print" }), "allow");
+test("find -newermt timestamp literal",           decide(validatorCfg(), "Bash", { command: "find . -newermt 2024-01-01 -print" }), "allow");
 
 section("validators — decline cases fall through to ask (not deny)");
 
@@ -68,7 +76,16 @@ test("mlr filter -f script",                    decide(validatorCfg(), "Bash", {
 test("mlr tee write in DSL",                    decide(validatorCfg(), "Bash", { command: "mlr put 'tee > \"out.tsv\", $*' data.csv" }), "ask");
 test("mlr --from outside cwd",                  decide(validatorCfg(), "Bash", { command: "mlr --from /etc/passwd cat" }), "ask");
 test("mlr input file outside cwd",              decide(validatorCfg(), "Bash", { command: "mlr cat /etc/passwd" }), "ask");
+test("find -delete",                             decide(validatorCfg(), "Bash", { command: "find . -name x -delete" }), "ask");
+test("find -exec",                               decide(validatorCfg(), "Bash", { command: "find . -exec rm {} \\;" }), "ask");
+test("find -ok",                                 decide(validatorCfg(), "Bash", { command: "find . -ok rm {} \\;" }), "ask");
+test("find -execdir",                            decide(validatorCfg(), "Bash", { command: "find . -execdir rm {} \\;" }), "ask");
+test("find -fprint",                             decide(validatorCfg(), "Bash", { command: "find . -fprint /tmp/out" }), "ask");
+test("find starting path outside cwd",           decide(validatorCfg(), "Bash", { command: "find / -name x" }), "ask");
+test("find unknown primary",                     decide(validatorCfg(), "Bash", { command: "find . -frobnicate" }), "ask");
+test("find -newer reference outside cwd",        decide(validatorCfg(), "Bash", { command: "find . -newer /etc/passwd -print" }), "ask");
 test("declined validator falls to defaultAction reason", decideWithReason(validatorCfg(), "Bash", { command: "duckdb -c \"COPY t TO 'out.csv'\"" }, "manual").reason, "no matching rule; defaultAction = ask");
+test("declined find falls to defaultAction reason",      decideWithReason(validatorCfg(), "Bash", { command: "find . -name x -delete" }, "manual").reason, "no matching rule; defaultAction = ask");
 
 section("validators: read roots (readAllowPaths)");
 
@@ -81,6 +98,8 @@ test("duckdb FROM /tmp/x.csv allows with /tmp root",    decide(withTmpRoot, "Bas
 test("/tmpfoo does not match /tmp root",                decide(withTmpRoot, "Bash", { command: "mlr cat /tmpfoo" }), "ask");
 test("dot-segment escape does not match /tmp root",     decide(withTmpRoot, "Bash", { command: "mlr --from /tmp/../etc/passwd cat" }), "ask");
 test("URL still declines with /tmp root",               decide(withTmpRoot, "Bash", { command: "duckdb -c \"SELECT * FROM 'https://example.com/f.csv'\"" }), "ask");
+test("find /tmp path declines without roots",            decide(validatorCfg(), "Bash", { command: "find /tmp -name x" }), "ask");
+test("find /tmp path allows with /tmp root",             decide(withTmpRoot, "Bash", { command: "find /tmp -name x" }), "allow");
 test("direct validatorApprovedBashReason with read root", validatorApprovedBashReason("mlr --from /tmp/x cut -f x", CWD, { mlr: "readonly-mlr" }, [], ["/tmp"]), "validated read-only mlr (bashValidators.readonly-mlr)");
 test("direct validatorApprovedBashReason without roots",  validatorApprovedBashReason("mlr --from /tmp/x cut -f x", CWD, { mlr: "readonly-mlr" }, []), null);
 
@@ -91,7 +110,10 @@ section("validators — disabled / not configured");
 const bareCfg = loadConfigFromObjects({}, {}, CWD);
 test("no bashValidators key → default duckdb allow", decide(bareCfg, "Bash", { command: "duckdb -c \"SELECT * FROM 'data.csv'\"" }), "allow");
 test("no bashValidators key → default mlr allow",   decide(bareCfg, "Bash", { command: "mlr cut -f x data.csv" }), "allow");
+test("no bashValidators key → default find allow",  decide(bareCfg, "Bash", { command: "find . -name x" }), "allow");
+test("no bashValidators key → find -delete still asks (negative control)", decide(bareCfg, "Bash", { command: "find . -name x -delete" }), "ask");
 test("none sentinel → duckdb falls through to ask", decide(loadConfigFromObjects({ bashValidators: { duckdb: "none" } }, {}, CWD), "Bash", { command: "duckdb -c \"SELECT * FROM 'data.csv'\"" }), "ask");
+test("none sentinel → find falls through to ask",   decide(loadConfigFromObjects({ bashValidators: { find: "none" } }, {}, CWD), "Bash", { command: "find . -name x" }), "ask");
 
 const emptyDefaultCfg = makeCfg({ defaultAction: "ask", cwd: CWD, bashValidators: {} });
 test("no validators configured → ask",          decide(emptyDefaultCfg, "Bash", { command: "duckdb -c \"SELECT 1\"" }), "ask");
@@ -131,5 +153,8 @@ test("compound: ls && validated duckdb",        decideCompound(compoundCfg, "bas
 test("compound: ls && declined duckdb",         decideCompound(compoundCfg, "bash", { command: "ls && duckdb -c \"COPY t TO 'x'\"" }).action, "ask");
 test("compound: pipe into validated mlr",       decideCompound(compoundCfg, "bash", { command: "cat data.csv | mlr cat" }).action, "allow");
 test("compound: mlr decline in pipe",           decideCompound(compoundCfg, "bash", { command: "cat x | mlr cat /etc/passwd" }).action, "ask");
+test("compound: ls && validated find",           decideCompound(compoundCfg, "bash", { command: "ls && find . -name x" }).action, "allow");
+test("compound: ls && find -delete",             decideCompound(compoundCfg, "bash", { command: "ls && find . -name x -delete" }).action, "ask");
+test("compound: find pipe into xargs rm",        decideCompound(compoundCfg, "bash", { command: "find . -print0 | xargs -0 rm" }).action, "ask");
 
 summary() && process.exit(1);
