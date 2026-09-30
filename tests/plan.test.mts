@@ -30,6 +30,7 @@ function makeHarness(
 	const selects: { title: string; options: string[] }[] = [];
 	const editors: { title: string; prefill: string }[] = [];
 	const newSessions: { parentSession?: string; kickoff?: string }[] = [];
+	const entries: { customType: string; data: unknown }[] = [];
 	let activeTools: string[] = [];
 
 	const originalTools = ["read", "write", "edit", "bash"];
@@ -43,6 +44,7 @@ function makeHarness(
 		getActiveTools: () => (activeTools.length ? activeTools.slice() : baselineTools.slice()),
 		getAllTools: () => allToolNamesFinal.map((name) => ({ name })),
 		setActiveTools(tools: string[]) { activeTools = tools.slice(); },
+		appendEntry(customType: string, data?: unknown) { entries.push({ customType, data }); },
 		sendUserMessage(msg: string) { sent.push(msg); },
 	};
 
@@ -84,7 +86,7 @@ function makeHarness(
 	const restored = () => activeTools.length > 0 && activeTools.includes("write") && activeTools.includes("edit");
 	const tools = () => activeTools.slice();
 
-	return { commands, events, sent, notifications, selects, editors, newSessions, ctx, branch, narrowed, restored, tools };
+	return { commands, events, sent, notifications, selects, editors, newSessions, entries, ctx, branch, narrowed, restored, tools };
 }
 
 function addAssistantTurn(h: ReturnType<typeof makeHarness>, text: string) {
@@ -156,6 +158,79 @@ async function main() {
 		assert.ok(tools.includes("grep"), "restored set includes the pre-plan active tools");
 		assert.ok(!tools.includes("bash"), "restored set does not re-activate pre-plan deactivated tools");
 		assert.ok(!tools.includes("mcp__slack"), "restored set does not activate registered-but-inactive tools");
+	}
+
+	// ── Plan-state persistence and mid-plan recovery ───────────────────────────
+	{
+		// /plan start persists { active: true, savedTools } after narrowing.
+		const h = makeHarness(CHOICE_STOP);
+		await h.commands["plan"].handler("do a thing", h.ctx);
+		const startEntry = h.entries.find((e: any) => e.customType === "plan-state");
+		assert.ok(startEntry, "plan start must persist a plan-state entry");
+		assert.deepEqual(startEntry.data, { active: true, savedTools: ["read", "write", "edit", "bash"] });
+
+		// /plan cancel appends the end marker after restoring.
+		await h.commands["plan"].handler("cancel", h.ctx);
+		assert.equal(h.entries.length, 2, "plan end must persist a second plan-state entry");
+		assert.deepEqual(h.entries[1].data, { active: false });
+	}
+
+	{
+		// Resume mid-plan: the branch holds an active plan-state entry; recovery
+		// restores the persisted set and stays out of planning mode.
+		const h = makeHarness(CHOICE_STOP);
+		h.branch.push({
+			type: "custom",
+			customType: "plan-state",
+			data: { active: true, savedTools: ["read", "write", "edit", "bash", "grep"] },
+		});
+		await h.events["session_start"]({ reason: "resume" }, h.ctx);
+		assert.deepEqual(h.tools(), ["read", "write", "edit", "bash", "grep"], "persisted pre-plan set must be restored");
+		assert.ok(h.restored(), "write/edit must be active again after mid-plan resume");
+		assert.ok(
+			h.notifications.some((n: any) => n.msg.includes("Interrupted mid-plan")),
+			"recovery must notify the user",
+		);
+		// Planning is NOT re-entered: /plan cancel says "Not in planning mode".
+		h.notifications.length = 0;
+		await h.commands["plan"].handler("cancel", h.ctx);
+		assert.ok(h.notifications.some((n: any) => n.msg === "Not in planning mode."));
+	}
+
+	{
+		// Resume after the plan already ended (end marker last): no recovery, no
+		// notification, tools untouched.
+		const h = makeHarness(CHOICE_STOP);
+		h.branch.push({ type: "custom", customType: "plan-state", data: { active: false } });
+		await h.events["session_start"]({ reason: "resume" }, h.ctx);
+		assert.deepEqual(h.tools(), [], "no setActiveTools call when the last entry says the plan ended");
+		assert.equal(h.notifications.filter((n: any) => n.msg.includes("Interrupted mid-plan")).length, 0);
+	}
+
+	{
+		// Malformed persisted entry (no savedTools): repair by re-activating
+		// write/edit alongside whatever pi replayed.
+		const h = makeHarness(CHOICE_STOP);
+		h.branch.push({ type: "custom", customType: "plan-state", data: { active: true } });
+		await h.events["session_start"]({ reason: "resume" }, h.ctx);
+		const tools = h.tools();
+		assert.ok(tools.includes("write") && tools.includes("edit"), "repair path must re-activate write/edit");
+		assert.ok(h.restored());
+	}
+
+	{
+		// /tree mid-plan: session_start does NOT fire for /tree, so the
+		// session_tree handler must run the same recovery.
+		const h = makeHarness(CHOICE_STOP);
+		h.branch.push({
+			type: "custom",
+			customType: "plan-state",
+			data: { active: true, savedTools: ["read", "write", "edit", "bash"] },
+		});
+		assert.ok(h.events["session_tree"], "a session_tree handler must be registered");
+		await h.events["session_tree"]({ newLeafId: null, oldLeafId: null }, h.ctx);
+		assert.deepEqual(h.tools(), ["read", "write", "edit", "bash"], "session_tree recovery restores the persisted set");
+		assert.ok(h.restored());
 	}
 
 	// ── Accept: implement in this session ──────────────────────────────────────

@@ -35,7 +35,12 @@
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 
 const PLAN_NUDGE_INTRO = `The user has asked for a plan. Produce a complete, self-contained handoff
 prompt that a fresh agent session (with no memory of this conversation) could
@@ -98,6 +103,12 @@ ${PLAN_CLARIFY_REQUIREMENTS}`.trim();
 // Set when the rpiv-ask-user-question package is installed; lets the planner
 // ask the user clarifying questions mid-turn via its ask_user_question tool.
 const ASK_USER_TOOL_NAME = "ask_user_question";
+
+// Custom session-entry type used to persist plan state across session
+// boundaries. Written when planning starts ({ active: true, savedTools }) and
+// when tools are restored ({ active: false }); the LAST entry in the branch
+// wins on recovery.
+const PLAN_STATE_ENTRY_TYPE = "plan-state";
 
 const IMPLEMENT_MESSAGE = "Implement the plan.";
 
@@ -209,6 +220,11 @@ export default function plan(pi: ExtensionAPI) {
 		savedTools = pi.getActiveTools();
 		const canAskUser = pi.getAllTools().some((t) => t.name === ASK_USER_TOOL_NAME);
 		narrowTools();
+		// Persist the plan state so a resume/fork or /tree that lands mid-plan can
+		// restore the pre-plan tool set (pi replays setActiveTools entries from the
+		// transcript on those boundaries, which would otherwise leave write/edit
+		// disabled with no in-band way back).
+		pi.appendEntry(PLAN_STATE_ENTRY_TYPE, { active: true, savedTools });
 		planCommandCtx = ctx;
 
 		planning = true;
@@ -237,6 +253,7 @@ export default function plan(pi: ExtensionAPI) {
 
 		if (savedTools) {
 			pi.setActiveTools(savedTools);
+			pi.appendEntry(PLAN_STATE_ENTRY_TYPE, { active: false });
 		}
 		savedTools = undefined;
 		planCommandCtx = undefined;
@@ -366,11 +383,58 @@ export default function plan(pi: ExtensionAPI) {
 		}
 	});
 
+	// A session resumed/forked/reloaded (or /tree'd) mid-plan replays pi's
+	// persisted setActiveTools narrowing, leaving write/edit disabled while the
+	// extension's in-memory state is fresh (planning === false, so /plan cancel
+	// refuses). Recover: find the last persisted plan-state entry in the branch
+	// and, if it says planning was active, auto-exit by restoring the persisted
+	// pre-plan tool set. Deliberately does NOT re-enter planning mode.
+	function recoverPersistedPlanState(ctx: ExtensionContext): void {
+		const branch = ctx.sessionManager.getBranch() as SessionEntry[];
+		const last = [...branch]
+			.reverse()
+			.find((e): e is Extract<SessionEntry, { type: "custom" }> =>
+				(e as { type?: string; customType?: string }).type === "custom" &&
+				(e as { customType?: string }).customType === PLAN_STATE_ENTRY_TYPE,
+			);
+		if (!last) return;
+		const data = last.data as { active?: boolean; savedTools?: unknown } | undefined;
+		if (!data || data.active !== true) return;
+
+		const saved = Array.isArray(data.savedTools)
+			? data.savedTools.filter((t): t is string => typeof t === "string")
+			: undefined;
+		if (saved && saved.length > 0) {
+			pi.setActiveTools(saved);
+		} else {
+			// Malformed or missing snapshot: repair by re-activating write/edit
+			// alongside whatever pi replayed.
+			const current = pi.getActiveTools();
+			const repaired = [...current];
+			for (const tool of ["write", "edit"] as const) {
+				if (!repaired.includes(tool)) repaired.push(tool);
+			}
+			pi.setActiveTools(repaired);
+		}
+		ctx.ui.notify("Interrupted mid-plan; previous tool set restored.", "info");
+	}
+
 	pi.on("session_start", async (_event, ctx) => {
-		// Reset transient state on session boundaries.
+		// Reset transient state on session boundaries. Recovery runs first: for
+		// resume/fork/reload/startup of a session that was interrupted mid-plan,
+		// it restores the persisted pre-plan tool set before the reset wipes the
+		// (already pristine) planning flags.
+		recoverPersistedPlanState(ctx);
 		planning = false;
 		savedTools = undefined;
 		planCommandCtx = undefined;
+		updateStatus(ctx);
+	});
+
+	// /tree does NOT fire session_start. Module state is already pristine here
+	// (the branch switch does not run the extension), so only recovery is needed.
+	pi.on("session_tree", async (_event, ctx) => {
+		recoverPersistedPlanState(ctx);
 		updateStatus(ctx);
 	});
 }
