@@ -21,6 +21,7 @@ const {
 	buildRegenerationPrompt,
 	buildRecentTurnsText,
 	extractInitialPrompts,
+	deriveTitleSource,
 	readTurnInterval,
 } = mod;
 
@@ -82,6 +83,48 @@ assert.deepEqual(
 );
 assert.deepEqual(extractInitialPrompts([msgEntry("assistant", "hi"), { type: "other" }]), []);
 assert.deepEqual(extractInitialPrompts([]), []);
+
+// deriveTitleSource: skill invocations are rewritten, not echoed verbatim.
+const skillOnly = '<skill name="update-changelog" location="/home/lucas/.pi/agent/skills/update-changelog/SKILL.md">\nskill body text\n</skill>';
+assert.equal(deriveTitleSource(skillOnly), "Invoked /update-changelog skill");
+assert.equal(
+	deriveTitleSource(`${skillOnly}\n${skillOnly.replace("update-changelog", "update-docs")}`),
+	"Invoked /update-changelog, /update-docs skills",
+);
+assert.equal(
+	deriveTitleSource(`<skill name="ship">body</skill> then please ship it`),
+	"then please ship it",
+	"mixed prompt keeps the user-authored text",
+);
+assert.equal(
+	deriveTitleSource("<skill name=\"ship\">truncated, never closed"),
+	"Invoked /ship skill",
+	"an unterminated skill block is still rewritten",
+);
+assert.equal(deriveTitleSource("please   fix\nthe login bug"), "please fix the login bug");
+assert.equal(deriveTitleSource("   "), "");
+assert.equal(deriveTitleSource(""), "");
+
+// extractInitialPrompts derives skill invocations and skips nameless ones.
+assert.deepEqual(
+	extractInitialPrompts([
+		msgEntry("user", skillOnly),
+		msgEntry("user", "real request"),
+	]),
+	["Invoked /update-changelog skill", "real request"],
+);
+assert.deepEqual(
+	extractInitialPrompts([msgEntry("user", "<skill>no name attribute</skill>")]),
+	[],
+);
+
+// Recent turns rewrite skill invocations for user messages only.
+const skillTurns = buildRecentTurnsText([
+	msgEntry("user", skillOnly),
+	msgEntry("assistant", "<skill> tags quoted in prose stay"),
+]);
+assert.ok(skillTurns.includes("User: Invoked /update-changelog skill"));
+assert.ok(skillTurns.includes('Assistant: <skill> tags quoted in prose stay'));
 
 // Eligible messages are selected BEFORE the window, so ignored or empty
 // entries do not consume a slot.
@@ -266,6 +309,37 @@ const textResponse = (text: string) => ({
 	const ctx = makeCtx({ authed: false, complete: async () => textResponse("never") });
 	await handlers.turn_end({}, ctx);
 	assert.equal(pi.name(), "unauthed prompt");
+}
+
+// 7b. A skill invocation as the first prompt titles as an invocation, never
+// as the raw <skill ...> serialization.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	const skillPrompt = '<skill name="update-changelog" location="/home/lucas/.pi/agent/skills/update-changelog/SKILL.md">\nskill body\n</skill>';
+	await handlers.before_agent_start({ prompt: skillPrompt }, makeCtx());
+	const completeCalls: any[] = [];
+	const ctx = makeCtx({
+		complete: async (model: any, context: any) => {
+			completeCalls.push({ model, context });
+			return textResponse("Update changelog");
+		},
+	});
+	await handlers.turn_end({}, ctx);
+	assert.equal(pi.name(), "Update changelog");
+	assert.ok(
+		JSON.stringify(completeCalls[0].context).includes("Invoked /update-changelog skill"),
+		"the model sees the derived invocation, not the skill XML",
+	);
+	assert.ok(!JSON.stringify(completeCalls[0].context).includes("<skill"));
+
+	// Model failure: the fallback is the derived source, not the XML.
+	await handlers.session_start({ reason: "new" }, makeCtx());
+	const pi2 = makePi();
+	mod.default(pi2 as any);
+	await handlers.before_agent_start({ prompt: skillPrompt }, makeCtx());
+	await handlers.turn_end({}, makeCtx({ authed: false }));
+	assert.equal(pi2.name(), "Invoked /update-changelog skill");
 }
 
 // 8. Session replacement: session_start resets per-session state, so a new

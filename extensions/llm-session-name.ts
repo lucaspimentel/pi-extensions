@@ -15,6 +15,13 @@
  * (no model, no auth, API error, empty response); later regenerations keep
  * the existing name on failure.
  *
+ * Prompts are used as title sources only after skill-invocation serialization
+ * is replaced: a <skill name="..." ...>...</skill> block carries the skill's
+ * instructions, not the user's words, so it is rewritten to "Invoked /name
+ * skill" (skill blocks mixed with user text are stripped, keeping the text;
+ * skill-only prompts become the invoked-skill description). The same
+ * derivation applies to theme anchors and recent-turn samples.
+ *
  * A manual /name rename always wins: the extension remembers the last title
  * it generated per session (lastGeneratedTitle). At a regeneration point, a
  * name that is set but does not match what we last generated is manual or
@@ -50,6 +57,31 @@ const INITIAL_PROMPT_SAMPLE_LENGTH = 1000;
 
 /** Collapse all whitespace runs (including newlines) to single spaces. */
 export const collapseWhitespace = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+const SKILL_BLOCK_RE = /<skill\b[^>]*>[\s\S]*?<\/skill>/g;
+const SKILL_OPEN_RE = /<skill\b[^>]*\bname="([^"]*)"[^>]*>/g;
+const UNCLOSED_SKILL_RE = /<skill\b[\s\S]*$/;
+
+/**
+ * Rewrite a raw prompt into a title source. Skill-invocation serialization
+ * (<skill name="..." location="...">...instructions...</skill>) describes the
+ * skill, not the user's request, so each block is removed; the skill's name
+ * is preserved so a skill-only prompt still titles as an invocation.
+ * Returns the collapsed remainder, or "" when nothing user-authored remains
+ * and no skill was named.
+ */
+export const deriveTitleSource = (prompt: string): string => {
+	const names: string[] = [];
+	for (const match of prompt.matchAll(SKILL_OPEN_RE)) {
+		if (match[1]) names.push(match[1]);
+	}
+	const stripped = prompt.replace(SKILL_BLOCK_RE, " ").replace(UNCLOSED_SKILL_RE, "");
+	const text = collapseWhitespace(stripped);
+	if (text) return text;
+	if (names.length === 0) return "";
+	const list = names.map((name) => `/${name}`).join(", ");
+	return `Invoked ${list} skill${names.length > 1 ? "s" : ""}`;
+};
 
 /** Build the fallback name: first prompt truncated to FALLBACK_LENGTH chars. */
 export const truncateFallbackName = (prompt: string): string => {
@@ -165,7 +197,7 @@ export const extractInitialPrompts = (entries: unknown[], maxPrompts: number = I
 	for (const entry of entries) {
 		if (!isMessageEntry(entry)) continue;
 		if (entry.message?.role !== "user") continue;
-		const text = extractMessageText(entry.message?.content).trim();
+		const text = deriveTitleSource(extractMessageText(entry.message?.content));
 		if (!text) continue;
 		prompts.push(text);
 		if (prompts.length >= maxPrompts) break;
@@ -187,7 +219,10 @@ export const buildRecentTurnsText = (entries: unknown[], maxMessages: number = R
 		if (!isMessageEntry(entry)) continue;
 		const role = entry.message?.role;
 		if (role !== "user" && role !== "assistant") continue;
-		const text = extractMessageText(entry.message?.content).trim();
+		const text =
+			role === "user"
+				? deriveTitleSource(extractMessageText(entry.message?.content))
+				: extractMessageText(entry.message?.content).trim();
 		if (!text) continue;
 		eligible.push({ role, text });
 	}
@@ -362,10 +397,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("before_agent_start", (event, ctx) => {
-		if (!event.prompt?.trim()) return;
+		// Store the derived title source, not the raw prompt: a skill
+		// invocation would otherwise become the title (or fallback) verbatim.
+		const source = deriveTitleSource(event.prompt ?? "");
+		if (!source) return;
 		const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral";
 		if (!firstPromptBySession.has(sessionId)) {
-			firstPromptBySession.set(sessionId, event.prompt);
+			firstPromptBySession.set(sessionId, source);
 		}
 	});
 
