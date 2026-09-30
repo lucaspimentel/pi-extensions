@@ -6,23 +6,90 @@
  * Line 3 (stats):     model • thinking   ↑10 ↓5.4k $0.285   ctx-icon X% context used        
  * Line 4+:            extension statuses (if any)
  *
- * Colors use the Campbell scheme, matching ~/.claude/statusline-command.sh.
+ * Colors: configurable via `<agent dir>/colored-footer.json`. By default every
+ * colored segment uses the pi theme (accent/success/warning/error/...), so it
+ * adapts to the active theme and terminal color depth. A custom palette of hex
+ * colors can be set per role (cwd, branch, model, ctxOk, ctxWarn, ctxError);
+ * roles without an override fall back to their theme token. The previous
+ * hardcoded Campbell scheme is preserved as a config file example below.
  */
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { parseColor, type Color, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { execFile } from "child_process";
+import { readFileSync } from "node:fs";
 import * as os from "os";
+import { join } from "node:path";
 
-// ── ANSI colors (Campbell color scheme) ────────────────────────────────────────
-const C_CYAN    = "\x1b[38;2;97;214;214m";   // #61D6D6 — folder / cwd
-const C_MAGENTA = "\x1b[38;2;255;127;255m";  // #FF7FFF — branch
-const C_BLUE    = "\x1b[38;2;59;120;255m";   // #3B78FF — model
-const C_GREEN   = "\x1b[38;2;22;198;12m";    // #16C60C — ctx ≤37%
-const C_YELLOW  = "\x1b[38;2;249;241;165m";  // #F9F1A5 — ctx 38-62%
-const C_RED     = "\x1b[38;2;231;72;86m";    // #E74856 — ctx ≥63%
-const C_RESET   = "\x1b[0m";
+// ── Configurable colors ──────────────────────────────────────────────────────
+// Each role renders with the user's custom hex color when colored-footer.json
+// provides one, otherwise with the mapped pi theme token.
+const CONFIG_FILE = "colored-footer.json";
+
+type ColorRole = "cwd" | "branch" | "model" | "ctxOk" | "ctxWarn" | "ctxError";
+
+const ROLE_THEME_TOKENS = {
+	cwd: "accent",
+	branch: "mdLinkUrl",
+	model: "accent",
+	ctxOk: "success",
+	ctxWarn: "warning",
+	ctxError: "error",
+} as const;
+
+const CAMPBELL_EXAMPLE = `{
+	"colors": {
+		"cwd": "#61D6D6",
+		"branch": "#FF7FFF",
+		"model": "#3B78FF",
+		"ctxOk": "#16C60C",
+		"ctxWarn": "#F9F1A5",
+		"ctxError": "#E74856"
+	}
+}`;
+
+function readPaletteConfig(notify: (msg: string) => void): Partial<Record<ColorRole, string>> {
+	let raw: string;
+	try {
+		raw = readFileSync(join(getAgentDir(), CONFIG_FILE), "utf8");
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+			notify(`colored-footer: could not read ${CONFIG_FILE}; using theme colors`);
+		}
+		return {};
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		notify(`colored-footer: ${CONFIG_FILE} is not valid JSON; using theme colors. Example: ${CAMPBELL_EXAMPLE}`);
+		return {};
+	}
+	const colors = (parsed as { colors?: unknown } | null)?.colors;
+	if (colors === undefined || colors === "theme") return {};
+	if (typeof colors !== "object" || colors === null || Array.isArray(colors)) {
+		notify(`colored-footer: "colors" in ${CONFIG_FILE} must be an object or "theme"; using theme colors`);
+		return {};
+	}
+	const palette: Partial<Record<ColorRole, string>> = {};
+	for (const role of Object.keys(ROLE_THEME_TOKENS) as ColorRole[]) {
+		const value = (colors as Record<string, unknown>)[role];
+		if (value === undefined) continue;
+		if (typeof value !== "string") {
+			notify(`colored-footer: colors.${role} in ${CONFIG_FILE} must be a hex color string; using the theme color`);
+			continue;
+		}
+		try {
+			parseColor(value);
+			palette[role] = value;
+		} catch {
+			notify(`colored-footer: colors.${role} "${value}" in ${CONFIG_FILE} is not a valid color; using the theme color`);
+		}
+	}
+	return palette;
+}
 
 // ── Nerd Font icons ─────────────────────────────────────────────────────────────
 const ICON_FOLDER   = "\uF07C";  // nf-fa-folder_open
@@ -109,7 +176,12 @@ function fetchPrInfo(cwd: string, branch: string): Promise<PrInfo | null> {
 }
 
 export default function (pi: ExtensionAPI) {
+	// Config read once at registration; the palette (possibly empty = theme mode)
+	// is captured by the footer factory below.
+	let palette: Partial<Record<ColorRole, string>> = {};
+
 	pi.on("session_start", (_event, ctx) => {
+		palette = readPaletteConfig((msg) => ctx.ui.notify?.(msg, "warning"));
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			let lastLookedUpBranch: string | undefined;
 
@@ -141,6 +213,17 @@ export default function (pi: ExtensionAPI) {
 				tui.requestRender();
 			});
 
+			// Resolve each role once per factory invocation: custom hexes are
+			// parsed once (outside render), theme tokens go straight to theme.fg.
+			const customColors = new Map<ColorRole, Color>();
+			for (const [role, hex] of Object.entries(palette) as [ColorRole, string][]) {
+				customColors.set(role, parseColor(hex));
+			}
+			const paint = (role: ColorRole, text: string): string => {
+				const color = customColors.get(role);
+				return color ? theme.style(text, { fg: color }) : theme.fg(ROLE_THEME_TOKENS[role], text);
+			};
+
 			return {
 				dispose: unsub,
 				invalidate() {},
@@ -155,6 +238,9 @@ export default function (pi: ExtensionAPI) {
 					// routedModel is a routing/gateway-alias of the current model; when it differs, the user
 					// has switched models and routedModel is stale context from the previous model.
 					let lastRequestedModel: string | undefined;
+					// Pi thinking level the agent loop requested for the latest assistant
+					// response (shown for virtual models, which have no fixed thinking level).
+					let lastThinkingLevel: string | undefined;
 
 					for (const e of ctx.sessionManager.getBranch() as SessionEntry[]) {
 						if (e.type === "message" && e.message.role === "assistant") {
@@ -164,6 +250,7 @@ export default function (pi: ExtensionAPI) {
 							totalCost   += m.usage.cost.total;
 							routedModel = m.responseModel;
 							lastRequestedModel = m.model;
+							lastThinkingLevel = m.thinkingLevel;
 						}
 					}
 
@@ -179,19 +266,19 @@ export default function (pi: ExtensionAPI) {
 						: rawCwd;
 
 					// ── Context circle icon ─────────────────────────────────────────
-					let ctxIcon: string, ctxColor: string;
-					if      (ctxPercentNum <  13) { ctxIcon = "󰝦"; ctxColor = C_GREEN;  }
-					else if (ctxPercentNum <  38) { ctxIcon = "󰪟"; ctxColor = C_GREEN;  }
-					else if (ctxPercentNum <  63) { ctxIcon = "󰪡"; ctxColor = C_YELLOW; }
-					else if (ctxPercentNum <  88) { ctxIcon = "󰪣"; ctxColor = C_RED;    }
-					else if (ctxPercentNum <  98) { ctxIcon = "󰪥"; ctxColor = C_RED;    }
-					else                          { ctxIcon = "󰝥"; ctxColor = C_RED;    }
+					let ctxIcon: string, ctxRole: ColorRole;
+					if      (ctxPercentNum <  13) { ctxIcon = "󰝦"; ctxRole = "ctxOk";    }
+					else if (ctxPercentNum <  38) { ctxIcon = "󰪟"; ctxRole = "ctxOk";    }
+					else if (ctxPercentNum <  63) { ctxIcon = "󰪡"; ctxRole = "ctxWarn"; }
+					else if (ctxPercentNum <  88) { ctxIcon = "󰪣"; ctxRole = "ctxError"; }
+					else if (ctxPercentNum <  98) { ctxIcon = "󰪥"; ctxRole = "ctxError"; }
+					else                          { ctxIcon = "󰝥"; ctxRole = "ctxError"; }
 
 					// ─────────────────────────────────────────────────────────────────
 					// LINE 1 — directory: cwd
 					// ─────────────────────────────────────────────────────────────────
 					const line1Parts: string[] = [
-						`${C_CYAN}${ICON_FOLDER}  ${shortCwd}${C_RESET}`,
+						paint("cwd", `${ICON_FOLDER}  ${shortCwd}`),
 					];
 
 					// LINE 2 — git: branch [PR icon + number]
@@ -206,7 +293,7 @@ export default function (pi: ExtensionAPI) {
 						const prSuffix = pr != null ? `  ${pr.icon} ${pr.number}` : "";
 						const repo = repoCache.get(ctx.cwd ?? ".");
 						const repoPrefix = repo ? `${ICON_REPO}  ${repo}    ` : "";
-						line2Parts.push(`${C_MAGENTA}${repoPrefix}${ICON_BRANCH} ${branch}${prSuffix}${C_RESET}`);
+						line2Parts.push(paint("branch", `${repoPrefix}${ICON_BRANCH} ${branch}${prSuffix}`));
 					}
 
 					// ─────────────────────────────────────────────────────────────────
@@ -216,19 +303,36 @@ export default function (pi: ExtensionAPI) {
 
 					const model = ctx.model;
 					if (model) {
+						// Virtual models (api "pi-virtual") route to a physical model per
+						// turn: ctx.model.id is the virtual id while every assistant message
+						// records the physical model it actually ran on. Show that routing
+						// (and the thinking level pi requested) from the latest assistant
+						// message, matching the built-in footer; the "last turn:" dim
+						// segment below must never fire for a virtual model since its
+						// m.model never equals the virtual id.
+						const isVirtual = (model.api as string) === "pi-virtual";
 						const label = (model as any).name ?? model.id ?? "?";
 						let modelLabel = label;
-						if (model.reasoning) {
-							const lvl = (pi as any).getThinkingLevel?.() ?? "off";
-							modelLabel += ` \u2022 ${lvl} effort`;
+						if (isVirtual) {
+							if (lastRequestedModel !== undefined) {
+								modelLabel += ` \u2192 ${lastRequestedModel}`;
+								if (lastThinkingLevel !== undefined) {
+									modelLabel += ` \u2022 ${lastThinkingLevel}`;
+								}
+							}
+						} else {
+							if (model.reasoning) {
+								const lvl = (pi as any).getThinkingLevel?.() ?? "off";
+								modelLabel += ` \u2022 ${lvl} effort`;
+							}
+							if (routedModel && lastRequestedModel === model.id) {
+								// Last turn used the current model and the provider reported a different
+								// underlying model id (router like openrouter/auto, or a gateway alias).
+								modelLabel += ` \u2192 ${routedModel}`;
+							}
 						}
-						if (routedModel && lastRequestedModel === model.id) {
-							// Last turn used the current model and the provider reported a different
-							// underlying model id (router like openrouter/auto, or a gateway alias).
-							modelLabel += ` \u2192 ${routedModel}`;
-						}
-						line3Parts.push(`${C_BLUE}${ICON_MODEL}  ${modelLabel}${C_RESET}`);
-						if (routedModel && lastRequestedModel !== model.id) {
+						line3Parts.push(paint("model", `${ICON_MODEL}  ${modelLabel}`));
+						if (!isVirtual && routedModel && lastRequestedModel !== model.id) {
 							// Last turn ran on a different model than the current one (user switched).
 							// Show it as a separate dim segment so it is not read as a routing of the current model.
 							line3Parts.push(theme.fg("dim", `last turn: ${routedModel}`));
@@ -244,7 +348,7 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					if (usage?.percent != null) {
-						line3Parts.push(`${ctxColor}${ctxIcon} ${Math.round(ctxPercentNum)}% context used${C_RESET}`);
+						line3Parts.push(paint(ctxRole, `${ctxIcon} ${Math.round(ctxPercentNum)}% context used`));
 					}
 
 					const lines = [truncateToWidth(line1Parts.join("  "), width)];
