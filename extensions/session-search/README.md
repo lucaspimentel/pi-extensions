@@ -38,6 +38,8 @@ branch dupes, tool-result noise).
 - A query starting with `/` is a regex: `/error.?sampler`.
 - Tool-only filters: `cwd` (substring), `since`/`until` (ISO dates on last
   activity), `in` (`user` | `assistant` | `summary`), `limit` (default 10).
+- The active session (the one doing the searching) is always excluded from
+  results, in both the tool and `/find-sessions`.
 
 ## Ranking
 

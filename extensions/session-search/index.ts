@@ -41,9 +41,10 @@ function ensureIndex(force: boolean = false): SessionIndex {
 	return cachedIndex;
 }
 
-function runSearch(rawQuery: string, filters: SearchFilters): { text: string; hits: ReturnType<typeof searchSessions> } {
+function runSearch(rawQuery: string, filters: SearchFilters, excludePaths?: string[]): { text: string; hits: ReturnType<typeof searchSessions> } {
+	const effective: SearchFilters = excludePaths && excludePaths.length > 0 ? { ...filters, excludePaths } : filters;
 	const index = ensureIndex();
-	const hits = searchSessions(index.values(), rawQuery, filters);
+	const hits = searchSessions(index.values(), rawQuery, effective);
 	return { text: formatHits(hits, rawQuery), hits };
 }
 
@@ -97,15 +98,16 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 		name: "session_search",
 		label: "Session Search",
 		description:
-			"Search the user's past pi coding sessions across all projects by keyword. Returns ranked hits with session path, date, project cwd, name, and labeled snippets (user message / assistant text / summary). Use it to recall past work: the user often half-remembers a session by keywords from what was said or built, not by project or date. After finding a hit, read the session file at `path` directly for the full transcript.",
+			"Search the user's past pi coding sessions across all projects by keyword. Returns ranked hits with session path, date, project cwd, name, and labeled snippets (user message / assistant text / summary). Excludes the current session from results. Use it to recall past work: the user often half-remembers a session by keywords from what was said or built, not by project or date. After finding a hit, read the session file at `path` directly for the full transcript.",
 		promptSnippet: "Search past pi sessions by keyword across all projects",
 		promptGuidelines: [
-			"Use session_search when the user references past work ('that time we...', 'the session where...') without naming the project or date.",
+			"Use session_search when the user references past work ('that time we...', 'the session where...') without naming the project or date. The current session is always excluded from results.",
 			"Searches globally across all projects by default; pass cwd to narrow to a project, since/until to bound dates, in to restrict to user/assistant/summary text.",
 			"To dig into a hit, read the session file at its `path`; it is JSONL (one JSON object per line).",
 		],
 		parameters: searchParams,
-		async execute(_id, params, _signal) {
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const currentSessionPath = ctx.sessionManager.getSessionFile();
 			const filters: SearchFilters = {
 				cwd: params.cwd,
 				since: params.since,
@@ -113,7 +115,7 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 				in: params.in,
 				limit: params.limit,
 			};
-			const { text, hits } = runSearch(params.query, filters);
+			const { text, hits } = runSearch(params.query, filters, currentSessionPath ? [currentSessionPath] : undefined);
 			return {
 				content: [{ type: "text", text }],
 				details: {
@@ -137,6 +139,7 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 			return null;
 		},
 		handler: async (args, ctx) => {
+			const currentSessionPath = ctx.sessionManager.getSessionFile();
 			const input = args.trim();
 			if (!input || input === "help") {
 				ctx.ui.notify("Usage: /find-sessions <query>\n       /find-sessions rebuild", "info");
@@ -149,7 +152,7 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
-			const { hits } = runSearch(input, {});
+			const { hits } = runSearch(input, {}, currentSessionPath ? [currentSessionPath] : undefined);
 			if (hits.length === 0) {
 				ctx.ui.notify(`No sessions matched: ${input}`, "info");
 				return;

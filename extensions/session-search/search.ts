@@ -11,11 +11,13 @@
  *   - Ranking tiers: user (300) > assistant (200) > summary (100). Subagent
  *     sessions are halved within their tier. Then hitCount and recency.
  *   - Filters: cwd substring, since/until on lastActivity, in:<origin>,
- *     limit (default 10).
+ *     excludePaths (session paths to hide, used to exclude the active
+ *     session), limit (default 10).
  *   - Snippets: +-60 chars around the first match, up to 2 per hit, each
  *     labeled with its origin.
  */
 
+import { resolve } from "node:path";
 import type { IndexedSession } from "./store.ts";
 
 export type OriginFilter = "user" | "assistant" | "summary";
@@ -25,6 +27,8 @@ export interface SearchFilters {
 	since?: string;
 	until?: string;
 	in?: OriginFilter;
+	/** Session file paths to exclude from results (e.g. the active session). */
+	excludePaths?: string[];
 	limit?: number;
 }
 
@@ -149,6 +153,10 @@ function clipSnippet(text: string, pos: number): string {
 }
 
 function passesFilters(session: IndexedSession, filters: SearchFilters): boolean {
+	if (filters.excludePaths && filters.excludePaths.length > 0) {
+		const p = resolve(session.path);
+		if (filters.excludePaths.some((x) => resolve(x) === p)) return false;
+	}
 	if (filters.cwd && !session.cwd.includes(filters.cwd)) return false;
 	if (filters.since) {
 		const since = Date.parse(filters.since);

@@ -184,6 +184,22 @@ ok("regex mode via leading slash", () => {
 	assert.equal(parseQuery("/[invalid"), null);
 });
 
+ok("excludePaths hides sessions by path (current-session exclusion)", () => {
+	const index = [
+		fakeIndexedSession({ path: "/s/current.jsonl" }),
+		fakeIndexedSession({ path: "/s/other.jsonl" }),
+	];
+	assert.deepEqual(searchSessions(index, "alpha", { excludePaths: ["/s/current.jsonl"] }).map((h) => h.path), ["/s/other.jsonl"]);
+	// non-normalized equivalent paths still match after resolve()
+	assert.deepEqual(searchSessions(index, "alpha", { excludePaths: ["/s/../s/current.jsonl"] }).map((h) => h.path), ["/s/other.jsonl"]);
+	// empty/undefined/mismatched exclusions exclude nothing
+	assert.equal(searchSessions(index, "alpha", { excludePaths: [] }).length, 2);
+	assert.equal(searchSessions(index, "alpha", {}).length, 2);
+	assert.equal(searchSessions(index, "alpha", { excludePaths: ["/s/nope.jsonl"] }).length, 2);
+	// composes with the other filters
+	assert.deepEqual(searchSessions(index, "alpha", { cwd: "/proj", excludePaths: ["/s/current.jsonl"] }).map((h) => h.path), ["/s/other.jsonl"]);
+});
+
 ok("filters: cwd substring, since date, in origin, limit", () => {
 	const index = [
 		fakeIndexedSession({ path: "/s/a.jsonl", cwd: "/home/x/serverless-components", lastActivity: "2026-09-22T00:00:00.000Z", entries: [{ origin: "assistant", ts: "t", text: "alpha" }] }),
