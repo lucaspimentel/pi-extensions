@@ -1,7 +1,7 @@
 {
   "name": "pi-extensions",
   "version": "0.1.0",
-  "description": "Personal pi-coding-agent extensions and skills",
+  "description": "Personal pi-coding-agent extensions",
   "private": true,
   "type": "module",
   "keywords": [
@@ -26,9 +26,6 @@
       "./extensions/python",
       "./extensions/node",
       "./extensions/session-search"
-    ],
-    "skills": [
-      "./skills"
     ]
   },
   "scripts": {
