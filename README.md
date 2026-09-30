@@ -1,6 +1,6 @@
 # pi-extensions
 
-Personal [pi-coding-agent](https://github.com/earendil-works/pi) extensions and skills.
+Personal [pi-coding-agent](https://github.com/earendil-works/pi) extensions.
 
 ## Install
 
@@ -50,13 +50,8 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 - **ollama-models** – auto-discovers locally pulled Ollama models (`/api/tags`) and registers them with pi as an `ollama` provider, so they show up in `/model` without maintaining `models.json`. Reads `OLLAMA_HOST` for a non-default server; registers nothing when Ollama is not running.
 - **slack-via-claude** – read-only Slack tools (`slack_search`, `slack_read_channel`, `slack_read_thread`) backed by the Slack MCP already configured in Claude Code. Spawns `claude --print` with a read-only tool allowlist, so no separate Slack app registration is required.
 
-### Skills
-
-`add-todo`, `address-pr-comments`, `atlassian-cli`, `git-commit`, `grill-me`, `review-pr`, `ship`,
-`update-changelog`, `update-docs`, `update-github-actions`, `update-pr-description`,
-`whats-next`, `zsa-layouts`.
-
-`atlassian-cli` is authored by [Jakob He](https://github.com/leweii), repackaged from [leweii/atlassian-cli](https://github.com/leweii/atlassian-cli) under the MIT License.
+Skills shared between pi and Claude Code live in the separate
+[agent-skills](https://github.com/lucaspimentel/agent-skills) repository.
 
 ## Layout
 
@@ -66,8 +61,6 @@ pi-extensions/
 ├── extensions/
 │   ├── *.ts              # single-file extensions
 │   └── */                # multi-file extensions (web, pi-tool-permissions, idle-summary, ...)
-├── skills/
-│   └── <skill>/SKILL.md
 └── tests/                # node-runnable test harnesses (*.test.mts)
 ```
 

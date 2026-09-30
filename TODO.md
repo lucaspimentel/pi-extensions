@@ -8,7 +8,8 @@ Review of all extensions against `@earendil-works/pi-coding-agent` 0.99.1 (repo 
 
 ### Bugs / risks from API changes
 
-- [ ] package.json: remove the `./extensions/questionnaire.ts` entry from `pi.extensions`; the file does not exist and has no git history. (The questionnaire mentions in `extensions/plan.ts` and `extensions/wt-tab-status/index.ts:24` refer to the rpiv `ask_user_question` tool and stay.)
+- [x] package.json: remove the `./extensions/questionnaire.ts` entry from `pi.extensions`; the file does not exist and has no git history. (The questionnaire mentions in `extensions/plan.ts` and `extensions/wt-tab-status/index.ts:24` refer to the rpiv `ask_user_question` tool and stay.)
+  - Done: removed in commit `d70f5cf`.
 - [ ] package.json: bump `@earendil-works/pi-coding-agent`, `pi-ai` and `pi-tui` (peer + dev) to `^0.99.1` so the compiler sees `parentToolCallId`, `annotations`, `isError`, `outputSchema`, `PowerShellToolCallEvent` and `classify`.
 - [ ] Virtual models (0.99.0) break nested model calls: `ctx.modelRegistry.complete()` does not route `api: "pi-virtual"` models; only `streamSimple()` does (`dist/core/model-runtime.js`). Affects `llm-session-name.ts:236`, `idle-summary/index.ts:257`, `pi-tool-permissions/index.ts:851,1100`.
   - Switch to `await ctx.modelRegistry.streamSimple(model, ctx, { maxTokens, signal }).result()`.

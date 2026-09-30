@@ -12,7 +12,7 @@ While an ask dialog is on screen, the extension reports `blocked` ("awaiting per
 
 ## Install
 
-Install via the [pi-extensions](https://github.com/lucaspimentel/pi-extensions) package (includes all extensions and skills):
+Install via the [pi-extensions](https://github.com/lucaspimentel/pi-extensions) package:
 
 ```bash
 # Global (all projects)
@@ -567,7 +567,8 @@ read-only bash tier that is already auto-allowed. This is a built-in tier, not a
   are **not** supported for these tools: patterns would match the raw JSON of the tool input,
   not the submitted code.
 - The node tool's sandbox differs from python's in isolation details that do not change its
-  permission treatment (no seccomp policy, no out-of-sandbox read prompts: reads fail closed).
+  permission treatment (no out-of-sandbox read prompts: reads fail closed; socket blocking
+  matches python via a compiled seccomp launcher).
   See [`extensions/node/README.md`](../node/README.md).
 
 #### `toolDefaults` map
@@ -757,7 +758,8 @@ Every mode change (and the `session_start` reset to `manual`) is broadcast on pi
 - Flipping the mode or changing the read roots mid-session kills the running sandbox (interpreter state is discarded); the next execution starts one with the new mounts, and a notification announces the change. The event is re-emitted whenever a read-root grant is added (dialog escalation, session or persisted) and on `/permissions reload`.
 - The mode signal is a courtesy UX, not a security boundary: the mount flags themselves are kernel-enforced, and a writable mount only exists because you explicitly switched into a mode that grants unprompted edits.
 
-Node-specific runtime deltas that do not change this treatment (no seccomp policy, no read prompts, prlimit-based limits) are documented in [`extensions/node/README.md`](../node/README.md).
+Node-specific runtime deltas that do not change this treatment (no read prompts, rlimits via
+prlimit, seccomp installed by a compiled launcher) are documented in [`extensions/node/README.md`](../node/README.md).
 
 ### Out-of-sandbox read prompts
 
