@@ -34,6 +34,12 @@
  *   - WT_SESSION env var is not set (i.e. not running in Windows Terminal)
  *   - ctx.hasUI is false (e.g. -p / JSON mode)
  *
+ * Mode note:
+ *   The OSC 9;4 progress write goes to raw stdout and only happens in TUI
+ *   mode (ctx.mode === "tui"). RPC mode also has hasUI === true, and a raw
+ *   write there would corrupt the RPC JSON stream (WT_SESSION is often
+ *   inherited); in RPC mode only the tab title is updated, never stdout.
+ *
  * Conflict note:
  *   Don't use alongside examples/extensions/titlebar-spinner.ts — both write
  *   to ctx.ui.setTitle on the same lifecycle events, last-writer-wins. This
@@ -193,7 +199,13 @@ export default function (pi: ExtensionAPI) {
 		lastApplied = s.state;
 
 		ctx.ui.setTitle(formatTitle(s.state, pi.getSessionName() ?? null, getCwdBase()));
-		process.stdout.write(formatProgressSequence(s.state));
+		// The OSC 9;4 sequence goes to raw stdout, which would corrupt the RPC
+		// JSON stream (RPC mode also has hasUI === true, e.g. when WT_SESSION is
+		// inherited). Write it only in TUI mode; the title update above is routed
+		// through ctx.ui and safe in both modes.
+		if (ctx.mode === "tui") {
+			process.stdout.write(formatProgressSequence(s.state));
+		}
 	}
 
 	function dispatch(ctx: ExtensionContext, ev: ReducerEvent) {
