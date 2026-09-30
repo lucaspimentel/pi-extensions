@@ -52,7 +52,7 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 
 ### Skills
 
-`add-todo`, `address-pr-comments`, `atlassian-cli`, `git-commit`, `review-pr`, `ship`,
+`add-todo`, `address-pr-comments`, `atlassian-cli`, `git-commit`, `grill-me`, `review-pr`, `ship`,
 `update-changelog`, `update-docs`, `update-github-actions`, `update-pr-description`,
 `whats-next`, `zsa-layouts`.
 
