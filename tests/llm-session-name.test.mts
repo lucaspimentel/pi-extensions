@@ -203,6 +203,12 @@ function makeCtx(opts: {
 		model: { provider: "anthropic", id: "claude-x" },
 		modelRegistry: {
 			hasConfiguredAuth: () => opts.authed ?? true,
+			// generateTitle uses streamSimple(...).result() (the virtual-model
+			// routing fix); delegate to the same complete mock so the existing
+			// complete-based assertions keep working.
+			streamSimple: (model: any, context: any, options?: any) => ({
+				result: () => (opts.complete ?? (async () => ({ content: [], errorMessage: undefined })))(model, context, options),
+			}),
 			complete: opts.complete ?? (async () => ({ content: [], errorMessage: undefined })),
 		},
 	};
@@ -217,6 +223,18 @@ const textResponse = (text: string) => ({
 });
 
 // ── Extension flow ───────────────────────────────────────────────────────────
+
+// Title generation is fire-and-forget on turn_end (it must never delay the
+// agent loop), so tests poll for the async run's observable effects. Each
+// poll is a macrotask, which also drains any pending microtask chains from
+// already-resolved mocks.
+async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
+	const deadline = Date.now() + ms;
+	while (!fn()) {
+		if (Date.now() > deadline) throw new Error("waitFor: condition not met in time");
+		await new Promise((r) => setTimeout(r, 5));
+	}
+}
 
 // 1. Success: first turn_end titles the session from the first prompt.
 {
@@ -233,6 +251,7 @@ const textResponse = (text: string) => ({
 		},
 	});
 	await handlers.turn_end({ turnIndex: 0 }, ctx);
+	await waitFor(() => pi.name() === "Refactor the auth module");
 	assert.equal(pi.name(), "Refactor the auth module");
 	assert.equal(completeCalls.length, 1);
 	assert.ok(JSON.stringify(completeCalls[0].context).includes("refactor the auth module"));
@@ -254,6 +273,7 @@ const textResponse = (text: string) => ({
 		},
 	});
 	await handlers.turn_end({}, ctx);
+	await waitFor(() => pi.name() === `${"w".repeat(50)}...`);
 	assert.equal(pi.name(), `${"w".repeat(50)}...`);
 }
 
@@ -266,6 +286,7 @@ const textResponse = (text: string) => ({
 		complete: async () => ({ content: [], errorMessage: "429 rate limit" }),
 	});
 	await handlers.turn_end({}, ctx);
+	await waitFor(() => pi.name() === "rate limited prompt");
 	assert.equal(pi.name(), "rate limited prompt");
 }
 
@@ -298,6 +319,8 @@ const textResponse = (text: string) => ({
 		},
 	});
 	await handlers.turn_end({}, ctx);
+	await waitFor(() => pi.setCallCount() >= 1);
+	await waitFor(() => pi.setCallCount() >= 1); // settle the post-await discard
 	assert.equal(pi.name(), "manual mid-flight");
 }
 
@@ -308,6 +331,7 @@ const textResponse = (text: string) => ({
 	await handlers.before_agent_start({ prompt: "unauthed prompt" }, makeCtx());
 	const ctx = makeCtx({ authed: false, complete: async () => textResponse("never") });
 	await handlers.turn_end({}, ctx);
+	await waitFor(() => pi.name() === "unauthed prompt");
 	assert.equal(pi.name(), "unauthed prompt");
 }
 
@@ -326,6 +350,7 @@ const textResponse = (text: string) => ({
 		},
 	});
 	await handlers.turn_end({}, ctx);
+	await waitFor(() => pi.name() === "Update changelog");
 	assert.equal(pi.name(), "Update changelog");
 	assert.ok(
 		JSON.stringify(completeCalls[0].context).includes("Invoked /update-changelog skill"),
@@ -339,6 +364,7 @@ const textResponse = (text: string) => ({
 	mod.default(pi2 as any);
 	await handlers.before_agent_start({ prompt: skillPrompt }, makeCtx());
 	await handlers.turn_end({}, makeCtx({ authed: false }));
+	await waitFor(() => pi2.name() === "Invoked /update-changelog skill");
 	assert.equal(pi2.name(), "Invoked /update-changelog skill");
 }
 
@@ -351,6 +377,7 @@ const textResponse = (text: string) => ({
 	mod.default(pi as any);
 	await handlers.before_agent_start({ prompt: "first session prompt" }, ctxFor("a"));
 	await handlers.turn_end({}, ctxFor("a"));
+	await waitFor(() => pi.name() === "title");
 	assert.equal(pi.name(), "title");
 	await handlers.session_start({ reason: "new" }, ctxFor("b"));
 	pi.setSessionName(""); // /new starts an unnamed session in real pi
@@ -359,11 +386,13 @@ const textResponse = (text: string) => ({
 		model: { provider: "anthropic", id: "claude-x" },
 		modelRegistry: {
 			hasConfiguredAuth: () => true,
+			streamSimple: (_m: any, _c: any) => ({ result: async () => textResponse("second title") }),
 			complete: async () => textResponse("second title"),
 		},
 	};
 	await handlers.before_agent_start({ prompt: "second session prompt" }, customCtx);
 	await handlers.turn_end({}, customCtx);
+	await waitFor(() => pi.name() === "second title");
 	assert.equal(pi.name(), "second title");
 }
 
@@ -390,12 +419,14 @@ const textResponse = (text: string) => ({
 		],
 	});
 	await handlers.turn_end({}, ctx); // turn 1: first title
+	await waitFor(() => pi.name() === "first title");
 	assert.equal(pi.name(), "first title");
 	for (let t = 2; t <= 10; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => completeCalls.length === 1); // settle turn 1's run
 	assert.equal(completeCalls.length, 1, "no regeneration before the cadence point");
 	assert.equal(pi.name(), "first title");
 	await handlers.turn_end({}, ctx); // turn 11: regeneration
-	assert.equal(completeCalls.length, 2);
+	await waitFor(() => completeCalls.length === 2);
 	assert.equal(pi.name(), "second title");
 	const sent = JSON.stringify(completeCalls[1]);
 	assert.ok(sent.includes("first title"), "regeneration prompt must include the current title");
@@ -422,9 +453,10 @@ const textResponse = (text: string) => ({
 		entries: [msgEntry("user", "recent")],
 	});
 	await handlers.turn_end({}, ctx); // turn 1: first title
-	assert.equal(pi.name(), "t");
+	await waitFor(() => pi.name() === "t");
 	pi.setSessionName("my manual name");
 	for (let t = 2; t <= 21; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => calls === 1); // settle turn 1's run
 	assert.equal(calls, 1, "manual rename must block all regeneration");
 	assert.equal(pi.name(), "my manual name");
 }
@@ -443,8 +475,10 @@ const textResponse = (text: string) => ({
 		entries: [msgEntry("user", "recent")],
 	});
 	await handlers.turn_end({}, ctx); // turn 1
+	await waitFor(() => calls === 1);
 	pi.setSessionName("");
 	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => calls === 1); // settle
 	assert.equal(calls, 1, "a cleared name must block regeneration");
 	assert.equal(pi.name(), "");
 }
@@ -464,8 +498,10 @@ const textResponse = (text: string) => ({
 		entries: [msgEntry("user", "latest focus")],
 	});
 	await handlers.turn_end({}, ctx); // turn 1: t1
+	await waitFor(() => calls === 1);
 	pi.setSessionName("manual");
 	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => calls === 1); // settle
 	assert.equal(calls, 1, "locked session must not regenerate on cadence");
 	assert.ok(commands["name-auto"], "/name-auto must be registered");
 	await commands["name-auto"].handler("", ctx);
@@ -477,6 +513,7 @@ const textResponse = (text: string) => ({
 	);
 	// Ownership resumed: the next cadence point regenerates again.
 	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => calls === 3);
 	assert.equal(calls, 3);
 	assert.equal(pi.name(), "forced title");
 }
@@ -497,11 +534,14 @@ const textResponse = (text: string) => ({
 		entries: [msgEntry("user", "recent stuff")],
 	});
 	await handlers.turn_end({}, ctx); // turn 1
+	await waitFor(() => pi.name() === "good title");
 	assert.equal(pi.name(), "good title");
 	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => calls === 2);
 	assert.equal(calls, 2, "regeneration must be attempted at the cadence point");
 	assert.equal(pi.name(), "good title", "failed regeneration must keep the existing name");
 	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => calls === 3);
 	assert.equal(calls, 3, "a failed regeneration must not lock the session");
 	assert.equal(pi.name(), "good title");
 }
@@ -520,8 +560,10 @@ const textResponse = (text: string) => ({
 		entries: [msgEntry("user", "recent")],
 	});
 	await handlers.turn_end({}, ctx);
+	await waitFor(() => pi.setCallCount() === 1);
 	assert.equal(pi.setCallCount(), 1);
 	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => calls === 2);
 	assert.equal(calls, 2);
 	assert.equal(pi.setCallCount(), 1, "identical title must not re-set the session name");
 	assert.equal(pi.name(), "same title");
@@ -558,10 +600,12 @@ const textResponse = (text: string) => ({
 			entries: [msgEntry("user", "recent")],
 		});
 		await handlers.turn_end({}, ctx);
+		await waitFor(() => calls === 1);
 		for (let t = 2; t <= 3; t++) await handlers.turn_end({}, ctx);
+		await waitFor(() => calls === 1); // settle
 		assert.equal(calls, 1);
 		await handlers.turn_end({}, ctx); // turn 4
-		assert.equal(calls, 2);
+		await waitFor(() => calls === 2);
 		assert.equal(pi.name(), "t2");
 	} finally {
 		if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -585,6 +629,7 @@ const textResponse = (text: string) => ({
 		return textResponse(responses[completeCalls.length - 1]);
 	};
 	await handlers.turn_end({}, makeCtx({ complete, entries: [] })); // turn 1: first title
+	await waitFor(() => pi.name() === "t1");
 	assert.equal(pi.name(), "t1");
 
 	// Regeneration on a branch whose user messages predate session_start
@@ -599,6 +644,7 @@ const textResponse = (text: string) => ({
 		],
 	});
 	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, resumedCtx);
+	await waitFor(() => completeCalls.length === 2);
 	assert.equal(completeCalls.length, 2);
 	const resumedSent = JSON.stringify(completeCalls[1]);
 	assert.ok(resumedSent.includes("pre-resume theme A"), "anchor from branch history before session_start");
@@ -609,10 +655,71 @@ const textResponse = (text: string) => ({
 	// Branch without any user messages: fall back to the captured first prompt.
 	const fallbackCtx = makeCtx({ complete, entries: [msgEntry("assistant", "only assistant text")] });
 	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, fallbackCtx);
+	await waitFor(() => completeCalls.length === 3);
 	assert.equal(completeCalls.length, 3);
 	const fallbackSent = JSON.stringify(completeCalls[2]);
 	assert.ok(fallbackSent.includes("post-resume prompt"), "anchor fallback uses the captured first prompt");
 	assert.ok(fallbackSent.includes("only assistant text"), "recent messages still sampled");
+}
+
+// 17. Fire-and-forget runs are guarded: a cadence point landing while a run
+// is still in flight is skipped (no overlapping model calls), and the next
+// cadence point regenerates normally once the run settles.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "overlap prompt" }, makeCtx());
+	const completeCalls: any[] = [];
+	let release!: () => void;
+	const gate = new Promise<void>((r) => { release = r; });
+	const ctx = makeCtx({
+		complete: async () => {
+			completeCalls.push(1);
+			await gate;
+			return textResponse("gated title");
+		},
+		entries: [msgEntry("user", "recent")],
+	});
+	await handlers.turn_end({}, ctx); // turn 1: run starts, gated inside complete
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(completeCalls.length, 1);
+
+	// Turns 2-11: turn 11 is a cadence point, but run 1 is still in flight.
+	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
+	assert.equal(completeCalls.length, 1, "in-flight cadence point must be skipped");
+
+	release();
+	await waitFor(() => pi.name() === "gated title");
+
+	// Next cadence point (turn 21) regenerates normally.
+	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => completeCalls.length === 2);
+	assert.equal(completeCalls.length, 2, "in-flight guard must clear after the run settles");
+}
+
+// 18. A rejecting complete mock never escapes the fire-and-forget run: the
+// first-title fallback still applies and no unhandled rejection surfaces.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	process.on("unhandledRejection", onUnhandled);
+	let unhandled = 0;
+	function onUnhandled() { unhandled++; }
+	try {
+		await handlers.before_agent_start({ prompt: "rejecting prompt" }, makeCtx());
+		const ctx = makeCtx({
+			complete: async () => {
+				throw new Error("network gone");
+			},
+		});
+		await handlers.turn_end({}, ctx);
+		await waitFor(() => pi.name() === "rejecting prompt");
+		assert.equal(pi.name(), "rejecting prompt");
+		await new Promise((r) => setTimeout(r, 20));
+		assert.equal(unhandled, 0, "no unhandled rejection from the fire-and-forget run");
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+	}
 }
 
 // ── herdr-tab-name: rename via a fake herdr on PATH ──────────────────────────

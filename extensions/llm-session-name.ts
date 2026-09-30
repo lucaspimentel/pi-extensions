@@ -15,6 +15,13 @@
  * (no model, no auth, API error, empty response); later regenerations keep
  * the existing name on failure.
  *
+ * Title generation is fire-and-forget: turn_end is an actionable boundary
+ * (pi awaits extension handlers before the next provider request), so the
+ * title model call is never awaited there and never delays the agent loop.
+ * A per-session in-flight guard skips cadence points that land while a run
+ * is still pending; the generation counter discards runs that outlive their
+ * session.
+ *
  * Prompts are used as title sources only after skill-invocation serialization
  * is replaced: a <skill name="..." ...>...</skill> block carries the skill's
  * instructions, not the user's words, so it is rewritten to "Invoked /name
@@ -259,6 +266,14 @@ export default function (pi: ExtensionAPI) {
 	// Sessions whose name is manual (or unattributable): never regenerate
 	// until /name-auto clears the lock. Cleared on session_start.
 	const manualLock = new Set<string>();
+	// Sessions with a title run currently in flight. Title runs are
+	// fire-and-forget (turn_end is an actionable boundary; awaiting the model
+	// call would delay the next provider request), so two cadence points could
+	// overlap on very fast turns; skip the later one (the next cadence point
+	// picks it up) rather than racing two runs on setSessionName. Cleared on
+	// session_start. Staleness across session replacement is already handled
+	// by the generation counter inside applyTitle.
+	const titleRunsInFlight = new Set<string>();
 
 	async function generateTitle(ctx: ExtensionContext, prompt: string): Promise<string | undefined> {
 		const model = ctx.model;
@@ -407,13 +422,24 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("turn_end", async (_event, ctx) => {
+	pi.on("turn_end", (_event, ctx) => {
+		// Turn counting and the cadence check are synchronous: turn_end is an
+		// actionable boundary (pi awaits handlers before the next provider
+		// request), so the title model call must never be awaited here. The run
+		// is fire-and-forget; the generation guard discards runs that outlive
+		// the session, and titleRunsInFlight skips overlapping cadence points.
 		try {
 			const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral";
 			const count = (turnCountBySession.get(sessionId) ?? 0) + 1;
 			turnCountBySession.set(sessionId, count);
 			if ((count - 1) % readTurnInterval() !== 0) return;
-			await applyTitle(ctx, sessionId, false);
+			if (titleRunsInFlight.has(sessionId)) return;
+			titleRunsInFlight.add(sessionId);
+			void applyTitle(ctx, sessionId, false)
+				.catch(() => {
+					// Best-effort: a failed title must never break the agent loop.
+				})
+				.finally(() => titleRunsInFlight.delete(sessionId));
 		} catch {
 			// Best-effort: a failed title must never break the agent loop.
 		}
@@ -442,6 +468,7 @@ export default function (pi: ExtensionAPI) {
 		turnCountBySession.clear();
 		lastGeneratedTitle.clear();
 		manualLock.clear();
+		titleRunsInFlight.clear();
 	});
 
 	pi.on("session_shutdown", () => {
