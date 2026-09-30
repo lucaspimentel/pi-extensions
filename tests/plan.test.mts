@@ -17,7 +17,12 @@ const CHOICE_CLEAR_AND_IMPLEMENT = "Accept: clear context, then implement";
 const CHOICE_REVISE = "Decline: write feedback, try again";
 const CHOICE_STOP = "Decline: stop";
 
-function makeHarness(selectChoice?: string, editorText?: string, allToolNames?: string[]) {
+function makeHarness(
+	selectChoice?: string,
+	editorText?: string,
+	allToolNames?: string[],
+	initialActiveTools?: string[],
+) {
 	const commands: Record<string, any> = {};
 	const events: Record<string, any> = {};
 	const sent: string[] = [];
@@ -28,13 +33,14 @@ function makeHarness(selectChoice?: string, editorText?: string, allToolNames?: 
 	let activeTools: string[] = [];
 
 	const originalTools = ["read", "write", "edit", "bash"];
+	const baselineTools = initialActiveTools ?? originalTools;
 	const allToolNamesFinal = allToolNames ?? ["read", "write", "edit", "bash", "grep", "find", "ls", "web_fetch", "mcp__slack"];
 
 	const pi: any = {
 		registerCommand(name: string, opts: any) { commands[name] = opts; },
 		registerShortcut() {},
 		on(event: string, handler: any) { events[event] = handler; },
-		getActiveTools: () => activeTools.length ? activeTools.slice() : originalTools.slice(),
+		getActiveTools: () => (activeTools.length ? activeTools.slice() : baselineTools.slice()),
 		getAllTools: () => allToolNamesFinal.map((name) => ({ name })),
 		setActiveTools(tools: string[]) { activeTools = tools.slice(); },
 		sendUserMessage(msg: string) { sent.push(msg); },
@@ -76,8 +82,9 @@ function makeHarness(selectChoice?: string, editorText?: string, allToolNames?: 
 
 	const narrowed = () => activeTools.length > 0 && activeTools.every((t) => t !== "write" && t !== "edit");
 	const restored = () => activeTools.length > 0 && activeTools.includes("write") && activeTools.includes("edit");
+	const tools = () => activeTools.slice();
 
-	return { commands, events, sent, notifications, selects, editors, newSessions, ctx, branch, narrowed, restored };
+	return { commands, events, sent, notifications, selects, editors, newSessions, ctx, branch, narrowed, restored, tools };
 }
 
 function addAssistantTurn(h: ReturnType<typeof makeHarness>, text: string) {
@@ -127,6 +134,28 @@ async function main() {
 		assert.equal(h.sent.length, 3);
 		assert.ok(h.sent[2].includes("cancel the migration plan in two phases"));
 		assert.ok(h.narrowed());
+	}
+
+	// ── Narrowing derives from the ACTIVE tools, not getAllTools ───────────────
+	{
+		// Pre-plan state: the user deactivated bash. mcp__slack is registered
+		// (getAllTools) but not active, emulating hidden/deferred/MCP tools on
+		// pi 0.99.x that narrowing must not flood into the declarations.
+		const h = makeHarness(CHOICE_STOP, undefined, undefined, ["read", "write", "edit", "grep"]);
+		await h.commands["plan"].handler("do a thing", h.ctx);
+
+		let tools = h.tools();
+		assert.ok(h.narrowed(), "write/edit must be disabled during planning");
+		assert.ok(tools.includes("grep"), "previously active tools stay active during planning");
+		assert.ok(!tools.includes("bash"), "previously deactivated tools stay deactivated during planning");
+		assert.ok(!tools.includes("mcp__slack"), "registered-but-inactive tools must not be activated by narrowing");
+
+		await h.commands["plan"].handler("cancel", h.ctx);
+		assert.ok(h.restored(), "cancel must restore the exact pre-plan active set");
+		tools = h.tools();
+		assert.ok(tools.includes("grep"), "restored set includes the pre-plan active tools");
+		assert.ok(!tools.includes("bash"), "restored set does not re-activate pre-plan deactivated tools");
+		assert.ok(!tools.includes("mcp__slack"), "restored set does not activate registered-but-inactive tools");
 	}
 
 	// ── Accept: implement in this session ──────────────────────────────────────

@@ -186,13 +186,14 @@ export default function plan(pi: ExtensionAPI) {
 	}
 
 	function narrowTools(): void {
-		// Disable write/edit; everything else (bash, MCP tools, web, ...) stays
-		// active so the planner can gather context however it needs to.
-		const allTools = pi
-			.getAllTools()
-			.map((t) => t.name)
-			.filter((name) => name !== "write" && name !== "edit");
-		pi.setActiveTools(allTools);
+		// Disable write/edit among the CURRENTLY ACTIVE tools. Tools the user or
+		// another extension had deactivated stay deactivated, and hidden/deferred/
+		// MCP tools that are not active (codemode, tool_search, etc.) are not
+		// flooded into the tool declarations; only getAllTools-based narrowing
+		// would do that, and it would also invalidate the prompt cache.
+		pi.setActiveTools(
+			pi.getActiveTools().filter((name) => name !== "write" && name !== "edit"),
+		);
 	}
 
 	async function startPlanning(args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -200,10 +201,11 @@ export default function plan(pi: ExtensionAPI) {
 			ctx.ui.notify("Already in planning mode.", "warning");
 			return;
 		}
-		// Snapshot the active tool set so it can be restored later. Also check
-		// whether the questionnaire tool is registered (optional dependency on
-		// the rpiv-ask-user-question package); it stays active because
-		// narrowTools() only excludes write/edit.
+		// Snapshot the active tool set so it can be restored later (narrowTools()
+		// filters this same set, so restore is exact). Also check whether the
+		// questionnaire tool is registered (optional dependency on the
+		// rpiv-ask-user-question package); it stays active if it was already
+		// active. getAllTools() is used here for registration detection only.
 		savedTools = pi.getActiveTools();
 		const canAskUser = pi.getAllTools().some((t) => t.name === ASK_USER_TOOL_NAME);
 		narrowTools();
