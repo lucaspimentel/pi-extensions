@@ -104,7 +104,9 @@ async function makeCase(options: {
 
 	let agentDir = options.agentDir;
 	let createdDir: string | undefined;
-	if (!agentDir && config !== undefined) {
+	if (!agentDir) {
+		// Always isolate the agent dir: the user's real ~/.pi/agent may contain
+		// a personal colored-footer.json that would leak into the case.
 		createdDir = mkdtempSync(join(tmpdir(), "pi-colored-footer-test-"));
 		agentDir = createdDir;
 	}
