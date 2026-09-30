@@ -848,7 +848,7 @@ export default function (pi: ExtensionAPI) {
 			const hasAskSub = isCompound && !shouldClassifyWholeCompound(breakdown);
 			if (autoEngaged && classifierModel && (!isCompound || !hasAskSub)) {
 				const result = await classifyAction(
-					(m, c) => ctx.modelRegistry.complete(m, c),
+					(m, c) => ctx.modelRegistry.streamSimple(m, c).result(),
 					classifierModel,
 				event.toolName,
 				matchInput,
@@ -1097,7 +1097,7 @@ export default function (pi: ExtensionAPI) {
 					if (liveAction === "auto") {
 						if (autoEngaged && classifierModel) {
 							const result = await classifyAction(
-								(m, c) => ctx.modelRegistry.complete(m, c),
+								(m, c) => ctx.modelRegistry.streamSimple(m, c).result(),
 								classifierModel,
 								"bash",
 								{ command: sub },

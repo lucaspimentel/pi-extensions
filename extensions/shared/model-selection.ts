@@ -34,6 +34,15 @@ export const hasPrice = (model: Model<Api>): boolean =>
 	model.cost.input != null && model.cost.output != null;
 
 /**
+ * The `api` id of pi's virtual catalog entries (router models). Not exported
+ * by pi's public index, so compare the string. Cast needed because the `Api`
+ * union from pi-ai does not include "pi-virtual".
+ */
+const VIRTUAL_MODEL_API = "pi-virtual";
+export const isVirtualModel = (model: Model<Api>): boolean =>
+	(model.api as string) === VIRTUAL_MODEL_API;
+
+/**
  * Cost proxy for both cheapness and speed: smaller/cheaper models generally
  * respond faster. Lower score = preferred. Uses per-million input + output
  * rates. Callers must ensure the model has pricing (see `hasPrice`) before
@@ -70,7 +79,10 @@ export const rankModels = (
 	pool: Model<Api>[],
 	currentProvider: string | undefined,
 ): Model<Api>[] => {
-	const unique = dedupeModels(pool).filter(hasPrice);
+	// Virtual models report $0 cost (they pass hasPrice and would sort first)
+	// and are excluded from auto-selection only; pickableModels still offers
+	// them, since the streamSimple call path routes virtual models correctly.
+	const unique = dedupeModels(pool).filter((m) => hasPrice(m) && !isVirtualModel(m));
 	return [...unique].sort((a, b) => {
 		const aSame = currentProvider !== undefined && a.provider === currentProvider;
 		const bSame = currentProvider !== undefined && b.provider === currentProvider;

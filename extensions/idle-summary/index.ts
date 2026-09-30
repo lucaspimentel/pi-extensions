@@ -254,7 +254,7 @@ export default function (pi: ExtensionAPI) {
 		for (const candidate of candidates) {
 			let response;
 			try {
-				response = await ctx.modelRegistry.complete(candidate, { messages });
+				response = await ctx.modelRegistry.streamSimple(candidate, { messages }).result();
 			} catch (e) {
 				lastError = e instanceof Error ? e.message : String(e);
 				continue;

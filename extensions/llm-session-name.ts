@@ -268,7 +268,7 @@ export default function (pi: ExtensionAPI) {
 
 		let response;
 		try {
-			response = await ctx.modelRegistry.complete(
+			response = await ctx.modelRegistry.streamSimple(
 				model,
 				{
 					messages: [
@@ -280,7 +280,7 @@ export default function (pi: ExtensionAPI) {
 					],
 				},
 				{ maxTokens: MAX_TOKENS },
-			);
+			).result();
 		} catch {
 			return undefined;
 		}

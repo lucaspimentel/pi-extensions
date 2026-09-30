@@ -81,6 +81,15 @@ const allModels = [
 	basetenPricey,
 ];
 
+// Virtual model catalog entry (pi's model router): api "pi-virtual", reports
+// $0 cost. Excluded from rankModels auto-selection; still offered by
+// pickableModels.
+const mkVirtual = (provider, id) => ({
+	...mk(provider, id, 0, 0),
+	api: "pi-virtual",
+});
+const virtualRouter = mkVirtual("pi", "auto");
+
 const idOf = (m) => (m ? `${m.provider}/${m.id}` : undefined);
 
 // ── modelCostScore ─────────────────────────────────────────────────────────
@@ -142,6 +151,27 @@ section("rankModels — dedupe + stability");
 test("dedupes before ranking", rankModels([anthropicCheap, anthropicCheap, openaiCheap], "anthropic").length, 2);
 test("stable tie order: equal costs keep insertion order",
 	idOf(rankModels([mk("a", "x", 1, 1), mk("b", "y", 1, 1)], undefined)[0]), "a/x");
+
+// ── rankModels — virtual models (pi-virtual) excluded ──────────────
+
+section("rankModels — virtual models excluded");
+
+const withVirtual = [virtualRouter, ...allModels];
+const rankedWithVirtual = rankModels(withVirtual, undefined);
+test("virtual model never appears in the ranking",
+	rankedWithVirtual.some((m) => m.api === "pi-virtual"), false);
+test("virtual $0 cost does not mask the cheapest physical model",
+	idOf(rankedWithVirtual[0]), "baseten/zai-org/GLM-5.2");
+test("virtual model excluded even when its provider is current",
+	idOf(rankModels(withVirtual, "pi")[0]), "baseten/zai-org/GLM-5.2");
+test("same-provider-first still holds alongside a virtual model",
+	idOf(rankModels(withVirtual, "anthropic")[0]), "anthropic/claude-haiku-4-5");
+test("pool of only virtual models ranks empty",
+	rankModels([virtualRouter, mkVirtual("pi", "auto-2")], undefined).length, 0);
+test("selectModel skips the virtual model",
+	idOf(selectModel(withVirtual, undefined, () => true)), "baseten/zai-org/GLM-5.2");
+test("pickableModels still offers the virtual model",
+	pickableModels(withVirtual, () => true).some((m) => m.api === "pi-virtual"), true);
 
 // ── selectModel — auth gating ──────────────────────────────────────
 
