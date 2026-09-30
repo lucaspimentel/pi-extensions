@@ -36,7 +36,7 @@
     "test:node": "node --test tests/node-unit.test.mts tests/node-integration.test.mts"
   },
   "dependencies": {
-    "html-to-text": "^9.0.5"
+    "html-to-text": "^10.0.1"
   },
   "devDependencies": {
     "@earendil-works/pi-tui": "^0.84.2",
