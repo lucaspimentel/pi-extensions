@@ -25,8 +25,10 @@
       "./extensions/ollama-models.ts",
       "./extensions/python",
       "./extensions/node",
-      "./extensions/session-search"
-    ]
+      "./extensions/session-search",
+      "./extensions/subagent"
+    ],
+    "prompts": ["./extensions/subagent/prompts/*.md"]
   },
   "scripts": {
     "test:python": "node --test tests/python-unit.test.mts tests/python-integration.test.mts",
@@ -42,6 +44,7 @@
     "typescript": "^6.0.3"
   },
   "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "^0.99.1",
     "@earendil-works/pi-coding-agent": "^0.99.1",
     "@earendil-works/pi-tui": "^0.99.1",
