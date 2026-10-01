@@ -415,17 +415,10 @@
  *   /permissions                       - show this help
  *   /permissions help                  - show this help
  *   /permissions list                  - show current rules + permission-mode state
- *   /permissions allow <rule>          - add an allow rule (project)
- *   /permissions deny  <rule>          - add a deny rule (project)
- *   /permissions ask   <rule>          - add an ask rule (project)
- *   /permissions remove <rule>         - remove a rule from any list
- *   /permissions default <allow|deny|ask>
  *   /permissions reload                - reload config from disk
  *   /permissions mode [manual|allow-edits|auto|yolo]  - show or set the session mode
- *   /permissions auto                  - alias for /permissions mode auto
  *   /permissions auto model [--user]   - pick the classifier model interactively
  *   /permissions auto model clear [--user]  - remove the classifier pin (resume auto-select)
- *   /permissions allowalledits         - deprecated alias for /permissions mode allow-edits
  */
 
 import { homedir } from "node:os";
@@ -637,6 +630,26 @@ export default function (pi: ExtensionAPI) {
 			const label = value === "edits" ? "allow edits" : value;
 			ctx.ui.notify(`Mode: ${label} (this session only)`, "info");
 		}
+	}
+
+	/**
+	 * Interactive permission-mode picker used by bare `/permissions` and by
+	 * `/permissions mode` with no argument. Falls back to a plain notification
+	 * of the current mode when there is no UI. No-op on Esc.
+	 */
+	async function pickMode(ctx: ExtensionContext): Promise<void> {
+		const labels = ["manual", "allow edits", "auto", "yolo"];
+		if (!ctx.hasUI) {
+			ctx.ui.notify(`Mode (this session): ${mode === "edits" ? "allow edits" : mode}`, "info");
+			return;
+		}
+		// Put the current mode first so it is pre-highlighted.
+		const currentLabel = mode === "edits" ? "allow edits" : mode;
+		const ordered = [currentLabel, ...labels.filter((l) => l !== currentLabel)];
+		const choice = await ctx.ui.select("Permission mode (this session):", ordered);
+		if (!choice) return; // cancelled
+		const target: PermissionMode = choice === "allow edits" ? "edits" : (choice as PermissionMode);
+		if (target !== mode) applyMode(target, ctx);
 	}
 
 	// ── Auto-mode helpers ────────────────────────────────────────────────────
@@ -1398,32 +1411,6 @@ export default function (pi: ExtensionAPI) {
 		else saveProjectConfig(cwd, cfg);
 	}
 
-	function removeRule(scope: Scope, cwd: string, rule: string): boolean {
-		const cfg = scope === "user" ? loadUserConfigRaw() : loadProjectConfigRaw(cwd);
-		let removed = false;
-		for (const key of ["allow", "deny", "ask"] as const) {
-			const list = cfg[key];
-			if (!list) continue;
-			const idx = list.indexOf(rule);
-			if (idx >= 0) {
-				list.splice(idx, 1);
-				removed = true;
-			}
-		}
-		if (removed) {
-			if (scope === "user") saveUserConfig(cfg);
-			else saveProjectConfig(cwd, cfg);
-		}
-		return removed;
-	}
-
-	function setDefault(scope: Scope, cwd: string, action: DefaultAction): void {
-		const cfg = scope === "user" ? loadUserConfigRaw() : loadProjectConfigRaw(cwd);
-		cfg.defaultAction = action;
-		if (scope === "user") saveUserConfig(cfg);
-		else saveProjectConfig(cwd, cfg);
-	}
-
 	// Persist an explicit classifier model pin into `autoMode.classifier` for
 	// the given scope (mirrors idle-summary's /summary model persistence, but
 	// reuses the project/user config files and scoping this extension already
@@ -1463,39 +1450,39 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("permissions", {
 		description: "Manage tool permissions (allow/deny/ask rules) and the session permission mode",
 		getArgumentCompletions: (prefix: string) => {
-			const subs = ["help", "list", "allow", "deny", "ask", "remove", "default", "reload", "mode", "allowalledits", "auto"];
+			const subs = ["help", "list", "reload", "mode", "auto"];
 			const items = subs.map((s) => ({ value: s, label: s }));
 			const filtered = items.filter((i) => i.value.startsWith(prefix));
 			return filtered.length > 0 ? filtered : null;
 		},
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const trimmed = (args ?? "").trim();
-			if (!trimmed || trimmed === "help") {
+			if (!trimmed) {
+				// Bare /permissions: interactive permission-mode picker.
+				await pickMode(ctx);
+				return;
+			}
+			if (trimmed === "help") {
 				const helpLines = [
 					"pi-tool-permissions — usage",
 					"",
 					"Subcommands:",
-					"  /permissions                  Show this help",
+					"  /permissions                  Pick the session permission mode (menu)",
 					"  /permissions help             Show this help",
 					"  /permissions list             Show current rules + permission-mode state",
-					"  /permissions allow <rule> [--user]   Add an allow rule (default: project)",
-					"  /permissions deny  <rule> [--user]   Add a deny rule",
-					"  /permissions ask   <rule> [--user]   Add an ask rule",
-					"  /permissions remove <rule> [--user]  Remove a rule from any list",
-					"  /permissions default <allow|deny|ask> [--user]",
 					"  /permissions reload           Reload config from disk",
 					"  /permissions mode [manual|allow-edits|auto|yolo]",
 					"                                Show or set the session permission mode",
-					"  /permissions auto             Alias for /permissions mode auto",
 					"  /permissions auto debug [on|off|toggle]   Toggle classifier debug notifications for this session",
 					"  /permissions auto model [--user]   Pick the classifier model interactively",
 					"  /permissions auto model clear [--user]   Remove the classifier pin (resume auto-select)",
-					"  /permissions allowalledits    Deprecated alias for /permissions mode allow-edits",
 					"",
 					"Rule syntax:  ToolName  or  ToolName(pattern)",
 					"  Patterns are case-insensitive globs (* = any chars, ? = one char).",
 					"  A ' *' pair is optional, so Bash(git status *) matches 'git status' too.",
 					"  Wrap in slashes for regex: Bash(/^git (push|tag) /)",
+					"  Rules live in the config JSON; edit it directly. One-click grants in ask",
+					"  dialogs also write rules.",
 					"",
 					"Precedence (first match wins):  deny > ask > allow > toolDefaults > mode strategy > defaultAction",
 					"",
@@ -1632,16 +1619,6 @@ export default function (pi: ExtensionAPI) {
 				case "reload":
 					reload(ctx.cwd, ctx);
 					return;
-				case "default": {
-					if (!isDefaultAction(value)) {
-						ctx.ui.notify(`Usage: /permissions default <allow|deny|ask> [--user] (use \`/permissions mode auto\` for auto mode)`, "warning");
-						return;
-					}
-					setDefault(scope, ctx.cwd, value);
-					reload(ctx.cwd, ctx);
-					ctx.ui.notify(`Set default (${scope}): ${value}`, "info");
-					return;
-				}
 				case "mode": {
 					const normalized = value.toLowerCase();
 					// "edits" is the internal id; the mode is displayed as "allow edits",
@@ -1657,19 +1634,12 @@ export default function (pi: ExtensionAPI) {
 					};
 					const target = modeAliases[normalized];
 					if (!normalized) {
-						ctx.ui.notify(`Mode (this session): ${mode === "edits" ? "allow edits" : mode}`, "info");
+						await pickMode(ctx);
 					} else if (target) {
 						applyMode(target, ctx);
 					} else {
 						ctx.ui.notify(`Usage: /permissions mode [manual|allow-edits|auto|yolo] (current: ${mode})`, "warning");
 					}
-					return;
-				}
-				case "allowalledits": {
-					// Deprecated alias: the old allow-all-edits toggle is now the "allow
-					// edits" rung of the permission-mode enum. Any argument is ignored.
-					ctx.ui.notify("/permissions allowalledits is deprecated; use /permissions mode allow-edits.", "info");
-					applyMode("edits", ctx);
 					return;
 				}
 				case "auto": {
@@ -1742,55 +1712,17 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Classifier model set to ${choice} (${scope})`, "info");
 					return;
 				}
-				// Bare /permissions auto is now an alias for mode auto. Legacy
-				// on/off/toggle forms are gone: use /permissions mode instead.
-				if (value) {
-					ctx.ui.notify(`Usage: /permissions auto | auto debug [on|off|toggle] | auto model [--user] [clear] (or /permissions mode [manual|allow-edits|auto|yolo])`, "warning");
-					return;
-				}
-				applyMode("auto", ctx);
+				// Bare /permissions auto shows usage for the auto subcommands. The old
+				// alias for mode auto is gone: use /permissions mode auto instead.
+				ctx.ui.notify(`Usage: /permissions auto debug [on|off|toggle] | auto model [--user] [clear]`, "warning");
 				return;
 			}
-			case "allow":
-				case "deny":
-				case "ask": {
-					if (!value) {
-						ctx.ui.notify(`Usage: /permissions ${sub} <rule> [--user]`, "warning");
-						return;
-					}
-					if (!parseRule(value)) {
-						ctx.ui.notify(`Invalid rule: ${value}. Expected ToolName or ToolName(pattern).`, "warning");
-						return;
-					}
-					addRule(scope, ctx.cwd, sub, value);
-					reload(ctx.cwd, ctx);
-					ctx.ui.notify(`Added ${sub} rule (${scope}): ${value}`, "info");
-					return;
-				}
-				case "remove": {
-					if (!value) {
-						ctx.ui.notify(`Usage: /permissions remove <rule> [--user]`, "warning");
-						return;
-					}
-					const removed = removeRule(scope, ctx.cwd, value);
-					if (removed) {
-						reload(ctx.cwd, ctx);
-						ctx.ui.notify(`Removed rule (${scope}): ${value}`, "info");
-					} else {
-						ctx.ui.notify(`Rule not found in ${scope} config: ${value}`, "warning");
-					}
-					return;
-				}
-				default:
-					ctx.ui.notify(
-						`Unknown subcommand: ${sub}. Use: help | list | allow | deny | ask | remove | default | reload | mode | allowalledits | auto`,
-						"warning",
-					);
-			}
-		},
+			default:
+				ctx.ui.notify(
+					`Unknown subcommand: ${sub}. Use: help | list | reload | mode | auto`,
+					"warning",
+				);
+		}
+	},
 	});
-}
-
-function isDefaultAction(s: string): s is DefaultAction {
-	return s === "allow" || s === "deny" || s === "ask";
 }

@@ -102,8 +102,7 @@ by the user still wins over the classifier.
 | ------- | ------ |
 | **Ctrl+Alt+M** | Cycles `manual → edits → auto → yolo → manual` (replaces `ctrl+alt+e` and `ctrl+alt+a`) |
 | `/permissions mode` | Bare shows the current mode; `/permissions mode <name>` sets it (usage warning for invalid values) |
-| `/permissions auto` | Bare form is now an alias for `mode auto`; `auto model` / `auto debug` subcommands unchanged |
-| `/permissions allowalledits` | Deprecated alias for `mode edits` (prints a note) |
+| `/permissions auto` | Bare form now prints usage for `auto model` / `auto debug` (the old `mode auto` alias was removed); `auto model` / `auto debug` subcommands unchanged |
 | Footer | Single status key: `✏️ allow edits`, `🤖 auto: <model-id>` (or `🤖 auto (no classifier)`), `💀 yolo`; blank for manual |
 | Write/Edit dialogs | "Switch to \"allow edits\" mode (this session)" replaces "Allow all edits this session" |
 | All dialogs | Keep "Switch to auto mode", gain "Switch to yolo mode"; "Allow once" remains the default selection |

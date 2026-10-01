@@ -755,8 +755,7 @@ The two former independent session toggles (allow-all-edits, auto mode) are cons
 | **Ctrl+Alt+P** | Cycle manual → allow edits → auto → yolo → manual |
 | Any permission dialog | Choose **"Switch to \"allow edits\" / auto / yolo mode (this session)"** |
 | `/permissions mode [manual\|allow-edits\|auto\|yolo]` | Show or set the mode |
-| `/permissions auto` | Alias for `/permissions mode auto` |
-| `/permissions allowalledits` | Deprecated alias for `/permissions mode allow-edits` |
+| `/permissions` (no args) | Interactive picker over the four modes (current mode pre-highlighted) |
 
 The full design (precedence, invariants, sharp edges) lives in [`docs/permission-modes-design.md`](./docs/permission-modes-design.md). The `auto` rung's classifier layer is detailed in [Auto mode](#auto-mode) below.
 
@@ -782,42 +781,35 @@ This flow is python-specific: the node tool has no audit-hook equivalent (node's
 ## Slash command
 
 ```
-/permissions                            # show this help
+/permissions                            # interactive permission-mode picker
 /permissions help                       # show this help
 /permissions list                       # show current rules + permission-mode state
-/permissions allow <rule> [--user]      # add an allow rule (default: project-local)
-/permissions deny  <rule> [--user]      # add a deny rule
-/permissions ask   <rule> [--user]      # add an ask rule
-/permissions remove <rule> [--user]     # remove a rule (searches project by default; --user searches user config)
-/permissions default <allow|deny|ask> [--user]
 /permissions reload                     # reload config from disk
-/permissions mode [manual|allow-edits|auto|yolo]  # show or set the session permission mode
-/permissions auto                       # alias for /permissions mode auto
+/permissions mode [manual|allow-edits|auto|yolo]  # show or set the session permission mode (no arg: picker)
 /permissions auto debug [on|off|toggle] # toggle classifier debug notifications for this session
 /permissions auto model [--user]        # pick the classifier model interactively
 /permissions auto model clear [--user]  # remove the classifier pin (resume auto-select)
-/permissions allowalledits              # deprecated alias for /permissions mode allow-edits
 ```
 
-All write subcommands (`allow`/`deny`/`ask`/`remove`/`default`) accept `--user` to target the user-global config (`~/.pi/agent/pi-tool-permissions.json`); the default is the project-local `.pi/pi-tool-permissions.local.json`. `/permissions list` tags each rule with its source: `[implicit]`, `[user]`, `[project]`, or `[user+project]` when the same rule lives in both files.
+Rules are **not** edited through the slash command: edit the config JSON directly (`~/.pi/agent/pi-tool-permissions.json` for user-global, `.pi/pi-tool-permissions.local.json` for project-local), then run `/permissions reload`. One-click grants in permission dialogs also write rules. `/permissions list` tags each rule with its source: `[implicit]`, `[user]`, `[project]`, or `[user+project]` when the same rule lives in both files.
 
-Examples:
+Examples (config JSON rule syntax):
+
+```json
+{
+  "allow": ["Bash(npm test*)", "Bash(rg *)", "WebSearch", "WebFetch(https://github.com/*)", "Mcp(slack*)"],
+  "deny": ["Mcp(slack_slack_post_*)", "Write(.env*)"],
+  "ask": ["WebFetch(*)", "Mcp(atlassian_*)"],
+  "defaultAction": "deny"
+}
+```
+
+Session examples:
 
 ```
-/permissions allow Bash(npm test*)
-/permissions allow Bash(rg *) --user
-/permissions allow WebSearch
-/permissions allow WebFetch(https://github.com/*)
-/permissions allow Mcp(slack_*)
-/permissions deny  Mcp(slack_slack_post_*)
-/permissions deny  Write(.env*)
-/permissions ask   WebFetch(*)
-/permissions ask   Mcp(atlassian_*)
-/permissions default deny
-/permissions default deny --user
 /permissions mode allow-edits
 /permissions mode yolo
-/permissions auto
+/permissions reload
 ```
 
 ## Auto mode
@@ -895,7 +887,6 @@ So `git add -A && git commit -m ...` runs silently, while anything that leaves y
 | **Ctrl+Alt+P** | Cycle through the modes (auto is the third stop) |
 | Any permission dialog | Choose **"Switch to auto mode (this session)"** |
 | `/permissions mode auto` | Set the mode |
-| `/permissions auto` | Alias for `/permissions mode auto` |
 | `/permissions auto debug on\|off\|toggle` | Toggle classifier debug notifications (see below) |
 
 When active, a `🤖 auto: <model-id>` indicator appears in the footer status bar (or `🤖 auto (no classifier)` when no model is available).
