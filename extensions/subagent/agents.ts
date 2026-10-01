@@ -161,7 +161,55 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 		for (const agent of loadAgentsFromDir(projectAgentsDir, "project")) agentMap.set(agent.name, agent);
 	}
 
+	applyModelOverrides(agentMap);
+
 	return { agents: Array.from(agentMap.values()), projectAgentsDir };
+}
+
+/**
+ * Per-agent model overrides from `<agentDir>/subagent.json`:
+ *
+ *     { "models": { "scout": "baseten/zai-org/GLM-5.3-Flash" } }
+ *
+ * Lets each bundled agent pin (or switch) its model without duplicating the
+ * whole agent file into ~/.pi/agent/agents/. Overrides win over agent
+ * frontmatter; a user/project agent file with the same name replaces the
+ * bundled agent entirely and is still subject to overrides (its frontmatter
+ * model loses to the override, which is the point of configuring it).
+ * Malformed files and entries are warned about and ignored.
+ */
+function applyModelOverrides(agentMap: Map<string, AgentConfig>): void {
+	const configPath = path.join(getAgentDir(), "subagent.json");
+	let raw: unknown;
+	try {
+		raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+			console.warn(`[subagent] could not read ${configPath}; model overrides ignored`);
+		}
+		return;
+	}
+
+	const models = (raw as { models?: unknown } | null)?.models;
+	if (typeof models !== "object" || models === null) {
+		if (models !== undefined) {
+			console.warn(`[subagent] ${configPath}: "models" should be an object of agent name -> model`);
+		}
+		return;
+	}
+
+	for (const [name, model] of Object.entries(models as Record<string, unknown>)) {
+		const agent = agentMap.get(name);
+		if (!agent) {
+			console.warn(`[subagent] ${configPath}: no agent named "${name}"; model override ignored`);
+			continue;
+		}
+		if (typeof model !== "string" || !model.trim()) {
+			console.warn(`[subagent] ${configPath}: models."${name}" should be a non-empty model string`);
+			continue;
+		}
+		agent.model = model.trim();
+	}
 }
 
 export function formatAgentList(agents: AgentConfig[], maxItems: number): { text: string; remaining: number } {

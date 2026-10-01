@@ -42,6 +42,22 @@ const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 
+/**
+ * Preferred tool -> built-in substitute, applied when the preferred tool is not
+ * registered in the dispatching session (e.g. ffgrep/fffind come from the
+ * optional @ff-labs/pi-fff package). pi silently ignores unknown names in
+ * --tools, so without this a missing package would silently strip the agents'
+ * search tools down to read/ls.
+ */
+const TOOL_FALLBACKS: Record<string, string> = { ffgrep: "grep", fffind: "find" };
+
+export function resolveAgentTools(tools: string[], available: Set<string>): string[] | undefined {
+	const resolved = tools
+		.map((t) => (available.has(t) ? t : TOOL_FALLBACKS[t]))
+		.filter((t): t is string => !!t && available.has(t));
+	return resolved.length > 0 ? resolved : undefined;
+}
+
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -280,6 +296,7 @@ async function runSingleAgent(
 	defaultCwd: string,
 	dispatchDefaults: DispatchDefaults,
 	agents: AgentConfig[],
+	availableTools: Set<string>,
 	agentName: string,
 	task: string,
 	cwd: string | undefined,
@@ -311,7 +328,10 @@ async function runSingleAgent(
 	if (inheritsDispatchConfig && dispatchDefaults.thinkingLevel) {
 		args.push("--thinking", dispatchDefaults.thinkingLevel);
 	}
-	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+	if (agent.tools && agent.tools.length > 0) {
+		const tools = resolveAgentTools(agent.tools, availableTools);
+		if (tools) args.push("--tools", tools.join(","));
+	}
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
@@ -496,6 +516,7 @@ export default function (pi: ExtensionAPI) {
 			};
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
+			const availableTools = new Set(pi.getAllTools().map((t) => t.name));
 			const confirmProjectAgents = params.confirmProjectAgents ?? true;
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
@@ -582,6 +603,7 @@ export default function (pi: ExtensionAPI) {
 						ctx.cwd,
 						dispatchDefaults,
 						agents,
+						availableTools,
 						step.agent,
 						taskWithContext,
 						step.cwd,
@@ -655,6 +677,7 @@ export default function (pi: ExtensionAPI) {
 						ctx.cwd,
 						dispatchDefaults,
 						agents,
+						availableTools,
 						t.agent,
 						t.task,
 						t.cwd,
@@ -698,6 +721,7 @@ export default function (pi: ExtensionAPI) {
 					ctx.cwd,
 					dispatchDefaults,
 					agents,
+					availableTools,
 					params.agent,
 					params.task,
 					params.cwd,

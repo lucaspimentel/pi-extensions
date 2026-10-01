@@ -12,25 +12,35 @@ streaming, usage display, security model).
   required. Bundled agents load regardless of `agentScope`.
 - **Precedence**: project agents (`.pi/agents/`) override user agents
   (`~/.pi/agent/agents/`) override bundled agents, on name collision. Drop a
-  `scout.md` into `~/.pi/agent/agents/` to retune scout (e.g. pin `model:`)
+  `scout.md` into `~/.pi/agent/agents/` to retune scout's prompt or tools
   without touching the repo.
-- **Agent set**: scout, reviewer, worker (upstream also ships planner).
-- **Read-only tooling**: scout and reviewer use `ffgrep`/`fffind` instead of
-  `grep`/`find`, and neither has `bash`.
+- **Model overrides**: all agents inherit the dispatching session's model. Pin
+  per-agent models in `~/.pi/agent/subagent.json` (see below) without
+  duplicating agent files.
+- **Read-only tooling**: scout, planner, and reviewer use `ffgrep`/`fffind`
+  instead of `grep`/`find`, and none of them has `bash`. If `ffgrep`/`fffind`
+  are not registered (the `@ff-labs/pi-fff` package is optional), the extension
+  substitutes the built-in `grep`/`find` at dispatch time.
 
 ## Agents
 
-| Agent    | Tools                                                                                                                                             | Model    |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| `scout`  | read, ffgrep, fffind, ls                                                                                                                          | inherit  |
-| `worker` | (all default)                                                                                                                                     | inherit  |
+| Agent     | Tools                                                                                                                                             | Model    |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `scout`   | read, ffgrep, fffind, ls                                                                                                                          | inherit  |
+| `planner` | read, ffgrep, fffind, ls                                                                                                                          | inherit  |
+| `worker`  | (all default)                                                                                                                                     | inherit  |
 | `reviewer` | read, ffgrep, fffind, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, memory_read, memory_search, memory_status | inherit |
 
 Notes:
 
-- All agents inherit the dispatching session's model and thinking level. To pin
-  scout (or any agent) to a cheap/fast model, add a same-name agent file with a
-  `model:` frontmatter line to `~/.pi/agent/agents/`.
+- To pin an agent's model, add it to `~/.pi/agent/subagent.json`:
+
+  ```json
+  { "models": { "scout": "baseten/zai-org/GLM-5.3-Flash" } }
+  ```
+
+  Overrides win over agent frontmatter; unknown agent names and malformed
+  entries are warned about and ignored.
 - Reviewer is enforced read-only by tool selection: no bash, so no `git diff`.
   Name the files (or describe the changes) in the task.
 - Worker has no `tools:` line and therefore gets the child process's default
@@ -40,7 +50,10 @@ Notes:
   to `"allow"` for children to act. Interactive subagent dispatches keep
   prompting under the normal rules.
 
-## Workflow prompt
+## Workflow prompts
 
-`/implement-and-review <task>` runs worker -> reviewer -> worker as a chain,
-passing output between steps via `{previous}`.
+- `/implement <task>` — scout → planner → worker: gather context, plan, implement
+- `/scout-and-plan <task>` — scout → planner: context and plan, no implementation
+- `/implement-and-review <task>` — worker → reviewer → worker: implement, review, apply feedback
+
+Each runs as a subagent chain, passing output between steps via `{previous}`.
