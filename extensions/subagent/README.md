@@ -21,6 +21,10 @@ streaming, usage display, security model).
   instead of `grep`/`find`, and none of them has `bash`. If `ffgrep`/`fffind`
   are not registered (the `@ff-labs/pi-fff` package is optional), the extension
   substitutes the built-in `grep`/`find` at dispatch time.
+- **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and
+  `/implement-and-review` are renamed to `/scout-plan-implement`,
+  `/scout-plan`, and `/implement-review`, so each name lists its chain's stages.
+  The chains themselves are unchanged.
 
 ## Agents
 
@@ -52,8 +56,10 @@ Notes:
 
 ## Workflow prompts
 
-- `/implement <task>` — scout → planner → worker: gather context, plan, implement
-- `/scout-and-plan <task>` — scout → planner: context and plan, no implementation
-- `/implement-and-review <task>` — worker → reviewer → worker: implement, review, apply feedback
+Each command name lists its stages, so what a command skips is visible:
+
+- `/scout-plan <task>`: scout → planner. Gathers context and returns a plan; no implementation
+- `/scout-plan-implement <task>`: scout → planner → worker. Gathers context, plans, implements
+- `/implement-review <task>`: worker → reviewer → worker. Implements, reviews, applies feedback; no scouting or planning, for well-specified tasks
 
 Each runs as a subagent chain, passing output between steps via `{previous}`.
