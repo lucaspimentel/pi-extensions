@@ -16,6 +16,7 @@
     "write": "ask",
     "mcp": "ask"
   },
+  "nonInteractiveAsk": "allow",
   "allow": [
     "Glob",
     "Grep",

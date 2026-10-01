@@ -149,6 +149,8 @@ export interface PermissionsConfig {
 	writeAllowPaths?: string[];
 	/** Map of bash command name -> built-in validator name (e.g. {"duckdb": "readonly-duckdb"}). When the validator proves the command read-only, it is implicitly allowed. Defaults: duckdb -> readonly-duckdb and mlr -> readonly-mlr are enabled without any config. Set a value to "none" (sentinel, lowercase) to disable that entry. Project keys override user keys and defaults. */
 	bashValidators?: Record<string, string>;
+	/** Action to apply when a call resolves to `ask` in a non-interactive session (print/JSON mode, no UI to prompt). "deny" (default) blocks the call; "allow" lets it proceed, on the theory that the run's initiator already consented to headless execution. Project wins over user when both set it. */
+	nonInteractiveAsk?: "allow" | "deny";
 }
 
 export interface ResolvedConfig {
@@ -189,6 +191,8 @@ export interface ResolvedConfig {
 	legacyBashAllowRedirectsToUsed: boolean;
 	/** Resolved per-command validators: command name -> BASH_VALIDATORS key. Approved commands are implicitly allowed read-only. */
 	bashValidators: Record<string, string>;
+	/** Action applied to `ask` outcomes in non-interactive sessions. "deny" (default) preserves the historical block-on-prompt behavior. */
+	nonInteractiveAsk: "allow" | "deny";
 	/** Resolved auto-mode config (merged user + project). Always present; used when the session auto toggle is on. */
 	autoMode: ResolvedAutoModeConfig;
 	/** Tracks synthetically injected rules/defaults (never written to disk). */
@@ -442,6 +446,7 @@ export function mergeConfig(
 
 	return {
 		defaultAction: coerceDefaultAction(project.defaultAction ?? user.defaultAction ?? "ask"),
+		nonInteractiveAsk: coerceNonInteractiveAsk(project.nonInteractiveAsk ?? user.nonInteractiveAsk),
 		allow: [...implicitAllow, ...allow],
 		deny,
 		ask,
@@ -481,6 +486,19 @@ export function coerceDefaultAction(raw: unknown): DefaultAction {
 		return "ask";
 	}
 	return "ask";
+}
+
+/**
+ * Coerce a raw `nonInteractiveAsk` value from config into a valid action.
+ * Only "allow" and "deny" are valid; anything else (including undefined)
+ * resolves to "deny", preserving the historical block-on-prompt behavior.
+ */
+export function coerceNonInteractiveAsk(raw: unknown): "allow" | "deny" {
+	if (raw === "allow" || raw === "deny") return raw;
+	if (raw !== undefined) {
+		console.warn('[tool-permissions] nonInteractiveAsk: expected "allow" or "deny", got ' + JSON.stringify(raw) + '. Coercing to "deny".');
+	}
+	return "deny";
 }
 
 export function projectConfigPath(cwd: string): string {

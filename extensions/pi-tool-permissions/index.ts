@@ -327,7 +327,8 @@
  *   { id, outcome }. We render the read-root dialog (session / project / user /
  *   deny); on allow we grant the covering directory and re-broadcast the mode
  *   event BEFORE the verdict so the sandbox is remounted before the code
- *   replays. Non-interactive contexts (no UI) deny immediately.
+ *   replays. Non-interactive contexts (no UI) deny asks by default; set the
+ *   `nonInteractiveAsk` config to "allow" to let headless runs proceed instead.
  *
  *   Switch via:
  *     - Ctrl+Alt+P hotkey (cycles manual → allow edits → auto → yolo → manual)
@@ -899,6 +900,10 @@ export default function (pi: ExtensionAPI) {
 		const isWriteOrEdit = toolNorm === "write" || toolNorm === "edit";
 
 		if (!ctx.hasUI) {
+			// Non-interactive session (print/JSON mode): nothing can answer the ask.
+			// Honor the configured fallback instead of always blocking, so headless
+			// runs (scripted `pi -p`, subagent children) can act when the user opts in.
+			if (cfg.nonInteractiveAsk === "allow") return undefined;
 			return {
 				block: true,
 				reason: `tool-permissions: '${event.toolName}' requires confirmation but no UI is available`,
@@ -1151,8 +1156,17 @@ export default function (pi: ExtensionAPI) {
 						...(mode !== "auto" ? ["Switch to auto mode (this session)"] : []),
 						...(mode !== "yolo" ? ["Switch to yolo mode (this session)"] : []),
 					];
+					if (!ctx.hasUI) {
+						// Non-interactive session: nothing can answer the ask for this
+						// subcommand; honor the configured fallback.
+						if (cfg.nonInteractiveAsk === "allow") continue;
+						return {
+							block: true,
+							reason: `tool-permissions: '${event.toolName}' subcommand requires confirmation but no UI is available`,
+						};
+					}
 					const choice = await ctx.ui.select(title, choices);
-	
+
 					if (choice === "Allow once") continue;
 
 					if (subEscalationLabels.includes(choice ?? "")) {

@@ -114,6 +114,17 @@ test("project defaultAction overrides user",    merged.defaultAction, "deny");
 test("project toolDefaults.write overrides",    merged.toolDefaults["write"], "allow");
 test("project toolDefaults.read overrides",     merged.toolDefaults["read"], "deny");
 
+section("nonInteractiveAsk merge");
+
+const niaEmpty = loadConfigFromObjects({}, {}, CWD);
+test("default is deny",                         niaEmpty.nonInteractiveAsk, "deny");
+const niaUser = loadConfigFromObjects({ nonInteractiveAsk: "allow" }, {}, CWD);
+test("user value used when project omits",      niaUser.nonInteractiveAsk, "allow");
+const niaProject = loadConfigFromObjects({ nonInteractiveAsk: "allow" }, { nonInteractiveAsk: "deny" }, CWD);
+test("project wins over user",                  niaProject.nonInteractiveAsk, "deny");
+const niaBogus = loadConfigFromObjects({}, { nonInteractiveAsk: "yolo" }, CWD);
+test("invalid value coerces to deny",           niaBogus.nonInteractiveAsk, "deny");
+
 section("bashAllowRedirectsTo merge (project wins)");
 
 const redirectsProject = loadConfigFromObjects({ bashAllowRedirectsTo: ["/home"] }, { bashAllowRedirectsTo: ["/tmp"] }, CWD);

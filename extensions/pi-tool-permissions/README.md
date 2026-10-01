@@ -59,9 +59,21 @@ See [`pi-tool-permissions.example.json`](./pi-tool-permissions.example.json) for
   "bashReadOnlyAllowCwd": true,
   "readAllowPaths": ["~/source/datadog"],
   "readAllowScratch": false,
-  "writeAllowPaths": ["/tmp"]
+  "writeAllowPaths": ["/tmp"],
+  "nonInteractiveAsk": "deny"
 }
 ```
+
+### Non-interactive sessions
+
+In print/JSON mode (`pi -p`, `--mode json`) there is no UI to answer an `ask`.
+By default those calls are blocked (`"nonInteractiveAsk": "deny"`). Set it to
+`"allow"` to let them proceed instead, on the theory that the run's initiator
+already consented to headless execution. This is what makes headless subagent
+children (see `extensions/subagent`) able to use their tools while interactive
+dispatches keep prompting. Explicit `deny` rules and classifier `hard_deny`
+verdicts still block; only `ask` outcomes are affected. Project config wins
+over user config for this key.
 
 ### Rule syntax
 
