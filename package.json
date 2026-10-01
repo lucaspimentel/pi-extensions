@@ -41,7 +41,7 @@
     "@earendil-works/pi-tui": "^0.99.1",
     "@types/html-to-text": "^9.0.4",
     "@types/node": "^26",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
