@@ -88,7 +88,7 @@ Patterns are simple **case-insensitive globs**:
 - `?` — single character
 - A space-asterisk pair `" *"` is treated as **optional**, so a rule like
   `Bash(git status *)` matches both `git status` and `git status -s`. This
-  mirrors the format the "Allow always (save rule)" prompt suggests, so an
+  mirrors the format the "Allow always" save prompt suggests, so an
   auto-saved rule covers the bare command form without needing two entries.
   A bare `*` without a leading space is unaffected (e.g. `npm*` still requires
   the matched string to start with `npm`).
@@ -626,9 +626,11 @@ Allow bash?
 Suggested rule: Bash(rm*)
 
   > Allow once
-    Allow always (save rule)
+    Allow always (project)
+    Allow always (user)
     Deny once
-    Deny always (save rule)
+    Deny always (project)
+    Deny always (user)
 ```
 
 ### Read-root escalation options
@@ -673,16 +675,7 @@ Sandboxed-tool dialogs (`python`, `node`) additionally offer **"Switch to \"allo
 
 Each compound prompt's dialog also shows the `Why:` line for the subcommand currently being confirmed, e.g. `Why: matched ask rule 'Bash(git push*)'` or the classifier's attribution when auto mode screened that step.
 
-Choosing **always** opens a second selector asking *where* to save the rule:
-
-```
-Save rule where?
-
-  > Project (.pi/pi-tool-permissions.local.json)
-    User    (~/.pi/agent/pi-tool-permissions.json)
-```
-
-The default is **Project** (machine-local, not committed). Pick **User** to apply the rule across every project on this machine. Pressing **Esc** cancels the save (the in-flight command still respects whatever once-decision the user already made: an allow-always cancel proceeds without a saved rule; a deny-always cancel still blocks just this one call).
+Choosing **always** saves the rule directly to the scope named in the option (the editor step still comes first; see below). **(project)** writes to the machine-local `.pi/pi-tool-permissions.local.json` (not committed); **(user)** writes to `~/.pi/agent/pi-tool-permissions.json` and applies across every project on this machine. Pressing **Esc** in the editor cancels the save (the in-flight command still respects whatever once-decision the user already made: an allow-always cancel proceeds without a saved rule; a deny-always cancel still blocks just this one call).
 
 ### Compound Bash commands
 
@@ -691,9 +684,11 @@ When a single `Bash` call chains multiple subcommands (e.g. `cd foo && npm test 
 ```
   > Allow once
     Allow ALL steps once
-    Allow always (save rule)
+    Allow always (project)
+    Allow always (user)
     Deny once
-    Deny always (save rule)
+    Deny always (project)
+    Deny always (user)
 ```
 
 **Allow ALL steps once** silently approves every remaining `ask` subcommand in the *current* Bash invocation without saving any rule and without re-prompting. It is scoped to this one compound command — the next independent Bash call starts from scratch. Compounds that contain a `deny` subcommand are still rejected up-front and never reach this prompt.
@@ -774,7 +769,7 @@ prlimit, seccomp installed by a compiled launcher) are documented in [`extension
 
 ### Out-of-sandbox read prompts
 
-When sandboxed python code reads a path outside every mounted root, the python extension emits `tool-permissions:prompt` `{ id, path }` and awaits the correlated `tool-permissions:promptResult` `{ id, outcome }`. This extension renders the dialog (mirroring the read-root escalation options): allow reads from the covering directory for **this session**, the **project** config, or the **user** config, or **deny**. On allow, the grant is persisted through the normal `readAllowPaths` machinery and the mode event is re-broadcast **before** the verdict, so the python sandbox is remounted before its code replays. Non-interactive contexts (no UI) deny immediately. See `docs/read-prompts-design.md` for the full design.
+When sandboxed python code reads a path outside every mounted root, the python extension emits `tool-permissions:prompt` `{ id, path }` and awaits the correlated `tool-permissions:promptResult` `{ id, outcome }`. This extension renders the dialog with the same option grammar as the ask dialogs: **Allow once** (read just this path, nothing persisted), allow reads from the covering directory for **this session**, the **project** config, or the **user** config, or **Deny once**. Each grant option opens the shared "Edit read root:" editor prefilled with the covering directory (cancelling it degrades to a plain allow-once). No mode-switch or save-rule options are offered: saved rules gate `tool_call` decisions, which python's internal reads bypass, and the session mode does not affect this prompt. On allow-with-grant, the grant is persisted through the normal `readAllowPaths` machinery and the mode event is re-broadcast **before** the verdict, so the python sandbox is remounted before its code replays. Non-interactive contexts (no UI) deny immediately. See `docs/read-prompts-design.md` for the full design.
 
 This flow is python-specific: the node tool has no audit-hook equivalent (node's `--permission` flag is still experimental), so out-of-mount reads there fail closed with the kernel's own error instead of prompting. See [`extensions/node/README.md`](../node/README.md).
 

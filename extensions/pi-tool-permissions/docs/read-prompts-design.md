@@ -47,11 +47,15 @@ grant it.
 The event bus is fire-and-forget, so the round trip is correlated by id:
 
 1. python emits `tool-permissions:prompt` `{ id, path }`.
-2. pi-tool-permissions renders the dialog via its session-start-captured
-   `ExtensionContext`, styled after its existing read-root escalation:
+2. pi-tool-permissions renders the dialog with the same option grammar as its
+   ask dialogs: **Allow once** (allow just this read, nothing persisted),
    allow reads from the covering directory (parent of the requested path) for
    **this session**, the **project** config, or the **user** config, or
-   **deny**.
+   **Deny once**. Each grant option opens the shared "Edit read root:" editor
+   prefilled with the covering directory; cancelling the editor degrades to a
+   plain allow-once. No mode-switch or save-rule options: saved rules gate
+   tool_call decisions, which python's internal reads bypass, and the session
+   mode does not affect this prompt.
 3. The verdict arrives as `tool-permissions:promptResult` `{ id, outcome }`;
    python resolves the pending promise keyed by `id`.
 4. Timeout (~30 s), an absent listener (pi-tool-permissions not loaded), or a

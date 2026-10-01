@@ -324,11 +324,13 @@
  *   Python read prompts: when sandboxed python code reads a path outside the
  *   mounted roots, the python extension emits "tool-permissions:prompt"
  *   { id, path } and awaits the correlated "tool-permissions:promptResult"
- *   { id, outcome }. We render the read-root dialog (session / project / user /
- *   deny); on allow we grant the covering directory and re-broadcast the mode
- *   event BEFORE the verdict so the sandbox is remounted before the code
- *   replays. Non-interactive contexts (no UI) deny asks by default; set the
- *   `nonInteractiveAsk` config to "allow" to let headless runs proceed instead.
+ *   { id, outcome }. We render the read-root dialog (allow once / session /
+ *   project / user grants, each grant opening the shared read-root editor, /
+ *   deny once); on allow-with-grant we grant the covering directory and
+ *   re-broadcast the mode event BEFORE the verdict so the sandbox is
+ *   remounted before the code replays. Non-interactive contexts (no UI) deny
+ *   asks by default; set the `nonInteractiveAsk` config to "allow" to let
+ *   headless runs proceed instead.
  *
  *   Switch via:
  *     - Ctrl+Alt+P hotkey (cycles manual → allow edits → auto → yolo → manual)
@@ -758,26 +760,49 @@ export default function (pi: ExtensionAPI) {
 			const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
 			const userPath = tildify(userConfigPath());
 			const title = `python wants to read ${path}`;
+			// Mirrors the ask dialogs' option grammar: Allow once, session/project/user
+			// grants (each opening the shared "Edit read root:" editor, cancel = plain
+			// allow-once), then Deny once. No mode switches or save-rule options: the
+			// saved rules gate tool_call decisions, which python's internal reads
+			// bypass, so neither could affect this prompt.
 			const choice = await ctx.ui.select(title, [
+				"Allow once",
 				`Allow reads from ${root} (this session)`,
 				`Allow reads from ${root} (project: ${projectPath})`,
 				`Allow reads from ${root} (user: ${userPath})`,
-				"Deny",
+				"Deny once",
 			]);
-			if (choice === undefined) {
+			if (choice === undefined || choice === "Deny once") {
 				respond("deny");
 				return;
 			}
+			if (choice === "Allow once") {
+				respond("allow");
+				return;
+			}
 			if (choice.startsWith("Allow reads from") && choice.endsWith("(this session)")) {
-				if (!sessionReadRoots.includes(root)) sessionReadRoots.push(root);
+				const edited = await ctx.ui.editor("Edit read root:", root);
+				if (!edited || !edited.trim()) {
+					// Editor cancel == plain allow-once (matches the escalation grants).
+					respond("allow");
+					return;
+				}
+				const granted = edited.trim();
+				if (!sessionReadRoots.includes(granted)) sessionReadRoots.push(granted);
 				emitModeEvent();
 				respond("allow");
 				return;
 			}
 			if (choice.includes("(project:")) {
+				const edited = await ctx.ui.editor("Edit read root:", root);
+				if (!edited || !edited.trim()) {
+					respond("allow");
+					return;
+				}
+				const granted = edited.trim();
 				const raw = loadProjectConfigRaw(ctx.cwd);
-				if (!raw.readAllowPaths?.includes(root)) {
-					raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), root]);
+				if (!raw.readAllowPaths?.includes(granted)) {
+					raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), granted]);
 					saveProjectConfig(ctx.cwd, raw);
 					cfg = loadConfig(ctx.cwd);
 				}
@@ -786,9 +811,15 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (choice.includes("(user:")) {
+				const edited = await ctx.ui.editor("Edit read root:", root);
+				if (!edited || !edited.trim()) {
+					respond("allow");
+					return;
+				}
+				const granted = edited.trim();
 				const raw = loadUserConfigRaw();
-				if (!raw.readAllowPaths?.includes(root)) {
-					raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), root]);
+				if (!raw.readAllowPaths?.includes(granted)) {
+					raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), granted]);
 					saveUserConfig(raw);
 					cfg = loadConfig(ctx.cwd);
 				}
@@ -1163,9 +1194,11 @@ export default function (pi: ExtensionAPI) {
 						"Allow once",
 						...subEscalationLabels,
 						...(askSubs.length > 1 ? ["Allow ALL steps once"] : []),
-						"Allow always (save rule)",
+						"Allow always (project)",
+						"Allow always (user)",
 						"Deny once",
-						"Deny always (save rule)",
+						"Deny always (project)",
+						"Deny always (user)",
 						...(mode !== "auto" ? ["Switch to auto mode (this session)"] : []),
 						...(mode !== "yolo" ? ["Switch to yolo mode (this session)"] : []),
 					];
@@ -1212,12 +1245,10 @@ export default function (pi: ExtensionAPI) {
 						if (choice === "Deny once") await promptSteerMessage(ctx);
 						return { block: true, reason: `Denied by user (subcommand: ${sub})` };
 					}
-					if (choice === "Allow always (save rule)") {
+					if (choice === "Allow always (project)" || choice === "Allow always (user)") {
+						const scope: Scope = choice === "Allow always (user)" ? "user" : "project";
 						const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
 						if (!edited) continue;
-						const scope = await promptScope(ctx);
-						// Cancelling scope == cancelling the save (matches editor-cancel above).
-						if (!scope) continue;
 						addRule(scope, ctx.cwd, "allow", edited.trim());
 						cfg = loadConfig(ctx.cwd);
 						currentBreakdown = recomputeBreakdown(breakdown, sessionCfg(), mode);
@@ -1228,15 +1259,10 @@ export default function (pi: ExtensionAPI) {
 						ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}${suffix}`, "info");
 						continue;
 					}
-					if (choice === "Deny always (save rule)") {
+					if (choice === "Deny always (project)" || choice === "Deny always (user)") {
+						const scope: Scope = choice === "Deny always (user)" ? "user" : "project";
 						const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
 						if (!edited) {
-							await promptSteerMessage(ctx);
-							return { block: true, reason: `Denied by user (subcommand: ${sub})` };
-						}
-						const scope = await promptScope(ctx);
-						// Cancelling scope == treating as deny-once (no rule saved, but command still blocked).
-						if (!scope) {
 							await promptSteerMessage(ctx);
 							return { block: true, reason: `Denied by user (subcommand: ${sub})` };
 						}
@@ -1298,13 +1324,15 @@ export default function (pi: ExtensionAPI) {
 						"Allow once",
 						...escalationLabels,
 						...editsSwitch,
-						"Allow always (save rule)",
+						"Allow always (project)",
+						"Allow always (user)",
 						"Deny once",
-						"Deny always (save rule)",
+						"Deny always (project)",
+						"Deny always (user)",
 						...autoSwitch,
 						...yoloSwitch,
 				  ]
-				: ["Allow once", ...escalationLabels, "Allow always (save rule)", "Deny once", "Deny always (save rule)", ...sandboxEscalationSwitch, ...autoSwitch, ...yoloSwitch];
+				: ["Allow once", ...escalationLabels, ...sandboxEscalationSwitch, "Allow always (project)", "Allow always (user)", "Deny once", "Deny always (project)", "Deny always (user)", ...autoSwitch, ...yoloSwitch];
 
 			const choice = await ctx.ui.select(title, choices);
 
@@ -1344,26 +1372,19 @@ export default function (pi: ExtensionAPI) {
 				if (choice === "Deny once") await promptSteerMessage(ctx);
 				return { block: true, reason: "Denied by user" };
 			}
-			if (choice === "Allow always (save rule)") {
+			if (choice === "Allow always (project)" || choice === "Allow always (user)") {
+				const scope: Scope = choice === "Allow always (user)" ? "user" : "project";
 				const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
 				if (!edited) return undefined;
-				const scope = await promptScope(ctx);
-				// Cancelling scope == cancelling the save (matches editor-cancel above).
-				if (!scope) return undefined;
 				addRule(scope, ctx.cwd, "allow", edited.trim());
 				cfg = loadConfig(ctx.cwd);
 				ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}`, "info");
 				return undefined;
 			}
-			if (choice === "Deny always (save rule)") {
+			if (choice === "Deny always (project)" || choice === "Deny always (user)") {
+				const scope: Scope = choice === "Deny always (user)" ? "user" : "project";
 				const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
 				if (!edited) {
-					await promptSteerMessage(ctx);
-					return { block: true, reason: "Denied by user" };
-				}
-				const scope = await promptScope(ctx);
-				// Cancelling scope == treating as deny-once (no rule saved, but command still blocked).
-				if (!scope) {
 					await promptSteerMessage(ctx);
 					return { block: true, reason: "Denied by user" };
 				}
@@ -1432,17 +1453,6 @@ export default function (pi: ExtensionAPI) {
 		if (scope === "user") saveUserConfig(cfg);
 		else saveProjectConfig(cwd, cfg);
 		return true;
-	}
-
-	// Interactive scope picker used by Allow/Deny-always prompts. Returns null on Esc.
-	async function promptScope(ctx: ExtensionContext): Promise<Scope | null> {
-		const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
-		const userPath = tildify(userConfigPath());
-		const projectLabel = `Project (${projectPath})`;
-		const userLabel = `User (${userPath})`;
-		const choice = await ctx.ui.select("Save rule where?", [projectLabel, userLabel]);
-		if (!choice) return null;
-		return choice === userLabel ? "user" : "project";
 	}
 
 	// ── Slash command ────────────────────────────────────────────────────────
