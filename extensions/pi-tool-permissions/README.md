@@ -10,6 +10,8 @@ Every time the LLM tries to call a tool, this extension checks the call against 
 
 While an ask dialog is on screen, the extension reports `blocked` ("awaiting permission: <tool>") to [herdr](https://herdr.dev), so herdr panes show the agent as blocked instead of working. No-op outside herdr.
 
+Concurrent asks are queued, not overlapped: pi's UI shows one extension dialog at a time, so if several tool calls need confirmation at once (e.g. parallel calls with no matching allow rule) they are answered one at a time, in the order they reached the dialog. Allowed and denied calls never queue — only asks wait.
+
 ## Install
 
 Install via the [pi-extensions](https://github.com/lucaspimentel/pi-extensions) package:

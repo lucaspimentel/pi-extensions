@@ -79,6 +79,7 @@ export {
 	verdictToAction,
 	classifierCacheKey,
 	classifyAction,
+	createAskLock,
 	mergeConfig as loadConfigFromObjects,
 	// Config paths / disk IO (test-friendly aliases below)
 	PROJECT_CONFIG_REL,

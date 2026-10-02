@@ -19,6 +19,7 @@ const suites = [
 	"test-web.mjs",
 	"test-rules-and-decide.mjs",
 	"test-loadconfig.mjs",
+	"test-ask-lock.mjs",
 ];
 
 const BAR = "═".repeat(60);

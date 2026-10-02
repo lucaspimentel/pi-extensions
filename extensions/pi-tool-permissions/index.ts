@@ -434,6 +434,7 @@ import {
 	buildActionContext,
 	classifierAttribution,
 	classifyAction,
+	createAskLock,
 	decideCompound,
 	decideWithReason,
 	dedupe,
@@ -555,6 +556,12 @@ export default function (pi: ExtensionAPI) {
 	let lastAutoStatusId: string | undefined = undefined;
 	/** Captured ExtensionContext for the python read-prompt dialog (bus events carry none). */
 	let promptCtx: ExtensionContext | undefined;
+	// Shared mutex for permission dialogs (tool_call ask section + python read
+	// prompt). pi's TUI keeps at most one extension dialog alive; a second
+	// concurrent `ctx.ui.select` orphans the first, whose promise never settles
+	// and hangs the tool call. Acquired only after a decision resolves to ask
+	// in an interactive session, so allowed/denied/headless calls never queue.
+	const withAskLock = createAskLock();
 	// Session-only read grants (never persisted, reset at session_start):
 	// sessionScratch mirrors readAllowScratch for this session, and
 	// sessionReadRoots holds extra read roots granted via dialog escalation.
@@ -754,88 +761,95 @@ export default function (pi: ExtensionAPI) {
 		const root = slash > 0 ? trimmed.slice(0, slash) : path;
 
 		const ctx = promptCtx;
-		ctx.ui.setWorkingVisible(false);
-		pi.events.emit("herdr:blocked", { active: true, label: "awaiting read permission: python" });
-		try {
-			const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
-			const userPath = tildify(userConfigPath());
-			const title = `python wants to read ${path}`;
-			// Mirrors the ask dialogs' option grammar: Allow once, session/project/user
-			// grants (each opening the shared "Edit read root:" editor, cancel = plain
-			// allow-once), then Deny once. No mode switches or save-rule options: the
-			// saved rules gate tool_call decisions, which python's internal reads
-			// bypass, so neither could affect this prompt.
-			const choice = await ctx.ui.select(title, [
-				"Allow once",
-				`Allow reads from ${root} (this session)`,
-				`Allow reads from ${root} (project: ${projectPath})`,
-				`Allow reads from ${root} (user: ${userPath})`,
-				"Deny once",
-			]);
-			if (choice === undefined || choice === "Deny once") {
+		// Same shared mutex as the tool_call ask section: the python read
+		// prompt renders through the same single-slot TUI, so it must never
+		// overlap a pending permission dialog (or vice versa). The catch
+		// below stays inside the locked body: a failed dialog denies rather
+		// than hangs.
+		await withAskLock(async () => {
+			ctx.ui.setWorkingVisible(false);
+			pi.events.emit("herdr:blocked", { active: true, label: "awaiting read permission: python" });
+			try {
+				const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
+				const userPath = tildify(userConfigPath());
+				const title = `python wants to read ${path}`;
+				// Mirrors the ask dialogs' option grammar: Allow once, session/project/user
+				// grants (each opening the shared "Edit read root:" editor, cancel = plain
+				// allow-once), then Deny once. No mode switches or save-rule options: the
+				// saved rules gate tool_call decisions, which python's internal reads
+				// bypass, so neither could affect this prompt.
+				const choice = await ctx.ui.select(title, [
+					"Allow once",
+					`Allow reads from ${root} (this session)`,
+					`Allow reads from ${root} (project: ${projectPath})`,
+					`Allow reads from ${root} (user: ${userPath})`,
+					"Deny once",
+				]);
+				if (choice === undefined || choice === "Deny once") {
+					respond("deny");
+					return;
+				}
+				if (choice === "Allow once") {
+					respond("allow");
+					return;
+				}
+				if (choice.startsWith("Allow reads from") && choice.endsWith("(this session)")) {
+					const edited = await ctx.ui.editor("Edit read root:", root);
+					if (!edited || !edited.trim()) {
+						// Editor cancel == plain allow-once (matches the escalation grants).
+						respond("allow");
+						return;
+					}
+					const granted = edited.trim();
+					if (!sessionReadRoots.includes(granted)) sessionReadRoots.push(granted);
+					emitModeEvent();
+					respond("allow");
+					return;
+				}
+				if (choice.includes("(project:")) {
+					const edited = await ctx.ui.editor("Edit read root:", root);
+					if (!edited || !edited.trim()) {
+						respond("allow");
+						return;
+					}
+					const granted = edited.trim();
+					const raw = loadProjectConfigRaw(ctx.cwd);
+					if (!raw.readAllowPaths?.includes(granted)) {
+						raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), granted]);
+						saveProjectConfig(ctx.cwd, raw);
+						cfg = loadConfig(ctx.cwd);
+					}
+					emitModeEvent();
+					respond("allow");
+					return;
+				}
+				if (choice.includes("(user:")) {
+					const edited = await ctx.ui.editor("Edit read root:", root);
+					if (!edited || !edited.trim()) {
+						respond("allow");
+						return;
+					}
+					const granted = edited.trim();
+					const raw = loadUserConfigRaw();
+					if (!raw.readAllowPaths?.includes(granted)) {
+						raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), granted]);
+						saveUserConfig(raw);
+						cfg = loadConfig(ctx.cwd);
+					}
+					emitModeEvent();
+					respond("allow");
+					return;
+				}
 				respond("deny");
-				return;
+			} catch {
+				// Dialog failed (interrupted, redraw error): deny so the python side
+				// never hangs on a missing verdict.
+				respond("deny");
+			} finally {
+				ctx.ui.setWorkingVisible(true);
+				pi.events.emit("herdr:blocked", { active: false });
 			}
-			if (choice === "Allow once") {
-				respond("allow");
-				return;
-			}
-			if (choice.startsWith("Allow reads from") && choice.endsWith("(this session)")) {
-				const edited = await ctx.ui.editor("Edit read root:", root);
-				if (!edited || !edited.trim()) {
-					// Editor cancel == plain allow-once (matches the escalation grants).
-					respond("allow");
-					return;
-				}
-				const granted = edited.trim();
-				if (!sessionReadRoots.includes(granted)) sessionReadRoots.push(granted);
-				emitModeEvent();
-				respond("allow");
-				return;
-			}
-			if (choice.includes("(project:")) {
-				const edited = await ctx.ui.editor("Edit read root:", root);
-				if (!edited || !edited.trim()) {
-					respond("allow");
-					return;
-				}
-				const granted = edited.trim();
-				const raw = loadProjectConfigRaw(ctx.cwd);
-				if (!raw.readAllowPaths?.includes(granted)) {
-					raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), granted]);
-					saveProjectConfig(ctx.cwd, raw);
-					cfg = loadConfig(ctx.cwd);
-				}
-				emitModeEvent();
-				respond("allow");
-				return;
-			}
-			if (choice.includes("(user:")) {
-				const edited = await ctx.ui.editor("Edit read root:", root);
-				if (!edited || !edited.trim()) {
-					respond("allow");
-					return;
-				}
-				const granted = edited.trim();
-				const raw = loadUserConfigRaw();
-				if (!raw.readAllowPaths?.includes(granted)) {
-					raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), granted]);
-					saveUserConfig(raw);
-					cfg = loadConfig(ctx.cwd);
-				}
-				emitModeEvent();
-				respond("allow");
-				return;
-			}
-			respond("deny");
-		} catch {
-			// Dialog failed (interrupted, redraw error): deny so the python side
-			// never hangs on a missing verdict.
-			respond("deny");
-		} finally {
-			ctx.ui.setWorkingVisible(true);
-			pi.events.emit("herdr:blocked", { active: false });
-		}
+		});
 	});
 
 	// ── Tool call gating ─────────────────────────────────────────────────────
@@ -957,54 +971,115 @@ export default function (pi: ExtensionAPI) {
 		// Hide pi's animated "⠋ Working..." loader while the permission dialog is on
 		// screen. Tall dialogs push the spinner above the visible region, where its
 		// redraws break terminal scrolling. Restored on any return/throw below.
-		ctx.ui.setWorkingVisible(false);
-		// Report blocked to herdr while the dialog is up (pane would otherwise show
-		// "working"). Ignored outside herdr; released in the finally below.
-		pi.events.emit("herdr:blocked", {
-			active: true,
-			label: `awaiting permission: ${event.toolName}`,
-		});
-		try {
-			// ── Read-root escalation options for ask dialogs ─────────────────────
-			// Two kinds, mutually exclusive per dialog (scratch wins if both would
-			// apply): a scratch-read grant (session flag or persisted
-			// readAllowScratch) and a suggested read-root grant (session list or
-			// persisted readAllowPaths). An option is only offered when granting it
-			// would actually flip this ask to an allow (asks caused by ask rules,
-			// deny rules, validator refusals, or the write guard get no options).
-			// Each entry pairs a dialog label with an async action returning true
-			// when the caller should proceed (grant applied, or the user cancelled
-			// the edit-before-save prompt, which degrades to a plain allow-once)
-			// and false when the caller should block (grant did not authorize).
-			type EscalationOption = { label: string; act: () => Promise<boolean> };
-			const escalateProceed = (toolName: string, input: Record<string, unknown>, m: PermissionMode): boolean =>
-				decideWithReason(sessionCfg(), toolName, input, m).action === "allow";
-			const escalationOptions = (toolName: string, input: Record<string, unknown>, m: PermissionMode): EscalationOption[] => {
-				const options: EscalationOption[] = [];
-				const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
-				const userPath = tildify(userConfigPath());
-				// Scratch escalation: only when scratch is fully off (persisted and
-				// session) and forcing it on would flip this ask to an allow.
-				if (!cfg.readAllowScratch && !sessionScratch) {
-					const scratchProbe = withExtraReadRoots(sessionCfg(), scratchRoots());
-					if (decideWithReason(scratchProbe, toolName, input, m).action === "allow") {
+		// Serialize concurrent asks behind the shared dialog mutex: pi's TUI
+		// keeps at most one extension dialog alive, so a second concurrent
+		// ctx.ui.select orphans the first (its promise never settles) and the
+		// tool call hangs forever. One acquisition per tool_call event, held
+		// across the whole compound-bash subcommand loop. Reachable only after
+		// the allow/deny/nonInteractiveAsk returns above, and only with a UI.
+		return withAskLock(async () => {
+			ctx.ui.setWorkingVisible(false);
+			// Report blocked to herdr while the dialog is up (pane would otherwise show
+			// "working"). Ignored outside herdr; released in the finally below.
+			pi.events.emit("herdr:blocked", {
+				active: true,
+				label: `awaiting permission: ${event.toolName}`,
+			});
+			try {
+				// ── Read-root escalation options for ask dialogs ─────────────────────
+				// Two kinds, mutually exclusive per dialog (scratch wins if both would
+				// apply): a scratch-read grant (session flag or persisted
+				// readAllowScratch) and a suggested read-root grant (session list or
+				// persisted readAllowPaths). An option is only offered when granting it
+				// would actually flip this ask to an allow (asks caused by ask rules,
+				// deny rules, validator refusals, or the write guard get no options).
+				// Each entry pairs a dialog label with an async action returning true
+				// when the caller should proceed (grant applied, or the user cancelled
+				// the edit-before-save prompt, which degrades to a plain allow-once)
+				// and false when the caller should block (grant did not authorize).
+				type EscalationOption = { label: string; act: () => Promise<boolean> };
+				const escalateProceed = (toolName: string, input: Record<string, unknown>, m: PermissionMode): boolean =>
+					decideWithReason(sessionCfg(), toolName, input, m).action === "allow";
+				const escalationOptions = (toolName: string, input: Record<string, unknown>, m: PermissionMode): EscalationOption[] => {
+					const options: EscalationOption[] = [];
+					const projectPath = tildify(join(ctx.cwd, PROJECT_CONFIG_REL));
+					const userPath = tildify(userConfigPath());
+					// Scratch escalation: only when scratch is fully off (persisted and
+					// session) and forcing it on would flip this ask to an allow.
+					if (!cfg.readAllowScratch && !sessionScratch) {
+						const scratchProbe = withExtraReadRoots(sessionCfg(), scratchRoots());
+						if (decideWithReason(scratchProbe, toolName, input, m).action === "allow") {
+							options.push({
+								label: "Allow scratch reads (this session)",
+								act: async () => {
+									sessionScratch = true;
+									// Scratch roots are now granted: re-broadcast so the
+									// sandboxed tools mount them read-only. (They skip the
+									// reserved /tmp mount itself; /var/tmp and $TMPDIR apply.)
+									emitModeEvent();
+									return escalateProceed(toolName, input, m);
+								},
+							});
+							if (loadProjectConfigRaw(ctx.cwd).readAllowScratch !== true) {
+								options.push({
+									label: `Allow scratch reads (project: ${projectPath})`,
+									act: async () => {
+										const raw = loadProjectConfigRaw(ctx.cwd);
+										raw.readAllowScratch = true;
+										saveProjectConfig(ctx.cwd, raw);
+										cfg = loadConfig(ctx.cwd);
+										emitModeEvent();
+										return escalateProceed(toolName, input, m);
+									},
+								});
+							}
+							if (loadUserConfigRaw().readAllowScratch !== true) {
+								options.push({
+									label: `Allow scratch reads (user: ${userPath})`,
+									act: async () => {
+										const raw = loadUserConfigRaw();
+										raw.readAllowScratch = true;
+										saveUserConfig(raw);
+										cfg = loadConfig(ctx.cwd);
+										emitModeEvent();
+										return escalateProceed(toolName, input, m);
+									},
+								});
+							}
+							return options; // scratch takes the slot: never offer root options too
+						}
+					}
+					// Root escalation for readAllowPaths: a single unambiguous candidate
+					// directory whose grant would flip this ask to an allow. The
+					// edit-before-save prompt (cancel = plain allow-once) matches the
+					// rule-save dialogs.
+					const suggestion = suggestReadRoot(toolName, input, sessionCfg(), m);
+					if (suggestion?.flipped && suggestion.root) {
+						const root = suggestion.root;
 						options.push({
-							label: "Allow scratch reads (this session)",
+							label: `Allow reads from ${root} (this session)`,
 							act: async () => {
-								sessionScratch = true;
-								// Scratch roots are now granted: re-broadcast so the
-								// sandboxed tools mount them read-only. (They skip the
-								// reserved /tmp mount itself; /var/tmp and $TMPDIR apply.)
+								const edited = await ctx.ui.editor("Edit read root:", root);
+								if (!edited) return true; // editor cancel == plain allow-once
+								const trimmed = edited.trim();
+								if (!trimmed) return true;
+								if (!sessionReadRoots.includes(trimmed)) sessionReadRoots.push(trimmed);
+								// New session read root: re-broadcast so the sandboxed tools
+								// mount it read-only.
 								emitModeEvent();
 								return escalateProceed(toolName, input, m);
 							},
 						});
-						if (loadProjectConfigRaw(ctx.cwd).readAllowScratch !== true) {
+						if (!loadProjectConfigRaw(ctx.cwd).readAllowPaths?.includes(root)) {
 							options.push({
-								label: `Allow scratch reads (project: ${projectPath})`,
+								label: `Allow reads from ${root} (project: ${projectPath})`,
 								act: async () => {
+									const edited = await ctx.ui.editor("Edit read root:", root);
+									if (!edited) return true;
+									const trimmed = edited.trim();
+									if (!trimmed) return true;
 									const raw = loadProjectConfigRaw(ctx.cwd);
-									raw.readAllowScratch = true;
+									raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), trimmed]);
 									saveProjectConfig(ctx.cwd, raw);
 									cfg = loadConfig(ctx.cwd);
 									emitModeEvent();
@@ -1012,12 +1087,16 @@ export default function (pi: ExtensionAPI) {
 								},
 							});
 						}
-						if (loadUserConfigRaw().readAllowScratch !== true) {
+						if (!loadUserConfigRaw().readAllowPaths?.includes(root)) {
 							options.push({
-								label: `Allow scratch reads (user: ${userPath})`,
+								label: `Allow reads from ${root} (user: ${userPath})`,
 								act: async () => {
+									const edited = await ctx.ui.editor("Edit read root:", root);
+									if (!edited) return true;
+									const trimmed = edited.trim();
+									if (!trimmed) return true;
 									const raw = loadUserConfigRaw();
-									raw.readAllowScratch = true;
+									raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), trimmed]);
 									saveUserConfig(raw);
 									cfg = loadConfig(ctx.cwd);
 									emitModeEvent();
@@ -1025,380 +1104,323 @@ export default function (pi: ExtensionAPI) {
 								},
 							});
 						}
-						return options; // scratch takes the slot: never offer root options too
 					}
-				}
-				// Root escalation for readAllowPaths: a single unambiguous candidate
-				// directory whose grant would flip this ask to an allow. The
-				// edit-before-save prompt (cancel = plain allow-once) matches the
-				// rule-save dialogs.
-				const suggestion = suggestReadRoot(toolName, input, sessionCfg(), m);
-				if (suggestion?.flipped && suggestion.root) {
-					const root = suggestion.root;
-					options.push({
-						label: `Allow reads from ${root} (this session)`,
-						act: async () => {
-							const edited = await ctx.ui.editor("Edit read root:", root);
-							if (!edited) return true; // editor cancel == plain allow-once
-							const trimmed = edited.trim();
-							if (!trimmed) return true;
-							if (!sessionReadRoots.includes(trimmed)) sessionReadRoots.push(trimmed);
-							// New session read root: re-broadcast so the sandboxed tools
-							// mount it read-only.
-							emitModeEvent();
-							return escalateProceed(toolName, input, m);
-						},
-					});
-					if (!loadProjectConfigRaw(ctx.cwd).readAllowPaths?.includes(root)) {
-						options.push({
-							label: `Allow reads from ${root} (project: ${projectPath})`,
-							act: async () => {
-								const edited = await ctx.ui.editor("Edit read root:", root);
-								if (!edited) return true;
-								const trimmed = edited.trim();
-								if (!trimmed) return true;
-								const raw = loadProjectConfigRaw(ctx.cwd);
-								raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), trimmed]);
-								saveProjectConfig(ctx.cwd, raw);
-								cfg = loadConfig(ctx.cwd);
-								emitModeEvent();
-								return escalateProceed(toolName, input, m);
-							},
-						});
-					}
-					if (!loadUserConfigRaw().readAllowPaths?.includes(root)) {
-						options.push({
-							label: `Allow reads from ${root} (user: ${userPath})`,
-							act: async () => {
-								const edited = await ctx.ui.editor("Edit read root:", root);
-								if (!edited) return true;
-								const trimmed = edited.trim();
-								if (!trimmed) return true;
-								const raw = loadUserConfigRaw();
-								raw.readAllowPaths = dedupe([...(raw.readAllowPaths ?? []), trimmed]);
-								saveUserConfig(raw);
-								cfg = loadConfig(ctx.cwd);
-								emitModeEvent();
-								return escalateProceed(toolName, input, m);
-							},
-						});
-					}
-				}
-				return options;
-			};
-			const applyEscalationChoice = async (
-				escalations: EscalationOption[],
-				choice: string | undefined,
-			): Promise<boolean> => {
-				const idx = escalations.findIndex((e) => e.label === choice);
-				if (idx < 0) return false;
-				// False means the grant did not authorize the action (e.g. the edited
-				// root was changed to something that no longer covers it): the caller
-				// blocks rather than silently bypassing the still-asking decision.
-				return escalations[idx].act();
-			};
+					return options;
+				};
+				const applyEscalationChoice = async (
+					escalations: EscalationOption[],
+					choice: string | undefined,
+				): Promise<boolean> => {
+					const idx = escalations.findIndex((e) => e.label === choice);
+					if (idx < 0) return false;
+					// False means the grant did not authorize the action (e.g. the edited
+					// root was changed to something that no longer covers it): the caller
+					// blocks rather than silently bypassing the still-asking decision.
+					return escalations[idx].act();
+				};
 
-			// ── Compound bash command: confirm each ask subcommand separately ──────
-			// Note: decideCompound() short-circuits any compound containing a `deny`
-			// subcommand before we reach this loop (see the `culprit` block above),
-			// so the loop below only iterates over `ask` items. Compounds with no
-			// static `ask`/`deny` sub are classified as a whole up-front and
-			// downgraded to a single-command decision (`isCompound = false` above),
-			// so they also bypass this loop — it now only runs for compounds that
-			// had a static `ask` sub (or auto off / no classifier model).
-			if (isCompound) {
-				const fullCmd = String((event.input as Record<string, unknown>).command ?? "");
-				const truncated = fullCmd.length > 200 ? `${fullCmd.slice(0, 197)}...` : fullCmd;
-				// A leading `cd <dir>` applies to every later subcommand, so classify each
-				// sub as if it ran there (otherwise the git-repo facts would describe the
-				// session cwd rather than the repository actually being touched).
-				const cdPrefix = leadingCdTarget(fullCmd);
-				const subCwd = cdPrefix ? resolveAgainstCwd(cdPrefix, cfg.cwd) : cfg.cwd;
+				// ── Compound bash command: confirm each ask subcommand separately ──────
+				// Note: decideCompound() short-circuits any compound containing a `deny`
+				// subcommand before we reach this loop (see the `culprit` block above),
+				// so the loop below only iterates over `ask` items. Compounds with no
+				// static `ask`/`deny` sub are classified as a whole up-front and
+				// downgraded to a single-command decision (`isCompound = false` above),
+				// so they also bypass this loop — it now only runs for compounds that
+				// had a static `ask` sub (or auto off / no classifier model).
+				if (isCompound) {
+					const fullCmd = String((event.input as Record<string, unknown>).command ?? "");
+					const truncated = fullCmd.length > 200 ? `${fullCmd.slice(0, 197)}...` : fullCmd;
+					// A leading `cd <dir>` applies to every later subcommand, so classify each
+					// sub as if it ran there (otherwise the git-repo facts would describe the
+					// session cwd rather than the repository actually being touched).
+					const cdPrefix = leadingCdTarget(fullCmd);
+					const subCwd = cdPrefix ? resolveAgainstCwd(cdPrefix, cfg.cwd) : cfg.cwd;
 	
-				// Loop-scoped (this Bash invocation only — not session-wide): when set,
-				// every remaining `ask` step is silently allowed without re-prompting
-				// and without saving any rule. Resets when this handler returns.
-				let allowAllStepsOnce = false;
+					// Loop-scoped (this Bash invocation only — not session-wide): when set,
+					// every remaining `ask` step is silently allowed without re-prompting
+					// and without saving any rule. Resets when this handler returns.
+					let allowAllStepsOnce = false;
 	
-				// Snapshot of the per-subcommand decisions that the dialog renders.
-				// Mutated after each rule-save so downstream icons reflect the new cfg.
-				let currentBreakdown = breakdown;
+					// Snapshot of the per-subcommand decisions that the dialog renders.
+					// Mutated after each rule-save so downstream icons reflect the new cfg.
+					let currentBreakdown = breakdown;
 	
-				// Iterate over the original `ask`/`auto` subcommands, but re-decide each one
-				// against the current `cfg` right before prompting so newly saved
-				// allow/deny rules apply to the rest of *this* compound command.
-				const askSubs = breakdown.filter((b) => b.action === "ask" || b.action === "auto").map((b) => b.sub);
+					// Iterate over the original `ask`/`auto` subcommands, but re-decide each one
+					// against the current `cfg` right before prompting so newly saved
+					// allow/deny rules apply to the rest of *this* compound command.
+					const askSubs = breakdown.filter((b) => b.action === "ask" || b.action === "auto").map((b) => b.sub);
 	
-				for (const sub of askSubs) {
-					// User intent (`Allow ALL steps once`) beats any rule-driven decision:
-					// a freshly saved deny must not override an explicit one-shot allow.
-					if (allowAllStepsOnce) continue;
+					for (const sub of askSubs) {
+						// User intent (`Allow ALL steps once`) beats any rule-driven decision:
+						// a freshly saved deny must not override an explicit one-shot allow.
+						if (allowAllStepsOnce) continue;
 	
-					const liveStatic = decideWithReason(sessionCfg(), "bash", { command: sub }, mode);
-					let liveAction = liveStatic.action;
-					let subReason = "";
-					let subClassifierModelId: string | undefined;
-					// Why the static-rule layer chose this sub's action; replaced by the
-					// classifier attribution when the classifier screens the sub, and by
-					// the no-classifier stub reason when auto mode can't screen it.
-					let subStaticReason: string | undefined = liveStatic.reason;
-					// Auto fallthrough: run the classifier for this subcommand.
-					if (liveAction === "auto") {
-						if (autoEngaged && classifierModel) {
-							const result = await classifyAction(
-								(m, c) => ctx.modelRegistry.streamSimple(m, c).result(),
-								classifierModel,
-								"bash",
-								{ command: sub },
-								cfg.autoMode,
-								verdictCache,
-								buildActionContext("bash", { command: sub }, subCwd),
-							);
-							subReason = result.reason;
-							subClassifierModelId = classifierModel.id;
-							// The classifier owns the why for this verdict.
-							subStaticReason = undefined;
-							notifyClassifierDebug(ctx, "bash", { command: sub }, classifierModel.id, result);
-							liveAction = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
-						} else {
-							liveAction = "ask";
-							subStaticReason = AUTO_NO_CLASSIFIER_REASON;
+						const liveStatic = decideWithReason(sessionCfg(), "bash", { command: sub }, mode);
+						let liveAction = liveStatic.action;
+						let subReason = "";
+						let subClassifierModelId: string | undefined;
+						// Why the static-rule layer chose this sub's action; replaced by the
+						// classifier attribution when the classifier screens the sub, and by
+						// the no-classifier stub reason when auto mode can't screen it.
+						let subStaticReason: string | undefined = liveStatic.reason;
+						// Auto fallthrough: run the classifier for this subcommand.
+						if (liveAction === "auto") {
+							if (autoEngaged && classifierModel) {
+								const result = await classifyAction(
+									(m, c) => ctx.modelRegistry.streamSimple(m, c).result(),
+									classifierModel,
+									"bash",
+									{ command: sub },
+									cfg.autoMode,
+									verdictCache,
+									buildActionContext("bash", { command: sub }, subCwd),
+								);
+								subReason = result.reason;
+								subClassifierModelId = classifierModel.id;
+								// The classifier owns the why for this verdict.
+								subStaticReason = undefined;
+								notifyClassifierDebug(ctx, "bash", { command: sub }, classifierModel.id, result);
+								liveAction = verdictToAction(result.verdict, nonInteractive, cfg.defaultAction);
+							} else {
+								liveAction = "ask";
+								subStaticReason = AUTO_NO_CLASSIFIER_REASON;
+							}
 						}
-					}
-					if (liveAction === "allow") continue;
-					if (liveAction === "deny") {
-						// No steer prompt here — this branch is only reached for static deny rules
-						// and classifier hard_deny verdicts (neither is user-initiated). The
-						// classifier's model + reason are already in the block message; user
-						// denies steer via the Deny-once / Deny-always choice branches below.
-						const reason = subClassifierModelId
-							? `Blocked by classifier ${subClassifierModelId} (subcommand: ${sub})${subReason ? `: ${subReason}` : ""}`
-							: `Blocked by tool-permissions deny rule (subcommand: ${sub})`;
-						return { block: true, reason };
-					}
+						if (liveAction === "allow") continue;
+						if (liveAction === "deny") {
+							// No steer prompt here — this branch is only reached for static deny rules
+							// and classifier hard_deny verdicts (neither is user-initiated). The
+							// classifier's model + reason are already in the block message; user
+							// denies steer via the Deny-once / Deny-always choice branches below.
+							const reason = subClassifierModelId
+								? `Blocked by classifier ${subClassifierModelId} (subcommand: ${sub})${subReason ? `: ${subReason}` : ""}`
+								: `Blocked by tool-permissions deny rule (subcommand: ${sub})`;
+							return { block: true, reason };
+						}
 	
-					const suggested = suggestRule("Bash", { command: sub });
-					const breakdownLines = formatBreakdown(currentBreakdown, sub);
-					// Read-root escalation options for this subcommand (scratch wins;
-					// empty when the ask was not caused by read-root containment).
-					const subEscalations = escalationOptions("bash", { command: sub }, mode);
-					const subEscalationLabels = subEscalations.map((e) => e.label);
+						const suggested = suggestRule("Bash", { command: sub });
+						const breakdownLines = formatBreakdown(currentBreakdown, sub);
+						// Read-root escalation options for this subcommand (scratch wins;
+						// empty when the ask was not caused by read-root containment).
+						const subEscalations = escalationOptions("bash", { command: sub }, mode);
+						const subEscalationLabels = subEscalations.map((e) => e.label);
 
-					const subWhy = whyLine(subStaticReason, subClassifierModelId, subReason);
-					const reasonNote = subWhy ? `\n\n${subWhy}` : "";
-					const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}`;
-					// "Allow ALL steps once" only makes sense when more than one step
-					// in this compound actually needs human approval; with a single
-					// ask sub it's identical to "Allow once", so omit it.
-					const choices = [
-						"Allow once",
-						...subEscalationLabels,
-						...(askSubs.length > 1 ? ["Allow ALL steps once"] : []),
-						"Allow always (project)",
-						"Allow always (user)",
-						"Deny once",
-						"Deny always (project)",
-						"Deny always (user)",
-						...(mode !== "auto" ? ["Switch to auto mode (this session)"] : []),
-						...(mode !== "yolo" ? ["Switch to yolo mode (this session)"] : []),
-					];
-					if (!ctx.hasUI) {
-						// Non-interactive session: nothing can answer the ask for this
-						// subcommand; honor the configured fallback.
-						if (cfg.nonInteractiveAsk === "allow") continue;
-						return {
-							block: true,
-							reason: `tool-permissions: '${event.toolName}' subcommand requires confirmation but no UI is available`,
-						};
-					}
-					const choice = await ctx.ui.select(title, choices);
+						const subWhy = whyLine(subStaticReason, subClassifierModelId, subReason);
+						const reasonNote = subWhy ? `\n\n${subWhy}` : "";
+						const title = `Allow Bash subcommand?\n\nFull command:\n  ${truncated}\n\nBreakdown:\n${breakdownLines}${reasonNote}`;
+						// "Allow ALL steps once" only makes sense when more than one step
+						// in this compound actually needs human approval; with a single
+						// ask sub it's identical to "Allow once", so omit it.
+						const choices = [
+							"Allow once",
+							...subEscalationLabels,
+							...(askSubs.length > 1 ? ["Allow ALL steps once"] : []),
+							"Allow always (project)",
+							"Allow always (user)",
+							"Deny once",
+							"Deny always (project)",
+							"Deny always (user)",
+							...(mode !== "auto" ? ["Switch to auto mode (this session)"] : []),
+							...(mode !== "yolo" ? ["Switch to yolo mode (this session)"] : []),
+						];
+						if (!ctx.hasUI) {
+							// Non-interactive session: nothing can answer the ask for this
+							// subcommand; honor the configured fallback.
+							if (cfg.nonInteractiveAsk === "allow") continue;
+							return {
+								block: true,
+								reason: `tool-permissions: '${event.toolName}' subcommand requires confirmation but no UI is available`,
+							};
+						}
+						const choice = await ctx.ui.select(title, choices);
 
-					if (choice === "Allow once") continue;
+						if (choice === "Allow once") continue;
 
-					if (subEscalationLabels.includes(choice ?? "")) {
-						if (await applyEscalationChoice(subEscalations, choice)) continue;
-						return { block: true, reason: "read-root grant did not authorize this subcommand" };
-					}
+						if (subEscalationLabels.includes(choice ?? "")) {
+							if (await applyEscalationChoice(subEscalations, choice)) continue;
+							return { block: true, reason: "read-root grant did not authorize this subcommand" };
+						}
  
-					if (choice === "Allow ALL steps once") {
-						allowAllStepsOnce = true;
-						continue;
-					}
+						if (choice === "Allow ALL steps once") {
+							allowAllStepsOnce = true;
+							continue;
+						}
 	
-					if (choice === "Switch to auto mode (this session)") {
-						applyMode("auto", ctx);
-						// The mode switch authorizes only the current prompted subcommand.
-						// Later subcommands must be re-evaluated under the new mode so explicit
-						// `ask` rules still prompt; non-explicit fallthroughs will be classified.
-						continue;
-					}
+						if (choice === "Switch to auto mode (this session)") {
+							applyMode("auto", ctx);
+							// The mode switch authorizes only the current prompted subcommand.
+							// Later subcommands must be re-evaluated under the new mode so explicit
+							// `ask` rules still prompt; non-explicit fallthroughs will be classified.
+							continue;
+						}
 
-					if (choice === "Switch to yolo mode (this session)") {
-						applyMode("yolo", ctx);
-						// The mode switch authorizes only the current prompted subcommand.
-						// Later subcommands must be re-evaluated under the new mode so explicit
-						// `ask` rules still prompt; only non-explicit fallthroughs are allowed.
-						continue;
-					}
+						if (choice === "Switch to yolo mode (this session)") {
+							applyMode("yolo", ctx);
+							// The mode switch authorizes only the current prompted subcommand.
+							// Later subcommands must be re-evaluated under the new mode so explicit
+							// `ask` rules still prompt; only non-explicit fallthroughs are allowed.
+							continue;
+						}
 	
-					if (choice === "Deny once" || !choice) {
-						if (choice === "Deny once") await promptSteerMessage(ctx);
-						return { block: true, reason: `Denied by user (subcommand: ${sub})` };
-					}
-					if (choice === "Allow always (project)" || choice === "Allow always (user)") {
-						const scope: Scope = choice === "Allow always (user)" ? "user" : "project";
-						const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
-						if (!edited) continue;
-						addRule(scope, ctx.cwd, "allow", edited.trim());
-						cfg = loadConfig(ctx.cwd);
-						currentBreakdown = recomputeBreakdown(breakdown, sessionCfg(), mode);
-						const autoCount = currentBreakdown.filter(
-							(b) => b.sub !== sub && askSubs.includes(b.sub) && b.action === "allow",
-						).length;
-						const suffix = autoCount > 0 ? ` (auto-allows ${autoCount} remaining step${autoCount === 1 ? "" : "s"})` : "";
-						ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}${suffix}`, "info");
-						continue;
-					}
-					if (choice === "Deny always (project)" || choice === "Deny always (user)") {
-						const scope: Scope = choice === "Deny always (user)" ? "user" : "project";
-						const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
-						if (!edited) {
-							await promptSteerMessage(ctx);
+						if (choice === "Deny once" || !choice) {
+							if (choice === "Deny once") await promptSteerMessage(ctx);
 							return { block: true, reason: `Denied by user (subcommand: ${sub})` };
 						}
-						addRule(scope, ctx.cwd, "deny", edited.trim());
-						cfg = loadConfig(ctx.cwd);
-						currentBreakdown = recomputeBreakdown(breakdown, sessionCfg(), mode);
-						ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
-						await promptSteerMessage(ctx);
-						return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
+						if (choice === "Allow always (project)" || choice === "Allow always (user)") {
+							const scope: Scope = choice === "Allow always (user)" ? "user" : "project";
+							const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+							if (!edited) continue;
+							addRule(scope, ctx.cwd, "allow", edited.trim());
+							cfg = loadConfig(ctx.cwd);
+							currentBreakdown = recomputeBreakdown(breakdown, sessionCfg(), mode);
+							const autoCount = currentBreakdown.filter(
+								(b) => b.sub !== sub && askSubs.includes(b.sub) && b.action === "allow",
+							).length;
+							const suffix = autoCount > 0 ? ` (auto-allows ${autoCount} remaining step${autoCount === 1 ? "" : "s"})` : "";
+							ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}${suffix}`, "info");
+							continue;
+						}
+						if (choice === "Deny always (project)" || choice === "Deny always (user)") {
+							const scope: Scope = choice === "Deny always (user)" ? "user" : "project";
+							const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+							if (!edited) {
+								await promptSteerMessage(ctx);
+								return { block: true, reason: `Denied by user (subcommand: ${sub})` };
+							}
+							addRule(scope, ctx.cwd, "deny", edited.trim());
+							cfg = loadConfig(ctx.cwd);
+							currentBreakdown = recomputeBreakdown(breakdown, sessionCfg(), mode);
+							ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
+							await promptSteerMessage(ctx);
+							return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
+						}
 					}
+					return undefined;
 				}
-				return undefined;
-			}
 	
-			// ── Single or ambiguous command ask ────────────────────────────────────
-			const suggested = suggestRule(event.toolName, event.input as Record<string, unknown>);
-			const matchField = getMatchField(event.toolName, event.input as Record<string, unknown>);
-			const isMcp = normalizeTool(event.toolName) === "mcp";
-			// MCP calls arrive as toolName "mcp" with the real tool name in input.tool;
-			// render a human-readable preview of the parsed args instead of raw JSON.
-			const preview = isMcp
-				? mcpPreview(event.input as Record<string, unknown>)
-				: (matchField.length > 200 ? `${matchField.slice(0, 197)}...` : matchField);
-			const titleHeader = isMcp
-				? `Allow MCP tool ${String((event.input as Record<string, unknown>).tool ?? "")}?`
-				: `Allow ${event.toolName}?`;
-			const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
-			const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
-			const why = whyLine(staticReason, classifierModelId, classifierReason);
-			const reasonNote = why ? `\n\n${why}` : "";
-			const title = `${titleHeader}\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
+				// ── Single or ambiguous command ask ────────────────────────────────────
+				const suggested = suggestRule(event.toolName, event.input as Record<string, unknown>);
+				const matchField = getMatchField(event.toolName, event.input as Record<string, unknown>);
+				const isMcp = normalizeTool(event.toolName) === "mcp";
+				// MCP calls arrive as toolName "mcp" with the real tool name in input.tool;
+				// render a human-readable preview of the parsed args instead of raw JSON.
+				const preview = isMcp
+					? mcpPreview(event.input as Record<string, unknown>)
+					: (matchField.length > 200 ? `${matchField.slice(0, 197)}...` : matchField);
+				const titleHeader = isMcp
+					? `Allow MCP tool ${String((event.input as Record<string, unknown>).tool ?? "")}?`
+					: `Allow ${event.toolName}?`;
+				const ambiguousNote = ambiguous ? "\n\n(complex command — could not be split for per-subcommand checks)" : "";
+				const extraInfo = pwshExtraInfo(event.toolName, event.input as Record<string, unknown>);
+				const why = whyLine(staticReason, classifierModelId, classifierReason);
+				const reasonNote = why ? `\n\n${why}` : "";
+				const title = `${titleHeader}\n\n  ${preview}${extraInfo}${ambiguousNote}${reasonNote}`;
 	
-			// Mode-switch options for every dialog; write/edit dialogs additionally
-			// get "Switch to \"allow edits\" mode" (replaces the old "Allow all edits
-			// this session" toggle). Each option is hidden when its mode is already
-			// active, so "Allow once" stays the default cursor position.
-			// Read-root escalation options (scratch grant / suggested read root) are
-			// injected right after "Allow once"; they are empty unless the ask was
-			// caused by read-root containment and a grant would flip it to allow.
-			// Sandboxed-tool dialogs additionally get the allow-edits escalation when
-			// the ask was caused by toolDefaults.<tool> = "ask" in manual mode: a
-			// plain mode switch cannot authorize the call (explicit toolDefaults win
-			// in every mode), so this dedicated option switches the mode, remounts
-			// /workspace read-write via the mode event, and authorizes this call.
-			const autoSwitch = mode !== "auto" ? ["Switch to auto mode (this session)"] : [];
-			const yoloSwitch = mode !== "yolo" ? ["Switch to yolo mode (this session)"] : [];
-			const editsSwitch = isWriteOrEdit && mode !== "edits" ? ['Switch to "allow edits" mode (this session)'] : [];
-			const sandboxEscalation =
-				mode === "manual" &&
-				SANDBOXED_TOOLS.has(toolNorm) &&
-				staticReason === `toolDefaults.${toolNorm} = ask`;
-			const sandboxEscalationSwitch = sandboxEscalation
-				? ['Switch to "allow edits" and remount /workspace read-write (this session)']
-				: [];
-			const escalations = escalationOptions(event.toolName, matchInput, mode);
-			const escalationLabels = escalations.map((e) => e.label);
-			const choices = isWriteOrEdit
-				? [
-						"Allow once",
-						...escalationLabels,
-						...editsSwitch,
-						"Allow always (project)",
-						"Allow always (user)",
-						"Deny once",
-						"Deny always (project)",
-						"Deny always (user)",
-						...autoSwitch,
-						...yoloSwitch,
-				  ]
-				: ["Allow once", ...escalationLabels, ...sandboxEscalationSwitch, "Allow always (project)", "Allow always (user)", "Deny once", "Deny always (project)", "Deny always (user)", ...autoSwitch, ...yoloSwitch];
+				// Mode-switch options for every dialog; write/edit dialogs additionally
+				// get "Switch to \"allow edits\" mode" (replaces the old "Allow all edits
+				// this session" toggle). Each option is hidden when its mode is already
+				// active, so "Allow once" stays the default cursor position.
+				// Read-root escalation options (scratch grant / suggested read root) are
+				// injected right after "Allow once"; they are empty unless the ask was
+				// caused by read-root containment and a grant would flip it to allow.
+				// Sandboxed-tool dialogs additionally get the allow-edits escalation when
+				// the ask was caused by toolDefaults.<tool> = "ask" in manual mode: a
+				// plain mode switch cannot authorize the call (explicit toolDefaults win
+				// in every mode), so this dedicated option switches the mode, remounts
+				// /workspace read-write via the mode event, and authorizes this call.
+				const autoSwitch = mode !== "auto" ? ["Switch to auto mode (this session)"] : [];
+				const yoloSwitch = mode !== "yolo" ? ["Switch to yolo mode (this session)"] : [];
+				const editsSwitch = isWriteOrEdit && mode !== "edits" ? ['Switch to "allow edits" mode (this session)'] : [];
+				const sandboxEscalation =
+					mode === "manual" &&
+					SANDBOXED_TOOLS.has(toolNorm) &&
+					staticReason === `toolDefaults.${toolNorm} = ask`;
+				const sandboxEscalationSwitch = sandboxEscalation
+					? ['Switch to "allow edits" and remount /workspace read-write (this session)']
+					: [];
+				const escalations = escalationOptions(event.toolName, matchInput, mode);
+				const escalationLabels = escalations.map((e) => e.label);
+				const choices = isWriteOrEdit
+					? [
+							"Allow once",
+							...escalationLabels,
+							...editsSwitch,
+							"Allow always (project)",
+							"Allow always (user)",
+							"Deny once",
+							"Deny always (project)",
+							"Deny always (user)",
+							...autoSwitch,
+							...yoloSwitch,
+					  ]
+					: ["Allow once", ...escalationLabels, ...sandboxEscalationSwitch, "Allow always (project)", "Allow always (user)", "Deny once", "Deny always (project)", "Deny always (user)", ...autoSwitch, ...yoloSwitch];
 
-			const choice = await ctx.ui.select(title, choices);
+				const choice = await ctx.ui.select(title, choices);
 
-			if (choice === "Allow once") return undefined;
+				if (choice === "Allow once") return undefined;
 
-			if (escalationLabels.includes(choice ?? "")) {
-				if (await applyEscalationChoice(escalations, choice)) return undefined;
-				return { block: true, reason: "read-root grant did not authorize this action" };
-			}
+				if (escalationLabels.includes(choice ?? "")) {
+					if (await applyEscalationChoice(escalations, choice)) return undefined;
+					return { block: true, reason: "read-root grant did not authorize this action" };
+				}
 
-			if (choice === 'Switch to "allow edits" and remount /workspace read-write (this session)') {
-				// Sandbox escalation (toolDefaults.<tool> = "ask", manual mode): the
-				// mode event makes the sandboxed extensions remount /workspace
-				// read-write and restart their sandbox; returning undefined allows
-				// this call, which then runs in the fresh writable sandbox. Later
-				// calls keep prompting (explicit toolDefaults still win).
-				applyMode("edits", ctx);
-				return undefined;
-			}
+				if (choice === 'Switch to "allow edits" and remount /workspace read-write (this session)') {
+					// Sandbox escalation (toolDefaults.<tool> = "ask", manual mode): the
+					// mode event makes the sandboxed extensions remount /workspace
+					// read-write and restart their sandbox; returning undefined allows
+					// this call, which then runs in the fresh writable sandbox. Later
+					// calls keep prompting (explicit toolDefaults still win).
+					applyMode("edits", ctx);
+					return undefined;
+				}
 
-			if (choice === 'Switch to "allow edits" mode (this session)') {
-				applyMode("edits", ctx);
-				return undefined;
-			}
+				if (choice === 'Switch to "allow edits" mode (this session)') {
+					applyMode("edits", ctx);
+					return undefined;
+				}
 
-			if (choice === "Switch to auto mode (this session)") {
-				applyMode("auto", ctx);
-				return undefined;
-			}
+				if (choice === "Switch to auto mode (this session)") {
+					applyMode("auto", ctx);
+					return undefined;
+				}
 
-			if (choice === "Switch to yolo mode (this session)") {
-				applyMode("yolo", ctx);
-				return undefined;
-			}
+				if (choice === "Switch to yolo mode (this session)") {
+					applyMode("yolo", ctx);
+					return undefined;
+				}
 	
-			if (choice === "Deny once" || !choice) {
-				if (choice === "Deny once") await promptSteerMessage(ctx);
-				return { block: true, reason: "Denied by user" };
-			}
-			if (choice === "Allow always (project)" || choice === "Allow always (user)") {
-				const scope: Scope = choice === "Allow always (user)" ? "user" : "project";
-				const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
-				if (!edited) return undefined;
-				addRule(scope, ctx.cwd, "allow", edited.trim());
-				cfg = loadConfig(ctx.cwd);
-				ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}`, "info");
-				return undefined;
-			}
-			if (choice === "Deny always (project)" || choice === "Deny always (user)") {
-				const scope: Scope = choice === "Deny always (user)" ? "user" : "project";
-				const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
-				if (!edited) {
-					await promptSteerMessage(ctx);
+				if (choice === "Deny once" || !choice) {
+					if (choice === "Deny once") await promptSteerMessage(ctx);
 					return { block: true, reason: "Denied by user" };
 				}
-				addRule(scope, ctx.cwd, "deny", edited.trim());
-				cfg = loadConfig(ctx.cwd);
-				ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
-				await promptSteerMessage(ctx);
-				return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
+				if (choice === "Allow always (project)" || choice === "Allow always (user)") {
+					const scope: Scope = choice === "Allow always (user)" ? "user" : "project";
+					const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+					if (!edited) return undefined;
+					addRule(scope, ctx.cwd, "allow", edited.trim());
+					cfg = loadConfig(ctx.cwd);
+					ctx.ui.notify(`Saved allow rule (${scope}): ${edited.trim()}`, "info");
+					return undefined;
+				}
+				if (choice === "Deny always (project)" || choice === "Deny always (user)") {
+					const scope: Scope = choice === "Deny always (user)" ? "user" : "project";
+					const edited = await ctx.ui.editor("Edit rule before saving:", suggested);
+					if (!edited) {
+						await promptSteerMessage(ctx);
+						return { block: true, reason: "Denied by user" };
+					}
+					addRule(scope, ctx.cwd, "deny", edited.trim());
+					cfg = loadConfig(ctx.cwd);
+					ctx.ui.notify(`Saved deny rule (${scope}): ${edited.trim()}`, "info");
+					await promptSteerMessage(ctx);
+					return { block: true, reason: `Blocked by tool-permissions deny rule (${edited.trim()})` };
+				}
+				return { block: true, reason: "Denied by user" };
+			} finally {
+				ctx.ui.setWorkingVisible(true);
+				pi.events.emit("herdr:blocked", { active: false });
 			}
-			return { block: true, reason: "Denied by user" };
-		} finally {
-			ctx.ui.setWorkingVisible(true);
-			pi.events.emit("herdr:blocked", { active: false });
-		}
+		});
 	});
 
 	// ── Hotkey ───────────────────────────────────────────────────────────────

@@ -3299,3 +3299,33 @@ export function inputForMatching(
 	return input;
 }
 
+// ── Ask-dialog mutex ─────────────────────────────────────────────────────────
+
+/**
+ * Create a shared mutex for permission dialogs. Returns `withAskLock(run)`, which
+ * runs `run()` only after every previously queued `run` has settled (fulfilled or
+ * rejected) and resolves/rejects with `run()`'s own outcome.
+ *
+ * Why this exists: pi's TUI keeps at most one extension dialog alive at a time
+ * (`showExtensionSelector` stores the active component in a single field and
+ * clears the editor container when a second dialog opens). A second concurrent
+ * `ctx.ui.select` orphans the first one: neither its select nor its cancel
+ * callback ever fires, so its promise never settles and the tool call hangs
+ * forever. This extension cannot fix the TUI, so it guarantees it never issues
+ * a second concurrent selector: the tool_call ask section and the python
+ * read-permission dialog both go through one lock instance.
+ *
+ * A rejected or aborted run must not poison the chain: the rejection
+ * continuations (`run, run`) keep `chain` alive, so later queued asks still
+ * execute. The returned promise still propagates the rejection to its own
+ * caller, so error handling per dialog site is unchanged.
+ */
+export function createAskLock(): <T>(run: () => Promise<T>) => Promise<T> {
+	let chain: Promise<void> = Promise.resolve();
+	return function withAskLock<T>(run: () => Promise<T>): Promise<T> {
+		const next = chain.then(run, run);
+		chain = next.then(() => undefined, () => undefined);
+		return next;
+	};
+}
+
