@@ -1,12 +1,12 @@
 # Guard: sandbox-first permission redesign
 
-Status: **draft, brainstorming**. The open questions at the end are not
-answered yet. Write no code until they are settled and this doc is updated.
+Status: **design settled (2026-10-02 grilling session); not implemented.**
+Six assumptions at the end still need explicit confirmation before coding.
 
-Scope: `extensions/pi-tool-permissions/`, `extensions/plan.ts`,
-`extensions/python/`, `extensions/node/`, a new sandboxed `bash`, plus
-`extensions/pwsh.ts` and `extensions/subagent/`, where they interact.
-Breaking changes, and starting from scratch, are both acceptable.
+Scope: a new `guard` extension that replaces `extensions/pi-tool-permissions/`,
+`extensions/python/`, and `extensions/node/`, plus changes to
+`extensions/plan.ts`, `extensions/pwsh.ts`, and `extensions/subagent/`.
+Breaking changes are acceptable.
 
 ## Goals
 
@@ -33,294 +33,293 @@ Holes, verified 2026-10-02:
 | Headless subagent children are safe only because of a config default | `nonInteractiveAsk` is unset in the user config and defaults to deny. Setting it to `"allow"` would let children write freely. |
 | Built-in bash inherits pi's full environment | Provider keys, `DD_API_KEY`, `GITHUB_TOKEN`, and similar are visible to every command. |
 
-Other relevant current state:
+## Verified facts (2026-10-02)
 
-- python/node are implicitly allowed by pi-tool-permissions
-  (`SANDBOXED_TOOLS`, `pi-tool-permissions/rules.ts:52`).
-- `PermissionMode = "manual" | "edits" | "auto" | "yolo"` is session-only and
-  broadcast on `pi.events` channel `tool-permissions:mode` as
-  `{ mode, readRoots }`. python/node remount `/workspace` read-write in
-  edits/auto/yolo and ignore unknown modes.
-- `plan.ts` and pi-tool-permissions do not communicate at all.
-- web_fetch currently prompts: no allow rule for it was found in the user
-  config.
+- **bubblewrap** is 0.9.0 (`/usr/bin/bwrap`, Ubuntu noble package
+  `0.9.0-1ubuntu0.3`, the noble-security point release; apt offers nothing
+  newer). It has no `--overlay-src` / `--tmp-overlay`.
+- **Unprivileged overlayfs** works on kernel
+  `6.18.40.1-microsoft-standard-WSL2`. Mounting the overlay **before** bwrap
+  works with stock bwrap 0.9.0 (nested user namespace):
+  `unshare -rm sh -c "mount -t overlay ... <merged> && bwrap ... --unshare-all --bind <merged> /w -- ..."`.
+  Writes and `mkdir` landed in upperdir; lowerdir was unchanged. Building
+  bwrap 0.10+ or using fuse-overlayfs is therefore unnecessary.
+  - Not yet tested: a lowerdir on `/mnt/c` (9p). upperdir must live on disk,
+    not tmpfs, because large builds (dd-trace-dotnet `obj/`, `bin/`) run to
+    GBs.
+- **codemode is not a bypass.** It calls tools through `ctx.executeTool`
+  (pi `dist/extensions/codemode/execute.js:304`). Nested calls go through
+  `tool_call` handlers (pi `docs/extensions.md:148`).
+- **cargo offline with read-only caches:** `cargo build --offline` inside
+  bwrap with `~/.cargo` and `~/.rustup` read-only and no network succeeded,
+  for a crate already extracted in `registry/src`. A never-extracted crate
+  would need writes there; the per-call cache overlay covers that (untested).
+- **dotnet offline with read-only caches:** `dotnet build` (implicit restore)
+  inside bwrap with `~/.dotnet` and `~/.nuget` read-only and no network
+  succeeded, with `Newtonsoft.Json 13.0.3` from the global packages folder.
+  Side effects: `NU1900` vulnerability-audit warnings and about 6 s of restore
+  timeout.
+- Local paths: dotnet is at `~/.dotnet/dotnet`, cargo at `~/.cargo/bin`, node
+  at `/home/linuxbrew/.linuxbrew/bin/node`, pwsh at `~/.dotnet/tools/pwsh`.
+- Reference implementations: pi `examples/extensions/sandbox` (uses
+  `@anthropic-ai/sandbox-runtime`) and `examples/extensions/gondolin`. Both
+  override the built-in bash through `createBashTool()` with custom
+  `BashOperations`.
 
-## Feasibility checks (verified 2026-10-02)
-
-- bubblewrap is 0.9.0 (Ubuntu package `0.9.0-1ubuntu0.3`, `/usr/bin/bwrap`).
-  On Ubuntu noble (24.04) the installed and candidate versions are both
-  this noble-security point release, so apt offers no newer bwrap. It has
-  **no** `--overlay-src` / `--tmp-overlay`
-  (`bwrap: Unknown option --overlay-src`).
-- The kernel is `6.18.40.1-microsoft-standard-WSL2`. **Unprivileged overlayfs
-  inside a user namespace works**:
-  `unshare -rm sh -c "mount -t overlay overlay -o lowerdir=...,upperdir=...,workdir=... <mnt>"`
-  succeeded, and writes went to `upperdir` while `lowerdir` stayed
-  unchanged.
-  - **Overlay mounted before bwrap works with stock bwrap 0.9.0:**
-    `unshare -rm sh -c "mount -t overlay ... <merged> && bwrap ... --unshare-all --bind <merged> /w -- ..."`
-    succeeded (nested user namespace). Writes and `mkdir` inside the sandbox
-    landed in upperdir; lowerdir was unchanged. This is the preferred
-    approach: no custom bwrap build. The outer step can be `unshare` or a
-    small C launcher (the `seccomp-launch.c` pattern).
-  - Rejected alternatives: building bwrap 0.10+ (extra dependency outside
-    apt), fuse-overlayfs (extra package, slower).
-  - Not yet tested: an overlay whose lowerdir is on `/mnt/c` (9p), and how
-    upperdir size behaves for large builds (dd-trace-dotnet `obj/` and `bin/`
-    run to GBs, so upperdir belongs on disk, not tmpfs).
-- Nested tool calls made through `ctx.executeTool` go through `tool_call`
-  handlers (pi `docs/extensions.md:148`). codemode is therefore not a
-  permission bypass **if** it uses `executeTool`. Unverified for codemode's
-  actual implementation.
-- Reference implementations:
-  - pi `examples/extensions/sandbox` (uses `@anthropic-ai/sandbox-runtime`:
-    bwrap, socat network proxy with a domain allowlist, deny-list reads).
-  - `examples/extensions/gondolin` (micro-VM).
-  - Both override the built-in bash through `createBashTool()` with custom
-    `BashOperations`, which keeps the built-in rendering and truncation.
-
-## Proposed paradigm: confinement first
-
-### Principles
+## Principles
 
 1. **The kernel enforces; rules only route.** A rule can never make an
-   unconfined action safe. Rules only decide whether an escape from the
-   sandbox needs a prompt.
-2. **One policy, many enforcers.** A single policy object holds the profile,
-   read roots, write roots, protected paths, and network setting. Host tools
-   (read/write/edit/grep) and sandbox mounts are both derived from it, so
-   they cannot drift apart.
-3. **Sandboxed runs cost nothing.** Prompts and classifier round trips are
-   spent only on escapes and on effects outside the machine.
-4. **Fail closed.** If the policy component is not loaded, executors use the
-   most restrictive profile and never fall back to unsandboxed execution.
-5. **Tightening only.** A holder (plan, a subagent parent) can tighten the
-   policy. Nothing downstream can loosen it.
+   unconfined action safe. Rules only decide whether leaving the sandbox needs
+   a prompt.
+2. **One policy, many enforcers.** A single policy object drives both the
+   sandbox mounts and the host-side read/write checks, so they cannot
+   disagree.
+3. **Sandboxed runs cost nothing.** Prompts and classifier calls are spent
+   only on escapes and on effects outside the machine.
+4. **Fail closed** wherever a sandbox is available. Degraded mode is explicit
+   and visible (see Platform).
+5. **Tightening only** for holders: plan and subagent parents can tighten the
+   policy; nothing downstream loosens it.
 
-### Tool classes
+## Platform
 
-| Class | Tools |
+- **Linux/WSL:** the full design.
+- **Degraded mode:** native Windows, or Linux where bwrap or user namespaces
+  are missing.
+  - `bash` runs on the host under host_bash rules and prompts.
+  - python/node are unavailable.
+  - In research, `bash` runs only commands the string-based read-only tier
+    and validators prove read-only; everything else is denied.
+- **pwsh:** registered on Windows only (removed on Linux).
+
+## Architecture
+
+- One new **`guard`** extension owns the policy. It contains the permissions
+  logic (from pi-tool-permissions), the shared sandbox library (extracted from
+  python/node), and the `bash`, `host_bash`, `python`, and `node` tools.
+- **plan.ts stays separate.** It requests the research profile from guard
+  over `pi.events` and refuses to start `/plan` without an acknowledgment.
+- **Rollout:** build guard alongside the old extensions (not loaded by
+  default) until it reaches parity, then switch over. No patches to the old
+  code in the meantime.
+
+## Config
+
+- New file **`guard.json`** (user and project scopes). It holds profiles
+  settings, protected paths, secret masks and per-project opt-outs, the
+  web_fetch domain allowlist, and `HostBash(...)` rules (replacing
+  `Bash(...)`).
+- **`/guard migrate`** converts `pi-tool-permissions.json`:
+  - copies every `Bash(...)` rule to `HostBash(...)`
+  - drops `nonInteractiveAsk`
+  - **lists** rules that look like project-code runners (cargo/dotnet
+    build/test/run/restore, pytest, npm run/install, make) for a manual purge.
+    Nothing is dropped automatically.
+
+## Tools
+
+| Tool | Behavior |
 |---|---|
-| Confined execution | `bash` (new, sandboxed), `python`, `node` |
-| Host execution (escape) | `host_bash` (new name for the unsandboxed built-in), `pwsh` |
-| Local read | read, grep, find, ls, fffind, ffgrep, session_search, memory_read, memory_search |
-| Local write | write, edit, memory_write, memory_forget, scratchpad |
-| Remote read | web_fetch, web_search, `pup_*` reads, MCP read tools |
-| Remote write | MCP writes, pup writes |
-| Meta | subagent, codemode, ask_user_question |
+| `bash` | Always sandboxed, except in yolo. Built with `createBashTool()` plus bwrap-spawning `BashOperations`. One process per call, no persistent shell. |
+| `host_bash` | The only escape from the sandbox. Only `HostBash(...)` rules apply to it. |
+| `python`, `node` | Persistent sandboxed interpreters (existing design), moved into guard. Unsandboxed in yolo. |
+| `pwsh` | Windows only. |
 
-Exfiltration needs a sink the attacker can read. Under that view:
+- **No auto-routing:** a sandboxed `bash` call never runs on the host because
+  it matches a rule.
+- **Failure hints:** when a sandboxed command fails (network unreachable,
+  EROFS on a protected or read-only path, path not mounted), the result adds a
+  hint to use `host_bash` if host access is required.
+- Commands you type with `!` stay unsandboxed.
 
-- **Attacker-readable sinks:** web_fetch to an arbitrary domain (data rides
-  in the URL), and Slack posts.
+## Profiles
+
+Session-only, never persisted. Every session starts in **default**; subagent
+children start in the inherited profile. Ctrl+Alt+M cycles through all five,
+with no confirmation when entering yolo.
+
+| | research | default | auto | trusted | yolo |
+|---|---|---|---|---|---|
+| Sandboxed workspace | throwaway overlay per call | read-write, protected paths read-only | same as default | same as default | **no sandbox** for bash, python, or node |
+| host_bash | hidden or denied | prompt unless rule-allowed | classifier | allowed | allowed |
+| write/edit | deny | allowed in write roots | classifier | allowed | allowed |
+| Protected paths | deny | prompt | prompt | prompt | allowed |
+| Exfil-capable remote reads (web_fetch outside the allowlist) | prompt | prompt | classifier | allowed | allowed |
+| Other remote reads (web_search, pup, Jira/Slack reads) | allowed | allowed | allowed | allowed | allowed |
+| Remote writes (Slack posts, MCP writes, pup writes) | deny | prompt | classifier | allowed | allowed |
+
+Exfiltration needs a sink the attacker can read:
+
+- **Attacker-readable sinks:** web_fetch to an arbitrary domain (data rides in
+  the URL), and Slack posts.
 - **Not attacker-readable:** web_search queries (they go to the search
   provider), and pup or Jira reads (your own tenant).
 
-The sandbox does not close remote-tool channels, so they are gated
-separately.
+## Sandbox contents
 
-### Profiles (replace the mode enum)
+For every profile except yolo:
 
-| | research (`/plan`) | default | auto | yolo |
-|---|---|---|---|---|
-| Sandboxed workspace | throwaway overlay (writes discarded) | read-write except protected paths | same as default | same as default |
-| Sandbox network | none | none (v2: package-registry proxy) | none | none |
-| Local writes | deny | allow inside write roots, except protected paths | classifier | allow, except protected paths |
-| Host escape | deny (tool hidden) | ask, unless a rule allows | classifier | allow |
-| Remote read | allowlist | allowlist or ask | classifier | allow |
-| Remote write | deny | ask | classifier | allow |
-
-- The sandbox stays on in every profile, **including yolo**. Yolo only stops
-  prompting for escapes.
-- In auto mode, the classifier screens only escapes and remote effects.
-  Sandboxed calls skip it, which also cuts classifier cost.
-
-### Sandboxed `bash`
-
-- Same tool name, `bash`, so the model's habit works for us. Built with
-  `createBashTool()` plus a bwrap-spawning `BashOperations`.
-- One process per call, like the built-in. No persistent shell, so no
-  worker/protocol layer is needed (unlike python/node).
-- **Reads:** allowlist, as in python/node. Anything read can reach the
-  model's context and leave through a remote tool. Mounted:
-  - workspace and granted read roots
-  - `/usr` and a minimal `/etc`
-  - toolchains, read-only (`~/.cargo/bin`, `~/.rustup`, `~/.dotnet`,
-    `~/.nvm`, `~/.local/bin`)
-  - package caches (see open question 11)
-
-  Never mounted: `~/.ssh`, the ssh-agent socket, `~/.config/gh`, `~/.aws`,
-  `~/.azure`, `~/.npmrc`, `~/.git-credentials`, `~/.docker`, pup tokens,
-  `/run`, `/mnt/c`.
-- **Writes:** workspace per profile, private `/tmp`, scratch. Protected
-  paths are bind-mounted read-only on top of the workspace.
+- **Reads** come only from allowed locations: workspace, granted read roots,
+  `/usr`, a minimal `/etc`, and toolchains.
+- **Never mounted:** `~/.ssh`, the ssh-agent socket, `~/.config/gh`,
+  `~/.aws`, `~/.azure`, `~/.npmrc`, `~/.git-credentials`, `~/.docker`, pup
+  tokens, `/run`, `/mnt/c`.
 - **Environment:** allowlist only (`PATH`, `HOME`, `TMPDIR`, `LANG`,
-  toolchain variables). Strips all keys and tokens.
-- **Network:** `--unshare-net` (loopback still works, so local test servers
-  run). v2 adds a host-side HTTP proxy with a package-registry allowlist,
-  reached through a bind-mounted Unix socket and an in-sandbox forwarder,
-  with `HTTP(S)_PROXY` set. Every allowlisted domain is also a possible
-  exfiltration sink, so keep the list to registries.
-- **Seccomp:** lighter than python/node. Keep the bans on ptrace, bpf, new
-  user namespaces, and keyctl. Do **not** ban `socket`: build tools need Unix
-  sockets and loopback (MSBuild node reuse, test runners), and the network
-  namespace already isolates abstract sockets. TIOCSTI is covered by bwrap
+  toolchain variables). No tokens or API keys.
+- **Network:** none (`--unshare-net`; loopback still works, so local test
+  servers run). A package-registry proxy comes **after the switchover**:
+  host-side HTTP proxy with a registry allowlist, reached through a
+  bind-mounted Unix socket and an in-sandbox forwarder, with `HTTP(S)_PROXY`
+  set. Until then, restores and installs go through host_bash.
+- **Caches and toolchains** (`~/.cargo`, `~/.rustup`, `~/.dotnet`,
+  `~/.nuget`, `~/.npm`): read-only lowerdir plus a throwaway overlay per call.
+  Lock files and first-time crate extraction work; nothing persists, so a
+  sandboxed command cannot poison a package that later runs on the host.
+- **Seccomp:** lighter than python/node's. Ban ptrace, bpf, new user
+  namespaces, and keyctl. Allow `socket`: build tools need Unix sockets and
+  loopback (MSBuild node reuse, test runners), and the network namespace
+  already isolates abstract sockets. TIOCSTI is covered by bwrap
   `--new-session`.
-- **Failure hints:** when a sandboxed command fails (network unreachable,
-  EROFS on a protected or read-only path, path not mounted), the result adds
-  a hint: "this ran sandboxed; use host_bash if host access is required".
+- **Overlay mechanics:** mount the overlay in an outer `unshare -rm` (or a
+  small C launcher like `seccomp-launch.c`) before bwrap.
 - **WSL interop** needs an explicit escape test: running a `.exe` from inside
   the sandbox must fail (`WSL_INTEROP` cleared, `/run/WSL` not mounted).
-- Commands typed with `!` stay unsandboxed.
 
-### Protected paths
+## Protected paths
 
-Read-only inside every sandbox. For write/edit they prompt even in yolo
-(pending question 4).
+Read-only in every sandbox. For write/edit: deny in research, prompt from
+default through trusted, allowed in yolo.
 
 - Workspace: `.git/hooks`, `.git/config`, `.git/info`, `.pi/`, `.claude/`,
-  `.agents/`, `.vscode/`, `.idea/`, `.envrc`, plus possibly instruction files
-  (`AGENTS.md`, `CLAUDE.md`, repo `skills/`); see question 3.
-- Git worktrees: the workspace `.git` is a file pointing into the main
-  clone's `.git/worktrees/<name>`. The main clone's `.git` must be mounted,
-  with the same protections.
-- Host: `~/.pi/agent/**` (config, installed extensions, memory), and shell rc
+  `.agents/`, `.vscode/`, `.idea/`, `.envrc`.
+- Repo instruction files: `AGENTS.md`, `CLAUDE.md`, repo `skills/`.
+- Host: `~/.pi/agent/**` (config, installed extensions, memory) and shell rc
   files (`~/.zshrc`, `~/.bashrc`, `~/.profile`).
+- Git worktrees: the workspace `.git` is a file pointing into the main clone's
+  `.git/worktrees/<name>`. The main clone's `.git` is mounted with the same
+  protections.
 
-### Research profile and `/plan`
+## Secrets
 
-This absorbs the earlier handoff, "read-only enforcement during `/plan`".
+A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 
-- plan.ts becomes a client of the policy component. It requests the
-  `research` profile with a holder id (`"plan"`) and releases it on **every**
-  exit path:
+- masked to `/dev/null` inside sandboxes
+- denied to read/grep
+- per-project opt-out in `guard.json` (e.g. `.env.example`)
+
+## Memory and instruction persistence
+
+- Repo instruction files are protected paths (see above).
+- `memory_write` stays allowed; each write is shown in the UI.
+
+## Accepted risks
+
+- In default (and auto/trusted), the workspace is writable, so a sandboxed
+  command can delete **untracked** files, which git cannot restore. Accepted
+  for v1; same exposure as today's edit/write tools in edits mode.
+- yolo is 100% unrestricted, at your own risk: no sandbox, no prompts,
+  protected paths writable.
+- Degraded mode relies on string-based rules, as today.
+
+## /plan integration
+
+- Entering `/plan` switches the profile to research, held by plan.
+- While plan holds research, profile changes (cycle or command) are
+  **blocked** with a notice; `/plan cancel` is the way out.
+- Every exit path restores the profile that was active before `/plan`:
   - `restoreTools`
   - the clear-context branch (`plan.ts:299`, which today skips
     `restoreTools`)
-  - the cancelled-newSession branch
+  - the cancelled new-session branch
   - recovery in `session_start` and `session_tree`
-- Track holders as a set (`"plan"`, `"user"`) so releasing one does not clear
-  the other.
-- Refuse to start `/plan` if the policy component does not acknowledge the
-  request (fail closed), instead of warning and continuing.
-- plan keeps `narrowTools()` for the model-facing tool list and also hides
+- plan keeps `narrowTools()` (hides write/edit) and now also hides
   `host_bash`.
-- Resolutions of the handoff's open decisions under this design:
-  - Refused calls are **denied**, not asked. This is cheap because builds and
-    tests run in the throwaway overlay.
-  - `writeAllowPaths` targets are not writable in research.
-  - MCP: only an explicit read-only allowlist (the
-    `mcp__slack__*` / `mcp__atlassian__*` read rules in the user config).
-  - Subagents: children inherit research mode.
+- Research is also reachable directly through the cycle.
 
-### Subagents
+## Subagents
 
-- Children inherit the profile and holders through an environment variable
-  read by the child's policy component. They cannot loosen it.
-- Escapes always deny in headless runs. Delete `nonInteractiveAsk`.
-- Sandboxed work is free, so workers stay useful without prompts.
+- Children inherit the parent's profile through an environment variable read
+  by the child's guard. They cannot loosen it.
+- Any prompt in a headless run is denied, including host_bash.
+  `nonInteractiveAsk` is deleted.
+- Sandboxed work stays free, so workers remain useful.
+- **Deferred:** forwarding child prompts to the parent UI.
 - Reminder: children load the **installed** extensions from
   `~/.pi/agent/git/github.com/lucaspimentel/pi-extensions`, not the working
   tree. End-to-end testing needs commit, push, and `pi update`.
 
-### Architecture
+## Assumptions pending confirmation
 
-Proposal (pending question 12): merge pi-tool-permissions, the shared
-sandbox library, and the `bash` / `host_bash` / `python` / `node` tools into
-one `guard` extension that owns the policy. This removes the
-cross-extension event-bus races and the "permissions not loaded" fallbacks.
-plan stays a separate client and communicates over the bus with an
-acknowledgment handshake.
+1. **python/node in research** use the same throwaway overlay as `bash`,
+   lasting for the worker's lifetime, instead of today's read-only mount.
+2. **Unsandboxed python/node in yolo** keep the persistent worker and
+   protocol; only bwrap and seccomp are skipped.
+3. **pwsh on Windows** follows host_bash rules and profiles.
+4. **Auto mode's classifier** screens only host_bash, write/edit,
+   exfil-capable remote reads, and remote writes. Sandboxed calls skip it.
+5. **Degraded mode** keeps both tool names, with `bash` behaving exactly like
+   `host_bash`, and shows a persistent footer warning.
+6. **`NuGetAudit=false`** is set in the sandbox environment so offline
+   restores don't time out or fail builds that treat warnings as errors.
 
-## Open questions
+## Decision log (2026-10-02)
 
-Bracketed text is the current lean, not a decision.
+| Topic | Decision |
+|---|---|
+| Platform | Linux/WSL full; Windows and missing-bwrap Linux degraded |
+| Architecture | One guard extension; plan separate with ack handshake |
+| Escape shape | Separate `host_bash` tool |
+| Manual profile | Dropped |
+| Remote gating | By attacker-readable sink |
+| Workspace secrets | Mask list with per-project opt-out |
+| Instruction files | Protected; memory_write allowed and shown |
+| Ladder | research / default / auto / trusted / yolo |
+| yolo | 100% unrestricted, sandboxes off (bash, python, node) |
+| Research execution | Throwaway overlay |
+| Untracked-file loss | Accepted for v1 |
+| Sandbox unavailable | Degrade like Windows |
+| Degraded research | Read-only bash tier only |
+| Auto-routing | No |
+| Rule migration | Manual purge; `/guard migrate` lists suspected code runners |
+| pwsh | Windows only |
+| Subagents | Inherit profile; never escape; prompt forwarding deferred |
+| Config | New `guard.json` plus `/guard migrate` |
+| Caches | Read-only plus per-call overlay |
+| Research remote reads | Same as default (prompt for exfil-capable) |
+| Research entry | In the cycle; yolo also in the cycle |
+| Rollout | Build alongside, switch over at parity |
+| Network proxy | After switchover |
+| Plan vs cycle | Profile changes blocked while plan holds research |
+| After /plan | Restore pre-plan profile |
+| yolo entry | No confirmation |
+| Start profile | default, always |
 
-### Threat model
+## Implementation outline (build alongside, switch over)
 
-1. **Remote reads:** gate by "attacker-readable sink" (web_fetch per domain,
-   Slack posts) rather than prompting on every remote call? [Yes]
-2. **Secrets inside the workspace** (`.env*`, `*.pem`, `appsettings.*.json`
-   with keys): mask them in the sandbox (bind `/dev/null` over them) and deny
-   them to `read`? This costs false positives such as `.env.example`. [Mask a
-   well-known list, with per-project opt-out]
-3. **Instruction files** (`AGENTS.md`, `CLAUDE.md`, repo skills) and
-   `memory_write` can carry an injection into future sessions. Protect them,
-   or rely on diff review? [Protect repo instruction files; leave memory_write
-   allowed but show writes in the UI]
-4. **Protected paths in yolo:** still prompt? [Yes. Yolo means "don't ask
-   about the work", not "let the model rewrite its own guardrails"]
-
-### Profiles
-
-5. **Drop manual (prompt on every edit)?** Alternatives: keep it, or a
-   staging overlay where sandbox writes land in an overlay and an approved
-   diff is applied. The staging overlay is heavy: deletes, permissions, large
-   `obj/` trees. [Drop manual; staging overlay later, if ever]
-6. **Untracked-file loss** (a sandboxed `rm` of untracked, non-ignored files
-   is not git-reversible): accept, or snapshot before each sandboxed call?
-   [Accept for v1]
-7. **Research mode execution:** run builds and tests in the throwaway
-   overlay, or forbid execution beyond read-only commands? [Overlay]
-
-### Escapes
-
-8. **Separate `host_bash` tool or a `sandbox: false` parameter on `bash`?**
-   [Separate tool: plan can hide it, `Bash(...)` rules naturally apply only
-   to escapes, and the model reaches for `bash` by habit]
-9. **Auto-routing:** run a sandboxed `bash` call on the host silently when it
-   matches a host allow rule (e.g. `gh pr view *`)? [No: it brings back
-   string-match trust]
-10. **Allow-rule migration:** `Bash(...)` rules come to mean "may escape
-    without a prompt". Delete every rule for commands that run project code
-    (cargo/dotnet build/test, pytest, `npm run`)? Without a network proxy,
-    `dotnet restore` and `npm install` then prompt every time, and they run
-    project code on the host when approved. [Delete; make the registry proxy
-    the v2 priority]
-11. **Package caches in the sandbox:** read-only, or a throwaway overlay per
-    call? Never writable, because a poisoned package would later run
-    unsandboxed. [Overlay; needs testing with cargo and NuGet, which may need
-    to write lock files]
-
-### Architecture and platform
-
-12. **One `guard` extension, or coordination over the event bus?** [Merge;
-    plan fails closed without an acknowledgment]
-13. **pwsh on Linux:** sandbox it, or host-only escape tier? [Host-only]
-14. **Native Windows pi:** must any of this work there? bwrap is Linux-only.
-    [WSL/Linux only; Windows keeps today's prompting behavior]
-15. **Subagents:** may headless children ever perform host actions (git push,
-    gh)? [No; the parent does those]
-
-### Rollout
-
-16. Phases or a big-bang rewrite? [Phases; each one closes a real hole on its
-    own]
-
-## Proposed rollout (pending answers)
-
-1. **Shared sandbox library.** Extract the common parts of
-   `python/sandbox.ts` and `node/sandbox.ts` (bwrap args, read-root mounts,
-   mode-event handling, seccomp launcher) into `extensions/shared`. Add
-   protected-path read-only overmounts.
-   - Verify: python/node suites pass, and new tests show that writes to
-     `.git/hooks/x` and `.pi/x.json` fail in writable mode.
-2. **Policy component and profiles.** Replace the mode enum with profiles.
-   Add the research profile and holder tracking; integrate plan.ts with an
-   acknowledgment handshake and release on every exit path.
-   - Verify: decide-level tests (research refuses `sed -i`, `git commit`,
-     write/edit, python/node writes, and broad-allow-rule matches; explicit
-     deny still wins), holder tests, session-reset tests, and python/node
-     staying read-only under research even when the profile would otherwise
-     be writable.
-3. **Sandboxed `bash` and `host_bash`.**
-   - Verify, escape tests: read `~/.ssh`, write `.git/hooks`, `curl`,
-     environment leak, `.exe` via WSL interop, TIOCSTI.
-   - Verify, happy path: offline `cargo test` and `dotnet test`.
-4. **Config purge.** Remove project-code-executing allow rules; delete
-   `nonInteractiveAsk`.
-5. **Package-registry network proxy** for the sandbox.
-6. **Optional:** staging overlay for reviewed writes.
+1. **Shared sandbox library** in guard: bwrap args, overlay launcher, read
+   roots, protected-path and secret overmounts, environment allowlist,
+   seccomp launcher.
+   - Verify: escape tests (read `~/.ssh`, write `.git/hooks` and `.pi/x.json`,
+     `curl`, environment leak, `.exe` via WSL interop, TIOCSTI) and a happy
+     path (offline `cargo test`, `dotnet test`).
+2. **Policy core:** profiles, decision function, `guard.json` loading,
+   `/guard migrate`, cycle and footer status, degraded mode.
+   - Verify: decision-level tests for every profile and tool-class cell in the
+     profile table; migration round trip.
+3. **Tools:** sandboxed `bash`, `host_bash`, and python/node ported onto the
+   shared library.
+   - Verify: python/node suites pass on the shared library; research overlay
+     discards writes; yolo runs unsandboxed.
+4. **plan.ts integration:** research request with acknowledgment, lock while
+   held, restore on every exit path.
+   - Verify: each exit path (accept, clear-context, revise then stop,
+     `/plan cancel`, resume mid-plan) restores the pre-plan profile.
+5. **Subagent inheritance** through an environment variable; headless prompts
+   deny.
+6. **Switchover:** load guard by default, unload pi-tool-permissions, python,
+   and node; remove pwsh on Linux.
+7. **Later:** package-registry network proxy; prompt forwarding for
+   subagents.
 
 Test commands today: `node extensions/pi-tool-permissions/run-all.mjs`,
 `npm run test:python`, and the node equivalents under `tests/`.
