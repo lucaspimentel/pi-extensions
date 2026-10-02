@@ -61,9 +61,10 @@ try {
 		.trim();
 } catch { /* keep default */ }
 
-// Two assistant messages from the same model; the last reports a different
-// responseModel (router/gateway alias) so the routed-model arrow is exercised.
-const ROUTER_BRANCH = [
+// Two assistant messages from the same model; the responseModel only reformats
+// the requested id (org prefix added), so under the default dedupe mode the
+// routed-model arrow is hidden. Also drives the switched-model case.
+const ALIAS_BRANCH = [
 	{
 		type: "message",
 		message: {
@@ -84,6 +85,34 @@ const ROUTER_BRANCH = [
 	},
 ];
 
+// A router that genuinely picks a different model: the served id is not a
+// reformatted form of the requested one.
+const GENUINE_ROUTE_BRANCH = [
+	{
+		type: "message",
+		message: {
+			role: "assistant",
+			model: "openrouter/auto",
+			responseModel: "anthropic/claude-sonnet-4",
+			usage: { input: 1000, output: 500, cost: { total: 0.01 } },
+		},
+	},
+];
+
+// Gateway alias matching the real-world Baseten case: same model, provider
+// echoes its own canonical id format.
+const GLM_ALIAS_BRANCH = [
+	{
+		type: "message",
+		message: {
+			role: "assistant",
+			model: "zai-org/GLM-5.3-Flash",
+			responseModel: "glm-5.3-flash",
+			usage: { input: 1000, output: 500, cost: { total: 0.01 } },
+		},
+	},
+];
+
 interface CaseResult {
 	footer: { render(width: number): string[]; dispose?(): void };
 	rendered: string[];
@@ -100,7 +129,7 @@ async function makeCase(options: {
 	agentDir?: string;
 	ctxPercent?: number;
 }): Promise<CaseResult> {
-	const { config, branch = ROUTER_BRANCH, model, ctxPercent = 24 } = options;
+	const { config, branch = ALIAS_BRANCH, model, ctxPercent = 24 } = options;
 
 	let agentDir = options.agentDir;
 	let createdDir: string | undefined;
@@ -329,11 +358,66 @@ async function main() {
 		cleanup();
 	}
 
-	// ── Non-virtual router: responseModel arrow, no last-turn segment ─────────
+	// ── Non-virtual alias, default mode: redundant arrow is hidden ─────────────
 	{
 		const { rendered, cleanup } = await makeCase({});
-		test("router: shows the routed model after an arrow", rendered.includes("→ anthropic/claude-sonnet-4"), rendered);
-		test("router: no last-turn segment (same model)", !rendered.includes("last turn:"), rendered);
+		test("dedupe default: hides the alias arrow", !rendered.includes("→"), rendered);
+		test("dedupe default: no last-turn segment (same model)", !rendered.includes("last turn:"), rendered);
+		cleanup();
+	}
+
+	// ── Real-world gateway alias: zai-org/GLM-5.3-Flash vs glm-5.3-flash ──────
+	{
+		const { rendered, cleanup } = await makeCase({
+			branch: GLM_ALIAS_BRANCH,
+			model: { id: "zai-org/GLM-5.3-Flash", name: "GLM 5.3 Flash", reasoning: true },
+		});
+		test("glm alias: display name still renders", rendered.includes("GLM 5.3 Flash"), rendered);
+		test("glm alias: no arrow", !rendered.includes("→"), rendered);
+		cleanup();
+	}
+
+	// ── Non-virtual genuine router: responseModel arrow, no last-turn segment ─
+	{
+		const { rendered, cleanup } = await makeCase({
+			branch: GENUINE_ROUTE_BRANCH,
+			model: { id: "openrouter/auto", name: "OpenRouter Auto", reasoning: true },
+		});
+		test("genuine router: shows the routed model after an arrow", rendered.includes("→ anthropic/claude-sonnet-4"), rendered);
+		test("genuine router: no last-turn segment (same model)", !rendered.includes("last turn:"), rendered);
+		cleanup();
+	}
+
+	// ── routedModel: "always" restores the arrow for aliases ──────────────────
+	{
+		const { rendered, notifications, cleanup } = await makeCase({ config: { routedModel: "always" } });
+		test("always: shows the alias arrow", rendered.includes("→ anthropic/claude-sonnet-4"), rendered);
+		test("always: no warnings", notifications.length === 0, JSON.stringify(notifications));
+		cleanup();
+	}
+
+	// ── routedModel: "never" hides even genuine routings, keeps last turn ─────
+	{
+		const hidden = await makeCase({
+			config: { routedModel: "never" },
+			branch: GENUINE_ROUTE_BRANCH,
+			model: { id: "openrouter/auto", name: "OpenRouter Auto", reasoning: true },
+		});
+		test("never: hides the genuine routing arrow", !hidden.rendered.includes("→"), hidden.rendered);
+		hidden.cleanup();
+		const switched = await makeCase({
+			config: { routedModel: "never" },
+			model: { id: "claude-opus-5", name: "Claude Opus 5", reasoning: true },
+		});
+		test("never: last-turn segment still shows after a model switch", switched.rendered.includes("last turn: anthropic/claude-sonnet-4"), switched.rendered);
+		switched.cleanup();
+	}
+
+	// ── routedModel: invalid value warns and falls back to dedupe ─────────────
+	{
+		const { rendered, notifications, cleanup } = await makeCase({ config: { routedModel: "sometimes" } });
+		test("invalid routedModel: falls back to dedupe (arrow hidden)", !rendered.includes("→"), rendered);
+		test("invalid routedModel: warning fires", notifications.some((n) => n.level === "warning" && n.msg.includes("routedModel")), JSON.stringify(notifications));
 		cleanup();
 	}
 

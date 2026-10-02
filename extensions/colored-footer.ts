@@ -12,6 +12,12 @@
  * colors can be set per role (cwd, branch, model, ctxOk, ctxWarn, ctxError);
  * roles without an override fall back to their theme token. The previous
  * hardcoded Campbell scheme is preserved as a config file example below.
+ *
+ * Routed model: when the provider reports the id it actually served and it
+ * differs from the configured model only in formatting (case, org prefix,
+ * separators), the footer shows a single name. The top-level "routedModel"
+ * key in colored-footer.json controls this: "dedupe" (default), "always",
+ * or "never".
  */
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -50,7 +56,14 @@ const CAMPBELL_EXAMPLE = `{
 	}
 }`;
 
-function readPaletteConfig(notify: (msg: string) => void): Partial<Record<ColorRole, string>> {
+type RoutedModelMode = "dedupe" | "always" | "never";
+const ROUTED_MODEL_MODES: readonly RoutedModelMode[] = ["dedupe", "always", "never"];
+
+// Parsed once per session start: the color palette and the routedModel mode.
+function readFooterConfig(notify: (msg: string) => void): {
+	palette: Partial<Record<ColorRole, string>>;
+	routedModel: RoutedModelMode;
+} {
 	let raw: string;
 	try {
 		raw = readFileSync(join(getAgentDir(), CONFIG_FILE), "utf8");
@@ -58,15 +71,19 @@ function readPaletteConfig(notify: (msg: string) => void): Partial<Record<ColorR
 		if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
 			notify(`colored-footer: could not read ${CONFIG_FILE}; using theme colors`);
 		}
-		return {};
+		return { palette: {}, routedModel: "dedupe" };
 	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
 	} catch {
 		notify(`colored-footer: ${CONFIG_FILE} is not valid JSON; using theme colors. Example: ${CAMPBELL_EXAMPLE}`);
-		return {};
+		return { palette: {}, routedModel: "dedupe" };
 	}
+	return { palette: readPalette(parsed, notify), routedModel: readRoutedModelMode(parsed, notify) };
+}
+
+function readPalette(parsed: unknown, notify: (msg: string) => void): Partial<Record<ColorRole, string>> {
 	const colors = (parsed as { colors?: unknown } | null)?.colors;
 	if (colors === undefined || colors === "theme") return {};
 	if (typeof colors !== "object" || colors === null || Array.isArray(colors)) {
@@ -91,6 +108,16 @@ function readPaletteConfig(notify: (msg: string) => void): Partial<Record<ColorR
 	return palette;
 }
 
+function readRoutedModelMode(parsed: unknown, notify: (msg: string) => void): RoutedModelMode {
+	const value = (parsed as { routedModel?: unknown } | null)?.routedModel;
+	if (value === undefined) return "dedupe";
+	if (typeof value === "string" && (ROUTED_MODEL_MODES as readonly string[]).includes(value)) {
+		return value as RoutedModelMode;
+	}
+	notify(`colored-footer: "routedModel" in ${CONFIG_FILE} must be one of "dedupe", "always", "never"; using "dedupe"`);
+	return "dedupe";
+}
+
 // ── Nerd Font icons ─────────────────────────────────────────────────────────────
 const ICON_FOLDER   = "\uF07C";  // nf-fa-folder_open
 const ICON_BRANCH   = "\uE725";  // nf-dev-git_branch
@@ -111,6 +138,14 @@ function formatTokens(n: number): string {
 
 function sanitize(text: string): string {
 	return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+}
+
+// Providers echo model ids back in their own canonical form ("zai-org/GLM-5.3-Flash"
+// vs "glm-5.3-flash"): case, org prefix, and separators vary. Compare the stripped
+// forms so an alias of the configured model is not displayed as a routing.
+function isSameModelAlias(a: string, b: string): boolean {
+	const norm = (id: string) => id.toLowerCase().replace(/^.*\//, "").replace(/[^a-z0-9]/g, "");
+	return norm(a) === norm(b);
 }
 
 function renderLineWithRightItem(left: string, right: string, width: number, edgePadding = 2): string {
@@ -179,9 +214,12 @@ export default function (pi: ExtensionAPI) {
 	// Config read once at registration; the palette (possibly empty = theme mode)
 	// is captured by the footer factory below.
 	let palette: Partial<Record<ColorRole, string>> = {};
+	let routedModelMode: RoutedModelMode = "dedupe";
 
 	pi.on("session_start", (_event, ctx) => {
-		palette = readPaletteConfig((msg) => ctx.ui.notify?.(msg, "warning"));
+		const config = readFooterConfig((msg) => ctx.ui.notify?.(msg, "warning"));
+		palette = config.palette;
+		routedModelMode = config.routedModel;
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			let lastLookedUpBranch: string | undefined;
 
@@ -325,9 +363,13 @@ export default function (pi: ExtensionAPI) {
 								const lvl = (pi as any).getThinkingLevel?.() ?? "off";
 								modelLabel += ` \u2022 ${lvl} effort`;
 							}
-							if (routedModel && lastRequestedModel === model.id) {
-								// Last turn used the current model and the provider reported a different
-								// underlying model id (router like openrouter/auto, or a gateway alias).
+							if (routedModel && lastRequestedModel === model.id && routedModelMode !== "never"
+								&& (routedModelMode === "always" || !isSameModelAlias(model.id, routedModel))) {
+								// Last turn used the current model and the provider reported the model id
+								// it actually served. "always" shows every served id; "dedupe" (default)
+								// hides ids that merely reformat the configured id (case, org prefix,
+								// separators); "never" shows none. The dim "last turn" segment below is
+								// unaffected by this setting.
 								modelLabel += ` \u2192 ${routedModel}`;
 							}
 						}
