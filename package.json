@@ -15,6 +15,7 @@
       "./extensions/llm-session-name.ts",
       "./extensions/plan.ts",
       "./extensions/stash.ts",
+      "./extensions/update-extensions.ts",
       "./extensions/web",
       "./extensions/pi-tool-permissions",
       "./extensions/wt-tab-status",
