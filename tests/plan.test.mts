@@ -112,6 +112,10 @@ async function main() {
 		assert.equal(h.sent.length, 1);
 		assert.ok(h.sent[0].includes("handoff prompt"));
 		assert.ok(h.sent[0].includes("do a thing"));
+		assert.ok(
+			h.sent[0].includes("no surrounding code fence"),
+			"handoff requirements must forbid a wrapping code fence",
+		);
 
 		// /plan cancel restores the previous tool set without sending a new prompt.
 		await h.commands["plan"].handler("cancel", h.ctx);

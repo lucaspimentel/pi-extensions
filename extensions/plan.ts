@@ -58,6 +58,8 @@ const PLAN_HANDOFF_REQUIREMENTS = `
 - Your entire final message will be copied verbatim and used as the handoff,
   so it must contain the handoff prompt and nothing else: no meta commentary,
   no "here is the plan" preamble.
+- Output the handoff as raw Markdown with no surrounding code fence; the
+  first line of your reply must be the handoff's own first heading or line.
 `.trim();
 
 const PLAN_CLARIFY_REQUIREMENTS = `
