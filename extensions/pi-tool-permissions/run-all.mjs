@@ -20,6 +20,7 @@ const suites = [
 	"test-rules-and-decide.mjs",
 	"test-loadconfig.mjs",
 	"test-ask-lock.mjs",
+	"test-ask-overlay.mjs",
 ];
 
 const BAR = "═".repeat(60);

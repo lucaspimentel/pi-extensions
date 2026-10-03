@@ -1,5 +1,10 @@
 # TODO
 
+- [x] Add ctrl+] hide/show toggle for large ask prompts (2026-10-03)
+  - The three large ask dialogs (single tool call, compound Bash per-subcommand, python out-of-sandbox read) now render as centered overlays via `ctx.ui.custom` instead of replacing the editor, and **ctrl+]** temporarily hides the overlay (same key reopens it). A raw `ctx.ui.onTerminalInput` listener toggles visibility because pi-tui does not deliver input to a hidden overlay's `handleInput`; the listener only acts when the overlay is focused or hidden and consumes the key so pi's default ctrl+] editor binding (jump forward) never fires while the dialog is up.
+  - Non-TUI modes (rpc, print, json) and hosts without the raw input hook fall back to plain `ctx.ui.select`; small pickers (permission mode, classifier model) are unchanged. Dispose/finally cleanup is preserved, so tool-call cancellation and the existing catch/fallbacks behave as before.
+  - Implemented in the new dependency-injected `ask-overlay.ts` (wired up in `index.ts`), covered by `test-ask-overlay.mjs` (registered in `run-all.mjs`), documented in the README "Interactive prompt" section.
+
 - [x] Enable duckdb/mlr readonly bash validators by default with a `"none"` opt-out (2026-09-23)
   - `bashValidators` no longer defaults to an empty map: `duckdb -> readonly-duckdb` and `mlr -> readonly-mlr` are enabled without any user/project config, so read-only SQL/DSL data analysis never prompts out of the box.
   - New sentinel value `"none"` (lowercase, compared case-sensitively) disables a mapping for that command, including the built-in defaults: `{ "bashValidators": { "duckdb": "none" } }` restores normal prompting for duckdb while keeping mlr default-on.

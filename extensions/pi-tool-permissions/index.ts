@@ -425,8 +425,15 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	ExtensionSelectorComponent,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
+import { createAskSelect } from "./ask-overlay.ts";
 import { modelLabel, pickableModels } from "../shared/model-selection.ts";
 import {
 	PROJECT_CONFIG_REL,
@@ -468,6 +475,9 @@ import type { ClassifyResult, DefaultAction, ListAction, PermissionMode, Resolve
 const STATUS_KEY = "tool-permissions";
 /** Shared bus channel announcing the session permission mode; consumed by the sandboxed extensions (python, node). */
 const MODE_EVENT_CHANNEL = "tool-permissions:mode";
+
+/** Large ask dialogs (tool call, compound Bash, python read) rendered as a ctrl+] hide/show overlay. */
+const askSelect = createAskSelect({ ExtensionSelectorComponent, matchesKey, isKeyRelease, isKeyRepeat });
 
 type Scope = "project" | "user";
 
@@ -778,7 +788,7 @@ export default function (pi: ExtensionAPI) {
 				// allow-once), then Deny once. No mode switches or save-rule options: the
 				// saved rules gate tool_call decisions, which python's internal reads
 				// bypass, so neither could affect this prompt.
-				const choice = await ctx.ui.select(title, [
+				const choice = await askSelect(ctx, title, [
 					"Allow once",
 					`Allow reads from ${root} (this session)`,
 					`Allow reads from ${root} (project: ${projectPath})`,
@@ -1232,7 +1242,7 @@ export default function (pi: ExtensionAPI) {
 								reason: `tool-permissions: '${event.toolName}' subcommand requires confirmation but no UI is available`,
 							};
 						}
-						const choice = await ctx.ui.select(title, choices);
+						const choice = await askSelect(ctx, title, choices);
 
 						if (choice === "Allow once") continue;
 
@@ -1355,7 +1365,7 @@ export default function (pi: ExtensionAPI) {
 					  ]
 					: ["Allow once", ...escalationLabels, ...sandboxEscalationSwitch, "Allow always (project)", "Allow always (user)", "Deny once", "Deny always (project)", "Deny always (user)", ...autoSwitch, ...yoloSwitch];
 
-				const choice = await ctx.ui.select(title, choices);
+				const choice = await askSelect(ctx, title, choices);
 
 				if (choice === "Allow once") return undefined;
 

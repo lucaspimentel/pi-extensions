@@ -635,6 +635,10 @@ Suggested rule: Bash(rm*)
     Deny always (user)
 ```
 
+### Hiding a large prompt (ctrl+])
+
+The three large ask prompts (single tool call, per-subcommand compound Bash, python out-of-sandbox read) render as a centered overlay and can be temporarily hidden with **ctrl+]** to read the conversation underneath; pressing **ctrl+]** again brings the prompt back with its selection and cursor state intact. The pending decision stays open while hidden: a one-time info notice reminds you of the key on the first hide, and Esc still cancels. Small pickers (permission mode, classifier model) are regular select dialogs without the toggle.
+
 ### Read-root escalation options
 
 When an ask is caused by read-root containment (a path outside cwd and every configured read root), the dialog injects one-click grants right after "Allow once". Two kinds, mutually exclusive per dialog (scratch wins if both would apply):
