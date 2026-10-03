@@ -146,7 +146,10 @@ export function createAskSelect(deps: AskOverlayDeps) {
 				},
 				{
 					overlay: true,
-					overlayOptions: { anchor: "center", width: "80%", maxHeight: "80%" },
+					// Full-width, anchored to the bottom like rpiv-ask-user-question's
+					// questionnaire: the dialog reads as a continuation of the chat
+					// above it rather than a floating modal.
+					overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: { left: 0, right: 0, bottom: 0 } },
 					onHandle: (h) => {
 						handle = h;
 					},
