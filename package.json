@@ -33,7 +33,8 @@
   },
   "scripts": {
     "test:python": "node --test tests/python-unit.test.mts tests/python-integration.test.mts",
-    "test:node": "node --test tests/node-unit.test.mts tests/node-integration.test.mts"
+    "test:node": "node --test tests/node-unit.test.mts tests/node-integration.test.mts",
+    "test:guard": "node --test tests/guard-sandbox-unit.test.mts tests/guard-sandbox-integration.test.mts"
   },
   "dependencies": {
     "html-to-text": "^10.0.1"

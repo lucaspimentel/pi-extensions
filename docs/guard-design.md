@@ -1,7 +1,8 @@
 # Guard: sandbox-first permission redesign
 
 Status: **design settled (2026-10-02 grilling sessions, including step 0:
-assumptions confirmed); not implemented.**
+assumptions confirmed); step 1 (shared sandbox library) implemented in
+`extensions/guard/sandbox/`, not yet loaded by pi; steps 2+ not implemented.**
 
 Scope: a new `guard` extension that replaces `extensions/pi-tool-permissions/`,
 `extensions/python/`, and `extensions/node/`, plus changes to
@@ -370,6 +371,17 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 | Launcher unavailable | Reduced sandbox (bwrap only, no seccomp or overlays, read-only fallback) |
 | Launcher cache | `~/.cache/pi-guard/<arch>-<hash>/`, 0700, verified; prune siblings older than 7 days after compile |
 | Rlimits | Per tool: python/node keep today's; bash core 0 only |
+| Sandbox paths (step 1) | 1:1 with host paths for every tool (workspace, read roots, toolchains, caches); python/node move off /workspace in step 3 |
+| .git protection (step 1) | The entire top-level .git is read-only; git writes go through host_bash |
+| Protected-path gap (step 1) | Top-level and nested binds plus a post-call audit: created/replaced/missing detection, quarantine (never deleted), lockWrites |
+| Mask discovery (step 1) | Every launch, one scan for masks and nested protected entries: fd with a find fallback, pruned build dirs and .git contents, 5 s timeout and a 500-match cap that fail the launch |
+| Toolchain credentials (step 1) | /dev/null over ~/.cargo/credentials(.toml); a sanitized NuGet.Config copy (packageSourceCredentials and apikeys removed) over the original |
+| Userns blocking (step 1) | bwrap --disable-userns with --unshare-user, not seccomp |
+| Mask scope (step 1) | Workspace only; granted read roots are not scanned (cost); documented limitation |
+| Mask exceptions (step 1) | .env.example, .env.sample, .env.template by default; guard.json per-project overrides arrive in step 2 |
+| Mask mechanism (step 1) | /dev/null via --dev-bind: a device bind made with --ro-bind inside the user namespace is nodev-enforced and reads fail with EACCES |
+| Project nuget.config (step 1) | Workspace-level nuget.config files are left alone (masking would break restore); listed in the threat model |
+| Scan failure (step 1) | Scan timeout or cap fails the launch with an actionable diagnostic; never launches unmasked |
 
 ## Implementation outline (build alongside, switch over)
 

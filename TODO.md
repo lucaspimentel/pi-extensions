@@ -8,7 +8,8 @@ Design: [`docs/guard-design.md`](docs/guard-design.md) (settled 2026-10-02, assu
 
 - [x] 0. Confirm the six assumptions at the end of the design doc (2026-10-02)
   - Done: all six confirmed and folded into the doc body; two new decisions added (read-only tier and validators also apply to host_bash, with a tightened host tier: no env/printenv, `$` expansion and secret-mask file args veto).
-- [ ] 1. Shared sandbox library (bwrap args, overlay launcher, read roots, protected-path and secret overmounts, environment allowlist, seccomp launcher); escape tests plus an offline cargo/dotnet happy path
+- [x] 1. Shared sandbox library (bwrap args, overlay launcher, read roots, protected-path and secret overmounts, environment allowlist, seccomp launcher); escape tests plus an offline cargo/dotnet happy path
+  - Done (2026-10-05): `extensions/guard/sandbox/` (spec, launcher.c/.ts, detect, scan, bwrap, audit, nuget, run) with two-mode C launcher (overlays outside bwrap, seccomp + rlimits inside), full/reduced/degraded detection, per-launch discovery scan (fd with find fallback), post-call audit with quarantine, NuGet.Config sanitizer. Unit + integration suites via `npm run test:guard`; escape tests (env, network, userns, ptrace, tty, WSL interop) and offline cargo/dotnet happy paths pass in full mode. Step-1 decisions recorded in the design doc's decision log.
 - [ ] 2. Policy core: profiles (research/default/auto/trusted/yolo), decision function, `guard.json`, `/guard migrate`, cycle + footer status, degraded mode
 - [ ] 3. Tools: sandboxed `bash`, `host_bash`, python/node ported onto the shared library
 - [ ] 4. plan.ts integration: research request with acknowledgment, lock while held, restore on every exit path
