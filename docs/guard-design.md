@@ -1,7 +1,7 @@
 # Guard: sandbox-first permission redesign
 
-Status: **design settled (2026-10-02 grilling session); not implemented.**
-Six assumptions at the end still need explicit confirmation before coding.
+Status: **design settled (2026-10-02 grilling sessions, including step 0:
+assumptions confirmed); not implemented.**
 
 Scope: a new `guard` extension that replaces `extensions/pi-tool-permissions/`,
 `extensions/python/`, and `extensions/node/`, plus changes to
@@ -86,11 +86,16 @@ Holes, verified 2026-10-02:
 - **Linux/WSL:** the full design.
 - **Degraded mode:** native Windows, or Linux where bwrap or user namespaces
   are missing.
-  - `bash` runs on the host under host_bash rules and prompts.
+  - `bash` and `host_bash` are both registered and identical host executors
+    (HostBash rules, the read-only tier and validators). A persistent
+    "no sandbox" footer warning is shown.
   - python/node are unavailable.
   - In research, `bash` runs only commands the string-based read-only tier
     and validators prove read-only; everything else is denied.
-- **pwsh:** registered on Windows only (removed on Linux).
+- **pwsh:** registered on Windows only (removed on Linux). It is a host-tier
+  tool exactly like host_bash (hidden in research, rule-or-prompt in default,
+  classifier in auto, allowed in trusted/yolo) with its own `Pwsh(...)` rules.
+  pwsh has no read-only tier today, so none carries over.
 
 ## Architecture
 
@@ -121,9 +126,29 @@ Holes, verified 2026-10-02:
 | Tool | Behavior |
 |---|---|
 | `bash` | Always sandboxed, except in yolo. Built with `createBashTool()` plus bwrap-spawning `BashOperations`. One process per call, no persistent shell. |
-| `host_bash` | The only escape from the sandbox. Only `HostBash(...)` rules apply to it. |
-| `python`, `node` | Persistent sandboxed interpreters (existing design), moved into guard. Unsandboxed in yolo. |
-| `pwsh` | Windows only. |
+| `host_bash` | The only escape from the sandbox. `HostBash(...)` rules plus the tightened host read-only tier (below) apply to it. |
+| `python`, `node` | Persistent sandboxed interpreters (existing design), moved into guard. In research: one throwaway overlay per worker lifetime. In yolo: fully raw (see below). |
+| `pwsh` | Windows only; host tier, like host_bash. |
+
+- **Read-only tier on both shells:** the read-only command tier, the
+  validators (duckdb/mlr/find/awk), and the redirect checks apply to sandboxed
+  `bash` **and** to `host_bash`; provably read-only host commands auto-allow.
+  The tier has no network commands, and path-taking commands are already
+  restricted to cwd and read roots.
+- **Tightened host tier** (host_bash only; these cases prompt instead):
+  - `env` and `printenv` are removed from the tier (the host environment
+    holds tokens; the sandbox environment is scrubbed);
+  - any `$` expansion vetoes auto-allow (`echo $GITHUB_TOKEN`);
+  - file arguments matching the secret-mask patterns veto auto-allow
+    (`cat .env`).
+
+  Sandboxed `bash` keeps the full tier.
+- **python/node in yolo** are fully raw: the persistent worker and protocol
+  stay (state, results, replay semantics), but there is no bwrap, no seccomp,
+  no rlimits, the full environment, and the full filesystem.
+- **Profile switches** that flip a python/node worker's sandbox state (into
+  or out of yolo or research) restart the worker with state loss and a
+  notification, the same mechanism as today's remount.
 
 - **No auto-routing:** a sandboxed `bash` call never runs on the host because
   it matches a rule.
@@ -140,13 +165,17 @@ with no confirmation when entering yolo.
 
 | | research | default | auto | trusted | yolo |
 |---|---|---|---|---|---|
-| Sandboxed workspace | throwaway overlay per call | read-write, protected paths read-only | same as default | same as default | **no sandbox** for bash, python, or node |
+| Sandboxed workspace | throwaway overlay (per call for bash, per worker lifetime for python/node) | read-write, protected paths read-only | same as default | same as default | **no sandbox** for bash, python, or node |
 | host_bash | hidden or denied | prompt unless rule-allowed | classifier | allowed | allowed |
 | write/edit | deny | allowed in write roots | classifier | allowed | allowed |
 | Protected paths | deny | prompt | prompt | prompt | allowed |
 | Exfil-capable remote reads (web_fetch outside the allowlist) | prompt | prompt | classifier | allowed | allowed |
 | Other remote reads (web_search, pup, Jira/Slack reads) | allowed | allowed | allowed | allowed | allowed |
 | Remote writes (Slack posts, MCP writes, pup writes) | deny | prompt | classifier | allowed | allowed |
+
+**Auto mode's classifier** screens only host_bash, pwsh, write/edit,
+exfil-capable remote reads, and remote writes. Every sandboxed call skips it;
+this retires today's "writable + classified" screening of python/node.
 
 Exfiltration needs a sink the attacker can read:
 
@@ -180,8 +209,15 @@ For every profile except yolo:
   loopback (MSBuild node reuse, test runners), and the network namespace
   already isolates abstract sockets. TIOCSTI is covered by bwrap
   `--new-session`.
+- **NuGet audit:** `NuGetAudit=false` is set in every sandbox environment
+  (MSBuild reads environment variables as properties), so offline restores
+  neither stall on the audit fetch nor fail builds that treat the `NU1900`
+  warning as an error. Guard's README documents that vulnerability auditing
+  is off inside the sandbox.
 - **Overlay mechanics:** mount the overlay in an outer `unshare -rm` (or a
-  small C launcher like `seccomp-launch.c`) before bwrap.
+  small C launcher like `seccomp-launch.c`) before bwrap. Upper layers live
+  on disk under the session scratch area (not tmpfs) and are removed when the
+  overlay ends.
 - **WSL interop** needs an explicit escape test: running a `.exe` from inside
   the sandbox must fail (`WSL_INTEROP` cleared, `/run/WSL` not mounted).
 
@@ -248,20 +284,6 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
   `~/.pi/agent/git/github.com/lucaspimentel/pi-extensions`, not the working
   tree. End-to-end testing needs commit, push, and `pi update`.
 
-## Assumptions pending confirmation
-
-1. **python/node in research** use the same throwaway overlay as `bash`,
-   lasting for the worker's lifetime, instead of today's read-only mount.
-2. **Unsandboxed python/node in yolo** keep the persistent worker and
-   protocol; only bwrap and seccomp are skipped.
-3. **pwsh on Windows** follows host_bash rules and profiles.
-4. **Auto mode's classifier** screens only host_bash, write/edit,
-   exfil-capable remote reads, and remote writes. Sandboxed calls skip it.
-5. **Degraded mode** keeps both tool names, with `bash` behaving exactly like
-   `host_bash`, and shows a persistent footer warning.
-6. **`NuGetAudit=false`** is set in the sandbox environment so offline
-   restores don't time out or fail builds that treat warnings as errors.
-
 ## Decision log (2026-10-02)
 
 | Topic | Decision |
@@ -293,6 +315,13 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 | After /plan | Restore pre-plan profile |
 | yolo entry | No confirmation |
 | Start profile | default, always |
+| python/node research overlay (step 0) | One throwaway overlay per worker lifetime |
+| python/node in yolo (step 0) | Fully raw: worker kept; no bwrap, seccomp, rlimits; full env and filesystem |
+| pwsh on Windows (step 0) | Host tier like host_bash, own `Pwsh(...)` rules |
+| Auto classifier scope (step 0) | host_bash, pwsh, write/edit, exfil-capable remote reads, remote writes; sandboxed calls skip it |
+| Degraded tools (step 0) | Both names registered, identical host executors, footer warning |
+| NuGet audit (step 0) | `NuGetAudit=false` in sandboxes, documented |
+| Read-only tier on host_bash (step 0) | Applies, tightened: no env/printenv, `$` expansion and secret-mask file args veto |
 
 ## Implementation outline (build alongside, switch over)
 

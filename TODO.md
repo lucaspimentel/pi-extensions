@@ -4,9 +4,10 @@
 
 ## Guard (sandbox-first permissions redesign)
 
-Design: [`docs/guard-design.md`](docs/guard-design.md) (settled 2026-10-02; six assumptions pending confirmation there). Guard replaces pi-tool-permissions, python, and node, and takes over Linux pwsh removal. It is built alongside the old extensions and switched over at parity; no new feature work on the replaced extensions. Bug fixes in code guard keeps (sandbox library, plan.ts, tool plumbing) are still fine.
+Design: [`docs/guard-design.md`](docs/guard-design.md) (settled 2026-10-02, assumptions confirmed). Guard replaces pi-tool-permissions, python, and node, and takes over Linux pwsh removal. It is built alongside the old extensions and switched over at parity; no new feature work on the replaced extensions. Bug fixes in code guard keeps (sandbox library, plan.ts, tool plumbing) are still fine.
 
-- [ ] 0. Confirm the six assumptions at the end of the design doc
+- [x] 0. Confirm the six assumptions at the end of the design doc (2026-10-02)
+  - Done: all six confirmed and folded into the doc body; two new decisions added (read-only tier and validators also apply to host_bash, with a tightened host tier: no env/printenv, `$` expansion and secret-mask file args veto).
 - [ ] 1. Shared sandbox library (bwrap args, overlay launcher, read roots, protected-path and secret overmounts, environment allowlist, seccomp launcher); escape tests plus an offline cargo/dotnet happy path
 - [ ] 2. Policy core: profiles (research/default/auto/trusted/yolo), decision function, `guard.json`, `/guard migrate`, cycle + footer status, degraded mode
 - [ ] 3. Tools: sandboxed `bash`, `host_bash`, python/node ported onto the shared library
