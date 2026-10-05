@@ -19,6 +19,8 @@
   - Design doc: [`docs/permission-modes-design.md`](docs/permission-modes-design.md); auto-mode classifier internals remain in [`docs/auto-mode-design.md`](docs/auto-mode-design.md).
 
 - [ ] Evaluate switching multi-step Bash breakdown indicators to emoji
+
+  (Superseded by guard: the multi-step Bash breakdown rendering is re-created there.)
   - Follow-up to the breakdown marker-placement task. The current rendering uses ASCII-safe action glyphs (`[✓]` / `[✗]` / `[?]`) plus a leading `»` (U+00BB) for the active step — see `actionIcon` / `formatBreakdownLine` / `formatBreakdown` in `rules.ts` (re-exported via `test-helpers.mjs`).
   - Consider replacing the glyphs with emoji for readability: e.g. `✅` (allow), `❌` or `🚫` (deny), `❓` (ask), `👉` (current step). The `actionIcon` indirection was added specifically so this swap is local to that helper.
   - Investigate terminal/TUI compatibility first: emoji width is often reported as 1 cell but renders as 2, which can break the column-alignment invariant exercised by the `icon column aligned across current/non-current` test in `test-bash.mjs`. Check how pi's TUI (`ctx.ui.select` title block) handles wide characters and whether other extensions already emit emoji.
@@ -26,6 +28,8 @@
   - If proceeding: update `actionIcon` and the gutter logic in `rules.ts` (consumed via `test-helpers.mjs`), refresh the `formatBreakdown — rendering` tests in `test-bash.mjs` (icon assertions, alignment invariant), and consider a config flag (e.g. `breakdownEmoji?: boolean`) so users on emoji-hostile terminals can opt out. Document the flag in the header block, `README.md`, and `pi-tool-permissions.example.json`.
 
 - [ ] Add an interactive settings UI via `SettingsList` for the implicit-allow toggles
+
+  (Superseded by guard: guard owns its own config and its `/guard list` output replaces `/permissions list`.)
   - Pi doesn't expose a first-class "extension settings" API (see `docs/settings.md`, `docs/sdk.md`, `docs/extensions.md`) — each extension owns its own JSON config. pi-tool-permissions already does this via `~/.pi/agent/pi-tool-permissions.json` (user, with a legacy fallback at `~/.pi/tool-permissions.json`) and `<cwd>/.pi/pi-tool-permissions.json` (project, with a legacy fallback at `<cwd>/.pi/tool-permissions.json`). What's missing is an in-TUI editor; users currently have to hand-edit JSON or rely on `/permissions list`.
   - Add a new subcommand (e.g. `/permissions settings`) that opens `SettingsList` from `@earendil-works/pi-tui` with `getSettingsListTheme()` (see `docs/tui.md` Pattern 3 and `examples/extensions/tools.ts`). Expose the existing boolean knobs as toggleable rows:
     - `readAllowCwd`, `grepAllowCwd`, `globAllowCwd`, `lsAllowCwd`
