@@ -1,6 +1,7 @@
 /**
  * Colored footer extension for pi
  *
+ * Line 0 (blank):    spacer
  * Line 1 (colored):   cwd
  * Line 2 (colored):   branch [PR icon + number]
  * Line 3 (stats):     model • thinking   ↑10 ↓5.4k $0.285   ctx-icon X% context used        
@@ -393,7 +394,7 @@ export default function (pi: ExtensionAPI) {
 						line3Parts.push(paint(ctxRole, `${ctxIcon} ${Math.round(ctxPercentNum)}% context used`));
 					}
 
-					const lines = [truncateToWidth(line1Parts.join("  "), width)];
+					const lines = ["", truncateToWidth(line1Parts.join("  "), width)];
 					if (line2Parts.length > 0) {
 						lines.push(truncateToWidth(line2Parts.join("  "), width));
 					}
