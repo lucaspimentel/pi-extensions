@@ -67,6 +67,8 @@ export interface SelectorLike {
 }
 
 /** Host implementations injected by index.ts; stubbed by test-ask-overlay.mjs. */
+import type { TUI } from "@earendil-works/pi-tui";
+
 export interface AskOverlayDeps {
 	matchesKey(data: string, key: string): boolean;
 	isKeyRelease(data: string): boolean;
@@ -76,7 +78,7 @@ export interface AskOverlayDeps {
 		options: string[],
 		onSelect: (option: string) => void,
 		onCancel: () => void,
-		opts?: { tui?: unknown },
+		opts?: { tui?: TUI },
 	) => SelectorLike;
 }
 
@@ -125,7 +127,7 @@ export function createAskSelect(deps: AskOverlayDeps) {
 						choices,
 						(option) => done(option),
 						() => done(undefined),
-						{ tui },
+						{ tui: tui as TUI },
 					);
 					// Dim hint line under the bordered selector box.
 					const hint: OverlayComponent = {
