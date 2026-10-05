@@ -96,12 +96,24 @@ Holes, verified 2026-10-02:
   tool exactly like host_bash (hidden in research, rule-or-prompt in default,
   classifier in auto, allowed in trusted/yolo) with its own `Pwsh(...)` rules.
   pwsh has no read-only tier today, so none carries over.
+- **Runtime modes on Linux:**
+
+  | Mode | When | Behavior |
+  |---|---|---|
+  | Full sandbox | bwrap and the launcher are both available | As designed |
+  | Reduced sandbox | bwrap works but the launcher cannot be built (no C compiler or no `libseccomp.so.2`) | bwrap namespaces only: no seccomp, no overlays. The research workspace and the caches fall back to read-only. Footer shows `⚠ reduced sandbox`. |
+  | Degraded | no bwrap or no user namespaces (or native Windows) | As above: `bash` = `host_bash`, python/node unavailable |
 
 ## Architecture
 
 - One new **`guard`** extension owns the policy. It contains the permissions
-  logic (from pi-tool-permissions), the shared sandbox library (extracted from
-  python/node), and the `bash`, `host_bash`, `python`, and `node` tools.
+  logic (from pi-tool-permissions), the shared sandbox library, and the
+  `bash`, `host_bash`, `python`, and `node` tools.
+- **Sandbox library origin:** written fresh in `extensions/guard/`, copying
+  and adapting the logic python/node duplicate today (read-root filtering,
+  bwrap args, merged-`/usr` handling, interpreter binds including linuxbrew,
+  dependency checks). `python/` and `node/` stay untouched; their copies are
+  deleted at switchover.
 - **plan.ts stays separate.** It requests the research profile from guard
   over `pi.events` and refuses to start `/plan` without an acknowledgment.
 - **Rollout:** build guard alongside the old extensions (not loaded by
@@ -204,20 +216,49 @@ For every profile except yolo:
   `~/.nuget`, `~/.npm`): read-only lowerdir plus a throwaway overlay per call.
   Lock files and first-time crate extraction work; nothing persists, so a
   sandboxed command cannot poison a package that later runs on the host.
-- **Seccomp:** lighter than python/node's. Ban ptrace, bpf, new user
-  namespaces, and keyctl. Allow `socket`: build tools need Unix sockets and
-  loopback (MSBuild node reuse, test runners), and the network namespace
-  already isolates abstract sockets. TIOCSTI is covered by bwrap
+- **Seccomp:** one policy for bash, python, and node, lighter than today's
+  python/node policy. Ban ptrace, bpf, userfaultfd, perf_event_open,
+  process_vm_readv/writev, kexec_load/kexec_file_load, open_by_handle_at,
+  name_to_handle_at, new user namespaces, and keyctl. Allow `socket` and
+  `socketpair`: build tools need Unix sockets and loopback (MSBuild node
+  reuse, test runners), including builds launched from python/node
+  subprocesses, and the network namespace already isolates abstract sockets.
+  Accepted cost: a Unix socket inside a mounted directory (workspace or read
+  root) is connectable from all three tools. TIOCSTI is covered by bwrap
   `--new-session`.
+- **Resource limits** (set by the launcher, replacing the `prlimit` binary):
+  - python/node keep today's limits: RLIMIT_AS 512 MiB (python) / 2 GiB
+    (node), RLIMIT_FSIZE 16 MiB, RLIMIT_NOFILE 128, no core dumps.
+  - bash: no core dumps only. RLIMIT_AS breaks .NET and V8 startup (they
+    reserve large virtual address ranges), so there are no address-space,
+    file-size, or descriptor caps; timeouts remain the main runaway guard.
 - **NuGet audit:** `NuGetAudit=false` is set in every sandbox environment
   (MSBuild reads environment variables as properties), so offline restores
   neither stall on the audit fetch nor fail builds that treat the `NU1900`
   warning as an error. Guard's README documents that vulnerability auditing
   is off inside the sandbox.
-- **Overlay mechanics:** mount the overlay in an outer `unshare -rm` (or a
-  small C launcher like `seccomp-launch.c`) before bwrap. Upper layers live
-  on disk under the session scratch area (not tmpfs) and are removed when the
-  overlay ends.
+- **Launcher:** one compiled C binary (generalized from node's
+  `seccomp-launch.c`) with two modes. No shell anywhere; everything is argv.
+  - **Outer mode:** create user and mount namespaces, mount the overlays
+    (research workspace, cache layers), then exec bwrap (verified: stock bwrap
+    0.9.0 runs inside the nested user namespace).
+  - **Inner mode** (inside bwrap): install seccomp, set rlimits, then exec
+    the target: `bash -c`, the python worker, or the node worker. Replaces
+    python's in-worker ctypes seccomp install.
+  - Overlay upper layers live on disk under the session scratch area (not
+    tmpfs) and are removed when the overlay ends.
+- **Launcher build and cache:**
+  - compiled on demand with cc/gcc/clang against the runtime
+    `libseccomp.so.2` (no dev package; the ABI is declared by hand);
+  - cached at `~/.cache/pi-guard/<arch>-<sha256(source + flags)>/`
+    (`XDG_CACHE_HOME` honored), directory created 0700, ownership and mode
+    verified before exec (another user's or a group/world-writable directory
+    is refused);
+  - atomic compile (temp file + rename); recompiles only when the source or
+    flags change; the soname link means libseccomp upgrades need no rebuild;
+  - after a successful compile, sibling `<arch>-<hash>` directories older
+    than 7 days are pruned (younger ones may belong to a running session of
+    another guard version).
 - **WSL interop** needs an explicit escape test: running a `.exe` from inside
   the sandbox must fail (`WSL_INTEROP` cleared, `/run/WSL` not mounted).
 
@@ -322,15 +363,26 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 | Degraded tools (step 0) | Both names registered, identical host executors, footer warning |
 | NuGet audit (step 0) | `NuGetAudit=false` in sandboxes, documented |
 | Read-only tier on host_bash (step 0) | Applies, tightened: no env/printenv, `$` expansion and secret-mask file args veto |
+| Sandbox library origin | Fresh in guard, borrowing the duplicated python/node code; old extensions untouched |
+| Seccomp mechanism | One compiled C launcher for bash, python, and node; python's ctypes install dropped |
+| Overlay step | Launcher outer mode (no shell) |
+| Seccomp policy | One lighter policy for all three (socket allowed) |
+| Launcher unavailable | Reduced sandbox (bwrap only, no seccomp or overlays, read-only fallback) |
+| Launcher cache | `~/.cache/pi-guard/<arch>-<hash>/`, 0700, verified; prune siblings older than 7 days after compile |
+| Rlimits | Per tool: python/node keep today's; bash core 0 only |
 
 ## Implementation outline (build alongside, switch over)
 
-1. **Shared sandbox library** in guard: bwrap args, overlay launcher, read
-   roots, protected-path and secret overmounts, environment allowlist,
-   seccomp launcher.
+1. **Shared sandbox library** in guard: bwrap args, the two-mode C launcher
+   (overlays, seccomp, rlimits) and its cache, read roots, protected-path and
+   secret overmounts, environment allowlist, full/reduced mode detection.
    - Verify: escape tests (read `~/.ssh`, write `.git/hooks` and `.pi/x.json`,
-     `curl`, environment leak, `.exe` via WSL interop, TIOCSTI) and a happy
-     path (offline `cargo test`, `dotnet test`).
+     read a masked `.env`, `curl`, environment leak, `.exe` via WSL interop,
+     TIOCSTI); happy path (offline `cargo test`, `dotnet test`; a
+     research-overlay write leaves the workspace untouched; a cache-overlay
+     write does not persist); launcher tests (cache keying, the 0700 and
+     ownership check refusing a foreign or group/world-writable directory,
+     pruning, reduced vs full mode selection).
 2. **Policy core:** profiles, decision function, `guard.json` loading,
    `/guard migrate`, cycle and footer status, degraded mode.
    - Verify: decision-level tests for every profile and tool-class cell in the
