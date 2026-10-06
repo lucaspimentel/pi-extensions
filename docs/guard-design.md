@@ -3,8 +3,9 @@
 Status: **design settled (2026-10-02 grilling sessions, including step 0:
 assumptions confirmed); step 1 (shared sandbox library) implemented in
 `extensions/guard/sandbox/`; step 2 (policy core) implemented and
-observe-only in `extensions/guard/index.ts` + `policy/` (2026-10-06); steps
-3+ not implemented.**
+observe-only in `extensions/guard/index.ts` + `policy/` (2026-10-06); step 3
+(tools and enforcement) design settled (2026-10-06 grilling, see the
+decision log); steps 3+ not implemented.**
 
 Scope: a new `guard` extension that replaces `extensions/pi-tool-permissions/`,
 `extensions/python/`, and `extensions/node/`, plus changes to
@@ -129,6 +130,32 @@ Holes, verified 2026-10-02:
   with the enforcing extension on real sessions. pi-tool-permissions keeps
   enforcing until switchover; guard's own tools (step 3) are the first
   calls guard enforces.
+- **Step 3 coexistence contract (settled 2026-10-06):**
+  - guard enforces only its own four tools (`bash`, `host_bash`, `python`,
+    `node`); every other tool stays observe-only, except the secret-mask
+    `tool_result` filter on grep/ffgrep (filtering, not blocking).
+  - guard registers all four tools in step 3. guard is declared before the
+    `python`/`node` extensions in `pi.extensions` and pi's tool registry is
+    first-extension-wins, so guard's copies are authoritative and the old
+    extensions go dormant until the switchover deletes them. This also
+    closes the old sandboxes' unprotected `.git`/`.pi` writable-mount hole
+    at step 3 instead of switchover.
+  - pi's `tool_call` handlers run in load order: the first `block` wins,
+    otherwise the last non-null result wins. pi-tool-permissions (earlier)
+    keeps first shot; guard can block what it allows.
+  - pi-tool-permissions is silenced on `host_bash` by a bare
+    `"host_bash"` allow entry in `pi-tool-permissions.json`, added manually
+    (same shape as the existing bare `"python"` allow). No guard code
+    writes another extension's config; the guard README documents the
+    entry and `/guard migrate`'s report reminds when it is missing.
+  - The three Bash ask rules (`Bash(rm *)`, `Bash(git * push)`,
+    `Bash(git push *)`) stay until switchover: they keep prompting on
+    guard's sandboxed calls (rare noise) and remain meaningful in degraded
+    mode, where sandboxed bash is host exec.
+  - Known quirk, documented: pi-tool-permissions' SANDBOXED_TOOLS implicit
+    allow keeps auto-allowing guard's python/node, and its mode events
+    (ctrl+alt+p) no longer affect guard's python/node workspace; guard's
+    profile is the only source of truth for guard's tools.
 
 ## Config
 
@@ -195,6 +222,18 @@ Holes, verified 2026-10-02:
 - **Failure hints:** when a sandboxed command fails (network unreachable,
   EROFS on a protected or read-only path, path not mounted), the result adds a
   hint to use `host_bash` if host access is required.
+- **Ask dialogs (settled 2026-10-06):** every guard ask offers allow once,
+  allow and save the suggested rule (the step-2 `suggestRule` helpers:
+  `HostBash(...)` for host shells, `webFetchAllow` globs, `toolClasses` for
+  MCP reads), or deny. No mid-dialog profile switching. Local reads outside
+  the roots keep the session/project/user/deny grant shape, and grants are
+  mounted read-only into the sandboxes. Non-interactive contexts (print
+  mode, subagent children) deny prompts; sandboxed work stays free.
+- **Protected-path audit (settled 2026-10-06):** the step-1 post-call audit
+  is wired into sandboxed bash. An escaped protected-path write is
+  quarantined and notified; the tool result itself is not failed. It is
+  defense-in-depth telemetry (a mount gap to investigate), not a denial
+  path, because the read-only mounts normally prevent these writes.
 - Commands you type with `!` stay unsandboxed.
 
 ## Profiles
@@ -246,8 +285,12 @@ auto / trusted / yolo / unrestricted.
 - **Step-2 mask scope (path-level only):** the decision function sees only
   the call's path argument, so a grep or find over a directory that happens
   to contain a masked file is allowed; only direct reads of masked paths
-  are denied. Documented gap; step 3 adds a `tool_result` filter that drops
-  grep/ffgrep matches from masked files.
+  are denied. Documented gap; step 3 adds a `tool_result` filter (settled
+  2026-10-06): grep/ffgrep matches whose file path matches the mask
+  patterns (minus exceptions) are dropped and one summary line is appended
+  ("N matches in masked files omitted"); `structuredContent` is replaced
+  alongside `content`. Applies in every profile except yolo and
+  unrestricted. `read` and `find` stay path-level.
 
 ### Tool classification
 
@@ -485,6 +528,13 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 | memory_write (step 2) | No guard UI; pi's default tool-call rendering shows writes (supersedes "shown in the UI") |
 | Step-2 implementation (2026-10-06) | Policy core shipped observe-only: six profiles, decision function, classification, guard.json with toolClasses, /guard (list/reload/profile/migrate/ack/debug), ctrl+alt+g cycle, footer status, migrate (preview + confirm, idempotent union); tests in tests/guard-{policy,classes,migrate,harness}.test.mts |
 | Step-2 mask scope (2026-10-06) | Secret-mask read denial is path-level only in step 2; a directory grep that touches a masked file is allowed; step 3 adds a tool_result filter dropping matches from masked files |
+| Step-3 enforcement scope (2026-10-06) | guard enforces only its own four tools; other tools stay observe-only except the grep/ffgrep mask filter (filtering, not blocking) |
+| Step-3 registration (2026-10-06) | All four tools registered in step 3; guard wins the registry (declared first, first-extension-wins) and the old python/node extensions go dormant until switchover; closes the old sandboxes' .git/.pi hole early |
+| Step-3 host_bash silencing (2026-10-06) | Manual bare "host_bash" allow entry in pi-tool-permissions.json; README documents it, /guard migrate reminds when missing; guard never writes another extension's config |
+| Step-3 Bash ask rules (2026-10-06) | The three Bash ask rules (rm, git push) stay until switchover; they keep prompting on sandboxed calls and stay meaningful in degraded mode |
+| Step-3 dialogs (2026-10-06) | Allow once / allow and save the suggested rule / deny; no mid-dialog profile switching; local-read grants keep session/project/user/deny; headless prompts deny |
+| Step-3 mask filter (2026-10-06) | tool_result filter on grep/ffgrep: drop matches from masked paths, append a summary line, replace structuredContent too; every profile except yolo/unrestricted |
+| Step-3 audit response (2026-10-06) | Escaped protected-path writes are quarantined and notified; the tool result is not failed (defense-in-depth telemetry, not a denial path) |
 
 ## Implementation outline (build alongside, switch over)
 
@@ -514,9 +564,17 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
      second run is a no-op); `npm run test:guard` includes the policy
      suite; a live pi session loads guard without a shortcut conflict.
 3. **Tools:** sandboxed `bash`, `host_bash`, and python/node ported onto the
-   shared library.
+   shared library; registered in `pi.extensions` ahead of the old
+   python/node extensions, which go dormant; enforcement on for guard's
+   own tools plus the mask filter.
    - Verify: python/node suites pass on the shared library; research overlay
-     discards writes; yolo runs unsandboxed.
+     discards writes; yolo runs unsandboxed; escape tests (read `~/.ssh`,
+     write `.git/hooks`, read a masked `.env`, `curl`, environment leak)
+     fail inside the sandbox; mask filter drops grep/ffgrep matches and
+     notes the omission; ask dialogs offer allow/rule/deny and persist the
+     suggested rule; audit quarantines an injected protected-path write and
+     only warns; /guard migrate reminds when `host_bash` is not
+     allow-listed in pi-tool-permissions.
 4. **plan.ts integration:** research request with acknowledgment, lock while
    held, restore on every exit path.
    - Verify: each exit path (accept, clear-context, revise then stop,
