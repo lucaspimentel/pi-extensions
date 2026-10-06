@@ -2,7 +2,8 @@
 
 Status: **design settled (2026-10-02 grilling sessions, including step 0:
 assumptions confirmed); step 1 (shared sandbox library) implemented in
-`extensions/guard/sandbox/`, not yet loaded by pi; steps 2+ not implemented.**
+`extensions/guard/sandbox/`; step 2 (policy core) in progress and settled
+(2026-10-05 grilling); steps 3+ not implemented.**
 
 Scope: a new `guard` extension that replaces `extensions/pi-tool-permissions/`,
 `extensions/python/`, and `extensions/node/`, plus changes to
@@ -117,30 +118,55 @@ Holes, verified 2026-10-02:
   deleted at switchover.
 - **plan.ts stays separate.** It requests the research profile from guard
   over `pi.events` and refuses to start `/plan` without an acknowledgment.
-- **Rollout:** build guard alongside the old extensions (not loaded by
-  default) until it reaches parity, then switch over. No patches to the old
-  code in the meantime.
+- **Rollout:** build guard alongside the old extensions until it reaches
+  parity, then switch over. No patches to the old code in the meantime.
+- **Coexistence (steps 2 through 5):** guard is registered in
+  `pi.extensions` from step 2 on and runs next to pi-tool-permissions in
+  **observe-only** mode: its `tool_call` hook computes each decision,
+  publishes it on the `guard:decision` event, and never blocks or prompts.
+  `/guard debug on|off` shows the decisions live, so they can be compared
+  with the enforcing extension on real sessions. pi-tool-permissions keeps
+  enforcing until switchover; guard's own tools (step 3) are the first
+  calls guard enforces.
 
 ## Config
 
-- New file **`guard.json`** (user and project scopes). It holds profiles
-  settings, protected paths, secret masks and per-project opt-outs, the
-  web_fetch domain allowlist, and `HostBash(...)` rules (replacing
-  `Bash(...)`).
-- **`/guard migrate`** converts `pi-tool-permissions.json`:
-  - copies every `Bash(...)` rule to `HostBash(...)`
-  - drops `nonInteractiveAsk`
-  - **lists** rules that look like project-code runners (cargo/dotnet
-    build/test/run/restore, pytest, npm run/install, make) for a manual purge.
-    Nothing is dropped automatically.
+- New file **`guard.json`**: user scope at `~/.pi/agent/guard.json`,
+  project scope at `<cwd>/.pi/guard.local.json` (machine-local; `.pi/` is a
+  protected path, so the model cannot edit it). Keys: `cycleShortcut`,
+  `protectedPaths`, `maskPatterns`, `maskExceptions`, `webFetchAllow`,
+  `hostBash` (`allow`/`ask`/`deny` lists of `HostBash(...)` rules, replacing
+  `Bash(...)`), `readRoots`, `writeRoots`, `toolClasses`, `bashValidators`,
+  and the classifier pin and natural-language lists. Scalars: project wins;
+  lists: union with dedupe. A corrupt file is ignored with a warning and
+  never discards the other scope.
+- **`/guard migrate`** converts `pi-tool-permissions.json` (user and project
+  scopes, including their legacy fallback paths). Everything that has a home
+  in guard carries over:
+  - `Bash(...)` rules -> `HostBash(...)` in the same slot;
+  - `readAllowPaths` -> `readRoots`; `writeAllowPaths` -> `writeRoots`;
+  - `WebFetch(domain:x)` allow rules -> `webFetchAllow` URL globs;
+  - MCP allow rules -> read entries in `toolClasses`;
+  - `bashValidators`, and the auto-mode classifier pin and lists, as-is.
+
+  Anything without a home (Read/Write/Grep/Glob rules, `toolDefaults`,
+  `nonInteractiveAsk`, implicit-allow toggles) is **listed as dropped**.
+  Rules that look like project-code runners (cargo/dotnet
+  build/test/run/restore, pytest, npm run/install, make, and similar) are
+  copied but **listed** for a manual purge; nothing is dropped
+  automatically.
+- **Migrate writes:** the report is shown first and migrate asks for
+  confirmation (`/guard migrate dry` only previews). Lists are unioned with
+  dedupe, so re-running changes nothing; existing guard.json entries are
+  never removed; each scope writes its own file.
 
 ## Tools
 
 | Tool | Behavior |
 |---|---|
-| `bash` | Always sandboxed, except in yolo. Built with `createBashTool()` plus bwrap-spawning `BashOperations`. One process per call, no persistent shell. |
+| `bash` | Always sandboxed, except in yolo and unrestricted. Built with `createBashTool()` plus bwrap-spawning `BashOperations`. One process per call, no persistent shell. |
 | `host_bash` | The only escape from the sandbox. `HostBash(...)` rules plus the tightened host read-only tier (below) apply to it. |
-| `python`, `node` | Persistent sandboxed interpreters (existing design), moved into guard. In research: one throwaway overlay per worker lifetime. In yolo: fully raw (see below). |
+| `python`, `node` | Persistent sandboxed interpreters (existing design), moved into guard. In research: one throwaway overlay per worker lifetime. In yolo and unrestricted: fully raw (see below). |
 | `pwsh` | Windows only; host tier, like host_bash. |
 
 - **Read-only tier on both shells:** the read-only command tier, the
@@ -156,11 +182,11 @@ Holes, verified 2026-10-02:
     (`cat .env`).
 
   Sandboxed `bash` keeps the full tier.
-- **python/node in yolo** are fully raw: the persistent worker and protocol
+- **python/node in yolo and unrestricted** are fully raw: the persistent worker and protocol
   stay (state, results, replay semantics), but there is no bwrap, no seccomp,
   no rlimits, the full environment, and the full filesystem.
 - **Profile switches** that flip a python/node worker's sandbox state (into
-  or out of yolo or research) restart the worker with state loss and a
+  or out of yolo/unrestricted or research) restart the worker with state loss and a
   notification, the same mechanism as today's remount.
 
 - **No auto-routing:** a sandboxed `bash` call never runs on the host because
@@ -173,18 +199,73 @@ Holes, verified 2026-10-02:
 ## Profiles
 
 Session-only, never persisted. Every session starts in **default**; subagent
-children start in the inherited profile. Ctrl+Alt+M cycles through all five,
-with no confirmation when entering yolo.
+children start in the inherited profile. Six profiles: research / default /
+auto / trusted / yolo / unrestricted.
 
-| | research | default | auto | trusted | yolo |
-|---|---|---|---|---|---|
-| Sandboxed workspace | throwaway overlay (per call for bash, per worker lifetime for python/node) | read-write, protected paths read-only | same as default | same as default | **no sandbox** for bash, python, or node |
-| host_bash | hidden or denied | prompt unless rule-allowed | classifier | allowed | allowed |
-| write/edit | deny | allowed in write roots | classifier | allowed | allowed |
-| Protected paths | deny | prompt | prompt | prompt | allowed |
-| Exfil-capable remote reads (web_fetch outside the allowlist) | prompt | prompt | classifier | allowed | allowed |
-| Other remote reads (web_search, pup, Jira/Slack reads) | allowed | allowed | allowed | allowed | allowed |
-| Remote writes (Slack posts, MCP writes, pup writes) | deny | prompt | classifier | allowed | allowed |
+- **ctrl+alt+g** (mnemonic: guard; overridable with `cycleShortcut`) cycles
+  research -> default -> auto -> trusted -> yolo, with no confirmation when
+  entering yolo. The design originally named Ctrl+Alt+M, but ctrl+alt+m is
+  indistinguishable from alt+enter in legacy terminal encoding (unreachable
+  in herdr), and pi-tool-permissions owns ctrl+alt+p while both are loaded.
+- **unrestricted** is reachable only with `/guard profile unrestricted`,
+  never through the cycle, so one keypress cannot drop the deny rules.
+- `/guard` opens a picker; `/guard profile <name>` sets a profile directly.
+
+| | research | default | auto | trusted | yolo | unrestricted |
+|---|---|---|---|---|---|---|
+| Sandboxed workspace | throwaway overlay (per call for bash, per worker lifetime for python/node) | read-write, protected paths read-only | same as default | same as default | **no sandbox** for bash, python, or node | **no sandbox** |
+| host_bash | deny (rules ignored) | prompt unless rule-allowed | classifier | allowed | allowed | allowed |
+| write/edit | deny | allowed in cwd and write roots, prompt outside | classifier | allowed | allowed | allowed |
+| Protected paths | deny | prompt | prompt | prompt | allowed | allowed |
+| Local reads (read/grep/find/ls) | as default | allowed in cwd and read roots, prompt outside | as default | as default | allowed | allowed |
+| Secret-mask files via read/grep | deny | deny | deny | deny | allowed | allowed |
+| Exfil-capable remote reads (web_fetch outside the allowlist) | prompt | prompt | classifier | allowed | allowed | allowed |
+| Other remote reads (web_search, pup, Jira/Slack reads) | allowed | allowed | allowed | allowed | allowed | allowed |
+| Remote writes (Slack posts, MCP writes, pup writes) | deny | prompt | classifier | allowed | allowed | allowed |
+| HostBash deny/ask rules | ignored (cell is deny) | apply | apply | apply | **apply** | **ignored** |
+
+### Rule precedence
+
+| Profile | Host shell (host_bash, pwsh, and sandboxed bash in degraded mode) |
+|---|---|
+| research | Absolute: rules change nothing. host_bash and pwsh deny; in degraded mode sandboxed bash runs only commands the read-only tier proves safe (allow rules do not widen it). |
+| default, auto, trusted | HostBash deny > ask > allow, then the tightened read-only tier, then the profile cell (and in auto, the classifier for the remainder). |
+| yolo | deny rules block and ask rules prompt; everything else is allowed. Your explicit rules are the last safety net. |
+| unrestricted | 100% unrestricted: no sandbox, rules ignored, nothing prompts. |
+
+### Local reads
+
+- Reads inside cwd and the read roots are allowed. Outside them, a prompt
+  offers a grant for the session, the project (`.pi/guard.local.json`
+  `readRoots`), or the user (`~/.pi/agent/guard.json` `readRoots`). Grants
+  are also mounted read-only into the sandboxes (step 3), as today.
+- Files matching the secret-mask patterns (minus exceptions) are denied to
+  read/grep in every profile except yolo and unrestricted, matching the
+  sandbox masks.
+
+### Tool classification
+
+Every pi tool call maps to one tool class (host shell, sandboxed execution,
+local read, local write, exfil-capable remote read, other remote read,
+remote write, meta). Resolution order:
+
+1. guard's **built-in map** (pi built-ins and this repo's tools; e.g.
+   python/node sandboxed, subagent/codemode meta with nested calls gated
+   individually, focused `pup_*` tools remote reads);
+2. the guard.json **`toolClasses`** map (exact names or globs), which
+   overrides the built-in map;
+3. the tool's **annotations** (`readOnlyHint` -> remote read,
+   `destructiveHint` -> remote write);
+4. a **name heuristic** (post/send/create/update/delete/write/... ->
+   remote write);
+5. anything still unknown is a **remote write** (prompt in default, deny in
+   research, classifier in auto, allowed in trusted and above).
+
+MCP calls in both naming styles (pi's built-in `mcp__<server>__<tool>` with
+plain arguments, and the pi-mcp-adapter `mcp` proxy with `input.tool`) go
+through the same order. **`pup_run`** is classified by its subcommand verb:
+list/get/search/query/show/status/aggregate -> remote read;
+create/update/delete/mute/edit and anything unrecognized -> remote write.
 
 **Auto mode's classifier** screens only host_bash, pwsh, write/edit,
 exfil-capable remote reads, and remote writes. Every sandboxed call skips it;
@@ -199,7 +280,7 @@ Exfiltration needs a sink the attacker can read:
 
 ## Sandbox contents
 
-For every profile except yolo:
+For every profile except yolo and unrestricted:
 
 - **Reads** come only from allowed locations: workspace, granted read roots,
   `/usr`, a minimal `/etc`, and toolchains.
@@ -288,15 +369,17 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 ## Memory and instruction persistence
 
 - Repo instruction files are protected paths (see above).
-- `memory_write` stays allowed; each write is shown in the UI.
+- `memory_write` stays allowed. guard adds no UI of its own: pi's default
+  tool-call rendering already shows every write in the transcript.
 
 ## Accepted risks
 
 - In default (and auto/trusted), the workspace is writable, so a sandboxed
   command can delete **untracked** files, which git cannot restore. Accepted
   for v1; same exposure as today's edit/write tools in edits mode.
-- yolo is 100% unrestricted, at your own risk: no sandbox, no prompts,
-  protected paths writable.
+- yolo runs without a sandbox and with protected paths writable; only your
+  HostBash deny/ask rules still apply. unrestricted is 100% unrestricted, at
+  your own risk: no sandbox, no rules, no prompts.
 - Degraded mode relies on string-based rules, as today.
 
 ## /plan integration
@@ -382,6 +465,18 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 | Mask mechanism (step 1) | /dev/null via --dev-bind: a device bind made with --ro-bind inside the user namespace is nodev-enforced and reads fail with EACCES |
 | Project nuget.config (step 1) | Workspace-level nuget.config files are left alone (masking would break restore); listed in the threat model |
 | Scan failure (step 1) | Scan timeout or cap fails the launch with an actionable diagnostic; never launches unmasked |
+| Step-2 runtime (step 2) | Observe-only, registered in pi.extensions; decisions on `guard:decision`; `/guard debug on\|off` |
+| Ladder (step 2) | Six profiles: research / default / auto / trusted / yolo / unrestricted (supersedes the five-profile ladder) |
+| Two yolo tiers (step 2) | yolo: no sandbox, HostBash deny/ask rules still apply; unrestricted: no sandbox, rules ignored |
+| Cycle hotkey (step 2) | ctrl+alt+g (overridable via cycleShortcut); cycles research..yolo; unrestricted is command-only; supersedes Ctrl+Alt+M |
+| Research rules (step 2) | Absolute: HostBash rules change nothing; host shells deny; degraded sandboxed bash read-only tier only |
+| Local reads (step 2) | Port today's model: allow in cwd and read roots, prompt outside with session/project/user grants; secret-mask files denied to read/grep except in yolo and unrestricted |
+| Tool classification (step 2) | Built-in map, then guard.json toolClasses, then annotations, then name heuristic; unknown is a remote write; same for both MCP naming styles |
+| pup_run (step 2) | Classified by subcommand verb (reads allowed, writes and unknown verbs are remote writes) |
+| Migrate scope (step 2) | Everything with a guard home (HostBash, read/write roots, webFetchAllow, MCP toolClasses, validators, classifier); the rest listed as dropped |
+| Migrate writes (step 2) | Preview and confirm; union with dedupe, idempotent, never removes entries; per scope |
+| Prompt UX (step 2) | Step 2 adds pure suggestRule and save helpers; dialogs land with enforcement in step 3 |
+| memory_write (step 2) | No guard UI; pi's default tool-call rendering shows writes (supersedes "shown in the UI") |
 
 ## Implementation outline (build alongside, switch over)
 
@@ -395,10 +490,21 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
      write does not persist); launcher tests (cache keying, the 0700 and
      ownership check refusing a foreign or group/world-writable directory,
      pruning, reduced vs full mode selection).
-2. **Policy core:** profiles, decision function, `guard.json` loading,
-   `/guard migrate`, cycle and footer status, degraded mode.
-   - Verify: decision-level tests for every profile and tool-class cell in the
-     profile table; migration round trip.
+2. **Policy core:** six profiles and the rule precedence table, decision
+   function (including local reads and secret-mask read denial), tool
+   classification (built-in map, `toolClasses`, annotations, heuristic,
+   `pup_run` verbs, both MCP styles), `guard.json` loading, pure
+   `suggestRule` and save helpers, `/guard migrate` (full scope, preview +
+   confirm, idempotent union), ctrl+alt+g cycle, `/guard debug`, footer
+   status, degraded mode; registered in `pi.extensions` in observe-only
+   mode.
+   - Verify: decision-level tests for every profile and tool-class cell in
+     the profile table (research with allow/ask rules, yolo vs unrestricted
+     with deny/ask rules); classification tests (built-ins, both MCP styles,
+     `pup_run` verbs, toolClasses override, annotation fallback, unknown
+     tool); migration fixtures (every conversion, dropped list, runner list,
+     second run is a no-op); `npm run test:guard` includes the policy
+     suite; a live pi session loads guard without a shortcut conflict.
 3. **Tools:** sandboxed `bash`, `host_bash`, and python/node ported onto the
    shared library.
    - Verify: python/node suites pass on the shared library; research overlay
