@@ -95,10 +95,11 @@ Judgment-heavy work (drafting epics, triage) is out of scope for v1.
 
 # Jira extension design (v2)
 
-Date: 2026-10-06. Status: design confirmed via a second grill-me session;
-not yet implemented. Supersedes v1 for transport, tool surface, config, and
-permissions. The goal, the branch-context injection, and the deferred list
-are unchanged in spirit.
+Date: 2026-10-06. Status: core design confirmed via a second grill-me
+session; amended after implementation-plan review, not yet implemented.
+Resolve the implementation gates below before implementation begins.
+Supersedes v1 for transport, tool surface, config, and permissions. The
+ambient-context goal remains; its injection mechanism is unresolved.
 
 ## Why the transport changed
 
@@ -123,8 +124,9 @@ surface the extension parses. v1→v2 already renamed tools and moved
 granular operations behind `discover`/`execute*`; `tool_unavailable` is the
 designed answer to that, and the granular operations this design depends on
 were confirmed present and re-checkable at runtime.
-- **Verified viable before committing:** an extension can call
-`mcp__atlassian__*` tools through `ctx.executeTool()`.
+- **Verified viable inside a tool:** an extension's tool `execute()` can
+call `mcp__atlassian__*` through `ctx.executeTool()`. The probe did not
+establish an event-time transport for session hooks.
 
 `acli` is dropped entirely; there is no fallback transport.
 
@@ -139,38 +141,59 @@ per-action validation in code.
 **`jira_read`** (`readOnlyHint: true`, `openWorldHint: true`,
 `idempotentHint: true`)
 
-- `get` — `getJiraIssue`. Returns the server's default field set (summary,
-description, status, issuetype, priority, labels, components, assignee,
-reporter, created, updated, resolution, project) with the description in
-markdown, capped at ~1500 characters with an explicit truncation marker
-pointing at the raw escape hatch. `raw: true` requests `fields: ["*all"]` and
-is read from `structuredContent`, which pi does not truncate (`content`
-truncates at 20KB).
-- `comments` — `listJiraIssueComments` via `executeRead`. Returns the first
-page plus `total`; the model pages on request.
+- `get` — `getJiraIssue`. The server defaults to `view: "compact"`, not a
+guaranteed long field list. Verify the actual payload with a read-only
+probe and choose an explicit view if the digest needs fields absent from
+compact. Cap the description at 1500 characters with an explicit truncation
+marker pointing at the raw escape hatch; handle missing fields and null
+bodies. Request markdown but preserve `appliedContentFormat`: the server
+can return HTML when markdown would lose rich content. `raw: true` requests
+`view: "full"` and `fields: ["*all"]` without local shaping. Read the full
+payload from `structuredContent`, which pi does not truncate (`content`
+truncates at 20KB); verify that this path retains the complete response.
+- `comments` — `listJiraIssueComments` via `executeRead`. Newest-first with
+`orderBy: "-created"` and `maxResults: 20`. Expose `startAt` (default 0,
+non-negative integer) and return page metadata, including `startAt`,
+`maxResults`, and `total`. Preserve returned rich-text format metadata;
+the model pages on request.
 
 **`jira_update`** (`readOnlyHint: false`, `openWorldHint: true`)
 
 - `transition` — takes a target **status**. The extension calls
-`listJiraIssueTransitions` via `executeRead`, matches the status a transition
-leads to (case-insensitive), and passes that transition's id. No match
-returns `rejected` listing the statuses actually available. Returns the
-status the write reports landing in. No alias map, no caching in v1.
-- `comment` — `addOrEditJiraIssueComment` with a markdown body. Returns the
-`commentId`. No ADF construction, no temp-file body: these are JSON
+`listJiraIssueTransitions` via `executeRead`, matches the destination status
+case-insensitively, and submits an ID only when exactly one transition
+matches. No match returns `rejected` listing available destination statuses;
+multiple matches return `rejected` with candidate IDs/names for workflow
+clarification rather than choosing the first. Transitions requiring fields
+outside this action's inputs surface as actionable rejections, not guessed
+values. Returns the status the write reports landing in. No alias map or
+transition cache.
+- `comment` — `addOrEditJiraIssueComment` with a body; new comments default
+to markdown and return `commentId`. Rich-text format handling must be
+settled under the implementation gates before exposing HTML authoring or
+read-modify-write. No ADF construction or temp-file body: these are JSON
 arguments, not argv.
 - `link_pr` — `createJiraIssueRemoteIssueLink` via `executeWrite`, creating a
 native **remote link** in the issue's Web links section rather than a
-comment. `title` comes from `gh pr view --json url,title` when the gh
-fallback runs, otherwise it is the URL. Deduped first: read
-`listJiraIssueRemoteIssueLinks` via `executeRead` and string-compare
-`data[].object.url`; if present, no-op. When the dedupe read itself fails,
-the call errors rather than risking a duplicate, because duplicates are
-permanent.
-- `edit` — `editJiraIssue` with a `fields` object, shape-validated only
-(non-empty; scalar, array, or null values). The server resolves
-human-readable names and accountIds; `null` clears a field. Unknown field
-names surface as server errors rather than silently creating anything.
+comment. An explicit URL wins; otherwise run `gh pr view --json url,title`
+in the current cwd. Title precedence: optional explicit title, gh title,
+then URL. Deduped first: read `listJiraIssueRemoteIssueLinks` via
+`executeRead` and string-compare `data[].object.url`; if present, no-op.
+A failed or malformed dedupe read prevents creation. Serialize the entire
+read-check-create sequence per site/ticket/URL within the extension.
+This is best-effort dedupe: other sessions and clients can race, and
+transport retries can repeat an uncertain write. Duplicate links are
+permanent through the available MCP operations; do not promise exactly-once
+creation or add an extension retry loop.
+- `edit` — accepts a non-empty `fields` object containing recursively valid
+JSON values, including nested objects, arrays, scalars, and null. This
+supports raw Jira shapes such as `{"priority":{"id":"2"}}`. Multi-value
+fields replace rather than append; explicit null clears supported fields.
+The MCP exposes both `fields` and `additional_fields`; name-based resolution
+is explicitly documented for `additional_fields`. Verify and pin the
+wrapper's routing before promising name/accountId resolution for every
+shape. Unknown fields and invalid values surface as server errors.
+Rich-text fields also follow the implementation gate below.
 
 Every action: **write response only, no re-fetch** (`transitionJiraIssue`
 reports the landed status, `editJiraIssue` returns the issue,
@@ -178,18 +201,31 @@ reports the landed status, `editJiraIssue` returns the issue,
 
 ### 2. Branch context injection
 
-Unchanged in mechanism from v1: hooked on `session_start` and
-`session_info_changed`, branch detected from the branch name with a
-configurable regex plus explicit `branchMappings`. The payload narrows to
-one line — key, status, summary — via `pi.sendMessage()` with a `customType`
-and `display: true` (a transcript note that does not trigger a turn). Silent
-no-op when nothing is detected. Full detail stays behind `jira_read`.
+Desired payload: one line with key, status, and summary via
+`pi.sendMessage()`, `customType: "jira-branch-context"`, `display: true`,
+and no triggered turn. Full detail stays behind `jira_read`; silently omit
+failed lookups and skip repeated injection for the same branch/cwd within
+one session. Reset that suppression when the active session changes.
+
+**Mechanism unresolved:** session handlers receive `ExtensionContext`,
+which lacks `executeTool()`. Only tool `execute()` receives
+`ExtensionToolContext` with nested tool execution. Also,
+`session_info_changed` reports session-name metadata, not git branch or cwd
+changes. The earlier claim that these hooks support a fetched Jira digest
+and branch-change detection was incorrect.
+
+Before implementation, verify a supported event-time MCP invocation path
+and a boundary for rechecking branch/cwd. If none exists, obtain agreement
+to narrow the contract to a startup ticket-key pointer enriched after a
+Jira tool call. Neither alternative is selected yet; avoid retained stale
+tool contexts or a hidden agent turn as a workaround.
 
 ### 3. Transport
 
 - Atlassian remote MCP v2 (`https://mcp.atlassian.com/v2/mcp`), signed in
-through pi's MCP OAuth. The extension calls its tools with
-`ctx.executeTool("mcp__atlassian__<tool>", args)`.
+through pi's MCP OAuth. Inside its tool `execute()` handlers, the extension
+calls `ctx.executeTool("mcp__atlassian__<tool>", args)`. This does not supply
+a transport for session hooks.
 - `cloudId` comes from config as the site URL, which the v2 schemas accept
 directly (`datadoghq.atlassian.net`); no `getAccessibleAtlassianResources`
 round trip.
@@ -197,9 +233,14 @@ round trip.
 `parentToolCallId` set, get the id `<parentId>/<n>`, and never enter the
 transcript: the wrapper is responsible for surfacing everything the model
 needs in its own result and `details`.
-- Failures never throw. They arrive as results with `isError: true` and the
-server's own text, e.g.
+- Nested tool failures return an outcome with `isError: true`, not a thrown
+tool failure. Parse `outcome.result.structuredContent` as the raw MCP
+`CallToolResult`, including its JSON text blocks and server error flags;
+outer success does not prove the server operation succeeded. Example:
 `{"error":true,"message":"Issue \"SLES-1\" not found","statusCode":404}`.
+Guard missing blocks, non-JSON content, and malformed payloads; keep raw
+failure evidence in `details`. Local parsing and subprocess failures still
+need explicit handling.
 - Timeouts and retries are pi's MCP layer's, not ours: 60s per request
 (configurable per server in `mcp.json`, left at the default) and two
 automatic retries on 408/429/5xx. The tool call's abort signal propagates to
@@ -207,10 +248,13 @@ the nested call, so no subprocess supervision is needed.
 
 ### 4. Config
 
-- Single file: `~/.pi/agent/update-jira.json`.
+- Single file: `<agentDir>/update-jira.json` (normally
+`~/.pi/agent/update-jira.json`).
 - Fields: `siteUrl`, `branchKeyRegex`, `branchMappings` (exact branch name to
-key). `defaultProject` and `statusAliases` are gone: nothing consumes them
-now that `create` is out and transitions resolve from the server.
+key). Missing `siteUrl` produces `config_invalid`. Validate the regex and
+mapping values before remote calls. `defaultProject` and `statusAliases`
+are gone: nothing consumes them now that `create` is out and transitions
+resolve from the server.
 - Defaults live in memory. The file is **not** created on first run; it is
 written only when something needs saving. Malformed JSON produces a visible
 warning and the defaults are used, because silently ignoring a broken config
@@ -218,12 +262,13 @@ silently changes which ticket gets written.
 
 ### 5. Permissions
 
-v1's section is void. It assumed `pi-tool-permissions`, which is being
-removed, and `guard` (its designated successor) is observe-only today. So v1
-has **no enforced gate**: `jira_update` writes go through unless and until
-guard enforces. Both tools declare the annotations above so guard's ladder
-classifies them (read-only → remote read, otherwise remote write) instead of
-guessing from the name. No in-extension confirm layer is added.
+v1's section is void. Ignore `pi-tool-permissions` entirely. At design time,
+`guard` (its designated successor) was observe-only, so Jira writes had
+**no enforced gate**. Enforcement belongs to the external guard, not this
+extension. Both tools declare the annotations above so guard can classify
+remote reads and writes instead of guessing from the name. No in-extension
+confirm layer or permission rules are added. Authorization for manual write
+verification is a separate prerequisite under Verification.
 
 ## Target resolution
 
@@ -252,18 +297,59 @@ transition), plus ticket resolution's `no_ticket`, `invalid_key`,
 `ambiguous_key`, and `config_invalid`.
 - Auth problems are reported lazily from the failure text with sign-in
 guidance, not by a preflight check in every session.
-- No retry loops of our own beyond pi's MCP-layer retries.
+- No retry loops of our own beyond pi's MCP-layer retries. Preserve
+cancellation rather than relabeling it as authentication failure; timeout,
+malformed-response, and unexpected transport failures must have explicit
+fallback handling without pretending a write did not land.
 
 ## Verification
 
-- Unit tests under `tests/`, using a stub transport (recorded MCP payloads,
-no network), covering branch resolution, key validation, digest capping,
-transition matching, link dedupe, and every error kind.
-- A manual smoke test against a scratch ticket. No test writes to Jira.
-- The first smoke test must confirm that a
-`createJiraIssueRemoteIssueLink`-created link surfaces with the PR URL as
-`data[].object.url`, since dedupe string-compares exactly that (see Open
-items).
+1. **Read-only discovery:** recheck live schemas and record transitions,
+comments, remote links, and issue views. Scrub ticket content and personal
+data from committed fixtures. Write-operation discovery inspects schemas
+only; obtaining a sample write response waits for authorized smoke testing.
+2. **Offline tests:** use an injectable stub transport and Node's built-in
+test runner, with no network or Jira writes. Cover all six actions,
+config/key/branch validation, missing fields and null descriptions,
+truncation and format metadata, comment pagination, zero/one/multiple
+transition matches, required-field rejections, nested edit values, link
+no-op and read failures, concurrent dedupe, missing tools, every error
+kind, malformed/non-JSON responses, and cancellation. Include registration
+and lifecycle tests for the injection mechanism once chosen.
+3. **Repository checks:** run `npx tsc --noEmit`, `npm run test:jira`, and the
+full existing test suite. Report pass/fail counts and distinguish existing
+unrelated failures from regressions.
+4. **Authorized manual writes:** obtain a user-designated scratch ticket
+and approval for the specific mutation scope before any live write,
+including transport probes. Agree on the transition path, comment text,
+permanent remote-link URL/title, and edit fields. Verify a permitted return
+transition before leaving the original status; do not assume workflows are
+reversible. Exercise comment, edit, transition-and-return, link creation,
+and duplicate-link no-op. Restore approved editable values where possible;
+acknowledge comments and links that will remain. No automated test writes
+to Jira and no unrelated ticket mutations.
+5. **Smoke results:** confirm the created link appears as
+`data[].object.url`, verify returned write status/IDs, and test fresh-session
+context plus branch/cwd changes against the agreed injection contract.
+Manual verification reads do not introduce a post-write re-fetch into the
+production tools. Record observed payload shapes and unresolved assumptions.
+
+## Implementation scope and handoff
+
+- Implement both tools, all six actions, config, branch resolution, and the
+agreed injection mechanism in one pass after the gates below are resolved.
+- Use existing TypeScript/TypeBox conventions, no new npm dependencies.
+Pure modules avoid pi-runtime value imports; tool factories accept an
+injectable `Transport` for offline tests.
+- Package `extensions/update-jira/` with `index.ts`, `config.ts`, `branch.ts`,
+`mcp.ts`, `digest.ts`, `read-tool.ts`, and `update-tool.ts`; register
+`"./extensions/update-jira"` in `package.json`'s `pi.extensions` array.
+- Add `tests/update-jira-unit.test.mts`, `tests/update-jira-tools.test.mts`,
+and `test:jira`; update the README extension list and relevant TODO entry.
+Keep unrelated guard code/tests and existing TODO/guard-design changes
+untouched. Leave implementation uncommitted and unpushed unless requested.
+- Description cap is a constant (1500 characters); no custom injection
+renderer is required initially.
 
 ## Explicitly deferred
 
@@ -295,19 +381,24 @@ operations this design needs, each with full input schemas:
 (`executeRead`), `listJiraIssueRemoteIssueLinks` (`executeRead`),
 `createJiraIssueRemoteIssueLink` (`executeWrite`, inputs `url`, `title`,
 `summary`, `relationship`).
-- `transitionJiraIssue`: "Take transitionId from listJiraIssueTransitions;
-transitionName is the transition's own name, not the target status. Returns
-the status the issue actually landed in, so no read-back is needed." The
-schema accepts only the id, so resolution has to go through
-`listJiraIssueTransitions`, whose description adds: "when the user names a
-target status, match the status a transition leads to, not the transition's
-name."
-- `getJiraIssue`: default fields as listed above; reports how many comments an
-issue has but not the comments themselves; `view` is
-`compact | evidence | full`; `responseContentFormat` is `markdown | adf`.
-- `editJiraIssue`: resolves field names and accountIds server-side, `null`
-clears a field, multi-value fields are set (not appended), and the response
-is `getJiraIssue`'s default field set.
+- `transitionJiraIssue`: accepts `transitionId` or `transitionName`. The
+name is the transition's own name, not its destination status. The wrapper
+resolves a requested status through `listJiraIssueTransitions` and submits
+an unambiguous ID. The write reports the status actually landed in; no
+production read-back is needed.
+- `getJiraIssue`: `view` is `compact | evidence | full`, default compact;
+reports comment counts rather than providing a comments page.
+`responseContentFormat` is `markdown | html`, not ADF. The live description
+says unsupported markdown bodies are returned as HTML automatically, with
+`appliedContentFormat` identifying the result. This is a schema guarantee,
+not yet a locally observed rich-content round-trip.
+- `editJiraIssue`: exposes `fields` and `additional_fields`; explicitly
+documents name-based resolution for `additional_fields` and accepts raw
+Jira shapes. Null clears supported fields and multi-value fields are set,
+not appended. `contentFormat: "html"` preserves rich bodies but requires
+the server's HTML-format feature; markdown writes can drop inline media.
+The response uses `getJiraIssue`'s default fields, so edited fields may not
+be echoed.
 - `listJiraIssueRemoteIssueLinks` returns `data[].object.url` (with
 `data[].object.title` and an optional `relationship`). It never returns a
 `globalId`, and the operation's own text says: "the same URL added twice
@@ -319,12 +410,16 @@ ticket) nor `getGraphObject` nor any `getJiraIssue` view/expand is a usable
 dedupe read.
 - `ctx.executeTool()` reaches MCP tools: the callable set is
 `exposure === "codemode" || "deferred"` plus active `direct` tools
-(`agent-session.js:1136-1145`). Verified empirically with a throwaway
-extension: name spelling `mcp__atlassian__<tool>`, nested ids
+(`agent-session.js:1136-1145`). Verified empirically inside a throwaway
+extension's tool `execute()`: name spelling `mcp__atlassian__<tool>`, nested ids
 `<parentId>/<n>`, hooks fire with `parentToolCallId`, no transcript entry
 (the parent result carries a bounded `nestedCalls` record), and
 `structuredContent` holds the untruncated `CallToolResult` while `content`
-truncates text at 20KB.
+truncates text at 20KB. The installed pi 1.0.4 declarations distinguish
+`ExtensionContext` from `ExtensionToolContext`; only the latter has
+`executeTool()`. `SessionInfoChangedEvent` contains session-name metadata,
+not git branch/cwd information. These facts invalidate the original
+session-hook transport assumption.
 - pi MCP behavior: per-request `timeout` defaults to 60s and is configurable
 per server in `mcp.json`; HTTP 408/429/5xx are retried twice; a dropped
 connection reconnects on the next call.
@@ -333,14 +428,20 @@ and is never remembered: the tool descriptions say to fetch it once per
 session and pass it explicitly each call. A site URL is accepted in its
 place, which is why config stores `siteUrl`.
 
-## Open items (small, decided at implementation time)
+## Implementation gates (unresolved)
 
-- `comments` ordering and page size: default to the server's order with a
-sane limit, and expose only what the model actually needs to page.
-- Injection `customType` string and whether it gets a custom renderer beyond
-`display: true`.
-- Whether `jira_read`'s description cap should ever become configurable (a
-constant is assumed for v1).
-- Extension packaging: `extensions/update-jira/` with config, branch, MCP, and
-digest modules plus the two tool files, registered in `package.json`'s
-`pi.extensions` array; tests as `tests/update-jira-*.test.mts`.
+- **Injection:** establish and verify a supported event-time invocation and
+branch/cwd refresh mechanism, or obtain agreement to the narrower
+startup-pointer/enrichment contract under Branch context injection.
+- **Rich text:** choose a loss-preserving write contract: expose
+`contentFormat` for HTML where supported, or explicitly reject unsupported
+rich-content edits. Preserve the read format metadata either way and verify
+feature availability before any authorized rich-content round-trip.
+- **Read/edit payloads:** use read-only probes to pin the digest view and
+raw response shape; verify the `fields` versus `additional_fields` routing
+contract without a write. Defer any behavior that cannot be established
+from schemas/reads to an approved scratch-ticket smoke test.
+
+Resolve and record these choices before marking v2 implementation-ready.
+Remote-link creation response shape remains a smoke-test check, not an
+excuse for an earlier live write.
