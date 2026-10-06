@@ -4,9 +4,161 @@ Sandbox-first permission redesign. Guard replaces `pi-tool-permissions`,
 `python`, and `node` with one extension built around a kernel-enforced
 sandbox. See `docs/guard-design.md` for the settled design.
 
-**Status: step 1 of the implementation outline (shared sandbox library) is
-built here; guard is not loaded by pi yet** and is not in the `pi.extensions`
-list. Steps 2 (policy core) and 3 (tools) build on `sandbox/`.
+**Status: step 1 (shared sandbox library) and step 2 (policy core) are built
+here. Guard is loaded by pi (`pi.extensions`) in observe-only mode:** its
+`tool_call` hook computes decisions, publishes them on `guard:decision`, and
+never blocks or prompts. pi-tool-permissions stays the enforcing extension
+until switchover (step 6). Step 3 (tools, dialogs) builds on both.
+
+## Policy (step 2, observe-only)
+
+The policy core lives in `policy/`: profiles, the decision function, tool
+classification, guard.json, the save/migrate helpers, and the session state.
+
+### Profiles and the cycle hotkey
+
+Six session-only profiles; every session starts at `default`, nothing is
+persisted:
+
+| | research | default | auto | trusted | yolo | unrestricted |
+|---|---|---|---|---|---|---|
+| Sandbox workspace (step 3) | overlay (ro unless full mode) | rw | rw | rw | none | none |
+| host_bash / pwsh | deny | rules, then tier, then prompt | rules, then tier, then classify | rules, then tier, then allow | deny/ask rules, else allow | allow |
+| write/edit (non-protected) | deny | cwd + writeRoots, prompt outside | classify | allow | allow | allow |
+| Protected-path write/edit | deny | prompt | prompt | prompt | allow | allow |
+| Local reads | as default | cwd + readRoots, prompt outside | as default | as default | allow | allow |
+| Secret-mask path via read/grep | deny | deny | deny | deny | allow | allow |
+| web_fetch outside webFetchAllow | prompt | prompt | classify | allow | allow | allow |
+| Other remote reads | allow | allow | allow | allow | allow | allow |
+| Remote writes | deny | prompt | classify | allow | allow | allow |
+| Sandboxed exec (bash/python/node) | allow | allow | allow | allow | allow | allow |
+| Meta (codemode, subagent, ...) | allow | allow | allow | allow | allow | allow |
+
+- **ctrl+alt+g** cycles research -> default -> auto -> trusted -> yolo ->
+  research, no confirmation on entering yolo. `cycleShortcut` in guard.json
+  overrides the key (read at load time).
+- **unrestricted is never in the cycle**; it is reachable only with
+  `/guard profile unrestricted`. Cycling from unrestricted goes to research.
+- While plan holds research (the `guard:research-request` /
+  `guard:research-release` / `guard:research-ack` handshake), every profile
+  change is blocked except staying in research; releasing restores the
+  pre-hold profile.
+
+### Host-shell precedence
+
+- **research:** absolute. HostBash/Pwsh rules are ignored; host shells deny.
+  In degraded mode, sandboxed bash runs only commands the read-only tier
+  proves read-only; allow rules never widen that set.
+- **default / auto / trusted:** deny rules > ask rules > the tightened
+  read-only tier (host vetoes first: `env`/`printenv` as the command, any `$`
+  outside single quotes, file arguments matching the secret-mask patterns
+  minus exceptions) > redirect-aware allow rules > the profile cell.
+- A top-level file redirect (outside the writeRoots exemptions) is allowed
+  only by a redirect-aware allow rule, one whose pattern contains `>` (e.g.
+  `HostBash(rg * > *)`). Broad rules and the profile cell never authorize a
+  write redirect.
+- Compounds (`&&`, `||`, `;`, `|`) are split per subcommand and aggregate as
+  deny > prompt > classify > allow; an ambiguous split prompts (denies in
+  research), but an explicit deny rule on the raw command still denies.
+- **yolo:** deny rules block, ask rules prompt, everything else allows.
+- **unrestricted:** allow, rules ignored.
+- Non-interactive sessions (`!ctx.hasUI`): prompts collapse to deny.
+
+### Tool classification
+
+Every call maps to exactly one class (`policy/classes.ts`), which selects the
+table row. Resolution order:
+
+1. guard.json **`toolClasses`** (exact names or globs; overrides everything),
+2. guard's **built-in map** (`read`/`grep`/... local reads; `bash`/`python`/
+   `node` sandboxed exec; focused `pup_*` and Slack reads remote reads;
+   `codemode`/`tool_search`/`subagent`/`ask_user_question` meta; `web_fetch`
+   by URL against `webFetchAllow`; `pup_run` by subcommand verb),
+3. the tool's self-declared **annotations** (`readOnlyHint` -> remote read,
+   `destructiveHint` -> remote write), looked up from `pi.getAllTools()` on
+   first use and cached per session,
+4. a **name heuristic** (post/send/create/update/delete/... -> remote write),
+5. anything still unknown is a **remote write** (fail closed).
+
+MCP calls in both naming styles classify the same way: built-in
+`mcp__<server>__<tool>` names pass through; the `mcp` proxy classifies as
+`mcp__<server>__<input.tool>` (or `mcp:<input.tool>` with no server), so
+globs like `mcp__slack__*read*` match.
+
+### Local reads and the directory-grep gap
+
+Reads inside cwd and `readRoots` (~ and `$HOME` expanded) are allowed; a
+missing or empty `path` argument means cwd. Outside them, guard would prompt
+(session/project/user grants, step 3); `readGrantSuggestion(path)` already
+returns the covering directory. Secret masks are **path-level only** in
+step 2: a read of a masked file (`.env`, `*.pem`, ...) is denied in every
+profile except yolo/unrestricted, but a grep or find over a directory that
+happens to contain a masked file is allowed. This is a documented gap; step 3
+adds a `tool_result` filter that drops matches from masked files.
+
+### guard.json
+
+User scope `~/.pi/agent/guard.json`, project scope `<cwd>/.pi/guard.local.json`
+(machine-local). Keys: `cycleShortcut`, `protectedPaths`, `maskPatterns`,
+`maskExceptions`, `webFetchAllow` (URL globs or `/regex/`), `hostBash`
+(`allow`/`ask`/`deny` lists of `HostBash(...)` / `Pwsh(...)` rules),
+`readRoots`, `writeRoots`, `toolClasses` (name/glob -> class),
+`bashValidators`, the `classifier` pin, and the `classifierEnvironment` /
+`classifierAllow` / `classifierSoftDeny` / `classifierHardDeny` lists.
+Scalars are project-wins; lists union with dedupe; a corrupt file is ignored
+with a warning and never discards the other scope.
+
+### /guard subcommands
+
+| Command | Behavior |
+|---|---|
+| `/guard` | profile picker (all six profiles) |
+| `/guard help` | usage |
+| `/guard list` | profile, holder, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, webFetchAllow count, host-shell rule counts, read/write roots, toolClasses count, classifier, debug state |
+| `/guard reload` | reload guard.json, refresh sandbox detection, clear the annotation cache |
+| `/guard profile [name]` | set a profile directly (`unrestricted` included) |
+| `/guard migrate [dry]` | convert pi-tool-permissions configs (below) |
+| `/guard ack` | clear the workspace lock (step 3 sets it on audit findings) |
+| `/guard debug on\|off` | session-only; when on, each decision is also shown as a notification |
+
+### Migrate
+
+`/guard migrate` reads the legacy pi-tool-permissions configs (user:
+`~/.pi/agent/pi-tool-permissions.json` with a `~/.pi/tool-permissions.json`
+fallback; project: `.pi/pi-tool-permissions.local.json` with
+`.pi/pi-tool-permissions.json` and `.pi/tool-permissions.json` fallbacks) and
+converts everything that has a guard home:
+
+- `Bash(...)` -> `HostBash(...)` in the same slot; `Pwsh(...)` rules kept;
+- `readAllowPaths` -> `readRoots`; `writeAllowPaths` and
+  `bashAllowRedirectsTo` -> `writeRoots`;
+- `WebFetch(...)` allow rules -> `webFetchAllow` verbatim; WebFetch deny/ask
+  rules are dropped with a note;
+- MCP allow rules (bare `mcp__*` names and `Mcp(...)`) -> `toolClasses`
+  entries set to `remote-read`;
+- `bashValidators` as-is; `autoMode.classifier` -> `classifier`;
+  `autoMode.environment`/`allow`/`soft_deny`/`hard_deny` -> the
+  `classifier*` keys.
+
+Dropped (reported, never written): Read/Write/Edit/Grep/Glob/Ls/Find rules,
+other tools' rules, `toolDefaults`, `defaultAction`, `nonInteractiveAsk`,
+and the implicit-allow toggles. Rules that look like project-code runners
+(cargo/dotnet build/test, pytest, npm run/install, make, ...) are copied but
+listed for a manual purge. `/guard migrate dry` only previews; without a UI
+it behaves like dry. On Write, each scope's patch is unioned into that
+scope's file with dedupe, so re-running adds nothing and nothing is ever
+removed.
+
+### Events
+
+- `guard:profile`: `{ profile, sandbox: { mode, workspaceMode, readRoots },
+  workspaceLocked }` - emitted on session start, every profile change,
+  reload, and research release. Step-3 tools subscribe to this.
+- `guard:decision`: `{ toolName, class, call, action, reason }` - emitted for
+  every mapped tool call, observe-only.
+- `guard:research-request` / `guard:research-release` (in) and
+  `guard:research-ack` (out, `{ granted, reason, profile }`): the plan.ts
+  handshake; wiring lands in step 4.
 
 ## Shared sandbox library (`sandbox/`)
 
@@ -149,7 +301,12 @@ process tree down, and `kill(-pid)` on the returned child's pid works too.
 ## Tests
 
 - `npm run test:guard`: unit (`tests/guard-sandbox-unit.test.mts`) and
-  integration (`tests/guard-sandbox-integration.test.mts`) suites. The
-  integration suite drives the real sandbox (escape attempts, protected paths,
-  overlays, offline `cargo test` and `dotnet build`) and skips with an explicit
-  reason when the runtime cannot reach full mode.
+  integration (`tests/guard-sandbox-integration.test.mts`) suites for the
+  sandbox library, plus the policy suites: `tests/guard-policy.test.mts`
+  (decision table, host shell, protected paths, local reads, config, state),
+  `tests/guard-classes.test.mts` (classification, suggestions, save helper),
+  `tests/guard-migrate.test.mts` (migrate fixtures and idempotence), and
+  `tests/guard-harness.test.mts` (extension entry point with a fake pi API).
+  The integration suite drives the real sandbox (escape attempts, protected
+  paths, overlays, offline `cargo test` and `dotnet build`) and skips with an
+  explicit reason when the runtime cannot reach full mode.

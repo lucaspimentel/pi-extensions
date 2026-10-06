@@ -2,8 +2,9 @@
 
 Status: **design settled (2026-10-02 grilling sessions, including step 0:
 assumptions confirmed); step 1 (shared sandbox library) implemented in
-`extensions/guard/sandbox/`; step 2 (policy core) in progress and settled
-(2026-10-05 grilling); steps 3+ not implemented.**
+`extensions/guard/sandbox/`; step 2 (policy core) implemented and
+observe-only in `extensions/guard/index.ts` + `policy/` (2026-10-06); steps
+3+ not implemented.**
 
 Scope: a new `guard` extension that replaces `extensions/pi-tool-permissions/`,
 `extensions/python/`, and `extensions/node/`, plus changes to
@@ -242,6 +243,11 @@ auto / trusted / yolo / unrestricted.
 - Files matching the secret-mask patterns (minus exceptions) are denied to
   read/grep in every profile except yolo and unrestricted, matching the
   sandbox masks.
+- **Step-2 mask scope (path-level only):** the decision function sees only
+  the call's path argument, so a grep or find over a directory that happens
+  to contain a masked file is allowed; only direct reads of masked paths
+  are denied. Documented gap; step 3 adds a `tool_result` filter that drops
+  grep/ffgrep matches from masked files.
 
 ### Tool classification
 
@@ -477,6 +483,8 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 | Migrate writes (step 2) | Preview and confirm; union with dedupe, idempotent, never removes entries; per scope |
 | Prompt UX (step 2) | Step 2 adds pure suggestRule and save helpers; dialogs land with enforcement in step 3 |
 | memory_write (step 2) | No guard UI; pi's default tool-call rendering shows writes (supersedes "shown in the UI") |
+| Step-2 implementation (2026-10-06) | Policy core shipped observe-only: six profiles, decision function, classification, guard.json with toolClasses, /guard (list/reload/profile/migrate/ack/debug), ctrl+alt+g cycle, footer status, migrate (preview + confirm, idempotent union); tests in tests/guard-{policy,classes,migrate,harness}.test.mts |
+| Step-2 mask scope (2026-10-06) | Secret-mask read denial is path-level only in step 2; a directory grep that touches a masked file is allowed; step 3 adds a tool_result filter dropping matches from masked files |
 
 ## Implementation outline (build alongside, switch over)
 
