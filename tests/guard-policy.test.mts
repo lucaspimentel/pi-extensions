@@ -54,6 +54,7 @@ import {
 	cycleProfile,
 	createSessionState,
 	footerLabel,
+	mapToolCallToGuardCall,
 	releaseResearchHold,
 	requestResearchHold,
 	setProfile,
@@ -390,6 +391,23 @@ test("tightened host tier vetoes: env/printenv, $ expansion, and mask arguments"
 		"allow",
 		"pwsh has no read-only tier; trusted cell allows",
 	);
+});
+
+test("pi's built-in powershell tool maps to the pwsh shell tier", () => {
+	const mapped = mapToolCallToGuardCall("powershell", { command: "Get-Content x.txt" }, makeConfig());
+	assert.equal(mapped.cls, "host-shell", "the built-in powershell tool classifies as a host shell");
+	if (mapped.call.kind !== "host-shell") throw new Error("expected a host-shell call");
+	assert.equal(mapped.call.shell, "pwsh", "powershell shares the pwsh shell discriminator");
+	// Pwsh(...) rules govern it, same as the old pwsh tool.
+	const denied = makePolicy({ profile: "trusted", config: makeConfig({ hostBash: { deny: ["Pwsh(Get-Content *)"] } }) });
+	assert.equal(decide(denied, mapped.call).action, "deny");
+	// The pwsh cell applies per profile: no read-only tier, trusted allows,
+	// research denies.
+	assert.equal(decide(makePolicy({ profile: "trusted" }), mapped.call).action, "allow");
+	assert.equal(decide(makePolicy({ profile: "research" }), mapped.call).action, "deny");
+	// host_bash keeps its own discriminator.
+	const bashMapped = mapToolCallToGuardCall("host_bash", { command: "ls" }, makeConfig());
+	assert.equal(bashMapped.call.kind === "host-shell" && bashMapped.call.shell, "host-bash");
 });
 
 test("redirected commands need a redirect-aware allow rule", () => {

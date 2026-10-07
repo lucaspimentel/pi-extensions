@@ -93,6 +93,9 @@ const BUILTIN_CLASSES: Readonly<Record<string, ToolClass>> = Object.freeze({
 	// Host shells.
 	host_bash: "host-shell",
 	pwsh: "host-shell",
+	// pi's built-in opt-in PowerShell tool. It shares the pwsh shell tier:
+	// Pwsh(...) rules and the pwsh host-shell cells govern it.
+	powershell: "host-shell",
 	// Sandboxed execution (the kernel sandbox is the guarantee; never
 	// classified). python/node reset/status actions count too.
 	bash: "sandboxed-exec",

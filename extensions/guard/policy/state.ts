@@ -269,7 +269,10 @@ export function mapToolCallToGuardCall(
 	});
 	switch (cls) {
 		case "host-shell": {
-			const shell = toolName.toLowerCase() === "pwsh" ? "pwsh" : "host-bash";
+			// pi's built-in "powershell" tool shares the pwsh shell tier, so
+			// Pwsh(...) rules and the pwsh host-shell cells govern it too.
+			const name = toolName.toLowerCase();
+			const shell = name === "pwsh" || name === "powershell" ? "pwsh" : "host-bash";
 			return { cls, call: { kind: "host-shell", shell, command: String(input.command ?? "") } };
 		}
 		case "sandboxed-exec": {

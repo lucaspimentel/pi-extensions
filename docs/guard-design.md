@@ -12,7 +12,8 @@ implemented.**
 
 Scope: a new `guard` extension that replaces `extensions/pi-tool-permissions/`,
 `extensions/python/`, and `extensions/node/`, plus changes to
-`extensions/plan.ts`, `extensions/pwsh.ts`, and `extensions/subagent/`.
+`extensions/plan.ts` and `extensions/subagent/`. (The standalone
+`extensions/pwsh.ts` was later removed outright; see the decision log.)
 Breaking changes are acceptable.
 
 ## Goals
@@ -36,7 +37,7 @@ Holes, verified 2026-10-02:
 | Allow rules run project code on the host with no prompt, with network, credentials, and pi's full environment (API keys) | `~/.pi/agent/pi-tool-permissions.json` allows `cargo build *`, `cargo test *`, `dotnet build *`, `dotnet test *`, `PYTHONPATH=. pytest *`. Two-step escape: edit a test file (allowed in edits mode), then run `cargo test` (allowed). |
 | `/plan` is not read-only | `plan.ts:199` (`narrowTools()`) hides only write/edit. bash, pwsh, python, node, MCP, and subagent stay active. The only other safeguard is prompt text (`plan.ts:55`). |
 | python/node writable mounts do not protect paths whose contents later execute outside the sandbox | `python/sandbox.ts` and `node/sandbox.ts` never mention `.git` or `.pi`. In edits/auto/yolo, sandboxed code can write `.git/hooks/*`, `.git/config`, and `.pi/pi-tool-permissions*.json` (the model could grant itself allow rules). |
-| `pwsh` runs on the host | `pwsh.ts:127` spawns it directly. On Linux it is equivalent to unsandboxed bash. |
+| `pwsh` ran on the host | The since-removed `pwsh` extension spawned it directly; on Linux it was equivalent to unsandboxed bash. pi's built-in `powershell` tool is opt-in (`defaultTools`) and guard classifies it as a host shell. |
 | Headless subagent children are safe only because of a config default | `nonInteractiveAsk` is unset in the user config and defaults to deny. Setting it to `"allow"` would let children write freely. |
 | Built-in bash inherits pi's full environment | Provider keys, `DD_API_KEY`, `GITHUB_TOKEN`, and similar are visible to every command. |
 
@@ -99,10 +100,12 @@ Holes, verified 2026-10-02:
   - python/node are unavailable.
   - In research, `bash` runs only commands the string-based read-only tier
     and validators prove read-only; everything else is denied.
-- **pwsh:** registered on Windows only (removed on Linux). It is a host-tier
-  tool exactly like host_bash (hidden in research, rule-or-prompt in default,
-  classifier in auto, allowed in trusted/yolo) with its own `Pwsh(...)` rules.
-  pwsh has no read-only tier today, so none carries over.
+- **pwsh:** the standalone `pwsh` extension was removed (2026-10-07); guard
+  registers no PowerShell tool of its own. pi's built-in `powershell` tool is
+  opt-in via `defaultTools`; when it is enabled, guard classifies it as a
+  host-tier tool on the pwsh tier (host-shell class, `shell: "pwsh"`), so
+  `Pwsh(...)` rules and the pwsh cells govern it exactly like the old pwsh
+  tool. It has no read-only tier, so none carries over.
 - **Runtime modes on Linux:**
 
   | Mode | When | Behavior |
@@ -198,7 +201,7 @@ Holes, verified 2026-10-02:
 | `bash` | Always sandboxed, except in yolo and unrestricted. Built with `createBashTool()` plus bwrap-spawning `BashOperations`. One process per call, no persistent shell. |
 | `host_bash` | The only escape from the sandbox. `HostBash(...)` rules plus the tightened host read-only tier (below) apply to it. |
 | `python`, `node` | Persistent interpreters moved into guard. Every sandboxed profile uses a worker-lifetime workspace overlay (read-only in reduced mode); workspace writes never reach the host. Persist outputs in shared scratch. Yolo/unrestricted are fully raw. |
-| `pwsh` | Windows only; host tier, like host_bash. |
+| `pwsh` | Not registered by guard. pi's built-in opt-in `powershell` tool is classified as a host shell on the pwsh tier (`Pwsh(...)` rules) whenever it is enabled. |
 
 - **Read-only tier on both shells:** the read-only command tier, the
   validators (duckdb/mlr/find/awk), and the redirect checks apply to sandboxed
@@ -655,6 +658,7 @@ remain useful.
 | Step-3 implementation (2026-10-07) | Shipped: four tools registered ahead of python/node (authoritative, dormant old extensions), one execution queue with pre-spawn revalidation and fail-closed transitions, worker-lifetime overlays plus shared real-path scratch, audits around all sandboxed execution with union pre/post comparison and violation/scan/quarantine locking, exact/effective rule saving with stale-approval cancellation, no grant replay, fixed executor identities, raw bash under HostBash rules, and the fail-closed grep/ffgrep mask filter; suites guard-{sandbox,policy,classes,migrate,filter,workers,runtime,harness} |
 | Step-4 implementation (2026-10-07) | Shipped: /plan requests the research hold before narrowing and refuses without an ack (timeout covers guard-absent); narrowTools hides host_bash; every exit path releases (awaited release-ack, background release on recovery/clear-context, warning on failed release); menu only on completed agent_before_settle (Batch B) |
 | Step-5 restriction shape (2026-10-07) | Allow-list (inherited profile + research), not an ordinal ceiling: the ladder is not a permission ordering, so an auto child must not reach default; refusals explain instead of clamping |
+| pwsh extension removed (2026-10-07) | `extensions/pwsh.ts` deleted and unregistered: pi's built-in `powershell` tool (opt-in via `defaultTools`) replaces it. Guard classifies the built-in name as a host shell on the pwsh tier (`shell: "pwsh"`, `Pwsh(...)` rules, pwsh cells, no read-only tier); `Pwsh(...)` rules in guard.json keep applying. pi-tool-permissions pwsh handling left untouched until switchover; user settings untouched |
 | Step-5 snapshot (2026-10-07) | Fresh synchronous snapshot query per actual spawn (single, each parallel task, each chain step, nested); no cached profile events; no retroactive tightening of running children |
 | Step-5 child config (2026-10-07) | Profile only: the child loads its own config for its cwd; locks are never transmitted (locked parents refuse dispatch) |
 | Step-5 gate (2026-10-07) | Dedicated bootstrap extension passed with --extension; synchronous contract ack proves version/nonce/profile/restriction/runtime; child-only fatal path (stderr + exit 1) because pi catches handler errors and print mode has no shutdown handler |

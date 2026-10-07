@@ -74,6 +74,7 @@ test("every built-in tool name maps to its class", () => {
 		["scratchpad", "local-write"],
 		["host_bash", "host-shell"],
 		["pwsh", "host-shell"],
+		["powershell", "host-shell"],
 		["bash", "sandboxed-exec"],
 		["python", "sandboxed-exec"],
 		["node", "sandboxed-exec"],

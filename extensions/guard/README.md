@@ -26,7 +26,7 @@ transitions; `tools/` holds the tool implementations.
 | `bash` | `createBashTool()` with sandboxed `BashOperations` (`tools/shell.ts`); one bwrap process per call, no persistent shell. Yolo/unrestricted run it on the host, honoring HostBash deny/ask rules (unrestricted ignores rules unless the workspace is locked). |
 | `host_bash` | The only sandbox escape: argv-array host exec with `HostBash(...)` rules and the tightened read-only tier. |
 | `python` / `node` | Ports of the old controllers (`tools/python/`, `tools/node/`) onto the shared sandbox: persistent worker, fd-3 JSON protocol, bounded output/timeouts, no code replay. Every sandboxed profile uses a worker-lifetime workspace overlay; reduced mode or a workspace lock degrades to read-only; yolo/unrestricted run the worker raw (full env and filesystem, no launcher, no rlimits). |
-| `pwsh` | Not registered on Linux (Windows hosts only, step 6 removes it there). |
+| `pwsh` | Not registered by guard. The standalone `pwsh` extension was removed; pi's built-in `powershell` tool is opt-in (`defaultTools`) and, when enabled, is classified as a host shell on the pwsh tier (`Pwsh(...)` rules, no read-only tier). |
 
 Registration details:
 

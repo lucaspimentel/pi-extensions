@@ -22,7 +22,6 @@
       "./extensions/wt-tab-status",
       "./extensions/external-editor-fix",
       "./extensions/idle-summary",
-      "./extensions/pwsh.ts",
       "./extensions/slack-via-claude.ts",
       "./extensions/ollama-models.ts",
       "./extensions/python",
