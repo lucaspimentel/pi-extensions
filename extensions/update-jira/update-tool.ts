@@ -167,6 +167,7 @@ export function requiredTransitionFieldNames(fields: unknown): string[] {
 export function extractLandedStatus(serverData: unknown): string | undefined {
 	if (typeof serverData !== "object" || serverData === null) return undefined;
 	const data = serverData as Record<string, unknown>;
+	if (typeof data.statusName === "string") return data.statusName;
 	const status = data.status;
 	if (typeof status === "string") return status;
 	if (typeof status === "object" && status !== null) {

@@ -426,6 +426,33 @@ test("update transition: status match submits an id and reports the landed statu
 	}
 });
 
+// MCP v2 returned this statusName response shape in authorized live smoke tests.
+for (const { mode, transitionId, statusName, params } of [
+	{ mode: "status", transitionId: "21", statusName: "In Progress", params: { status: "in progress" } },
+	{ mode: "explicit id", transitionId: "11", statusName: "To Do", params: { transitionId: "11" } },
+]) {
+	test(`update transition: ${mode} reports landed status from the live statusName shape`, async () => {
+		const harness = makeHarness({ config: VALID_CONFIG });
+		try {
+			const server = { message: "Issue EXAMPLE-101 transitioned successfully", transitionId: Number(transitionId), statusName };
+			harness.setHandler((call) =>
+				call.tool.includes("executeRead")
+					? okOutcome({ data: { transitions: [{ id: transitionId, name: statusName, to: { name: statusName }, fields: {} }] } })
+					: okOutcome({ data: server }),
+			);
+			const result = await runUpdate(harness, { action: "transition", ticketKey: "EXAMPLE-101", ...params });
+			const envelope = envelopeOf(result);
+			assert.equal(envelope.ok, true);
+			assert.equal(result.isError, false);
+			assert.deepEqual(envelope.data, { server, landedStatus: statusName });
+			assert.deepEqual(harness.calls.map((call) => call.tool), ["mcp__atlassian__executeRead", "mcp__atlassian__transitionJiraIssue"]);
+			assert.equal(harness.calls[1].args.transitionId, transitionId);
+		} finally {
+			cleanupHarness(harness);
+		}
+	});
+}
+
 test("update transition: zero and multiple status matches are rejected with candidates", async () => {
 	const harness = makeHarness({ config: VALID_CONFIG });
 	try {
