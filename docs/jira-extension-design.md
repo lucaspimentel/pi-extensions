@@ -96,9 +96,10 @@ Judgment-heavy work (drafting epics, triage) is out of scope for v1.
 # Jira extension design (v2)
 
 Date: 2026-10-06; amended 2026-10-07 after a further design interview.
-Status: contracts confirmed; not yet implemented. Human design choices are
-settled; read-only payload verification remains an implementation gate.
-Live-write verification has separate authorization gates below.
+Status: implemented and verified (2026-10-07). Human design choices are
+settled; the read-only payload gate and the live-write authorization gates
+below were all satisfied on 2026-10-07 (scratch ticket APMSVLS-670; see
+"Verification gates" and the TODO's Done notes).
 Supersedes v1 for transport, tool surface, config, permissions, and context
 injection. The first implementation uses a local ticket-key pointer, not
 an automatically fetched digest.
@@ -559,8 +560,10 @@ production read-back is needed.
 reports comment counts rather than providing a comments page.
 `responseContentFormat` is `markdown | html`, not ADF. The live description
 says unsupported markdown bodies are returned as HTML automatically, with
-`appliedContentFormat` identifying the result. This is a schema guarantee,
-not yet a locally observed rich-content round-trip.
+`appliedContentFormat` identifying the result. A locally observed
+rich-content round-trip followed on 2026-10-07: an approved HTML
+description was written and read back byte-identical (APMSVLS-670 smoke,
+tested panel/status body).
 - `editJiraIssue`: exposes `fields` and `additional_fields`; explicitly
 documents name-based resolution for `additional_fields` and accepts raw
 Jira shapes. Null clears supported fields and multi-value fields are set,
@@ -614,10 +617,21 @@ and is never remembered: the tool descriptions say to fetch it once per
 session and pass it explicitly each call. A site URL is accepted in its
 place, which is why config stores `siteUrl`.
 
-## Verification gates remaining
+## Verification gates (satisfied 2026-10-07)
 
 The context, rich-text input, edit routing, and failure contracts are
 selected above; there is no unresolved choice of event-time transport.
+All four gates below were satisfied on 2026-10-07 against scratch ticket
+APMSVLS-670 with the real committed extension over live Atlassian MCP in
+an isolated installed pi 1.0.4 SDK session (no LLM calls): read-only
+probes plus an authorized live-write smoke (39 live assertions passed,
+1 skipped), a separately authorized transition pass (To Do -> In Progress
+via status mode ID21 and back via explicit transitionId ID11, each
+confirmed by an independent read, 25 live assertions), a byte-identical
+HTML description read/write/read for the tested panel/status body, and
+recorded write response shapes; the observed transition shape exposed and
+fixed a `statusName` normalization bug (commit `b6f36dc`, test:jira
+67/67). Details and private artifact paths are in the TODO's Done notes.
 
 - **Before payload-parser implementation:** use read-only probes to pin the
 explicit-field digest and raw response shapes, nested envelope, comment
@@ -635,8 +649,9 @@ caller edits. A truncated digest is never evidence of a safe write-back.
 - **Before declaring implementation verified:** pass offline/repository
 checks and authorized smoke tests; record observed write responses,
 including remote-link creation. No new write response shapes were observed
-in the 2026-10-07 design interview.
+in the 2026-10-07 design interview; the live smoke and transition passes
+recorded them (comments, edit, transitions, remote-link creation/dedupe).
 
-These are evidence and authorization gates, not unselected design
-alternatives. Leave the extension unimplemented until the read-only
-payload gate is satisfied, and unverified until the applicable checks pass.
+These were evidence and authorization gates, not unselected design
+alternatives. They are all satisfied; the extension is implemented and
+verified against the live server within the recorded scope.
