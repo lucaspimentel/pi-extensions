@@ -1,0 +1,13 @@
+{
+  "outcome": {
+    "isError": false,
+    "result": {
+      "content": [{ "type": "text", "text": "<server JSON text block, truncated at 20 KiB for the model>" }],
+      "isError": false,
+      "structuredContent": {
+        "content": [{ "type": "text", "text": "{\"data\":{\"key\":\"EXAMPLE-101\"}}" }],
+        "isError": false
+      }
+    }
+  }
+}

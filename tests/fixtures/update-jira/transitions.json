@@ -1,0 +1,20 @@
+{
+  "data": {
+    "transitions": [
+      { "id": "111", "name": "Example Transition A", "to": { "name": "Archive", "statusCategory": { "key": "done" } }, "hasScreen": false, "isAvailable": true, "fields": {} },
+      { "id": "931", "name": "Example Transition B", "to": { "name": "Done", "statusCategory": { "key": "done" } }, "hasScreen": false, "isAvailable": true, "fields": {} },
+      { "id": "941", "name": "Example Transition C", "to": { "name": "Done", "statusCategory": { "key": "done" } }, "hasScreen": false, "isAvailable": true, "fields": {} },
+      {
+        "id": "951",
+        "name": "Example Transition D",
+        "to": { "name": "Waiting", "statusCategory": { "key": "new" } },
+        "hasScreen": true,
+        "isAvailable": true,
+        "fields": [
+          { "required": true, "name": "Resolution", "key": "resolution", "schema": { "type": "resolution" } },
+          { "required": false, "name": "Assignee", "key": "assignee" }
+        ]
+      }
+    ]
+  }
+}

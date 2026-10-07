@@ -1,0 +1,30 @@
+{
+  "data": {
+    "id": "10001",
+    "key": "EXAMPLE-101",
+    "fields": {
+      "summary": "Placeholder summary text",
+      "status": {
+        "description": "A status description",
+        "name": "In Progress",
+        "id": "10002",
+        "statusCategory": { "id": 2, "key": "inprogress", "name": "In Progress" }
+      },
+      "assignee": {
+        "accountId": "example-account-id",
+        "emailAddress": "user@example.com",
+        "displayName": "Example User",
+        "active": true,
+        "timeZone": "America/New_York",
+        "accountType": "atlassian"
+      },
+      "description": "<p>Placeholder rich-text body with an <ac:structured-macro ac:name=\"info\">panel</ac:structured-macro> that markdown cannot represent.</p>",
+      "customfield_10010": "Scrubbed value",
+      "customfield_10011": [{ "id": "10020", "name": "Scrubbed Option" }],
+      "attachment": [{ "id": "10030", "filename": "placeholder.png" }],
+      "labels": ["placeholder-label"]
+    },
+    "appliedContentFormat": "html",
+    "warning": "responseContentFormat: markdown was not applied — this content holds nodes markdown cannot represent (inline media, panels, expands, statuses, @mentions), which markdown would drop or return as literal text, so HTML was returned instead. Read it as HTML, and write it back as HTML with contentFormat: \"html\"."
+  }
+}

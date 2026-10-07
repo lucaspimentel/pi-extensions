@@ -1,0 +1,9 @@
+{
+  "data": [
+    {
+      "id": "222898",
+      "relationship": "Wiki Page",
+      "object": { "url": "https://example.atlassian.net/wiki/pages/viewpage.action?pageId=1", "title": "Example linked page" }
+    }
+  ]
+}

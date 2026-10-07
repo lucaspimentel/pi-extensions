@@ -2,6 +2,16 @@
 
 > See also [`extensions/pi-tool-permissions/TODO.md`](extensions/pi-tool-permissions/TODO.md) for the pi-tool-permissions extension's own task list.
 
+## update-jira extension
+
+Design: [`docs/jira-extension-design.md`](docs/jira-extension-design.md) (v2 contract). Live-write smoke verification and the HTML round-trip are separately authorized gates.
+
+- [x] Implement the v2 extension (2026-10-07)
+  - Done: `extensions/update-jira/` (index, common, schema, config, branch, mcp, digest, context, results, write-queue, read-tool, update-tool) registered as `./extensions/update-jira`; `jira_read` (get digest/raw, comments page) and `jira_update` (transition, comment, link_pr, edit) over the Atlassian MCP v2 server via nested `ctx.executeTool()` only; fail-closed `update-jira.json` config re-read per call/boundary; per-call branch regex/mapping resolution with explicit-key override; per-site/ticket mutation queue with queued cancellation; 16 KiB text budget with private session-local spill and shutdown cleanup; run-boundary pointer with change/clearing/reconstruction rules; the fifteen documented error kinds with conservative post-dispatch uncertainty. Read-only live probes pinned the payload shapes (scrubbed fixtures in `tests/fixtures/update-jira/`) and the nested envelope (complete `structuredContent`, 20 KiB truncated `content`, `{error,message,statusCode}` server errors, unknown-tool shape).
+  - Suites: `npm run test:jira` (`tests/update-jira-unit.test.mts`, `tests/update-jira-tools.test.mts`); network-free, stub transport only.
+- [ ] Authorized live-write smoke tests: user-designated scratch ticket, agreed mutation scope, a permitted return transition, and permanent-artifact acknowledgment before any write; exercise comment, edit, transition-and-return (including ID selection), link creation, duplicate-link no-op; record observed write response shapes (none observed yet; write fixtures are schema-derived only).
+- [ ] HTML rich-content round-trip: verify the site's HTML feature is enabled and perform an approved full-body round-trip (comment and description) before claiming losslessness; a truncated digest is never evidence of a safe write-back.
+
 ## Guard (sandbox-first permissions redesign)
 
 Design: [`docs/guard-design.md`](docs/guard-design.md) (settled 2026-10-02, assumptions confirmed). Guard replaces pi-tool-permissions, python, and node, and takes over Linux pwsh removal. It is built alongside the old extensions and switched over at parity; no new feature work on the replaced extensions. Bug fixes in code guard keeps (sandbox library, plan.ts, tool plumbing) are still fine.

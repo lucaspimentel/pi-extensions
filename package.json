@@ -28,13 +28,15 @@
       "./extensions/python",
       "./extensions/node",
       "./extensions/session-search",
-      "./extensions/subagent"
+      "./extensions/subagent",
+      "./extensions/update-jira"
     ],
     "prompts": ["./extensions/subagent/prompts/*.md"]
   },
   "scripts": {
     "test:python": "node --test tests/python-unit.test.mts tests/python-integration.test.mts",
     "test:node": "node --test tests/node-unit.test.mts tests/node-integration.test.mts",
+    "test:jira": "node --test tests/update-jira-unit.test.mts tests/update-jira-tools.test.mts",
     "test:guard": "node --test tests/guard-sandbox-unit.test.mts tests/guard-sandbox-integration.test.mts && node tests/guard-policy.test.mts && node tests/guard-classes.test.mts && node tests/guard-migrate.test.mts && node tests/guard-filter.test.mts && node tests/guard-workers.test.mts && node tests/guard-runtime.test.mts && node tests/guard-harness.test.mts"
   },
   "dependencies": {

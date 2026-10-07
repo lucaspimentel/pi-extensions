@@ -1,0 +1,25 @@
+{
+  "data": {
+    "id": "10001",
+    "key": "EXAMPLE-101",
+    "fields": {
+      "summary": "Placeholder summary text",
+      "status": {
+        "description": "A status description",
+        "name": "In Progress",
+        "id": "10002",
+        "statusCategory": { "id": 2, "key": "inprogress", "name": "In Progress" }
+      },
+      "assignee": {
+        "accountId": "example-account-id",
+        "emailAddress": "user@example.com",
+        "displayName": "Example User",
+        "active": true,
+        "timeZone": "America/New_York",
+        "accountType": "atlassian"
+      },
+      "description": "Placeholder description body. Second paragraph with scrubbed customer content."
+    },
+    "appliedContentFormat": "markdown"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "data": {
+    "startAt": 0,
+    "maxResults": 20,
+    "total": 13,
+    "isLast": false,
+    "comments": [
+      {
+        "id": "100001",
+        "author": { "displayName": "Example User" },
+        "body": "<p>Placeholder comment body with <code>inline code</code>.</p>",
+        "created": "2026-10-01T10:00:00.000+0000",
+        "updated": "2026-10-01T10:00:00.000+0000",
+        "jsdPublic": true
+      },
+      {
+        "id": "100002",
+        "author": { "displayName": "Another Example User" },
+        "body": "<p>Second placeholder comment body.</p>",
+        "created": "2026-09-30T09:00:00.000+0000",
+        "updated": "2026-09-30T09:00:00.000+0000",
+        "jsdPublic": true
+      }
+    ],
+    "appliedContentFormat": "html",
+    "warning": "responseContentFormat: markdown was not applied — this content holds nodes markdown cannot represent (inline media, panels, expands, statuses, @mentions), which markdown would drop or return as literal text, so HTML was returned instead. Read it as HTML, and write it back as HTML with contentFormat: \"html\"."
+  }
+}
