@@ -251,8 +251,11 @@ removed.
 - `guard:decision`: `{ toolName, class, call, action, reason }` - emitted for
   every mapped tool call, observe-only.
 - `guard:research-request` / `guard:research-release` (in) and
-  `guard:research-ack` (out, `{ granted, reason, profile }`): the plan.ts
-  handshake; wiring lands in step 4.
+  `guard:research-ack` / `guard:research-release-ack` (out): the plan.ts
+  handshake, wired in step 4. `/plan` requests the hold before narrowing
+  (write/edit/`host_bash`) and refuses to start without an acknowledgment;
+  every exit path releases it, and guard acks only after the transition
+  (teardown included) completes.
 
 ## Shared sandbox library (`sandbox/`)
 

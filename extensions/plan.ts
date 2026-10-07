@@ -1,9 +1,11 @@
 /**
  * plan
  *
- * When the user runs `/plan <task>`, pi disables the `write` and `edit` tools
- * (everything else stays active, including unrestricted bash and MCP tools)
- * and sends a planning prompt as a user message. `/plan` with no task tells
+ * When the user runs `/plan <task>`, guard (if loaded) is asked to hold its
+ * research profile for the planning turn (a refusal refuses to start `/plan`:
+ * planning must be read-only), pi disables the `write`, `edit`, and
+ * `host_bash` tools (everything else stays active, including unrestricted
+ * bash and MCP tools), and sends a planning prompt as a user message. `/plan` with no task tells
  * the planner to infer what to plan from the conversation, asking the user
  * (via ask_user_question when available, plain text otherwise) if the intent
  * is ambiguous. If the optional
@@ -41,6 +43,82 @@ import type {
 	ExtensionContext,
 	SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+
+// ── guard research handshake (step 4) ────────────────────────────────────
+// guard owns the research profile. /plan requests it before narrowing tools
+// and releases it on every exit path; guard awaits teardown before acking, so
+// the tool restore below never races a raw worker. If guard is not loaded (no
+// ack within the timeout), /plan refuses to start: planning without the
+// research sandbox is exactly the hole this extension exists to close.
+const GUARD_REQUEST_CHANNEL = "guard:research-request";
+const GUARD_ACK_CHANNEL = "guard:research-ack";
+const GUARD_RELEASE_CHANNEL = "guard:research-release";
+const GUARD_RELEASE_ACK_CHANNEL = "guard:research-release-ack";
+const GUARD_HOLDER = "plan";
+// Test hook (read per call so tests can shorten it): real sessions ack in
+// milliseconds; the timeout only fires when guard is absent or wedged.
+function guardAckTimeoutMs(): number {
+	return Number(process.env.PI_PLAN_GUARD_ACK_TIMEOUT_MS) || 5_000;
+}
+
+/** Tools hidden during planning, beyond the built-in write pair. */
+const EXTRA_NARROWED_TOOLS = ["host_bash"] as const;
+
+interface GuardAck {
+	granted?: boolean;
+	released?: boolean;
+	reason?: string;
+	profile?: string;
+}
+
+/**
+ * Wait for the next emission on a guard channel, or null on timeout. The
+ * listener is registered before the caller emits so a synchronous ack cannot
+ * be missed.
+ */
+function nextGuardEvent(pi: ExtensionAPI, channel: string, timeoutMs: number): Promise<GuardAck | null> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const finish = (value: GuardAck | null) => {
+			if (settled) return;
+			settled = true;
+			try { off(); } catch { /* unsubscribe is best effort */ }
+			resolve(value);
+		};
+		const off = pi.events.on(channel, (data: unknown) => {
+			finish((data ?? {}) as GuardAck);
+		});
+		// The timer must keep the event loop alive: an unref'd timer plus a
+		// pending await would let the process exit before the timeout fires.
+		const timer = setTimeout(() => finish(null), timeoutMs);
+	});
+}
+
+/** Ask guard to hold research; resolves false when absent, wedged, or refused. */
+async function requestGuardResearch(pi: ExtensionAPI): Promise<GuardAck> {
+	const timeout = guardAckTimeoutMs();
+	const pending = nextGuardEvent(pi, GUARD_ACK_CHANNEL, timeout);
+	pi.events.emit(GUARD_REQUEST_CHANNEL, { holder: GUARD_HOLDER });
+	const ack = await pending;
+	return ack ?? { granted: false, reason: `no acknowledgment within ${timeout} ms (guard not loaded?)` };
+}
+
+/**
+ * Release the research hold. Guard-unavailable and no-hold outcomes resolve
+ * quietly; a failed transition is reported so the user can check /guard.
+ */
+async function releaseGuardResearch(pi: ExtensionAPI): Promise<string | null> {
+	const pending = nextGuardEvent(pi, GUARD_RELEASE_ACK_CHANNEL, guardAckTimeoutMs());
+	pi.events.emit(GUARD_RELEASE_CHANNEL, { holder: GUARD_HOLDER });
+	const ack = await pending;
+	if (ack === null) return null; // guard absent: nothing to release
+	return ack.released === false ? (ack.reason ?? "release failed") : null;
+}
+
+/** Fire-and-forget release for recovery paths that must not block. */
+function releaseGuardResearchInBackground(pi: ExtensionAPI): void {
+	void releaseGuardResearch(pi).catch(() => undefined);
+}
 
 const PLAN_NUDGE_INTRO = `The user has asked for a plan. Produce a complete, self-contained handoff
 prompt that a fresh agent session (with no memory of this conversation) could
@@ -199,19 +277,29 @@ export default function plan(pi: ExtensionAPI) {
 	}
 
 	function narrowTools(): void {
-		// Disable write/edit among the CURRENTLY ACTIVE tools. Tools the user or
-		// another extension had deactivated stay deactivated, and hidden/deferred/
-		// MCP tools that are not active (codemode, tool_search, etc.) are not
-		// flooded into the tool declarations; only getAllTools-based narrowing
-		// would do that, and it would also invalidate the prompt cache.
+		// Disable write/edit and the guard host escape among the CURRENTLY ACTIVE
+		// tools. Tools the user or another extension had deactivated stay
+		// deactivated, and hidden/deferred/MCP tools that are not active
+		// (codemode, tool_search, etc.) are not flooded into the tool
+		// declarations; only getAllTools-based narrowing would do that, and it
+		// would also invalidate the prompt cache.
 		pi.setActiveTools(
-			pi.getActiveTools().filter((name) => name !== "write" && name !== "edit"),
+			pi.getActiveTools().filter(
+				(name) => name !== "write" && name !== "edit" && !(EXTRA_NARROWED_TOOLS as readonly string[]).includes(name),
+			),
 		);
 	}
 
 	async function startPlanning(args: string, ctx: ExtensionCommandContext): Promise<void> {
 		if (planning) {
 			ctx.ui.notify("Already in planning mode.", "warning");
+			return;
+		}
+		// Research first: a refusal (guard absent, another holder, or a failed
+		// transition) aborts planning before anything is narrowed or persisted.
+		const hold = await requestGuardResearch(pi);
+		if (!hold.granted) {
+			ctx.ui.notify(`/plan requires the guard research profile; refused: ${hold.reason ?? "unknown reason"}`, "warning");
 			return;
 		}
 		// Snapshot the active tool set so it can be restored later (narrowTools()
@@ -233,8 +321,8 @@ export default function plan(pi: ExtensionAPI) {
 		updateStatus(ctx);
 		ctx.ui.notify(
 			canAskUser
-				? "Planning (write/edit disabled; clarifying questions enabled)."
-				: "Planning (write/edit disabled).",
+				? "Planning (write/edit and host_bash disabled; research held; clarifying questions enabled)."
+				: "Planning (write/edit and host_bash disabled; research held).",
 			"info",
 		);
 
@@ -252,6 +340,13 @@ export default function plan(pi: ExtensionAPI) {
 	async function restoreTools(ctx: ExtensionContext): Promise<void> {
 		if (!planning) return;
 		planning = false;
+
+		// Release the research hold before touching tools: guard awaits teardown
+		// before acking, so queued guarded work drains under the restored policy.
+		const releaseProblem = await releaseGuardResearch(pi);
+		if (releaseProblem) {
+			ctx.ui.notify(`guard research release failed: ${releaseProblem}; check /guard list.`, "warning");
+		}
 
 		if (savedTools) {
 			pi.setActiveTools(savedTools);
@@ -301,7 +396,10 @@ export default function plan(pi: ExtensionAPI) {
 		if (choice === CHOICE_CLEAR_AND_IMPLEMENT) {
 			// Detach this instance's state before replacing the session; the
 			// replacement session starts with default tools and fires
-			// session_start, which resets everything anyway.
+			// session_start, which resets everything anyway. The research hold is
+			// released in the background so the old session's guard does not keep
+			// the profile pinned while the new session starts.
+			releaseGuardResearchInBackground(pi);
 			planning = false;
 			savedTools = undefined;
 			updateStatus(ctx);
@@ -377,10 +475,12 @@ export default function plan(pi: ExtensionAPI) {
 		},
 	});
 
-	// After the planning turn settles (retries/continuations included), capture
-	// the plan and ask the user what to do next.
-	pi.on("agent_settled", async (_event, ctx) => {
-		if (planning) {
+	// The final actionable boundary: the menu and clipboard copy must only
+	// fire after a COMPLETED settle. On abort or error, keep planning active
+	// (tools stay narrowed) and stay silent: no menu, no clipboard, no notify.
+	pi.on("agent_before_settle", async (event, ctx) => {
+		if (!planning) return;
+		if (event.outcome === "completed") {
 			await handlePlanReady(ctx);
 		}
 	});
@@ -410,14 +510,18 @@ export default function plan(pi: ExtensionAPI) {
 			pi.setActiveTools(saved);
 		} else {
 			// Malformed or missing snapshot: repair by re-activating write/edit
-			// alongside whatever pi replayed.
+			// and the narrowed guard tools alongside whatever pi replayed.
 			const current = pi.getActiveTools();
 			const repaired = [...current];
-			for (const tool of ["write", "edit"] as const) {
+			for (const tool of ["write", "edit", ...EXTRA_NARROWED_TOOLS] as const) {
 				if (!repaired.includes(tool)) repaired.push(tool);
 			}
 			pi.setActiveTools(repaired);
 		}
+		// The fresh session's guard has no hold (its state starts clean), but a
+		// stale release is harmless and keeps a replaced session from pinning
+		// research.
+		releaseGuardResearchInBackground(pi);
 		ctx.ui.notify("Interrupted mid-plan; previous tool set restored.", "info");
 	}
 

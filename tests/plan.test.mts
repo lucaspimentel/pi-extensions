@@ -10,6 +10,9 @@ import assert from "node:assert/strict";
 import planExtension from "../extensions/plan.ts";
 
 process.env.PI_PLAN_CLIPBOARD = "off";
+// The guard handshake timeout is read per call; shorten it so the "guard
+// absent" and "guard wedged" tests do not wait the real 5 s.
+process.env.PI_PLAN_GUARD_ACK_TIMEOUT_MS = "50";
 
 const PLAN_TEXT = "HANDOFF PLAN: do the thing, then verify with tests.";
 const CHOICE_IMPLEMENT_HERE = "Accept: implement in this session";
@@ -17,11 +20,20 @@ const CHOICE_CLEAR_AND_IMPLEMENT = "Accept: clear context, then implement";
 const CHOICE_REVISE = "Decline: write feedback, try again";
 const CHOICE_STOP = "Decline: stop";
 
+// How the fake guard event bus answers the research handshake:
+//   granted     - acks research requests and releases (the real guard)
+//   refused     - acks requests with granted:false
+//   absent      - no guard listeners at all (requests time out)
+//   wedged      - listeners exist but never ack
+//   releaseFail - requests grant, but releases fail (transition error)
+type GuardMode = "granted" | "refused" | "absent" | "wedged" | "releaseFail";
+
 function makeHarness(
 	selectChoice?: string,
 	editorText?: string,
 	allToolNames?: string[],
 	initialActiveTools?: string[],
+	guardMode: GuardMode = "granted",
 ) {
 	const commands: Record<string, any> = {};
 	const events: Record<string, any> = {};
@@ -31,6 +43,8 @@ function makeHarness(
 	const editors: { title: string; prefill: string }[] = [];
 	const newSessions: { parentSession?: string; kickoff?: string }[] = [];
 	const entries: { customType: string; data: unknown }[] = [];
+	const busListeners: Record<string, Array<(data: any) => void>> = {};
+	const emitted: Array<[string, any]> = [];
 	let activeTools: string[] = [];
 
 	const originalTools = ["read", "write", "edit", "bash"];
@@ -46,7 +60,41 @@ function makeHarness(
 		setActiveTools(tools: string[]) { activeTools = tools.slice(); },
 		appendEntry(customType: string, data?: unknown) { entries.push({ customType, data }); },
 		sendUserMessage(msg: string) { sent.push(msg); },
+		events: {
+			on(channel: string, fn: (data: any) => void) {
+				(busListeners[channel] ??= []).push(fn);
+				return () => {
+					const list = busListeners[channel];
+					if (list) busListeners[channel] = list.filter((f) => f !== fn);
+				};
+			},
+			emit(channel: string, data: unknown) {
+				emitted.push([channel, data]);
+				for (const fn of [...(busListeners[channel] ?? [])]) fn(data);
+			},
+		},
 	};
+
+	if (guardMode === "granted" || guardMode === "releaseFail") {
+		pi.events.on("guard:research-request", () => {
+			pi.events.emit("guard:research-ack", { granted: true, reason: "research granted", profile: "research" });
+		});
+		pi.events.on("guard:research-release", () => {
+			if (guardMode === "releaseFail") {
+				pi.events.emit("guard:research-release-ack", { released: false, reason: "teardown wedged" });
+				return;
+			}
+			pi.events.emit("guard:research-release-ack", { released: true, reason: "released", profile: "default" });
+		});
+	} else if (guardMode === "refused") {
+		pi.events.on("guard:research-request", () => {
+			pi.events.emit("guard:research-ack", { granted: false, reason: "research is already held by someone else" });
+		});
+	} else if (guardMode === "wedged") {
+		pi.events.on("guard:research-request", () => {});
+		pi.events.on("guard:research-release", () => {});
+	}
+	// "absent" registers nothing: every handshake times out.
 
 	const branch: any[] = [];
 	const ctx: any = {
@@ -86,7 +134,7 @@ function makeHarness(
 	const restored = () => activeTools.length > 0 && activeTools.includes("write") && activeTools.includes("edit");
 	const tools = () => activeTools.slice();
 
-	return { commands, events, sent, notifications, selects, editors, newSessions, entries, ctx, branch, narrowed, restored, tools };
+	return { commands, events, sent, notifications, selects, editors, newSessions, entries, emitted, ctx, branch, narrowed, restored, tools };
 }
 
 function addAssistantTurn(h: ReturnType<typeof makeHarness>, text: string) {
@@ -242,7 +290,7 @@ async function main() {
 		const h = makeHarness(CHOICE_IMPLEMENT_HERE);
 		await h.commands["plan"].handler("add a feature", h.ctx);
 		addAssistantTurn(h, PLAN_TEXT);
-		await h.events["agent_settled"](undefined, h.ctx);
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, h.ctx);
 
 		assert.equal(h.selects.length, 1, "must ask the user what to do next");
 		assert.deepEqual(h.selects[0].options, [CHOICE_IMPLEMENT_HERE, CHOICE_CLEAR_AND_IMPLEMENT, CHOICE_REVISE, CHOICE_STOP]);
@@ -256,7 +304,7 @@ async function main() {
 		const h = makeHarness(CHOICE_CLEAR_AND_IMPLEMENT);
 		await h.commands["plan"].handler("add a feature", h.ctx);
 		addAssistantTurn(h, PLAN_TEXT);
-		await h.events["agent_settled"](undefined, h.ctx);
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, h.ctx);
 
 		assert.equal(h.newSessions.length, 1, "must create a replacement session");
 		assert.equal(h.newSessions[0].parentSession, "/tmp/session.jsonl");
@@ -269,7 +317,7 @@ async function main() {
 		const h = makeHarness(CHOICE_REVISE, "make step 2 use xUnit instead");
 		await h.commands["plan"].handler("add a feature", h.ctx);
 		addAssistantTurn(h, PLAN_TEXT);
-		await h.events["agent_settled"](undefined, h.ctx);
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, h.ctx);
 
 		assert.equal(h.editors.length, 1, "must open the editor for feedback");
 		assert.equal(h.editors[0].prefill, "", "editor must open blank");
@@ -280,7 +328,7 @@ async function main() {
 
 		// The revise turn settles: re-capture the revised plan and re-ask.
 		h.branch.push({ message: { role: "assistant", content: [{ type: "text", text: "REVISED PLAN" }] } });
-		await h.events["agent_settled"](undefined, h.ctx);
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, h.ctx);
 		assert.equal(h.selects.length, 2, "must re-ask after a revision");
 		assert.ok(h.narrowed(), "still planning after the second decline");
 	}
@@ -290,7 +338,7 @@ async function main() {
 		const h = makeHarness(CHOICE_REVISE, "   ");
 		await h.commands["plan"].handler("add a feature", h.ctx);
 		addAssistantTurn(h, PLAN_TEXT);
-		await h.events["agent_settled"](undefined, h.ctx);
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, h.ctx);
 
 		assert.equal(h.sent.length, 1, "empty feedback must not be sent");
 		assert.ok(h.restored(), "empty feedback must cancel planning and restore tools");
@@ -301,14 +349,14 @@ async function main() {
 		const h = makeHarness(CHOICE_STOP);
 		await h.commands["plan"].handler("add a feature", h.ctx);
 		addAssistantTurn(h, PLAN_TEXT);
-		await h.events["agent_settled"](undefined, h.ctx);
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, h.ctx);
 		assert.ok(h.restored(), "decline-stop must restore tools");
 		assert.equal(h.sent.length, 1, "decline-stop must not send a prompt");
 
 		const h2 = makeHarness("ALWAYS_UNDEFINED");
 		await h2.commands["plan"].handler("add a feature", h2.ctx);
 		addAssistantTurn(h2, PLAN_TEXT);
-		await h2.events["agent_settled"](undefined, h2.ctx);
+		await h2.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, h2.ctx);
 		assert.ok(h2.restored(), "a dismissed dialog must fall back to stop + restore");
 		assert.equal(h2.sent.length, 1);
 	}
@@ -317,17 +365,17 @@ async function main() {
 	{
 		const h = makeHarness(CHOICE_IMPLEMENT_HERE);
 		await h.commands["plan"].handler("add a feature", h.ctx);
-		await h.events["agent_settled"](undefined, h.ctx);
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, h.ctx);
 
 		assert.equal(h.selects.length, 0, "must not ask when there is no plan");
 		assert.ok(h.restored(), "must restore tools when the turn produced no plan");
 	}
 
-	// ── agent_settled outside planning mode is ignored ─────────────────────────
+	// ── agent_before_settle outside planning mode is ignored ─────────────────
 	{
 		const h = makeHarness(CHOICE_IMPLEMENT_HERE);
 		addAssistantTurn(h, PLAN_TEXT);
-		await h.events["agent_settled"](undefined, h.ctx);
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, h.ctx);
 		assert.equal(h.selects.length, 0);
 		assert.equal(h.sent.length, 0);
 	}
@@ -388,8 +436,126 @@ async function main() {
 		assert.ok(h.narrowed(), "session_start must not restore tools");
 		// Planning state is reset: the next settle must not trigger the ask.
 		addAssistantTurn(h, PLAN_TEXT);
-		await h.events["agent_settled"](undefined, h.ctx);
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, h.ctx);
 		assert.equal(h.selects.length, 0, "session_start must clear the planning flag");
+	}
+
+	// ── guard handshake: refusal (granted:false) refuses to start ─────────
+	{
+		const h = makeHarness(CHOICE_STOP, undefined, undefined, undefined, "refused");
+		await h.commands["plan"].handler("do a thing", h.ctx);
+		assert.deepEqual(h.tools(), [], "refused planning must not narrow tools");
+		assert.equal(h.sent.length, 0, "refused planning must not send the nudge");
+		assert.equal(h.entries.length, 0, "refused planning must not persist state");
+		assert.ok(
+			h.notifications.some((n: any) => n.msg.includes("requires the guard research profile")),
+			"refusal must notify the user",
+		);
+		assert.deepEqual(
+			h.emitted.filter(([c]) => c === "guard:research-request").length, 1,
+			"exactly one request must be emitted",
+		);
+		// /plan cancel stays a no-op afterwards.
+		await h.commands["plan"].handler("cancel", h.ctx);
+		assert.ok(h.notifications.some((n: any) => n.msg === "Not in planning mode."));
+	}
+
+	// ── guard handshake: guard absent (ack timeout) refuses to start ─────
+	{
+		const h = makeHarness(CHOICE_STOP, undefined, undefined, undefined, "absent");
+		await h.commands["plan"].handler("do a thing", h.ctx);
+		assert.deepEqual(h.tools(), [], "absent guard must leave tools untouched");
+		assert.equal(h.sent.length, 0);
+		assert.ok(
+			h.notifications.some((n: any) => n.msg.includes("no acknowledgment within")),
+			"the timeout refusal must say why",
+		);
+	}
+
+	// ── host_bash is narrowed during planning and restored after ─────────
+	{
+		const h = makeHarness(CHOICE_STOP, undefined, undefined, ["read", "write", "edit", "bash", "host_bash"]);
+		await h.commands["plan"].handler("do a thing", h.ctx);
+		let tools = h.tools();
+		assert.ok(!tools.includes("host_bash"), "the host escape must be hidden during planning");
+		assert.ok(!tools.includes("write") && !tools.includes("edit"));
+		assert.ok(tools.includes("bash"), "sandboxed bash stays active during planning");
+		await h.commands["plan"].handler("cancel", h.ctx);
+		tools = h.tools();
+		assert.ok(tools.includes("host_bash"), "cancel must restore host_bash");
+	}
+
+	// ── every exit path releases the research hold ─────────────────────
+	{
+		const releases = (h: ReturnType<typeof makeHarness>) =>
+			h.emitted.filter(([c]) => c === "guard:research-release").length;
+
+		// Cancel.
+		const cancelled = makeHarness(CHOICE_STOP);
+		await cancelled.commands["plan"].handler("t", cancelled.ctx);
+		assert.equal(releases(cancelled), 0, "no release while planning is active");
+		await cancelled.commands["plan"].handler("cancel", cancelled.ctx);
+		assert.equal(releases(cancelled), 1, "cancel must release the hold");
+		assert.ok(cancelled.restored());
+
+		// Accept: implement here releases before the implement message.
+		const accepted = makeHarness(CHOICE_IMPLEMENT_HERE);
+		await accepted.commands["plan"].handler("t", accepted.ctx);
+		addAssistantTurn(accepted, PLAN_TEXT);
+		await accepted.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, accepted.ctx);
+		assert.equal(releases(accepted), 1);
+		assert.deepEqual(accepted.sent.slice(1), ["Implement the plan."]);
+
+		// Revise keeps the hold (the loop stays in research); stop releases.
+		const revising = makeHarness(CHOICE_REVISE, "fix it");
+		await revising.commands["plan"].handler("t", revising.ctx);
+		addAssistantTurn(revising, PLAN_TEXT);
+		await revising.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, revising.ctx);
+		assert.equal(releases(revising), 0, "the revise loop must keep the research hold");
+		addAssistantTurn(revising, "REVISED");
+		await revising.commands["plan"].handler("cancel", revising.ctx);
+		assert.equal(releases(revising), 1);
+
+		// Clear context releases in the background before the session swap.
+		const clearing = makeHarness(CHOICE_CLEAR_AND_IMPLEMENT);
+		await clearing.commands["plan"].handler("t", clearing.ctx);
+		addAssistantTurn(clearing, PLAN_TEXT);
+		await clearing.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "completed" }, clearing.ctx);
+		assert.equal(releases(clearing), 1, "clear-context must release the hold");
+	}
+
+	// ── aborted settle: no menu, no clipboard, planning stays active ─────
+	{
+		const h = makeHarness(CHOICE_STOP);
+		await h.commands["plan"].handler("t", h.ctx);
+		addAssistantTurn(h, PLAN_TEXT);
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "aborted" }, h.ctx);
+		assert.equal(h.selects.length, 0, "an aborted settle must not open the menu");
+		assert.ok(h.narrowed(), "an aborted settle must keep planning active");
+		await h.events["agent_before_settle"]({ type: "agent_before_settle", outcome: "error" }, h.ctx);
+		assert.equal(h.selects.length, 0, "an errored settle must not open the menu either");
+	}
+
+	// ── recovery and failed releases ───────────────────────────────────
+	{
+		// Mid-plan recovery emits a stale release in the background.
+		const h = makeHarness(CHOICE_STOP);
+		h.branch.push({ type: "custom", customType: "plan-state", data: { active: true, savedTools: ["read"] } });
+		await h.events["session_start"]({ reason: "resume" }, h.ctx);
+		assert.ok(
+			h.emitted.some(([c]) => c === "guard:research-release"),
+			"recovery must release any stale research hold",
+		);
+
+		// A failed release warns instead of dying silently.
+		const failing = makeHarness(CHOICE_STOP, undefined, undefined, undefined, "releaseFail");
+		await failing.commands["plan"].handler("t", failing.ctx);
+		await failing.commands["plan"].handler("cancel", failing.ctx);
+		assert.ok(failing.restored(), "tools are restored even when the release fails");
+		assert.ok(
+			failing.notifications.some((n: any) => n.msg.includes("research release failed")),
+			"a failed release must warn the user",
+		);
 	}
 
 	console.log("All plan tests passed.");

@@ -6,7 +6,8 @@ assumptions confirmed); step 1 (shared sandbox library) implemented in
 observe-only in `extensions/guard/index.ts` + `policy/` (2026-10-06); step 3
 (tools and enforcement) implemented in `runtime.ts`, `tools/`, and
 `filter.ts` after the 2026-10-06/07 design review closed the audit,
-lifecycle, and filter gaps (see the decision log); steps 4+ not
+lifecycle, and filter gaps (see the decision log); step 4 (plan.ts
+integration) implemented in `extensions/plan.ts` (2026-10-07); steps 5+ not
 implemented.**
 
 Scope: a new `guard` extension that replaces `extensions/pi-tool-permissions/`,
@@ -576,6 +577,7 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 | Step-3 review: filtering | Context, structured data and metadata redacted; unsupported or failed parsing suppresses the entire result |
 | Step-3 review: residual risks | Idle background reads may precede mount refresh; raw descendants may escape tracking |
 | Step-3 implementation (2026-10-07) | Shipped: four tools registered ahead of python/node (authoritative, dormant old extensions), one execution queue with pre-spawn revalidation and fail-closed transitions, worker-lifetime overlays plus shared real-path scratch, audits around all sandboxed execution with union pre/post comparison and violation/scan/quarantine locking, exact/effective rule saving with stale-approval cancellation, no grant replay, fixed executor identities, raw bash under HostBash rules, and the fail-closed grep/ffgrep mask filter; suites guard-{sandbox,policy,classes,migrate,filter,workers,runtime,harness} |
+| Step-4 implementation (2026-10-07) | Shipped: /plan requests the research hold before narrowing and refuses without an ack (timeout covers guard-absent); narrowTools hides host_bash; every exit path releases (awaited release-ack, background release on recovery/clear-context, warning on failed release); menu only on completed agent_before_settle (Batch B) |
 
 ## Implementation outline (build alongside, switch over)
 
