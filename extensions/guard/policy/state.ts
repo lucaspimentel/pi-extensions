@@ -1,12 +1,12 @@
 /**
- * Guard's session state: the current profile, the research hold (plan.ts
- * handshake, wired in step 4), the workspace lock, and the derived views the
- * footer, the profile event, and the observe-only hook consume.
+ * Pure session-state helpers for profiles, research holds and workspace locks.
+ * Runtime teardown precedes every mutation and publication in index.ts.
+ * The footer, profile event and observation hook consume the derived views.
  *
  * Session-only: every session starts at "default"; nothing is persisted.
  * While a research hold is active, every profile change is blocked except
  * staying in research; releasing the hold restores the profile that was
- * active before it. /guard ack clears the workspace lock.
+ * active before it. Runtime failure checks precede /guard ack.
  */
 
 import type { SandboxDetection } from "../sandbox/detect.ts";
@@ -25,7 +25,7 @@ export interface GuardSessionState {
 	researchHolder: string | null;
 	/** Profile that was active before the research hold; restored on release. */
 	profileBeforeHold: Profile | null;
-	/** Set by step 3 when the audit reports lockWrites; cleared by /guard ack. */
+	/** Audit violations/incomplete containment lock the workspace until safe acknowledgment. */
 	workspaceLocked: boolean;
 	workspaceLockReason: string | null;
 	/** Detection result from session start; refreshed on demand. */
@@ -125,7 +125,7 @@ export function lockWorkspace(state: GuardSessionState, reason: string): void {
 	state.workspaceLockReason = reason;
 }
 
-/** /guard ack: clear the workspace lock. */
+/** Pure ack mutation. The caller must first pass the runtime teardown barrier. */
 export function ackWorkspaceLock(state: GuardSessionState): { cleared: boolean; notice: string } {
 	if (!state.workspaceLocked) return { cleared: false, notice: "Workspace is not locked." };
 	state.workspaceLocked = false;
@@ -151,12 +151,12 @@ export function toPolicyState(
 	};
 }
 
-/** The guard:profile event payload (step 3 tools subscribe to this). */
+/** Published after the runtime transition has completed. */
 export interface ProfileEventPayload {
 	profile: Profile;
 	sandbox: {
 		mode: SandboxMode;
-		/** Effective workspace mode for the tools; "none" means fully raw (yolo/unrestricted). */
+		/** Bash workspace mode; workers independently use overlay/ro. "none" means fully raw. */
 		workspaceMode: WorkspaceMode | "none";
 		readRoots: string[];
 	};

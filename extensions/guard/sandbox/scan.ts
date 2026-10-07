@@ -91,7 +91,8 @@ export function scanRawEntries(
 ): { entries: string[]; scanner: ScannerKind } {
 	const kind = options.scanner ?? (options.fdPath ? "fd" : "find");
 	const timeoutMs = options.timeoutMs ?? SCAN_TIMEOUT_MS;
-	const program = kind === "fd" ? (options.fdPath ?? "fd") : (options.fdPath ?? "/usr/bin/find");	const args = kind === "fd" ? fdScanArgs(workspace) : findScanArgs(workspace);
+	const program = kind === "fd" ? (options.fdPath ?? "fd") : (options.fdPath ?? "/usr/bin/find");
+	const args = kind === "fd" ? fdScanArgs(workspace) : findScanArgs(workspace);
 	const r = spawnSync(program, args, {
 		stdio: ["ignore", "pipe", "pipe"],
 		timeout: timeoutMs,
@@ -166,15 +167,17 @@ export function classifyEntries(
 		if (depth === 0 && name === ".git") continue;
 		if (depth > 0 && PROTECTED_NESTED_NAMES.includes(name)) {
 			nestedProtected.push(entry);
-			continue;
 		}
 		if (isMaskedName(name, patterns, exceptions)) {
 			// Only regular files are masked; a directory named like a secret is
 			// left alone (binding /dev/null over a directory breaks traversal).
 			try {
 				if (lstatSync(entry).isFile()) masks.push(entry);
-			} catch {
-				/* vanished between scan and classify */
+			} catch (err) {
+				throw new ScanFailure(
+					`The workspace discovery scan could not classify ${entry}: ${String(err)}. ` +
+						"The launch is refused rather than running with an incomplete secret-mask layout.",
+				);
 			}
 		}
 	}

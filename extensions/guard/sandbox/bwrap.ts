@@ -9,25 +9,26 @@
  *   1. namespace and lifecycle flags, proc/dev/shm/tmp, /usr (+ merged links)
  *   2. minimal /etc (ld.so.cache, localtime, alternatives, ssl,
  *      ca-certificates, gitconfig) plus the generated passwd/group
- *   3. home tmpfs, then toolchains, then cache dirs (overlays in full mode),
- *      then credential masks and the sanitized NuGet.Config
- *   4. granted read roots (filtered)
- *   5. workspace (rw, ro, or the launcher-mounted overlay view)
- *   6. protected paths (top-level whole entries, nested entries, worktree
- *      common dir)
- *   7. secret masks (/dev/null over workspace files)
- *   8. launcher bind, chdir, --clearenv plus the allowlisted env, argv tail
+ *   3. home tmpfs, granted read roots, toolchains, then cache dirs
+ *      (overlays in full mode)
+ *   4. staged worker files, workspace, and trusted real-path scratch
+ *   5. protected paths (top-level whole entries, nested entries, worktree
+ *      common dir), then workspace secret masks
+ *   6. hard host exclusions, then final cargo/NuGet credential sanitization
+ *   7. launcher bind, chdir, --clearenv plus the allowlisted env, argv tail
  *
  * No shell anywhere: only argv arrays, and only controller-chosen paths.
  */
 
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
+import { isWithin, pathAliases, sensitiveHostPaths } from "./host-paths.ts";
 import {
 	CACHE_OVERLAY_DIRS,
 	GUARD_LAUNCH_MOUNT,
 	LINUXBREW_ROOT,
-	PROTECTED_TOP_LEVEL,
+	protectedTopLevelNames,
 	TOOLCHAIN_HOME_DIRS,
 	type LaunchSpec,
 	type RlimitSet,
@@ -60,13 +61,16 @@ export interface FilteredReadRoots {
  * Filter candidate read roots down to what can safely be mounted read-only
  * 1:1. Skips reserved sandbox mountpoints, roots inside the workspace (already
  * covered by the workspace bind), and roots nested under a shallower kept
- * root. A root CONTAINING the workspace is kept: the workspace bind that
- * follows stays writable on top of it. Pure; exported for tests.
+ * root. Resolves existing aliases before checking reserved and sensitive
+ * locations. A root CONTAINING the workspace is kept: the workspace bind
+ * that follows stays writable on top of it.
  */
 export function filterMountableReadRoots(
 	roots: readonly unknown[],
 	workspace: string,
+	homePath: string = os.homedir(),
 ): FilteredReadRoots {
+	const excluded = sensitiveHostPaths(homePath);
 	const mountable: string[] = [];
 	const skipped: Array<{ root: string; reason: string }> = [];
 	const seen = new Set<string>();
@@ -78,7 +82,12 @@ export function filterMountableReadRoots(
 			if (raw.length > 0) skipped.push({ root: raw, reason: "not an absolute path" });
 			continue;
 		}
-		const normalized = root.replace(/\/+$/, "") || "/";
+		const aliases = pathAliases(root);
+		const normalized = aliases[aliases.length - 1];
+		if (aliases.some((alias) => excluded.some((p) => isWithin(alias, p)))) {
+			skipped.push({ root: raw, reason: "sensitive host location is never mounted" });
+			continue;
+		}
 		if (normalized === "/") {
 			skipped.push({ root: raw, reason: "a bare / would shadow everything" });
 			continue;
@@ -256,20 +265,13 @@ function mergedUsrLayout(): boolean {
 	}
 }
 
-function isFile(p: string): boolean {
-	try {
-		return lstatSync(p).isFile();
-	} catch {
-		return false;
-	}
-}
-
 /**
  * Build the complete bwrap argv. Throws when an overlay path cannot be
  * encoded (':' or ','), so the launch fails before anything runs.
  */
 export function buildBwrapArgs(spec: LaunchSpec, ctx: BwrapContext): string[] {
 	for (const o of ctx.overlays) assertOverlayPaths(o);
+	const protectedNames = protectedTopLevelNames(spec.protectedPaths);
 
 	const args: string[] = [
 		// 1. Namespaces: user (with nested-userns blocking), pid, ipc, uts, net.
@@ -331,10 +333,11 @@ export function buildBwrapArgs(spec: LaunchSpec, ctx: BwrapContext): string[] {
 		"--ro-bind", path.join(ctx.etcDir, "group"), "/etc/group",
 	);
 
-	// 3. Home: private and empty first (this alone keeps ~/.ssh, ~/.config/gh,
-	// ~/.aws, ~/.azure, ~/.npmrc, ~/.git-credentials, ~/.docker, pup tokens,
-	// ~/.pi/agent, and shell rc files out), then toolchains 1:1.
+	// 3. Home: private and empty first, then granted roots and toolchains.
+	// Final hard exclusions cover secrets reintroduced by ancestor grants.
 	args.push("--tmpfs", ctx.homePath);
+	// Broad roots precede the toolchain/cache mounts and final exclusions.
+	for (const root of ctx.readRoots) args.push("--ro-bind-try", root, root);
 	for (const dir of TOOLCHAIN_HOME_DIRS) {
 		args.push("--ro-bind-try", path.join(ctx.homePath, dir), path.join(ctx.homePath, dir));
 	}
@@ -356,26 +359,6 @@ export function buildBwrapArgs(spec: LaunchSpec, ctx: BwrapContext): string[] {
 		}
 		args.push("--ro-bind-try", hostDir, hostDir);
 	}
-	// Toolchain credentials: /dev/null over cargo credential files; a
-	// sanitized copy over the NuGet.Config. Only when the host files exist.
-	// --dev-bind (not --ro-bind) for the /dev/null masks: a device bind made
-	// with ro-bind inside the user namespace is nodev-enforced and reads fail
-	// with EACCES, while --dev-bind reads and writes behave exactly like
-	// /dev/null (reads empty, writes discarded).
-	for (const name of ["credentials", "credentials.toml"]) {
-		const cred = path.join(ctx.homePath, ".cargo", name);
-		if (isFile(cred)) args.push("--dev-bind", "/dev/null", cred);
-	}
-	if (ctx.nugetConfigPath !== null) {
-		const orig = path.join(ctx.homePath, ".nuget", "NuGet", "NuGet.Config");
-		if (existsSync(orig)) args.push("--ro-bind", ctx.nugetConfigPath, orig);
-	}
-
-	// 4. Granted read roots, read-only 1:1 (already filtered).
-	for (const root of ctx.readRoots) {
-		args.push("--ro-bind-try", root, root);
-	}
-
 	// extraRoBinds: worker files and similar, read-only.
 	for (const [host, sandbox] of spec.extraRoBinds ?? []) {
 		args.push("--ro-bind", host, sandbox);
@@ -397,10 +380,25 @@ export function buildBwrapArgs(spec: LaunchSpec, ctx: BwrapContext): string[] {
 		}
 	}
 
+	// Trusted runtime scratch: no aliases or caller-selected sandbox destinations.
+	for (const [host, sandbox] of spec.extraRwBinds ?? []) {
+		if (!path.isAbsolute(host) || host !== sandbox || realpathSync(host) !== host || !statSync(host).isDirectory()) {
+			throw new Error("extraRwBinds must bind scratch directories at their real absolute host paths");
+		}
+		if (sensitiveHostPaths(ctx.homePath).some((p) => isWithin(host, p) || isWithin(p, host))) {
+			throw new Error("extraRwBinds must not expose sensitive host locations");
+		}
+		if (host === "/" || host === ctx.homePath || spec.workspace === host || spec.workspace.startsWith(`${host}/`) ||
+			RESERVED_MOUNTPOINTS.some((p) => host === p || p.startsWith(`${host}/`) || (p !== "/tmp" && host.startsWith(`${p}/`)))) {
+			throw new Error("extraRwBinds must not shadow workspace, home, or reserved sandbox mounts");
+		}
+		args.push("--bind", host, sandbox);
+	}
+
 	// 6. Protected paths: whole top-level entries (the entire .git included),
 	// nested entries from the scan, and the worktree common dir. All
 	// read-only; git writes go through host_bash in later steps.
-	for (const name of PROTECTED_TOP_LEVEL) {
+	for (const name of protectedNames) {
 		const p = path.join(spec.workspace, name);
 		if (existsSync(p)) args.push("--ro-bind", p, p);
 	}
@@ -417,6 +415,41 @@ export function buildBwrapArgs(spec: LaunchSpec, ctx: BwrapContext): string[] {
 	// gives real /dev/null semantics (reads empty, writes discarded).
 	for (const p of ctx.masks) {
 		args.push("--dev-bind", "/dev/null", p);
+	}
+
+	// Hard host exclusions run after every broad bind, including workspace
+	// and interpreter mounts. Mask both configured locations and real targets.
+	const mountedDestinations: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		if (["--bind", "--ro-bind", "--ro-bind-try"].includes(args[i])) mountedDestinations.push(args[i + 2]);
+	}
+	const excludedDirs: string[] = [];
+	for (const excluded of sensitiveHostPaths(ctx.homePath).sort((a, b) => a.split(path.sep).length - b.split(path.sep).length)) {
+		if (!mountedDestinations.some((root) => isWithin(excluded, root))) continue;
+		if (excludedDirs.some((root) => isWithin(excluded, root))) continue;
+		if (!existsSync(excluded) || lstatSync(excluded).isSymbolicLink()) continue;
+		if (statSync(excluded).isDirectory()) {
+			args.push("--tmpfs", excluded, "--remount-ro", excluded);
+			excludedDirs.push(excluded);
+		} else args.push("--dev-bind", "/dev/null", excluded);
+	}
+	const canSanitize = (p: string) => !excludedDirs.some((root) => isWithin(p, root)) &&
+		!(lstatSync(p).isSymbolicLink() && mountedDestinations.some((root) => isWithin(p, root)));
+
+	// Final credential sanitization cannot be shadowed by a broad read root.
+	for (const name of ["credentials", "credentials.toml"]) {
+		const cred = path.join(ctx.homePath, ".cargo", name);
+		if (existsSync(cred) && statSync(cred).isFile()) {
+			for (const alias of pathAliases(cred)) {
+				if (canSanitize(alias)) args.push("--dev-bind", "/dev/null", alias);
+			}
+		}
+	}
+	if (ctx.nugetConfigPath !== null) {
+		const orig = path.join(ctx.homePath, ".nuget", "NuGet", "NuGet.Config");
+		for (const alias of pathAliases(orig)) {
+			if (canSanitize(alias)) args.push("--ro-bind", ctx.nugetConfigPath, alias);
+		}
 	}
 
 	// 8. Launcher, working dir, environment, target.

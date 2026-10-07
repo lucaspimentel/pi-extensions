@@ -4,11 +4,105 @@ Sandbox-first permission redesign. Guard replaces `pi-tool-permissions`,
 `python`, and `node` with one extension built around a kernel-enforced
 sandbox. See `docs/guard-design.md` for the settled design.
 
-**Status: step 1 (shared sandbox library) and step 2 (policy core) are built
-here. Guard is loaded by pi (`pi.extensions`) in observe-only mode:** its
-`tool_call` hook computes decisions, publishes them on `guard:decision`, and
-never blocks or prompts. pi-tool-permissions stays the enforcing extension
-until switchover (step 6). Step 3 (tools, dialogs) builds on both.
+**Status: steps 1 to 3 are built here. Step 3 registers guard's own tools
+(`bash`, `host_bash`, `python`, `node`) and enforces decisions on them;
+every other tool call stays observe-only** (decisions on `guard:decision`,
+nothing blocked or prompted), except the grep/ffgrep secret-mask
+`tool_result` filter below. pi-tool-permissions stays loaded and enforcing
+until switchover (step 6); the old python/node extensions are dormant
+because guard is declared first and pi's registry is
+first-extension-wins.
+
+## Tools and enforcement (step 3)
+
+`runtime.ts` owns the four tools, one execution queue, and the policy
+transitions; `tools/` holds the tool implementations.
+
+### The four tools
+
+| Tool | Implementation |
+|---|---|
+| `bash` | `createBashTool()` with sandboxed `BashOperations` (`tools/shell.ts`); one bwrap process per call, no persistent shell. Yolo/unrestricted run it on the host, honoring HostBash deny/ask rules (unrestricted ignores rules unless the workspace is locked). |
+| `host_bash` | The only sandbox escape: argv-array host exec with `HostBash(...)` rules and the tightened read-only tier. |
+| `python` / `node` | Ports of the old controllers (`tools/python/`, `tools/node/`) onto the shared sandbox: persistent worker, fd-3 JSON protocol, bounded output/timeouts, no code replay. Every sandboxed profile uses a worker-lifetime workspace overlay; reduced mode or a workspace lock degrades to read-only; yolo/unrestricted run the worker raw (full env and filesystem, no launcher, no rlimits). |
+| `pwsh` | Not registered on Linux (Windows hosts only, step 6 removes it there). |
+
+Registration details:
+
+- Guard is declared before python/node in `pi.extensions`; first registration
+  per name wins, so guard's copies are authoritative and the old extensions
+  go dormant. In degraded mode guard still registers python/node (they report
+  unavailability rather than falling back to the legacy extensions), so the
+  old sandboxes' writable `.git`/`.pi` mounts never come back.
+- A sandbox launch or scan failure never falls back to host execution; the
+  tool result fails closed with the diagnostic and a `host_bash` hint.
+- **Fixed identities:** `toolClasses` cannot reclassify the four executors
+  (`isOwnedExecutor`); overrides for them are ignored. Every other tool keeps
+  the step-2 classification and observe-only behavior.
+- Tool results add failure hints (network unreachable, EROFS on a protected
+  or read-only path, missing mount) pointing at `host_bash`.
+
+### Execution queue and transitions
+
+- The four tools serialize through one queue; permission dialogs do not hold
+  it (other calls proceed; the dialog's call waits).
+- Policy is revalidated after the queue wait and immediately before spawn.
+- A tightening transition (research entry/exit, raw/sandbox change, effective
+  root/mask/protected change, lock/ack remount) preempts active execution,
+  awaits teardown, and only then publishes `guard:profile` or acknowledges.
+  If a known process does not finish teardown within the deadline, guarded
+  execution is blocked and `/guard ack` cannot clear it.
+- Workers restart (interpreter state and workspace overlay discarded; scratch
+  preserved) on research entry/exit, raw/sandbox changes, effective mount-set
+  changes, and lock/ack remounts. default/auto/trusted changes preserve the
+  worker when the effective launch policy is unchanged.
+- Before each worker execute, guard re-scans the workspace mask/protected
+  mount set and restarts the worker if it changed.
+
+### Workspace, scratch, and audit
+
+- Sandboxed bash and both workers share one scratch directory per session/cwd
+  at its real absolute host path (no `/scratch` or `/workspace` aliases);
+  it is mounted writable and persists across reset, crash, and policy-driven
+  restarts. Session, cwd, `/tree` replacement, and shutdown remove it. Logs
+  and quarantine are separate and never mounted writable.
+- The pre/post protected-path audit runs around every sandboxed execution
+  (bash process and worker execute/teardown). Created/replaced/missing
+  protected entries are quarantined and notified without failing an otherwise
+  successful result. Any violation, an incomplete audit (scan failure), or a
+  failed quarantine **locks the workspace**: writable workers stop, sandboxed
+  execution continues read-only, and host/raw execution is denied even in
+  yolo/unrestricted until `/guard ack`.
+
+### Dialogs and grants
+
+- An explicit HostBash/Pwsh **ask-rule match** offers allow once or deny
+  (saving a rule cannot override the ask).
+- A fallback prompt offers allow once, save for this project
+  (`.pi/guard.local.json`), save for the user (`~/.pi/agent/guard.json`), or
+  deny. The suggestion is an **exact escaped command**, shown with its
+  destination, and is offered only when the merged patch would authorize the
+  whole call. Existing ask/deny rules are never removed.
+- If policy changes while a dialog is open, the approval is stale: nothing
+  runs and nothing is saved.
+- Local reads outside cwd/readRoots keep the session/project/user/deny grant
+  shape; grants are validated, mounted read-only, restart workers, report the
+  state loss, and return **without replaying the code**. Legacy
+  pi-tool-permissions grants are not mirrored during coexistence.
+- Non-interactive contexts (print mode, subagent children) deny prompts;
+  sandboxed work stays free.
+
+### grep/ffgrep secret-mask filter
+
+`filter.ts` hooks `tool_result` for `grep` and `ffgrep`: in every profile
+except yolo/unrestricted, matches from files whose basename matches the mask
+patterns (minus exceptions) are dropped together with their context and
+grouped blocks, a `N matches in masked files omitted` line is appended, and
+structured content/details are replaced or removed. Unsupported or ambiguous
+output formats, and any filtering failure, **suppress the entire result**
+with a fixed notice; filter errors never leak the original output. `read`
+and `find` remain path-level (a direct masked-path read is denied in step 2;
+a directory listing is not filtered).
 
 ## Policy (step 2, observe-only)
 
@@ -171,6 +265,7 @@ removed.
 | `scan.ts` | Per-launch mask and protected-path discovery (fd, find fallback) |
 | `bwrap.ts` | Pure bubblewrap argv builder and the read-root filter |
 | `audit.ts` | Pre-call snapshot, post-call audit, quarantine |
+| `host-paths.ts` | Sensitive host paths that are never mountable, alias resolution, containment helper |
 | `nuget.ts` | NuGet.Config sanitizer |
 | `run.ts` | `spawnSandboxed()`: runtime dirs, spawn, cleanup |
 
@@ -261,8 +356,11 @@ closes that gap:
 - Created and replaced entries are moved into
   `<runtimeDir>/quarantine/<timestamp>/` (never deleted; cross-device falls
   back to copy-then-remove).
-- `lockWrites` is true when replaced or missing entries were seen; step 2
-  turns that into "workspace read-only until `/guard ack`".
+- `lockWrites` is true when any violation is seen (created, replaced, or
+  missing entries) or when the post-call scan or a quarantine move fails;
+  step 3 turns that into "workspace read-only and host/raw execution denied
+  until `/guard ack`". The audit compares the union of pre- and post-call
+  paths, so a removed nested protected entry is detected too.
 
 ### Scanner
 
@@ -287,8 +385,13 @@ process tree down, and `kill(-pid)` on the returned child's pid works too.
   escape escapes everything.
 - **Read roots are not secret-masked** (see the limitation above).
 - **Protected-path binds plus the post-call audit:** a background process
-  left behind by a persistent worker (python/node, step 3) can act between
-  audits; the audit runs after calls, not continuously.
+  left behind by a persistent worker can act between audits, and can read
+  newly exposed live-workspace files before the next execute refreshes the
+  mounts; workspace overlays are disposable, not immutable snapshots.
+- **Raw execution (yolo/unrestricted) has no namespace boundary:** detached
+  descendants can escape process tracking, and a tightening transition can
+  stop known processes but cannot revoke escaped ones or undo prior host
+  effects.
 - **Workspace secrets are matched only by filename patterns.** A secret stored
   under a non-matching name is not masked.
 - **Project-level `nuget.config` files inside the workspace** can also carry
@@ -305,8 +408,13 @@ process tree down, and `kill(-pid)` on the returned child's pid works too.
   sandbox library, plus the policy suites: `tests/guard-policy.test.mts`
   (decision table, host shell, protected paths, local reads, config, state),
   `tests/guard-classes.test.mts` (classification, suggestions, save helper),
-  `tests/guard-migrate.test.mts` (migrate fixtures and idempotence), and
-  `tests/guard-harness.test.mts` (extension entry point with a fake pi API).
-  The integration suite drives the real sandbox (escape attempts, protected
-  paths, overlays, offline `cargo test` and `dotnet build`) and skips with an
-  explicit reason when the runtime cannot reach full mode.
+  `tests/guard-migrate.test.mts` (migrate fixtures and idempotence),
+  `tests/guard-filter.test.mts` (grep/ffgrep mask filter),
+  `tests/guard-workers.test.mts` (ported python/node controllers on the
+  shared sandbox, real workers), `tests/guard-runtime.test.mts` (queue,
+  transitions, locks, dialogs), and `tests/guard-harness.test.mts`
+  (extension entry point with a fake pi API).
+  The sandbox and worker integration suites drive the real sandbox (escape
+  attempts, protected paths, overlays, offline `cargo test` and
+  `dotnet build`) and skip with an explicit reason when the runtime cannot
+  reach full mode.

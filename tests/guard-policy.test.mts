@@ -92,6 +92,39 @@ function test(name: string, fn: () => void | Promise<void>) {
 	tests.push({ name, fn });
 }
 
+test("raw bash honors deny/ask while unrestricted ignores rules", () => {
+	const config = makeConfig({ hostBash: { deny: ["HostBash(rm *)"], ask: ["HostBash(git push *)"] } });
+	for (const [command, expected] of [["rm x", "deny"], ["git push", "prompt"]]) {
+		const call: GuardCall = { kind: "sandboxed-exec", tool: "bash", command };
+		assert.equal(decide(makePolicy({ profile: "yolo", config }), call).action, expected);
+		assert.equal(decide(makePolicy({ profile: "unrestricted", config }), call).action, "allow");
+	}
+});
+
+test("raw yolo cannot hide denied or asked subcommands behind an innocent prefix", () => {
+	const policy = makePolicy({ profile: "yolo", config: makeConfig({ hostBash: { deny: ["HostBash(rm *)"], ask: ["HostBash(git push *)"] } }) });
+	assert.equal(decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "echo x; rm x" }).action, "deny");
+	const ask = decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "echo x; git push" });
+	assert.equal(ask.action, "prompt");
+	assert.equal(ask.provenance, "explicit-ask");
+});
+
+test("reduced bash preserves rw outside research; workspace locks always force ro", () => {
+	for (const profile of ["default", "auto", "trusted"] as const) {
+		assert.equal(effectiveWorkspaceMode(makePolicy({ profile, sandboxMode: "reduced" })), "rw");
+	}
+	assert.equal(effectiveWorkspaceMode(makePolicy({ profile: "research", sandboxMode: "reduced" })), "ro");
+});
+
+test("workspace locks deny every host/raw route and force ro even in unrestricted", () => {
+	for (const profile of ALL_PROFILES) {
+		const policy = makePolicy({ profile, workspaceLocked: true });
+		assert.equal(effectiveWorkspaceMode(policy), "ro");
+		assert.equal(decide(policy, { kind: "host-shell", shell: "host-bash", command: "ls" }).action, "deny");
+		assert.equal(decide({ ...policy, sandboxMode: "degraded" }, { kind: "sandboxed-exec", tool: "bash", command: "ls" }).action, "deny");
+	}
+});
+
 // ── Profile ladder ────────────────────────────────────────────────────────────
 
 test("profile ladder cycles and wraps; unrestricted is excluded", () => {
@@ -578,7 +611,8 @@ test("config merge: scalar project-wins, lists union with dedupe, toolClasses pr
 
 test("config coercion: invalid toolClasses values are warned and ignored", () => {
 	const merged = mergeConfig({ toolClasses: { read: "not-a-class", bash: "meta", bad: 42 as unknown as string } }, {}, "/w");
-	assert.equal(merged.toolClasses.bash, "meta");
+	assert.equal(merged.toolClasses.bash, undefined, "owned executor overrides are ignored");
+	assert.ok(merged.warnings.some((w) => w.includes("cannot reclassify owned executors")));
 	assert.equal("read" in merged.toolClasses, false);
 	assert.equal("bad" in merged.toolClasses, false);
 	assert.ok(merged.warnings.some((w) => w.includes("toolClasses")));

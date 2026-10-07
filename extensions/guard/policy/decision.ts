@@ -92,6 +92,8 @@ export type DecisionAction = "allow" | "prompt" | "deny" | "classify";
 export interface Decision {
 	action: DecisionAction;
 	reason: string;
+	/** Explicit ask rules never offer saving an allow rule. */
+	provenance?: "explicit-ask" | "fallback";
 }
 
 export interface PolicyState {
@@ -253,7 +255,8 @@ function decideHostShellSub(command: string, policy: PolicyState, shell: "host-b
 	const denyRule = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
 	if (denyRule !== undefined) return { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'` };
 	const askRule = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
-	if (askRule !== undefined) return { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'` };
+	if (askRule !== undefined) return { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'`, provenance: "explicit-ask" };
+	if (profile === "yolo") return { action: "allow", reason: "host shell: yolo allows everything else" };
 	// Tightened read-only tier (host_bash only; host vetoes first).
 	if (shell === "host-bash") {
 		const tier = hostTierAllowReason(cmd, config);
@@ -298,27 +301,27 @@ export function decideHostShellCommand(
 ): Decision {
 	const { profile, config } = policy;
 	const shell = call.shell;
+	if (policy.workspaceLocked) return { action: "deny", reason: "workspace locked: host execution is unavailable until /guard ack" };
 	if (profile === "unrestricted") return { action: "allow", reason: "host shell: unrestricted profile allows everything" };
 	if (profile === "research") return { action: "deny", reason: "host shell: denied in research (rules are ignored)" };
 
 	const cmd = stripLineContinuations(call.command);
-	if (profile === "yolo") {
-		const denyRule = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
-		if (denyRule !== undefined) return { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'` };
-		const askRule = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
-		if (askRule !== undefined) return { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'` };
-		return { action: "allow", reason: "host shell: yolo allows everything else" };
-	}
+	const rawDeny = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
+	if (rawDeny !== undefined) return { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${rawDeny}'` };
+	const rawAsk = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
 
 	const split = splitTopLevelShell(cmd);
 	if (split.kind === "ambiguous") {
 		const denyRule = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
 		if (denyRule !== undefined) return { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'` };
+		if (rawAsk !== undefined) return { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" };
+		if (profile === "yolo") return { action: "allow", reason: "host shell: yolo allows everything else" };
 		return { action: "prompt", reason: "complex command could not be split for per-subcommand checks" };
 	}
 	if (split.kind === "single") {
 		const effective = split.effectiveCmd ?? cmd;
-		return decideHostShellSub(effective, policy, shell);
+		const decision = decideHostShellSub(effective, policy, shell);
+		return decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" } : decision;
 	}
 	const parts: string[] = [];
 	for (const rawSub of split.parts) {
@@ -326,15 +329,21 @@ export function decideHostShellCommand(
 		if (stripped !== null) parts.push(stripped);
 	}
 	if (parts.length === 0) return { action: "allow", reason: "no commands after structural stripping" };
-	if (parts.length === 1) return decideHostShellSub(parts[0], policy, shell);
+	if (parts.length === 1) {
+		const decision = decideHostShellSub(parts[0], policy, shell);
+		return decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" } : decision;
+	}
 	const breakdown = parts.map((p) => ({ sub: p, decision: decideHostShellSub(p, policy, shell) }));
+	if (!breakdown.some((b) => b.decision.action === "deny") && rawAsk !== undefined) {
+		return { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" };
+	}
 	const worst =
 		breakdown.find((b) => b.decision.action === "deny") ??
 		breakdown.find((b) => b.decision.action === "prompt") ??
 		breakdown.find((b) => b.decision.action === "classify") ??
 		breakdown[0];
 	// The reason comes from the worst subcommand, attributed to it.
-	return { action: worst.decision.action, reason: `subcommand '${worst.sub}': ${worst.decision.reason}` };
+	return { action: worst.decision.action, reason: `subcommand '${worst.sub}': ${worst.decision.reason}`, provenance: breakdown.some((b) => b.decision.provenance === "explicit-ask") ? "explicit-ask" : worst.decision.provenance };
 }
 
 /**
@@ -431,12 +440,22 @@ function decideDegradedSandboxedExec(call: Extract<GuardCall, { kind: "sandboxed
  */
 export function decide(policy: PolicyState, call: GuardCall): Decision {
 	const { profile, config } = policy;
+	if (policy.workspaceLocked && (call.kind === "host-shell" || (call.kind === "sandboxed-exec" && policy.sandboxMode === "degraded"))) {
+		return { action: "deny", reason: "workspace locked: host/raw execution is unavailable until /guard ack" };
+	}
 
 	switch (call.kind) {
 		case "sandboxed-exec": {
 			// Degraded mode: the sandbox is unavailable, so sandboxed bash IS
 			// host execution and follows the host-shell row (research: tier only).
-			if (policy.sandboxMode === "degraded") return decideDegradedSandboxedExec(call, policy);
+			if (policy.sandboxMode === "degraded") {
+				if (call.tool !== "bash") return { action: "deny", reason: "persistent workers unavailable in degraded mode" };
+				return decideDegradedSandboxedExec(call, policy);
+			}
+			if ((profile === "yolo" || profile === "unrestricted") && !policy.workspaceLocked) {
+				if (call.tool === "bash") return decideHostShellCommand({ kind: "host-shell", shell: "host-bash", command: call.command ?? "" }, policy);
+				return { action: "allow", reason: `${call.tool}: raw execution in ${profile}, no sandbox or resource limits` };
+			}
 			return cellAction(sandboxedExecCell(profile), "sandboxed execution (kernel-enforced sandbox)");
 		}
 		case "host-shell":
@@ -468,10 +487,10 @@ export async function resolveDecision(
 	policy: PolicyState,
 	call: GuardCall,
 	classify: ClassifyStrategy,
-): Promise<{ action: "allow" | "prompt" | "deny"; reason: string }> {
+): Promise<Decision & { action: "allow" | "prompt" | "deny" }> {
 	const d = decide(policy, call);
 	if (d.action !== "classify") {
-		return finalize(policy, d.action, d.reason);
+		return { ...finalize(policy, d.action, d.reason), provenance: d.provenance };
 	}
 	let result: { verdict: "allow" | "soft_deny" | "hard_deny" | "no_match"; reason: string; modelId?: string };
 	try {
@@ -510,6 +529,7 @@ function finalize(
  * yolo and unrestricted are "none".
  */
 export function effectiveWorkspaceMode(policy: PolicyState): WorkspaceMode | "none" {
+	if (policy.workspaceLocked) return "ro";
 	if (policy.profile === "yolo" || policy.profile === "unrestricted") return "none";
 	const base = workspaceModeForProfile(policy.profile);
 	if (base === "overlay" && policy.sandboxMode !== "full") return "ro";

@@ -689,7 +689,7 @@ test("bind order invariants hold", () => {
 		assert.ok(idx >= 0, `missing ${name}`);
 	}
 	assert.ok(homeTmpfs < toolchain, "home tmpfs before toolchains");
-	assert.ok(toolchain < readRoot, "toolchains before read roots");
+	assert.ok(readRoot < toolchain, "read roots before toolchains so cache overlays stay authoritative");
 	assert.ok(readRoot < workspace, "read roots before workspace");
 	assert.ok(workspace < protectedBind, "workspace before protected");
 	assert.ok(protectedBind < mask, "protected before masks");
@@ -783,7 +783,7 @@ test("audit reports created entries, quarantines them, and cleans the workspace"
 	const result = auditProtected(before, ws, { quarantineDir: path.join(session, "quarantine"), scan: auditScanStub(ws) });
 	// .pi/x.json is not a protected name itself; the .pi directory entry covers it.
 	assert.deepEqual(result.created, [".pi"]);
-	assert.equal(result.lockWrites, false, "creation alone does not lock the workspace");
+	assert.equal(result.lockWrites, true, "every protected-path violation locks the workspace");
 	assert.ok(result.quarantined.some((q) => q.from === ".pi"));
 	assert.equal(fs.existsSync(path.join(ws, ".pi")), false, "quarantined entry removed from the workspace");
 	assert.ok(fs.existsSync(path.join(session, "quarantine")), "quarantine dir populated");
@@ -832,6 +832,103 @@ test("audit detects missing entries and a clean pass reports clean", () => {
 	assert.equal(clean.created.length + clean.replaced.length + clean.missing.length, 0);
 	assert.equal(clean.lockWrites, false);
 	assert.equal(clean.summary, "Protected-path audit clean.");
+});
+
+test("audit includes removed nested entries from the baseline", () => {
+	const ws = makeTempDir("guard-unit-audit-nested-");
+	const session = makeTempDir("guard-unit-audit-nested-rt-");
+	fs.mkdirSync(path.join(ws, "sub"));
+	fs.writeFileSync(path.join(ws, "sub", "AGENTS.md"), "instructions");
+	const before = snapshotProtected(ws);
+	fs.rmSync(path.join(ws, "sub"), { recursive: true });
+	const result = auditProtected(before, ws, { quarantineDir: path.join(session, "quarantine") });
+	assert.deepEqual(result.missing, ["sub/AGENTS.md"]);
+	assert.equal(result.lockWrites, true);
+});
+
+test("incomplete initial and post scans lock writes and retain diagnostics", () => {
+	const ws = makeTempDir("guard-unit-audit-scan-");
+	const session = makeTempDir("guard-unit-audit-scan-rt-");
+	const brokenScan = () => { throw new Error("scan unavailable"); };
+	const incomplete = snapshotProtected(ws, { scan: brokenScan });
+	assert.ok(incomplete instanceof Map, "baseline Map behavior remains compatible");
+	assert.equal(incomplete.complete, false);
+	assert.match(incomplete.diagnostics!.join(" "), /scan unavailable/);
+	const initial = auditProtected(incomplete, ws, { quarantineDir: session });
+	assert.equal(initial.lockWrites, true);
+	assert.match(initial.diagnostics.join(" "), /scan unavailable/);
+	assert.doesNotMatch(initial.summary, /audit clean/);
+	const before = snapshotProtected(ws);
+	assert.equal(before.complete, true);
+	const post = auditProtected(before, ws, { quarantineDir: session, scan: brokenScan });
+	assert.equal(post.lockWrites, true);
+	assert.match(post.diagnostics.join(" "), /scan unavailable/);
+	assert.doesNotMatch(post.summary, /audit clean/);
+});
+
+test("failed quarantine locks writes and preserves the containment error", () => {
+	const ws = makeTempDir("guard-unit-audit-quarantine-");
+	const session = makeTempDir("guard-unit-audit-quarantine-rt-");
+	const before = snapshotProtected(ws);
+	fs.writeFileSync(path.join(ws, "CLAUDE.md"), "untrusted instructions");
+	const blocked = path.join(session, "quarantine");
+	fs.writeFileSync(blocked, "not a directory");
+	const result = auditProtected(before, ws, { quarantineDir: blocked });
+	assert.equal(result.lockWrites, true);
+	assert.deepEqual(result.created, ["CLAUDE.md"]);
+	assert.deepEqual(result.quarantined, []);
+	assert.match(result.diagnostics.join(" "), /could not quarantine CLAUDE.md.*ENOTDIR/i);
+	assert.equal(fs.readFileSync(path.join(ws, "CLAUDE.md"), "utf8"), "untrusted instructions");
+});
+
+test("custom top-level protected entries participate in snapshot and audit", () => {
+	const ws = makeTempDir("guard-unit-audit-custom-");
+	const session = makeTempDir("guard-unit-audit-custom-rt-");
+	fs.writeFileSync(path.join(ws, "custom-config"), "original");
+	const before = snapshotProtected(ws, { protectedPaths: ["custom-config", "new-config"] });
+	assert.equal(before.get("custom-config")?.exists, true);
+	assert.equal(before.get("new-config")?.exists, false);
+	fs.renameSync(path.join(ws, "custom-config"), path.join(ws, "old-config"));
+	fs.writeFileSync(path.join(ws, "custom-config"), "replacement");
+	fs.writeFileSync(path.join(ws, "new-config"), "new");
+	const result = auditProtected(before, ws, {
+		quarantineDir: path.join(session, "quarantine"),
+		protectedPaths: ["custom-config", "new-config"],
+	});
+	assert.deepEqual(result.replaced, ["custom-config"]);
+	assert.deepEqual(result.created, ["new-config"]);
+	assert.equal(result.lockWrites, true);
+	assert.deepEqual(result.quarantined.map((q) => q.from).sort(), ["custom-config", "new-config"]);
+});
+
+test("snapshot rejects protected-path traversal and marks real scan failures incomplete", () => {
+	const ws = makeTempDir("guard-unit-audit-invalid-");
+	for (const name of ["", ".", "..", "../escape", "/tmp/escape", "nested/name", "nested\\name", "name\0suffix"]) {
+		assert.throws(() => snapshotProtected(ws, { protectedPaths: [name] }), /top-level names/);
+	}
+	fs.mkdirSync(path.join(ws, "sub"));
+	fs.writeFileSync(path.join(ws, "sub/AGENTS.md"), "instructions");
+	const before = snapshotProtected(ws, { cap: 0 });
+	assert.equal(before.complete, false);
+	assert.match(before.diagnostics!.join(" "), /hard cap/);
+	const result = auditProtected(before, ws, { quarantineDir: path.join(ws, "quarantine") });
+	assert.equal(result.lockWrites, true);
+});
+
+test("quarantine does not follow a renamed protected parent outside the workspace", () => {
+	const ws = makeTempDir("guard-unit-audit-symlink-parent-");
+	const outside = makeTempDir("guard-unit-audit-outside-");
+	const session = makeTempDir("guard-unit-audit-symlink-parent-rt-");
+	fs.mkdirSync(path.join(ws, "sub"));
+	fs.writeFileSync(path.join(ws, "sub/AGENTS.md"), "original");
+	fs.writeFileSync(path.join(outside, "AGENTS.md"), "outside instructions");
+	const before = snapshotProtected(ws);
+	fs.renameSync(path.join(ws, "sub"), path.join(ws, "old-sub"));
+	fs.symlinkSync(outside, path.join(ws, "sub"));
+	const result = auditProtected(before, ws, { quarantineDir: path.join(session, "quarantine") });
+	assert.equal(result.lockWrites, true);
+	assert.match(result.diagnostics.join(" "), /outside the workspace/);
+	assert.equal(fs.readFileSync(path.join(outside, "AGENTS.md"), "utf8"), "outside instructions");
 });
 
 // ── Runner ────────────────────────────────────────────────────────────────────

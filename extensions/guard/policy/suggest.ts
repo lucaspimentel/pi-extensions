@@ -15,7 +15,7 @@ import { dedupe, loadProjectConfigRaw, loadUserConfigRaw, projectConfigPath, sav
 import type { GuardCall, PolicyState } from "./decision.ts";
 import { classificationName } from "./classes.ts";
 import { normalizeMatchPath } from "./paths.ts";
-import { tokenizeSimple } from "./bashtier.ts";
+import { decide } from "./decision.ts";
 
 /** A partial guard.json patch an "always allow" choice would save. */
 export type SuggestedPatch = Partial<GuardConfig>;
@@ -27,6 +27,7 @@ export type SuggestedPatch = Partial<GuardConfig>;
  */
 export function readGrantSuggestion(path: string, cwd: string): string {
 	const resolved = normalizeMatchPath(path, cwd);
+	try { if (statSync(resolved).isDirectory()) return resolved; } catch { /* missing targets use a covering parent */ }
 	let dir = dirname(resolved);
 	for (let i = 0; i < 32; i++) {
 		try {
@@ -51,8 +52,7 @@ function writeRootSuggestion(path: string, cwd: string): string {
  * there is nothing worth saving (e.g. a prompt on a remote write has no
  * allow-shaped home). Pure: returns data, never writes.
  *
- * - host shell: `<Shell>(<first two tokens> *)`, falling back to the first
- *   token for one-token commands;
+ * - host shell: an anchored regex of the complete escaped command;
  * - web_fetch: `https://<host>/*`, for webFetchAllow;
  * - local read outside the roots: the grant directory, for readRoots;
  * - write outside the roots: the directory, for writeRoots;
@@ -62,11 +62,10 @@ function writeRootSuggestion(path: string, cwd: string): string {
 export function suggestRule(call: GuardCall, policy: PolicyState): SuggestedPatch | null {
 	switch (call.kind) {
 		case "host-shell": {
-			const tokens = tokenizeSimple(call.command.trim());
-			const prefix = tokens.length === 0 ? "" : tokens.length === 1 ? tokens[0] : `${tokens[0]} ${tokens[1]}`;
-			if (!prefix) return null;
+			if (!call.command.trim() || /[\r\n]/.test(call.command)) return null;
+			const exact = call.command.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 			const shell = call.shell === "pwsh" ? "Pwsh" : "HostBash";
-			return { hostBash: { allow: [`${shell}(${prefix} *)`] } };
+			return { hostBash: { allow: [`${shell}(/^${exact}$/)`] } };
 		}
 		case "web-fetch": {
 			const host = urlHost(call.url);
@@ -134,6 +133,18 @@ const LIST_KEYS: readonly (keyof GuardConfig)[] = [
 
 export type ConfigScope = "user" | "project";
 
+/** Save only patches whose effective merge authorizes the complete call. */
+export function effectiveAllowSuggestion(call: GuardCall, policy: PolicyState): SuggestedPatch | null {
+	if (decide(policy, call).provenance === "explicit-ask") return null;
+	const patch = suggestRule(call, policy);
+	if (!patch?.hostBash?.allow) return null;
+	const config: ResolvedGuardConfig = {
+		...policy.config,
+		hostBash: { ...policy.config.hostBash, allow: dedupe([...policy.config.hostBash.allow, ...patch.hostBash.allow]) },
+	};
+	return decide({ ...policy, config }, call).action === "allow" ? patch : null;
+}
+
 export interface AddToScopeResult {
 	/** The file the patch was written to. */
 	path: string;
@@ -144,8 +155,9 @@ export interface AddToScopeResult {
 function unionStrings(existing: unknown, patch: unknown): { list: string[]; added: number } {
 	const base = Array.isArray(existing) ? existing.filter((v): v is string => typeof v === "string") : [];
 	const patchList = Array.isArray(patch) ? patch.filter((v): v is string => typeof v === "string") : [];
-	const merged = dedupe([...base, ...patchList]);
-	return { list: merged, added: merged.length - base.length };
+	const uniqueBase = dedupe(base);
+	const merged = dedupe([...uniqueBase, ...patchList]);
+	return { list: merged, added: merged.length - uniqueBase.length };
 }
 
 /**

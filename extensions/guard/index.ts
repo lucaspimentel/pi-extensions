@@ -1,466 +1,425 @@
-/**
- * guard: sandbox-first permission redesign (step 2: policy core).
- *
- * Coexistence mode: guard is loaded by pi alongside pi-tool-permissions until
- * switchover (step 6). In this step guard owns the profile ladder, the
- * decision function, /guard, the cycle hotkey, and the footer status, but its
- * tool_call hook is OBSERVE-ONLY: it computes each decision and publishes it
- * on the "guard:decision" event and NEVER blocks, prompts, or mutates input.
- * pi-tool-permissions remains the enforcing extension until guard reaches
- * parity (step 6); permission dialogs and "always allow" saving land in
- * step 3.
- *
- * Session-only state: every session starts at the "default" profile; nothing
- * is persisted. Profile changes are broadcast on "guard:profile" (payload:
- * { profile, sandbox: { mode, workspaceMode, readRoots }, workspaceLocked })
- * for the step-3 tools. plan.ts will request research over
- * "guard:research-request" / "guard:research-release" in step 4.
- */
-
-import type {
-	ExtensionAPI,
-	ExtensionCommandContext,
-	ExtensionContext,
-	ToolAnnotations,
-} from "@earendil-works/pi-coding-agent";
+/** Guard owns four executors. All other tool decisions remain observe-only. */
+import { createBashTool, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type ToolAnnotations, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { homedir } from "node:os";
+import { GuardRuntime, validateReadGrant } from "./runtime.ts";
+import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
+import { FAILURE_STATUSES as NODE_FAILURES } from "./tools/node/session.ts";
+import { createGuardShellOperations, SANDBOX_FAILURE_HINT } from "./tools/shell.ts";
+import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
 import { detectSandboxMode } from "./sandbox/detect.ts";
 import { PROTECTED_TOP_LEVEL } from "./sandbox/spec.ts";
-import {
-	loadConfig,
-	loadUserConfigRaw,
-	type ResolvedGuardConfig,
-} from "./policy/config.ts";
-import { resolveDecision, type Decision, type GuardCall, type PolicyState } from "./policy/decision.ts";
+import { loadConfig, loadUserConfigRaw, resolvedClassifierConfig, type ResolvedGuardConfig } from "./policy/config.ts";
+import { decide, resolveDecision, type Decision, type GuardCall, type PolicyState } from "./policy/decision.ts";
+import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
 import { computeMigration } from "./policy/migrate.ts";
-import { pickClassifierModel } from "./policy/classifier.ts";
-import { addToConfigScope } from "./policy/suggest.ts";
-import {
-	ackWorkspaceLock,
-	cycleProfile,
-	createSessionState,
-	footerLabel,
-	lockWorkspace,
-	mapToolCallToGuardCall,
-	profileEventPayload,
-	releaseResearchHold,
-	requestResearchHold,
-	setProfile,
-	toPolicyState,
-} from "./policy/state.ts";
-import { isProfile, ALL_PROFILES, PROFILE_LADDER, type Profile } from "./policy/profiles.ts";
-import { classifyAction } from "./policy/classifier.ts";
-import { resolvedClassifierConfig } from "./policy/config.ts";
+import { pickClassifierModel, classifyAction } from "./policy/classifier.ts";
+import { addToConfigScope, effectiveAllowSuggestion, readGrantSuggestion } from "./policy/suggest.ts";
+import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, releaseResearchHold, requestResearchHold, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
+import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
 
-const STATUS_KEY = "guard";
-const PROFILE_EVENT = "guard:profile";
-const DECISION_EVENT = "guard:decision";
-
-/** Cycle hotkey; guard.json cycleShortcut (user scope, read at load) overrides. */
 const DEFAULT_CYCLE_SHORTCUT = "ctrl+alt+g";
+const workerParameters = Type.Object({
+	action: Type.Optional(Type.Union([Type.Literal("execute"), Type.Literal("status"), Type.Literal("reset")])),
+	code: Type.Optional(Type.String()),
+	timeoutSeconds: Type.Optional(Type.Number({ minimum: 1, maximum: 120 })),
+});
 
 export default function guard(pi: ExtensionAPI) {
-	let state: ReturnType<typeof createSessionState> | null = null;
+	let state: GuardSessionState | null = null;
 	let config: ResolvedGuardConfig | null = null;
-	let debugEnabled = false;
-
-	/** Per-session annotation cache (pi.getAllTools results); cleared on session_start and /guard reload. */
-	let annotationCache = new Map<string, ToolAnnotations | undefined>();
-	let annotationSnapshot: ToolInfoLite[] | null = null;
-	interface ToolInfoLite {
-		name: string;
-		annotations?: ToolAnnotations;
-	}
-
-	function getAnnotations(name: string): ToolAnnotations | undefined {
-		if (annotationCache.has(name)) return annotationCache.get(name);
-		if (annotationSnapshot === null) {
-			try {
-				annotationSnapshot = pi.getAllTools().map((t) => ({ name: t.name, annotations: t.annotations }));
-			} catch {
-				annotationSnapshot = [];
-			}
-		}
-		const found = annotationSnapshot.find((t) => t.name === name)?.annotations;
-		annotationCache.set(name, found);
-		return found;
-	}
-
-	function clearAnnotationCache(): void {
-		annotationCache = new Map();
-		annotationSnapshot = null;
-	}
-
-	function currentCtx(): { state: NonNullable<typeof state>; config: ResolvedGuardConfig } | null {
-		return state !== null && config !== null ? { state, config } : null;
-	}
-
-	function policyFor(ctx: ExtensionContext): PolicyState | null {
-		const cur = currentCtx();
-		if (cur === null) return null;
-		return toPolicyState(cur.state, cur.config, ctx.cwd, ctx.hasUI);
-	}
-
-	function statusValue(ctx: ExtensionContext): string | undefined {
-		const cur = currentCtx();
-		if (cur === null) return undefined;
-		const label = footerLabel(cur.state);
-		if (!label) return undefined;
-		const role = cur.state.profile === "unrestricted" ? "error" : "warning";
-		return ctx.ui.theme.fg(role, `guard: ${label}`);
-	}
-
-	function updateFooter(ctx: ExtensionContext): void {
-		try {
-			ctx.ui.setStatus(STATUS_KEY, statusValue(ctx));
-		} catch {
-			// setStatus unavailable (some contexts): the footer is best-effort.
-		}
-	}
-
-	function emitProfile(ctx: ExtensionContext): void {
-		const cur = currentCtx();
-		if (cur === null) return;
-		pi.events.emit(PROFILE_EVENT, profileEventPayload(cur.state, cur.config, ctx.cwd));
-	}
-
-	function resolveClassifierModelFromCtx(ctx: ExtensionContext): Model<Api> | undefined {
-		const cur = currentCtx();
-		return pickClassifierModel(
-			ctx.scopedModels.length > 0 ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable(),
-			ctx.model?.provider,
-			(m) => ctx.modelRegistry.hasConfiguredAuth(m),
-			cur?.config.classifier,
-			(provider, modelId) => ctx.modelRegistry.find(provider, modelId),
-		);
-	}
-
-	/** Map a GuardCall back to pi-style (toolName, input) for the classifier port. */
-	function piToolNameForClassifier(call: GuardCall): string {
-		switch (call.kind) {
-			case "host-shell": return call.shell === "pwsh" ? "pwsh" : "HostBash";
-			case "sandboxed-exec": return call.tool;
-			case "local-write": return call.tool;
-			case "local-read": return call.tool;
-			case "web-fetch": return "webfetch";
-			case "remote-read":
-			case "remote-write":
-				return call.tool;
-			case "meta": return call.tool;
-		}
-	}
-
-	function piInputForClassifier(call: GuardCall): Record<string, unknown> {
-		switch (call.kind) {
-			case "host-shell":
-			case "sandboxed-exec":
-				return { command: call.command ?? "" };
-			case "local-write":
-				return { path: call.path ?? "" };
-			case "local-read":
-				return { path: call.path ?? "" };
-			case "web-fetch":
-				return { url: call.url };
-			case "remote-read":
-				return {};
-			case "remote-write":
-				return call.input ?? {};
-			case "meta":
-				return {};
-		}
-	}
-
-	// ── Lifecycle ────────────────────────────────────────────────────────────
-
-	// The most recent extension context, so the plan.ts handshake listeners
-	// (which receive no ctx) can refresh the footer and broadcast the profile.
+	let runtime: GuardRuntime | null = null;
 	let lastCtx: ExtensionContext | null = null;
-
-	pi.on("session_start", async (_event, ctx) => {
-		lastCtx = ctx;
-		config = loadConfig(ctx.cwd);
-		state = createSessionState({
-			config,
-			sandbox: detectSandboxMode(),
-			cwd: ctx.cwd,
-			interactive: ctx.hasUI,
-		});
-		clearAnnotationCache();
-		try {
-			const model = resolveClassifierModelFromCtx(ctx);
-			state.classifierLabel = model ? String(model.id) : null;
-		} catch {
-			state.classifierLabel = null;
-		}
-		updateFooter(ctx);
-		emitProfile(ctx);
-	});
-
-	// ── Observe-only decision recording ─────────────────────────────────────
-
-	pi.on("tool_call", async (event, ctx) => {
-		try {
-			const policy = policyFor(ctx);
-			const cur = currentCtx();
-			if (policy === null || cur === null) return;
-			const input = (event.input ?? {}) as Record<string, unknown>;
-			const mapped = mapToolCallToGuardCall(event.toolName, input, cur.config, getAnnotations);
-			const decision: Decision = await resolveDecision(policy, mapped.call, async (call) => {
-				const model = resolveClassifierModelFromCtx(ctx);
-				if (model === undefined) return { verdict: "no_match", reason: "no classifier model available" };
-				const result = await classifyAction(
-					(m, cc) => ctx.modelRegistry.streamSimple(m, cc).result(),
-					model,
-					piToolNameForClassifier(call),
-					piInputForClassifier(call),
-					resolvedClassifierConfig(cur.config),
-					classifierCache,
-				);
-				return { ...result, modelId: String(model.id) };
-			});
-			pi.events.emit(DECISION_EVENT, {
-				toolName: event.toolName,
-				class: mapped.cls,
-				call: mapped.call,
-				action: decision.action,
-				reason: decision.reason,
-			});
-			if (debugEnabled) {
-				ctx.ui.notify(`[guard observe] ${event.toolName}: ${decision.action} (${decision.reason})`, "info");
-			}
-		} catch {
-			// Observation must never break a tool call.
-		}
-	});
-
+	let debugEnabled = false;
+	let sessionReadRoots: string[] = [];
+	let annotationSnapshot: Array<{ name: string; annotations?: ToolAnnotations }> | null = null;
 	const classifierCache = new Map<string, { verdict: "allow" | "soft_deny" | "hard_deny" | "no_match"; reason: string }>();
 
-	// ── plan.ts handshake (guard side; plan wiring lands in step 4) ─────────
+	function getAnnotations(name: string): ToolAnnotations | undefined {
+		if (annotationSnapshot === null) annotationSnapshot = pi.getAllTools().map((t) => ({ name: t.name, annotations: t.annotations }));
+		return annotationSnapshot.find((t) => t.name === name)?.annotations;
+	}
+	function effectiveConfig(): ResolvedGuardConfig {
+		if (!config) throw new Error("guard session state not initialized");
+		return { ...config, readRoots: [...new Set([...config.readRoots, ...sessionReadRoots])] };
+	}
+	function policyFor(ctx: ExtensionContext): PolicyState {
+		if (!state || !runtime) throw new Error("guard session state not initialized");
+		if (runtime.policy.cwd !== ctx.cwd) throw new Error("guard cwd changed; awaiting session replacement");
+		return { ...runtime.policy, interactive: ctx.hasUI };
+	}
+	function updateFooter(ctx: ExtensionContext): void {
+		try {
+			const label = [state ? footerLabel(state) : "", runtime?.teardownFailure ? "execution blocked (unresolved teardown)" : ""].filter(Boolean).join(" | ");
+			ctx.ui.setStatus("guard", label ? ctx.ui.theme.fg(state?.profile === "unrestricted" ? "error" : "warning", `guard: ${label}`) : undefined);
+		} catch { /* best effort */ }
+	}
+	function emitProfile(ctx: ExtensionContext): void {
+		if (state && config) pi.events.emit("guard:profile", profileEventPayload(state, effectiveConfig(), ctx.cwd));
+	}
+	function publish(ctx: ExtensionContext): void { updateFooter(ctx); emitProfile(ctx); }
+	function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" = "info"): void {
+		try { ctx.ui.notify(message, level); } catch { /* notification does not weaken enforcement */ }
+	}
+	function classifierModel(ctx: ExtensionContext): Model<Api> | undefined {
+		return pickClassifierModel(ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable(), ctx.model?.provider, (m) => ctx.modelRegistry.hasConfiguredAuth(m), config?.classifier, (provider, modelId) => ctx.modelRegistry.find(provider, modelId));
+	}
+	async function classify(call: GuardCall, ctx: ExtensionContext) {
+		const model = classifierModel(ctx);
+		if (!model || !config) return { verdict: "no_match" as const, reason: "no classifier model available" };
+		const tool = call.kind === "host-shell" ? call.shell === "pwsh" ? "pwsh" : "HostBash" : "tool" in call ? call.tool : call.kind === "web-fetch" ? "webfetch" : "unknown";
+		const input = call.kind === "host-shell" || call.kind === "sandboxed-exec" ? { command: call.command ?? "" } : call.kind === "local-read" || call.kind === "local-write" ? { path: call.path ?? "" } : call.kind === "web-fetch" ? { url: call.url } : call.kind === "remote-write" ? call.input ?? {} : {};
+		return { ...await classifyAction((m, cc) => ctx.modelRegistry.streamSimple(m, cc).result(), model, tool, input, resolvedClassifierConfig(config), classifierCache), modelId: String(model.id) };
+	}
+	function mappedCall(name: string, input: Record<string, unknown>) {
+		return mapToolCallToGuardCall(name, input, effectiveConfig(), getAnnotations);
+	}
+	async function decisionFor(name: string, input: Record<string, unknown>, ctx: ExtensionContext, policy = policyFor(ctx)): Promise<Decision> {
+		return resolveDecision({ ...policy, interactive: ctx.hasUI }, mappedCall(name, input).call, (call) => classify(call, ctx));
+	}
+	function configSignature(cfg: ResolvedGuardConfig): string {
+		const { warnings: _warnings, ...policy } = cfg as ResolvedGuardConfig & { warnings?: string[] };
+		return JSON.stringify(policy);
+	}
+	async function transition(next: GuardSessionState, cfg: ResolvedGuardConfig, ctx: ExtensionContext, persistence?: { epoch: number; beforeCommit: () => ResolvedGuardConfig }): Promise<void> {
+		if (!runtime) throw new Error("guard session state not initialized");
+		const rt = runtime;
+		const baseState = state;
+		let committedConfig = cfg;
+		const policy = toPolicyState(next, { ...cfg, readRoots: [...new Set([...cfg.readRoots, ...sessionReadRoots])] }, ctx.cwd, ctx.hasUI);
+		await rt.transition(policy, next.sandbox ?? detectSandboxMode(), () => {
+			state = { ...next, workspaceLocked: rt.policy.workspaceLocked, workspaceLockReason: rt.policy.workspaceLocked ? state?.workspaceLockReason ?? next.workspaceLockReason : null };
+			config = committedConfig;
+			annotationSnapshot = null;
+			classifierCache.clear();
+			publish(ctx);
+		}, () => {
+			if (rt !== runtime || state !== baseState) throw new Error("guard: stale policy transition; retry the request");
+		}, persistence ? { preempt: true, invalidateWorkers: true, expectedEpoch: persistence.epoch, beforeCommit: () => {
+			committedConfig = persistence.beforeCommit();
+			return toPolicyState(next, { ...committedConfig, readRoots: [...new Set([...committedConfig.readRoots, ...sessionReadRoots])] }, ctx.cwd, ctx.hasUI);
+		} } : undefined);
+	}
 
-	pi.events.on("guard:research-request", (data: unknown) => {
+	async function startSession(ctx: ExtensionContext, fresh: boolean): Promise<void> {
+		if (runtime) await runtime.dispose(fresh ? "session replacement" : "session tree/cwd replacement");
+		lastCtx = ctx;
+		if (fresh || !state || !config) {
+			config = loadConfig(ctx.cwd);
+			sessionReadRoots = [];
+			state = createSessionState({ config, sandbox: detectSandboxMode(), cwd: ctx.cwd, interactive: ctx.hasUI });
+		} else if (config.cwd !== ctx.cwd) {
+			config = loadConfig(ctx.cwd);
+		}
+		annotationSnapshot = null;
+		classifierCache.clear();
+		try { state.classifierLabel = classifierModel(ctx)?.id ?? null; } catch { state.classifierLabel = null; }
+		runtime = new GuardRuntime({
+			policy: toPolicyState(state, effectiveConfig(), ctx.cwd, ctx.hasUI), detection: state.sandbox ?? detectSandboxMode(),
+			onLock: (reason) => { if (state) { lockWorkspace(state, reason); updateFooter(ctx); } },
+			onWarning: (message) => { updateFooter(ctx); notify(ctx, message, "warning"); },
+			onLockSettled: () => publish(ctx),
+		});
+		for (const warning of (config as ResolvedGuardConfig & { warnings?: string[] }).warnings ?? []) notify(ctx, warning, "warning");
+		publish(ctx);
+	}
+	pi.on("session_start", async (_event, ctx) => { await startSession(ctx, true); });
+	pi.on("session_tree", async (_event, ctx) => { await startSession(ctx, false); });
+	pi.on("session_shutdown", async () => {
+		if (runtime) await runtime.dispose();
+		runtime = null;
+		lastCtx = null;
+	});
+
+	pi.on("tool_call", async (event, ctx) => {
+		const owned = isOwnedExecutor(event.toolName);
+		try {
+			const input = (event.input ?? {}) as Record<string, unknown>;
+			const policy = policyFor(ctx);
+			const mapped = mappedCall(event.toolName, input);
+			// No classifier or dialog here for owned tools: execute is authoritative.
+			const decision = owned ? decide({ ...policy, interactive: ctx.hasUI }, mapped.call) : await decisionFor(event.toolName, input, ctx, policy);
+			pi.events.emit("guard:decision", { toolName: event.toolName, class: mapped.cls, call: mapped.call, ...decision, enforcement: owned });
+			if (debugEnabled) notify(ctx, `[guard ${owned ? "enforce" : "observe"}] ${event.toolName}: ${decision.action} (${decision.reason})`);
+			if (owned && (decision.action === "deny" || runtime?.teardownFailure)) return { block: true, reason: runtime?.teardownFailure ?? decision.reason };
+		} catch (err) {
+			if (owned) return { block: true, reason: `guard: authorization failed closed: ${String(err)}` };
+			// Observation errors never block unrelated tools.
+		}
+	});
+	pi.on("tool_result", (event, ctx) => {
+		if (event.toolName !== "grep" && event.toolName !== "ffgrep") return;
+		try { return filterSearchResult(event as unknown as SearchResultEvent, { profile: state?.profile ?? "default", cwd: ctx.cwd, config: effectiveConfig() }); }
+		catch { return { content: [{ type: "text" as const, text: "Search result suppressed by guard: unable to safely filter masked files." }], details: undefined, isError: true }; }
+	});
+
+	function assertCallActive(signal?: AbortSignal): void {
+		if (signal?.aborted) throw new Error("guard: call aborted; nothing saved or executed");
+	}
+	/** Return an epoch-bound once token. Never hold the runtime queue in a dialog. */
+	async function authorize(rt: GuardRuntime, name: OwnedExecutor, input: Record<string, unknown>, ctx: ExtensionContext, signal?: AbortSignal): Promise<number> {
+		rt.assertAvailable();
+		assertCallActive(signal);
+		const epoch = rt.epoch;
+		const decision = await decisionFor(name, input, ctx);
+		assertCallActive(signal);
+		rt.assertAvailable();
+		if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw new Error("guard: approval expired after a policy change");
+		if (decision.action === "deny") throw new Error(`guard: ${decision.reason}`);
+		if (decision.action === "allow") return epoch;
+		if (!ctx.hasUI) throw new Error("guard: headless prompts deny");
+		const policy = policyFor(ctx);
+		const mapped = mappedCall(name, input).call;
+		// Raw/degraded bash is a host shell for routing and saving, too.
+		const call: GuardCall = mapped.kind === "sandboxed-exec" && name === "bash" ? { kind: "host-shell", shell: "host-bash", command: String(input.command ?? "") } : mapped;
+		const patch = decision.provenance === "explicit-ask" ? null : effectiveAllowSuggestion(call, policy);
+		const options = ["Allow once", ...(patch ? ["Save for project", "Save for user"] : []), "Deny"];
+		const choice = await ctx.ui.select(`guard: ${name}\n${decision.reason}\n${String(input.command ?? "")}\n${patch ? `Exact rule: ${patch.hostBash?.allow?.join(", ")}\nProject: ${ctx.cwd}/.pi/guard.local.json\nUser: ${homedir()}/.pi/agent/guard.json` : ""}`, options);
+		assertCallActive(signal);
+		if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw new Error("guard: approval expired; nothing saved or executed");
+		rt.assertAvailable();
+		if (choice === "Allow once") return epoch;
+		if (patch && (choice === "Save for project" || choice === "Save for user")) {
+			// Recheck the complete hypothetical merge immediately before persistence.
+			const diskConfig = loadConfig(ctx.cwd);
+			const latestPolicy = { ...policyFor(ctx), config: { ...diskConfig, readRoots: [...new Set([...diskConfig.readRoots, ...sessionReadRoots])] } };
+			if (!effectiveAllowSuggestion(call, latestPolicy)) throw new Error("guard: suggested rule no longer authorizes the complete call");
+			const target = { ...diskConfig, hostBash: { ...diskConfig.hostBash, allow: [...new Set([...diskConfig.hostBash.allow, ...patch.hostBash!.allow!])] } };
+			await transition({ ...state! }, target, ctx, { epoch, beforeCommit: () => {
+				assertCallActive(signal);
+				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or executed");
+				addToConfigScope(choice === "Save for project" ? "project" : "user", patch, { cwd: ctx.cwd });
+				return loadConfig(ctx.cwd);
+			} });
+			return rt.epoch;
+		}
+		throw new Error("guard: execution denied");
+	}
+
+	function appendWarnings(result: AgentToolResult<any>, warnings: string[]): AgentToolResult<any> {
+		if (!warnings.length) return result;
+		return { ...result, content: [...result.content, { type: "text", text: warnings.join("\n") }] };
+	}
+	async function executeShell(name: "bash" | "host_bash", id: string, input: { command: string; timeout?: number }, signal: AbortSignal | undefined, onUpdate: any, ctx: ExtensionContext): Promise<AgentToolResult<any>> {
+		const rt = runtime;
+		if (!rt) throw new Error("guard session state not initialized");
+		const epoch = await authorize(rt, name, input, ctx, signal);
+		const outcome = await rt.run(async (policy) => {
+			if (rt !== runtime || rt.epoch !== epoch) return false;
+			const decision = await decisionFor(name, input, ctx, policy);
+			return decision.action !== "deny";
+		}, async (execution) => {
+			const host = name === "host_bash" || execution.policy.sandboxMode === "degraded" || (!execution.policy.workspaceLocked && (execution.policy.profile === "yolo" || execution.policy.profile === "unrestricted"));
+			const tool = createBashTool(ctx.cwd, { operations: createGuardShellOperations(execution, host), exposeSessionEnvironment: false });
+			const run = () => tool.execute(id, input, execution.signal, onUpdate);
+			try {
+				const result = host ? await run() : await rt.sandboxBoundary(run, execution.warnings);
+				if (!host && result.isError) return appendWarnings(result, [SANDBOX_FAILURE_HINT]);
+				return result;
+			} catch (err) {
+				if (!host) throw new Error(`${err instanceof Error ? err.message : String(err)}\n${SANDBOX_FAILURE_HINT}`);
+				throw err;
+			}
+		}, signal);
+		return appendWarnings(outcome.result, outcome.warnings);
+	}
+	const bash = createBashTool(process.cwd(), { exposeSessionEnvironment: false });
+	for (const name of ["bash", "host_bash"] as const) pi.registerTool({
+		...bash, name, label: name,
+		description: name === "bash" ? `${bash.description} Guard sandboxed except in raw profiles; isolated network and shared real-path scratch.` : `${bash.description} Runs on the host, subject to HostBash rules and guard profile.`,
+		execute: (id, input, signal, onUpdate, ctx) => executeShell(name, id, input, signal, onUpdate, ctx),
+	});
+	for (const name of ["python", "node"] as const) pi.registerTool({
+		name, label: name, parameters: workerParameters, outputSchema: Type.Any(),
+		description: `Persistent ${name} interpreter managed by guard. Sandboxed workers use throwaway workspace overlays, no network and shared real-path scratch. action=reset discards state, not scratch; action=status never starts a worker. Raw profiles expose the host. Unavailable in degraded mode.`,
+		execute: async (_id, input, signal, _onUpdate, ctx) => {
+			const rt = runtime;
+			if (!rt) throw new Error("guard session state not initialized");
+			const epoch = await authorize(rt, name, input, ctx, signal);
+			const outcome = await rt.run(async (policy) => rt === runtime && rt.epoch === epoch && (await decisionFor(name, input, ctx, policy)).action === "allow", (execution) => rt.worker(name, input, execution), signal);
+			let data = outcome.result as Record<string, any>;
+			if (data.status === "permission_needed" && typeof data.permissionPath === "string") {
+				data = await handleReadGrant(rt, name, data, ctx, signal);
+			}
+			const failed = (name === "python" ? PYTHON_FAILURES : NODE_FAILURES).has(data.status);
+			const text = [data.stdout, data.stderr, data.repr ?? data.value, data.exception ? JSON.stringify(data.exception) : "", data.diagnostic, data.stateLost ? `Interpreter state lost: ${data.stateLostReason ?? "worker stopped"}. Scratch retained.` : "", !data.status ? JSON.stringify(data) : `status: ${data.status}`, failed && rt.policy.profile !== "yolo" && rt.policy.profile !== "unrestricted" ? SANDBOX_FAILURE_HINT : ""].filter(Boolean).join("\n");
+			return appendWarnings({ content: [{ type: "text", text }], details: data, structuredContent: data, isError: failed }, outcome.warnings);
+		},
+	});
+
+	async function handleReadGrant(rt: GuardRuntime, name: string, data: Record<string, any>, ctx: ExtensionContext, signal?: AbortSignal): Promise<Record<string, any>> {
+		if (signal?.aborted) return { ...data, diagnostic: "No read grant: call aborted." };
+		if (!ctx.hasUI) return data;
+		const epoch = rt.epoch;
+		try {
+			rt.assertAvailable();
+			const root = validateReadGrant(readGrantSuggestion(data.permissionPath, ctx.cwd), ctx.cwd);
+			const choice = await ctx.ui.select(`guard: ${name} requests read-only access to ${root}. Granting discards worker state; code is never replayed.`, ["Grant for session", "Save for project", "Save for user", "Deny"]);
+			assertCallActive(signal);
+			if (rt !== runtime || rt.epoch !== epoch || rt.teardownFailure) return { ...data, diagnostic: "Read grant expired; nothing saved or replayed." };
+			if (choice !== "Grant for session" && choice !== "Save for project" && choice !== "Save for user") return data;
+			rt.assertAvailable();
+			validateReadGrant(root, ctx.cwd);
+			const diskConfig = loadConfig(ctx.cwd);
+			const target = { ...diskConfig, readRoots: [...new Set([...diskConfig.readRoots, root])] };
+			await transition({ ...state! }, target, ctx, { epoch, beforeCommit: () => {
+				assertCallActive(signal);
+				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or replayed");
+				validateReadGrant(root, ctx.cwd);
+				if (choice === "Grant for session") sessionReadRoots = [...new Set([...sessionReadRoots, root])];
+				else addToConfigScope(choice === "Save for project" ? "project" : "user", { readRoots: [root] }, { cwd: ctx.cwd });
+				return loadConfig(ctx.cwd);
+			} });
+			return { ...data, stateLost: true, stateLostReason: "read roots changed", diagnostic: `Read-only grant added: ${root}. Worker state discarded. Code was not replayed; run it again explicitly.` };
+		} catch (err) { return { ...data, diagnostic: `Read grant refused: ${String(err)}` }; }
+	}
+
+	// Async bus listeners publish the effective policy only after teardown.
+	pi.events.on("guard:research-request", async (data: unknown) => {
 		const holder = (data as { holder?: string } | null)?.holder ?? "plan";
-		if (state === null) {
+		if (!state || !config || !runtime || !lastCtx) {
 			pi.events.emit("guard:research-ack", { granted: false, reason: "guard session state not initialized", profile: "default" });
 			return;
 		}
-		const result = requestResearchHold(state, holder);
-		pi.events.emit("guard:research-ack", result);
+		const next = { ...state };
+		const result = requestResearchHold(next, holder);
+		if (!result.granted) { pi.events.emit("guard:research-ack", result); return; }
+		try {
+			await transition(next, config, lastCtx);
+			runtime?.assertAvailable();
+			if (state?.researchHolder !== holder || state?.profile !== "research") throw new Error("research request superseded by a policy transition");
+			pi.events.emit("guard:research-ack", result);
+		}
+		catch (err) { pi.events.emit("guard:research-ack", { granted: false, reason: String(err), profile: state?.profile ?? "default" }); }
 	});
-
-	pi.events.on("guard:research-release", (data: unknown) => {
+	pi.events.on("guard:research-release", async (data: unknown) => {
 		const holder = (data as { holder?: string } | null)?.holder ?? "plan";
-		if (state === null) return;
-		const result = releaseResearchHold(state, holder);
-		// The restored profile is broadcast so the step-3 tools stay in sync.
-		if (result.released && lastCtx !== null) {
-			updateFooter(lastCtx);
-			emitProfile(lastCtx);
-		}
+		if (!state || !config || !lastCtx) return;
+		const next = { ...state };
+		const result = releaseResearchHold(next, holder);
+		if (!result.released) return;
+		try { await transition(next, config, lastCtx); pi.events.emit("guard:research-release-ack", result); }
+		catch (err) { pi.events.emit("guard:research-release-ack", { released: false, reason: String(err), profile: state?.profile ?? "default" }); }
 	});
 
-	// ── /guard command ───────────────────────────────────────────────────────
-
-	pi.registerCommand("guard", {
-		description: "Guard sandbox permissions: cycle profiles, inspect policy, migrate old rules (/guard help)",
-		getArgumentCompletions: (prefix: string) => {
-			const subs = [
-				"help",
-				"list",
-				"reload",
-				"profile",
-				...ALL_PROFILES.map((p) => `profile ${p}`),
-				"migrate",
-				"migrate dry",
-				"ack",
-				"debug on",
-				"debug off",
-			];
-			const items = subs.map((s) => ({ value: s, label: s }));
-			const filtered = items.filter((i) => i.value.startsWith(prefix));
-			return filtered.length > 0 ? filtered : null;
-		},
-		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const trimmed = (args ?? "").trim();
-			if (!trimmed) {
-				await pickProfile(ctx);
-				return;
-			}
-			if (trimmed === "help") { showHelp(ctx); return; }
-			if (trimmed === "list") { showList(ctx); return; }
-			if (trimmed === "reload") { reloadConfig(ctx); return; }
-			if (trimmed === "ack") { handleAck(ctx); return; }
-			if (trimmed === "migrate" || trimmed === "migrate dry") { await handleMigrate(ctx, trimmed.endsWith("dry")); return; }
-			if (trimmed === "debug on") { debugEnabled = true; ctx.ui.notify("guard: debug observations ON (decisions appear as notifications; nothing is blocked).", "info"); return; }
-			if (trimmed === "debug off") { debugEnabled = false; ctx.ui.notify("guard: debug observations OFF.", "info"); return; }
-			if (trimmed.startsWith("profile")) {
-				const name = trimmed.slice("profile".length).trim();
-				if (!name) {
-					await pickProfile(ctx);
-					return;
-				}
-				if (!isProfile(name)) {
-					ctx.ui.notify(`Unknown profile "${name}". Profiles: ${ALL_PROFILES.join(", ")} (the cycle covers ${PROFILE_LADDER.join(" -> ")})`, "warning");
-					return;
-				}
-				applyProfile(name as Profile, ctx);
-				return;
-			}
-			ctx.ui.notify(`Unknown subcommand "${trimmed}". /guard help shows usage.`, "warning");
-		},
-	});
-
-	function applyProfile(profile: Profile, ctx: ExtensionContext): void {
-		const cur = currentCtx();
-		if (cur === null) {
-			ctx.ui.notify("guard: no active session state yet.", "warning");
-			return;
-		}
-		const result = setProfile(cur.state, profile);
-		if (!result.ok) {
-			ctx.ui.notify(result.notice, "warning");
-			return;
-		}
-		updateFooter(ctx);
-		emitProfile(ctx);
-		ctx.ui.notify(`Profile: ${profile} (this session only)`, "info");
+	async function applyProfile(profile: Profile, ctx: ExtensionContext): Promise<void> {
+		if (!state || !config) { notify(ctx, "guard: no active session state yet.", "warning"); return; }
+		const next = { ...state };
+		const result = setProfile(next, profile);
+		if (!result.ok) { notify(ctx, result.notice, "warning"); return; }
+		try { await transition(next, config, ctx); notify(ctx, `Profile: ${profile} (this session only)`); }
+		catch (err) { notify(ctx, `guard: profile transition failed: ${String(err)}`, "warning"); }
 	}
-
 	async function pickProfile(ctx: ExtensionContext): Promise<void> {
-		const cur = currentCtx();
-		const current = cur?.state.profile ?? "default";
-		if (!ctx.hasUI || cur === null) {
-			ctx.ui.notify(`Profile (this session): ${current}`, "info");
-			return;
-		}
-		const ordered = [current, ...ALL_PROFILES.filter((p) => p !== current)];
-		const choice = await ctx.ui.select("Guard profile (this session):", ordered);
-		if (!choice) return;
-		if (isProfile(choice)) applyProfile(choice as Profile, ctx);
+		const current = state?.profile ?? "default";
+		if (!ctx.hasUI || !state) { notify(ctx, `Profile (this session): ${current}`); return; }
+		const rt = runtime;
+		const epoch = rt?.epoch;
+		const choice = await ctx.ui.select("Guard profile (this session):", [current, ...ALL_PROFILES.filter((p) => p !== current)]);
+		if (rt !== runtime || epoch !== runtime?.epoch) { notify(ctx, "guard: profile selection expired after a session/policy change.", "warning"); return; }
+		if (choice && isProfile(choice)) await applyProfile(choice, ctx);
 	}
-
-	function showHelp(ctx: ExtensionContext): void {
-		const lines = [
-			"guard: usage",
-			"",
-			"Subcommands:",
-			"  /guard                  Pick the session profile (menu)",
-			"  /guard help             Show this help",
-			"  /guard list             Show profile, sandbox mode, and effective policy",
-			"  /guard reload           Reload guard.json from disk",
-			"  /guard profile [name]   Show or set the session profile",
-			"  /guard migrate [dry]    Convert pi-tool-permissions rules into guard.json",
-			"  /guard ack              Clear the workspace lock (step 3 sets it on audit findings)",
-			"  /guard debug on|off     Show live observe-only decisions as notifications",
-			"",
-			`Profiles (starts at default every session, never persisted): ${PROFILE_LADDER.join(" -> ")};`,
-			`unrestricted is command-only (/guard profile unrestricted). The cycle hotkey is`,
-			`${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT} unless cycleShortcut overrides it in guard.json.`,
-			"While both guard and pi-tool-permissions are loaded, guard only OBSERVES:",
-			"decisions are recorded on the guard:decision event and nothing is blocked or prompted.",
-		];
-		ctx.ui.notify(lines.join("\n"), "info");
+	async function migrate(ctx: ExtensionCommandContext, dry: boolean): Promise<void> {
+		const report = computeMigration(homedir(), ctx.cwd);
+		notify(ctx, `/guard migrate${dry ? " (dry)" : ""}:\n${report.summary}${!ctx.hasUI && !dry ? "\n(no UI: behaving like dry; re-run in a TUI to write)" : ""}`);
+		if (dry || !ctx.hasUI) return;
+		runtime?.assertAvailable();
+		const diskConfig = loadConfig(ctx.cwd);
+		const rt = runtime;
+		const epoch = rt?.epoch;
+		const choice = await ctx.ui.select("Write the migration into guard.json (union, never removes)?", ["Write", "Cancel"]);
+		if (choice !== "Write") { notify(ctx, "guard: migrate cancelled; nothing was written."); return; }
+		if (rt !== runtime || epoch !== runtime?.epoch || runtime?.teardownFailure) { notify(ctx, "guard: migration expired; nothing was written.", "warning"); return; }
+		runtime?.assertAvailable();
+		if (!state || !config || !runtime || epoch === undefined) { notify(ctx, "guard: no active session; migration not saved.", "warning"); return; }
+		const scopes = (["user", "project"] as const).filter((scope) => report[scope].sourceFound && Object.keys(report[scope].patch).length);
+		if (!scopes.length) { notify(ctx, "guard: migrate: nothing to write."); return; }
+		if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) { notify(ctx, "guard: migration expired after a config change; nothing was written.", "warning"); return; }
+		if (scopes.every((scope) => report[scope].changes === 0)) { notify(ctx, "guard: migrate wrote 0 new entries: already merged; no files or worker state changed. Re-running adds nothing (union with dedupe)."); return; }
+		let added = 0;
+		const written: string[] = [];
+		await transition({ ...state }, diskConfig, ctx, { epoch, beforeCommit: () => {
+			if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; migration not saved");
+			const fresh = computeMigration(homedir(), ctx.cwd);
+			if (JSON.stringify([fresh.user.patch, fresh.project.patch]) !== JSON.stringify([report.user.patch, report.project.patch])) throw new Error("guard: legacy migration sources changed; preview again before saving");
+			for (const scope of scopes) {
+				const result = addToConfigScope(scope, report[scope].patch, { cwd: ctx.cwd });
+				added += result.added;
+				written.push(`${result.path} (+${result.added})`);
+			}
+			return loadConfig(ctx.cwd);
+		} });
+		notify(ctx, `guard: migrate wrote ${added} new entr${added === 1 ? "y" : "ies"}:\n${written.join("\n")}\nRe-running adds nothing (union with dedupe).`);
 	}
-
 	function showList(ctx: ExtensionContext): void {
-		const cur = currentCtx();
-		if (cur === null || config === null) {
-			ctx.ui.notify("guard: no active session state yet.", "info");
-			return;
-		}
-		const st = cur.state;
-		const cfg = config;
-		const lines = [
-			`profile (this session): ${st.profile}${st.researchHolder !== null ? ` (research held by ${st.researchHolder})` : ""}`,
-			`sandbox: ${st.sandbox?.mode ?? "unknown"}${st.sandbox && st.sandbox.diagnostics.length > 0 ? ` (${st.sandbox.diagnostics.join("; ")})` : ""}`,
-			`workspace: ${st.workspaceLocked ? `LOCKED (/guard ack): ${st.workspaceLockReason ?? ""}` : "unlocked"}`,
+		if (!state || !config) { notify(ctx, "guard: no active session state yet."); return; }
+		const cfg = effectiveConfig();
+		notify(ctx, [
+			`profile (this session): ${state.profile}${state.researchHolder ? ` (research held by ${state.researchHolder})` : ""}`,
+			`sandbox: ${state.sandbox?.mode ?? "unknown"} (${state.sandbox?.diagnostics.join("; ") ?? ""})`,
+			`workspace: ${state.workspaceLocked ? `LOCKED (/guard ack): ${state.workspaceLockReason}` : "unlocked"}`,
+			`unresolved teardown: ${runtime?.teardownFailure ?? "none"}`,
 			`protected paths (top level): ${[...PROTECTED_TOP_LEVEL, ...cfg.protectedPaths].join(", ")}`,
-			`mask exceptions: ${cfg.maskExceptions.length > 0 ? cfg.maskExceptions.join(", ") : "(none)"}`,
+			`mask exceptions: ${cfg.maskExceptions.join(", ") || "(none)"}`,
 			`web_fetch allowlist: ${cfg.webFetchAllow.length} glob(s)`,
 			`host shell rules: ${cfg.hostBash.deny.length} deny, ${cfg.hostBash.ask.length} ask, ${cfg.hostBash.allow.length} allow`,
-			`read roots: ${cfg.readRoots.length > 0 ? cfg.readRoots.join(", ") : "(none)"}`,
-			`write roots: ${cfg.writeRoots.length > 0 ? cfg.writeRoots.join(", ") : "(none)"}`,
+			`read roots: ${cfg.readRoots.join(", ") || "(none)"}`,
+			`write roots: ${cfg.writeRoots.join(", ") || "(none)"}`,
 			`toolClasses overrides: ${Object.keys(cfg.toolClasses).length}`,
 			`classifier: ${cfg.classifier ? `${cfg.classifier.provider}/${cfg.classifier.model}` : "(auto-select)"}`,
+			`shared scratch: ${runtime?.scratchDir ?? "not initialized"}`,
 			`debug: ${debugEnabled ? "on" : "off"}`,
-		];
-		ctx.ui.notify(lines.join("\n"), "info");
+		].join("\n"));
 	}
-
-	function reloadConfig(ctx: ExtensionContext): void {
-		config = loadConfig(ctx.cwd);
-		if (state !== null) state.sandbox = detectSandboxMode();
-		clearAnnotationCache();
-		updateFooter(ctx);
-		emitProfile(ctx);
-		ctx.ui.notify("guard: config reloaded.", "info");
-	}
-
-	function handleAck(ctx: ExtensionContext): void {
-		const cur = currentCtx();
-		if (cur === null) {
-			ctx.ui.notify("guard: no active session state yet.", "warning");
-			return;
-		}
-		const result = ackWorkspaceLock(cur.state);
-		updateFooter(ctx);
-		emitProfile(ctx);
-		ctx.ui.notify(`guard: ${result.notice}`, result.cleared ? "info" : "warning");
-	}
-
-	async function handleMigrate(ctx: ExtensionCommandContext, dry: boolean): Promise<void> {
-		const home = homedir();
-		const report = computeMigration(home, ctx.cwd);
-		if (dry || !ctx.hasUI) {
-			const lines = [report.summary];
-			if (!dry && !ctx.hasUI) lines.push("", "(no UI: behaving like dry; re-run /guard migrate in a TUI to write)");
-			ctx.ui.notify(`/guard migrate${dry ? " (dry)" : ""}:\n${lines.join("\n")}`, "info");
-			return;
-		}
-		const choice = await ctx.ui.select("Write the migration into guard.json (union, never removes)?", ["Write", "Cancel"]);
-		if (choice !== "Write") {
-			ctx.ui.notify("guard: migrate cancelled; nothing was written.", "info");
-			return;
-		}
-		const written: string[] = [];
-		let added = 0;
-		for (const scope of ["user", "project"] as const) {
-			const scopeReport = report[scope];
-			if (!scopeReport.sourceFound || Object.keys(scopeReport.patch).length === 0) continue;
-			const result = addToConfigScope(scope, scopeReport.patch, { home, cwd: ctx.cwd });
-			written.push(`${result.path} (+${result.added})`);
-			added += result.added;
-		}
-		if (written.length === 0) {
-			ctx.ui.notify("guard: migrate: nothing to write (no legacy config found or empty patch).", "info");
-			return;
-		}
-		config = loadConfig(ctx.cwd, home);
-		updateFooter(ctx);
-		emitProfile(ctx);
-		ctx.ui.notify(`guard: migrate wrote ${added} new entr${added === 1 ? "y" : "ies"}:\n${written.join("\n")}\n\nRe-running /guard migrate adds nothing (union with dedupe).`, "info");
-	}
-
-	// ── Cycle hotkey ─────────────────────────────────────────────────────────
-
-	// ctrl+alt+g (mnemonic: guard); overridable via cycleShortcut in guard.json.
-	// pi-tool-permissions owns ctrl+alt+p, so there is no conflict and no
-	// coexistence warning is needed.
+	pi.registerCommand("guard", {
+		description: "Guard sandbox permissions: profiles, policy, read-only lock acknowledgment and migration (/guard help)",
+		getArgumentCompletions: (prefix) => {
+			const filtered = ["help", "list", "reload", "profile", ...ALL_PROFILES.map((p) => `profile ${p}`), "migrate", "migrate dry", "ack", "debug on", "debug off"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s }));
+			return filtered.length ? filtered : null;
+		},
+		handler: async (args, ctx) => {
+			const command = args.trim();
+			if (!command || command === "profile") { await pickProfile(ctx); return; }
+			if (command === "help") {
+				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy and shared scratch", "/guard reload            Reload guard.json", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python and node; other tools remain observe-only (grep results are secret-filtered).", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects."].join("\n"));
+				return;
+			}
+			if (command === "list") { showList(ctx); return; }
+			if (command === "debug on" || command === "debug off") { debugEnabled = command.endsWith("on"); notify(ctx, `guard: debug ${debugEnabled ? "ON" : "OFF"}; owned tools enforce, others observe.`); return; }
+			if (command === "migrate" || command === "migrate dry") { await migrate(ctx, command.endsWith("dry")); return; }
+			if (command === "reload") {
+				if (state) await transition({ ...state, sandbox: detectSandboxMode() }, loadConfig(ctx.cwd), ctx);
+				notify(ctx, "guard: config reloaded."); return;
+			}
+			if (command === "ack") {
+				if (!state || !config || !runtime) { notify(ctx, "guard: no active session state yet.", "warning"); return; }
+				if (runtime.teardownFailure) { notify(ctx, `guard: ack refused: unresolved teardown: ${runtime.teardownFailure}`, "warning"); return; }
+				const next = { ...state };
+				const result = ackWorkspaceLock(next);
+				try {
+				await transition(next, config, ctx);
+				if (result.cleared && state.workspaceLocked) notify(ctx, "guard: ack refused: a new audit finding kept the workspace locked.", "warning");
+				else notify(ctx, `guard: ${result.notice}`, result.cleared ? "info" : "warning");
+			}
+				catch (err) { notify(ctx, `guard: ack refused: ${String(err)}`, "warning"); }
+				return;
+			}
+			if (command.startsWith("profile ")) {
+				const profile = command.slice(8).trim();
+				if (isProfile(profile)) await applyProfile(profile, ctx);
+				else notify(ctx, `Unknown profile "${profile}". Profiles: ${ALL_PROFILES.join(", ")}`, "warning");
+				return;
+			}
+			notify(ctx, `Unknown subcommand "${command}". /guard help shows usage.`, "warning");
+		},
+	});
 	pi.registerShortcut((loadUserConfigRaw().cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT) as Parameters<ExtensionAPI["registerShortcut"]>[0], {
 		description: "Cycle guard profile (research -> default -> auto -> trusted -> yolo; this session only)",
 		handler: async (ctx) => {
-			const cur = currentCtx();
-			if (cur === null) return;
-			const result = cycleProfile(cur.state);
-			if (!result.ok) {
-				ctx.ui.notify(result.notice, "warning");
-				return;
-			}
-			updateFooter(ctx);
-			emitProfile(ctx);
-			ctx.ui.notify(`Profile: ${result.profile} (this session only)`, "info");
+			if (!state) return;
+			if (state.researchHolder) { notify(ctx, `Profile changes are blocked while ${state.researchHolder} holds research; the holder must release it first.`, "warning"); return; }
+			await applyProfile(nextProfile(state.profile), ctx);
 		},
 	});
-
-	void lockWorkspace; // step 3 calls this on audit lockWrites; kept exported via state.ts
 }

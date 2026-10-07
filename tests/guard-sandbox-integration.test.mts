@@ -16,7 +16,7 @@ import * as path from "node:path";
 import { spawnSandboxed, createSessionDir, defaultRuntimeRoot, disposeSession, SandboxUnavailableError } from "../extensions/guard/sandbox/run.ts";
 import { detectSandboxMode, resetSandboxDetection, type SandboxDetection } from "../extensions/guard/sandbox/detect.ts";
 import { auditProtected, snapshotProtected } from "../extensions/guard/sandbox/audit.ts";
-import { RESERVED_ENV_KEYS, NEVER_ENV_KEYS, RLIMITS_PYTHON, RLIMITS_SHELL } from "../extensions/guard/sandbox/spec.ts";
+import { DEFAULT_MASK_PATTERNS, DEFAULT_MASK_EXCEPTIONS, RESERVED_ENV_KEYS, NEVER_ENV_KEYS, RLIMITS_PYTHON, RLIMITS_SHELL, type LaunchSpec } from "../extensions/guard/sandbox/spec.ts";
 
 // ── Prerequisites: skip with an explicit reason when unsupported ─────────────
 
@@ -62,28 +62,15 @@ interface SandboxRun {
 }
 
 async function runInSandbox(
-	spec: {
-		workspace: string;
-		workspaceMode?: "rw" | "ro" | "overlay";
-		target: string[];
-		rlimits?: Record<string, number>;
-		homePath?: string;
-		extraEnv?: Record<string, string>;
-		extraFds?: number;
-	},
+	spec: Omit<LaunchSpec, "workspaceMode"> & { workspaceMode?: LaunchSpec["workspaceMode"] },
 	options: { detection?: SandboxDetection } = {},
 ): Promise<SandboxRun> {
 	const session = createSessionDir();
 	sessionDirs.push(session);
 	const r = spawnSandboxed(
 		{
-			workspace: spec.workspace,
+			...spec,
 			workspaceMode: spec.workspaceMode ?? "rw",
-			target: spec.target,
-			rlimits: spec.rlimits,
-			homePath: spec.homePath,
-			extraEnv: spec.extraEnv,
-			extraFds: spec.extraFds,
 			runtimeDir: session,
 		},
 		options,
@@ -238,6 +225,48 @@ if (supported) {
 		assert.equal(res.code, 0);
 		assert.match(out, /std-out/);
 		assert.match(Buffer.concat(chunks).toString("utf8"), /fd3-payload/);
+	});
+
+	test("launch discovery honors custom masks and exceptions", async () => {
+		const ws = makeWorkspace();
+		fs.writeFileSync(path.join(ws, "private.secret"), "custom-private-token");
+		fs.writeFileSync(path.join(ws, "public.secret"), "public-fixture");
+		const r = await bash(ws, "cat private.secret public.secret .env.example", {
+			maskPatterns: [...DEFAULT_MASK_PATTERNS, "*.secret"],
+			maskExceptions: [...DEFAULT_MASK_EXCEPTIONS, "public.secret"],
+		});
+		assert.equal(r.code, 0, r.err);
+		assert.doesNotMatch(r.out, /custom-private-token/);
+		assert.match(r.out, /public-fixture/);
+		assert.match(r.out, /PUBLIC_VAR=1/);
+		assert.equal(r.effective.maskedFiles, 2);
+	});
+
+	test("custom top-level protected entries are mounted read-only", async () => {
+		const ws = makeWorkspace();
+		fs.writeFileSync(path.join(ws, "custom-config"), "original");
+		const r = await bash(ws, "echo evil > custom-config 2>/dev/null; echo rc=$?; cat custom-config", {
+			protectedPaths: ["custom-config"],
+		});
+		assert.equal(r.code, 0, r.err);
+		assert.match(r.out, /rc=[1-9]/);
+		assert.match(r.out, /original/);
+		assert.equal(fs.readFileSync(path.join(ws, "custom-config"), "utf8"), "original");
+	});
+
+	test("shared scratch is writable at its real path in overlay and reduced launches", async () => {
+		const ws = makeWorkspace();
+		const scratch = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-int-scratch-"))));
+		for (const reduced of [false, true]) {
+			const file = path.join(scratch, reduced ? "reduced.txt" : "full.txt");
+			const r = await bash(ws, `printf scratch-value > '${file}'; cat '${file}'`, {
+				workspaceMode: "overlay",
+				extraRwBinds: [[scratch, scratch]],
+			}, reduced ? { detection: { ...detection!, mode: "reduced", launcherPath: null } } : {});
+			assert.equal(r.code, 0, r.err);
+			assert.equal(r.out, "scratch-value");
+			assert.equal(fs.readFileSync(file, "utf8"), "scratch-value");
+		}
 	});
 
 	// ── Protected paths and masks ─────────────────────────────────────────────
@@ -410,6 +439,184 @@ if (supported) {
 		assert.doesNotMatch(r.out, /packageSourceCredentials/, "credentials section removed");
 		assert.doesNotMatch(r.out, /hunter2/, "credential values removed");
 		assert.doesNotMatch(r.out, /apikeys/, "apikeys section removed");
+	});
+
+	test("ancestor read roots cannot expose host credentials or undo toolchain sanitization", async () => {
+		const parent = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), "guard-int-ancestor-"))));
+		const fakeHome = path.join(parent, "home");
+		fs.mkdirSync(fakeHome);
+		const sensitive = [
+			".ssh/key", ".config/gh/hosts.yml", ".aws/credentials", ".azure/token", ".docker/config.json",
+			".pi/agent/auth.json", ".config/pup/tokens.json", ".local/share/pup/tokens.json",
+			".npmrc", ".git-credentials", ".bashrc", ".zshrc", ".profile",
+			".cargo/credentials", ".cargo/credentials.toml",
+		];
+		for (const rel of sensitive) {
+			fs.mkdirSync(path.dirname(path.join(fakeHome, rel)), { recursive: true });
+			fs.writeFileSync(path.join(fakeHome, rel), "HOST-CREDENTIAL-MARKER");
+		}
+		fs.mkdirSync(path.join(fakeHome, ".nuget/NuGet"), { recursive: true });
+		fs.writeFileSync(path.join(fakeHome, ".nuget/NuGet/NuGet.Config"),
+			'<configuration><packageSources><add key="public" value="https://example.test" /></packageSources><packageSourceCredentials><feed><add key="password" value="HOST-CREDENTIAL-MARKER" /></feed></packageSourceCredentials></configuration>');
+		fs.writeFileSync(path.join(parent, "public.txt"), "public-root-fixture");
+		const ws = makeWorkspace();
+		const r = await bash(ws, [
+			...sensitive.map((rel) => `cat '${path.join(fakeHome, rel)}' 2>/dev/null || true`),
+			`cat '${path.join(fakeHome, ".nuget/NuGet/NuGet.Config")}'`,
+			`cat '${path.join(parent, "public.txt")}'`,
+		].join("; "), { homePath: fakeHome, readRoots: [parent] });
+		assert.equal(r.code, 0, r.err);
+		assert.doesNotMatch(r.out, /HOST-CREDENTIAL-MARKER/);
+		assert.match(r.out, /packageSources/);
+		assert.doesNotMatch(r.out, /packageSourceCredentials/);
+		assert.match(r.out, /public-root-fixture/);
+	});
+
+	test("sensitive read-root aliases are rejected and ancestor mounts mask relocated credentials", async () => {
+		const parent = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), "guard-int-aliases-"))));
+		const home = path.join(parent, "home");
+		const relocated = path.join(parent, "relocated-ssh");
+		fs.mkdirSync(home);
+		fs.mkdirSync(relocated);
+		fs.writeFileSync(path.join(relocated, "key"), "RELOCATED-SECRET-MARKER");
+		fs.symlinkSync(relocated, path.join(home, ".ssh"));
+		const alias = path.join(parent, "ssh-alias");
+		fs.symlinkSync(relocated, alias);
+		const ws = makeWorkspace();
+		for (const readRoots of [[alias], [parent, alias]]) {
+			const r = await bash(ws, `cat '${alias}/key' '${relocated}/key' '${home}/.ssh/key' 2>/dev/null || true`, {
+				homePath: home, readRoots,
+			});
+			assert.equal(r.code, 0, r.err);
+			assert.doesNotMatch(r.out, /RELOCATED-SECRET-MARKER/);
+			assert.ok(r.effective.skippedReadRoots.some((skip) => /sensitive|never mounted/.test(skip.reason)));
+		}
+	});
+
+	test("workspace aliases resolve to real paths and excluded workspace aliases refuse launch", async () => {
+		const parent = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), "guard-int-workspace-alias-"))));
+		const ws = path.join(parent, "workspace");
+		const alias = path.join(parent, "workspace-alias");
+		fs.mkdirSync(ws);
+		fs.writeFileSync(path.join(ws, "AGENTS.md"), "original instructions");
+		fs.symlinkSync(ws, alias);
+		const r = await bash(alias, "pwd; echo evil > AGENTS.md 2>/dev/null; echo rc=$?");
+		assert.equal(r.code, 0, r.err);
+		assert.match(r.out, new RegExp(`^${ws}\\n`));
+		assert.match(r.out, /rc=[1-9]/);
+		const home = path.join(parent, "home");
+		fs.mkdirSync(home);
+		fs.symlinkSync(ws, path.join(home, ".ssh"));
+		assert.throws(() => spawnSandboxed({ workspace: alias, workspaceMode: "rw", target: ["true"], homePath: home }), /sensitive host location/);
+	});
+
+	test("initial discovery failures refuse launch without executing a target", async () => {
+		const ws = makeWorkspace();
+		const marker = path.join(ws, "must-not-run");
+		assert.throws(() => spawnSandboxed({
+			workspace: ws, workspaceMode: "rw", target: ["bash", "-c", `touch '${marker}'`],
+		}, { detection: { ...detection!, fdPath: "/missing-guard-scanner" } }), /discovery scan failed/);
+		assert.equal(fs.existsSync(marker), false);
+	});
+
+	test("scratch binds and custom protections reject aliases, traversal, and mount manipulation", async () => {
+		const ws = makeWorkspace();
+		const scratch = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-int-bind-validation-"))));
+		const alias = path.join(ws, "scratch-alias");
+		fs.symlinkSync(scratch, alias);
+		for (const name of ["../escape", "/usr", "nested/config", "nested\\config"]) {
+			assert.throws(() => spawnSandboxed({ workspace: ws, workspaceMode: "ro", target: ["true"], protectedPaths: [name] }), /top-level names/);
+		}
+		for (const bind of [[scratch, "/usr"], [alias, alias], ["/tmp", "/tmp"], [ws, ws]] as Array<[string, string]>) {
+			assert.throws(() => spawnSandboxed({ workspace: ws, workspaceMode: "ro", target: ["true"], extraRwBinds: [bind] }), /extraRwBinds/);
+		}
+	});
+
+	test("trusted scratch cannot bind sensitive host paths or their ancestors writable", async () => {
+		const ws = makeWorkspace();
+		const parent = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-int-sensitive-scratch-"))));
+		const home = path.join(parent, "home");
+		const ssh = path.join(home, ".ssh");
+		fs.mkdirSync(ssh, { recursive: true });
+		for (const scratch of [ssh, parent]) {
+			assert.throws(() => spawnSandboxed({
+				workspace: ws, workspaceMode: "ro", target: ["true"], homePath: home,
+				extraRwBinds: [[scratch, scratch]],
+			}), /extraRwBinds.*sensitive/);
+		}
+	});
+
+	test("credential aliases stay sanitized under ancestor mounts", async () => {
+		const parent = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), "guard-int-credential-alias-"))));
+		const home = path.join(parent, "home");
+		fs.mkdirSync(path.join(home, ".cargo"), { recursive: true });
+		fs.mkdirSync(path.join(home, ".nuget/NuGet"), { recursive: true });
+		const cargo = path.join(parent, "cargo-secret");
+		const nuget = path.join(parent, "nuget-secret");
+		fs.writeFileSync(cargo, "ALIASED-CREDENTIAL-MARKER");
+		fs.writeFileSync(nuget, '<configuration><packageSources /><apikeys><add key="source" value="ALIASED-CREDENTIAL-MARKER" /></apikeys></configuration>');
+		fs.symlinkSync(cargo, path.join(home, ".cargo/credentials.toml"));
+		fs.symlinkSync(nuget, path.join(home, ".nuget/NuGet/NuGet.Config"));
+		const ws = makeWorkspace();
+		const r = await bash(ws, `cat '${cargo}' '${nuget}' ~/.cargo/credentials.toml ~/.nuget/NuGet/NuGet.Config`, {
+			homePath: home, readRoots: [parent],
+		});
+		assert.equal(r.code, 0, r.err);
+		assert.doesNotMatch(r.out, /ALIASED-CREDENTIAL-MARKER|apikeys/);
+		assert.match(r.out, /packageSources/);
+	});
+
+	test("staged worker binds survive hard pi-agent exclusions", async () => {
+		const parent = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), "guard-int-staged-worker-"))));
+		const home = path.join(parent, "home");
+		fs.mkdirSync(path.join(home, ".pi/agent"), { recursive: true });
+		const worker = path.join(home, ".pi/agent/worker.py");
+		fs.writeFileSync(worker, "import os\nprint('worker-ok')\nprint(os.path.exists(os.path.expanduser('~/.pi/agent/auth.json')))\n");
+		fs.writeFileSync(path.join(home, ".pi/agent/auth.json"), "WORKER-HOST-SECRET");
+		const r = await runInSandbox({
+			workspace: makeWorkspace(), target: ["python3", "/.guard/worker.py"], homePath: home,
+			readRoots: [parent], extraRoBinds: [[worker, "/.guard/worker.py"]],
+		});
+		assert.equal(r.code, 0, r.err);
+		assert.equal(r.out, "worker-ok\nFalse\n");
+	});
+
+	test("ancestor grants and aliases cannot expose run or Windows host mounts", async () => {
+		const ws = makeWorkspace();
+		const alias = path.join(ws, "run-alias");
+		fs.symlinkSync("/run", alias);
+		const r = await bash(ws, "test -e /run/WSL; echo run=$?; test -e /mnt/c/Windows; echo windows=$?", {
+			readRoots: ["/mnt", "/var", alias],
+		});
+		assert.equal(r.code, 0, r.err);
+		assert.match(r.out, /run=1/);
+		assert.match(r.out, /windows=1/);
+		assert.ok(r.effective.skippedReadRoots.some((skip) => /never mounted/.test(skip.reason)));
+	});
+
+	test("custom masks also apply to nested protected files", async () => {
+		const ws = makeWorkspace();
+		fs.mkdirSync(path.join(ws, "sub"));
+		fs.writeFileSync(path.join(ws, "sub/AGENTS.md"), "NESTED-MASKED-MARKER");
+		const r = await bash(ws, "cat sub/AGENTS.md", {
+			maskPatterns: [...DEFAULT_MASK_PATTERNS, "AGENTS.md"],
+		});
+		assert.equal(r.code, 0, r.err);
+		assert.equal(r.out, "");
+		assert.equal(r.effective.nestedProtectedEntries, 1);
+	});
+
+	test("incomplete discovery classification refuses launch and marks audit baselines incomplete", async () => {
+		const ws = makeWorkspace();
+		const tools = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-int-scanner-"))));
+		const scanner = path.join(tools, "scanner.mjs");
+		fs.writeFileSync(scanner, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(path.join(ws, "vanished.key") + "\0")});\n`, { mode: 0o700 });
+		assert.throws(() => spawnSandboxed({ workspace: ws, workspaceMode: "ro", target: ["true"] }, {
+			detection: { ...detection!, fdPath: scanner },
+		}), /discovery.*vanished.key/i);
+		const before = snapshotProtected(ws, { fdPath: scanner });
+		assert.equal(before.complete, false);
+		assert.match(before.diagnostics!.join(" "), /vanished.key/);
 	});
 
 	// ── Happy paths (offline) ────────────────────────────────────────────────

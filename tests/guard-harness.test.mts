@@ -29,7 +29,10 @@ interface Harness {
 	status: Map<string, string | undefined>;
 	commandHandlers: Map<string, (args: string, ctx: unknown) => Promise<void>>;
 	tools: Array<{ name: string; annotations?: Record<string, boolean> }>;
+	registeredTools: Map<string, { execute: (...args: any[]) => Promise<any> }>;
 }
+
+const harnesses: Harness[] = [];
 
 function makeHarness(tools: Harness["tools"] = []): Harness {
 	const h: Harness = {
@@ -42,13 +45,14 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 		status: new Map(),
 		commandHandlers: new Map(),
 		tools,
+		registeredTools: new Map(),
 	};
 	const api = {
 		on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
 			(h.handlers[event] ??= []).push(handler);
 			return () => {};
 		},
-		registerTool: () => {},
+		registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => h.registeredTools.set(tool.name, tool),
 		registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
 			h.commands.push({ name });
 			h.commandHandlers.set(name, options.handler);
@@ -73,6 +77,7 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 		},
 	};
 	(guardExtension as (api: unknown) => void)(api);
+	harnesses.push(h);
 	return h;
 }
 
@@ -103,10 +108,15 @@ async function withTempHome<T>(fn: () => Promise<T> | T): Promise<T> {
 	const realHome = process.env.HOME;
 	const home = makeTempDir("guard-harness-home-");
 	process.env.HOME = home;
+	const firstHarness = harnesses.length;
 	try {
 		return await fn();
 	} finally {
-		process.env.HOME = realHome;
+		try {
+			for (const h of harnesses.slice(firstHarness)) {
+				for (const shutdown of h.handlers.session_shutdown ?? []) await shutdown({}, {});
+			}
+		} finally { process.env.HOME = realHome; }
 	}
 }
 
@@ -138,7 +148,7 @@ test("harness: session_start initializes state, footer, and the profile event", 
 		};
 		assert.equal(payload.profile, "default");
 		assert.equal(payload.sandbox.mode, sandboxMode);
-		assert.equal(payload.sandbox.workspaceMode, sandboxMode === "full" ? "rw" : "rw");
+		assert.equal(payload.sandbox.workspaceMode, "rw", "default bash stays rw even in reduced mode");
 		assert.deepEqual(payload.sandbox.readRoots, []);
 		assert.equal(payload.workspaceLocked, false);
 	});
@@ -240,7 +250,7 @@ test("harness: /guard profile, cycle shortcut, research hold, and ack", async ()
 		// Hold research, then a profile change is blocked with a notice.
 		h.emitted.length = 0;
 		h.notifications.length = 0;
-		for (const listener of h.eventListeners["guard:research-request"] ?? []) listener({ holder: "plan" });
+		for (const listener of h.eventListeners["guard:research-request"] ?? []) await listener({ holder: "plan" });
 		const ack = h.emitted.find(([c]) => c === "guard:research-ack")?.[1] as { granted: boolean; reason: string; profile: string };
 		assert.equal(ack.granted, true);
 		assert.equal(ack.profile, "research");
@@ -251,7 +261,7 @@ test("harness: /guard profile, cycle shortcut, research hold, and ack", async ()
 
 		// Release restores the pre-hold profile (research was already active when
 		// the hold was requested, so it stays).
-		for (const listener of h.eventListeners["guard:research-release"] ?? []) listener({ holder: "plan" });
+		for (const listener of h.eventListeners["guard:research-release"] ?? []) await listener({ holder: "plan" });
 		const restored = h.emitted.filter(([c]) => c === "guard:profile").at(-1)?.[1] as { profile: string };
 		assert.equal(restored.profile, "research", "release broadcasts the restored profile");
 
@@ -277,7 +287,7 @@ test("harness: /guard debug on produces observe notifications", async () => {
 		h.notifications.length = 0;
 		await observers[0]({ toolName: "bash", input: { command: "ls" } }, ctx);
 		assert.equal(h.notifications.length, 1);
-		assert.match(h.notifications[0], /\[guard observe\] bash: allow \(/);
+		assert.match(h.notifications[0], /\[guard enforce\] bash: allow \(/);
 		await handler!("debug off", ctx);
 		h.notifications.length = 0;
 		await observers[0]({ toolName: "bash", input: { command: "ls" } }, ctx);
@@ -314,7 +324,13 @@ test("harness: /guard migrate with a confirm choice writes both scopes idempoten
 		const ctx = harnessCtx(h, cwd, "Write");
 		for (const handler of h.handlers["session_start"] ?? []) await handler({}, ctx);
 		h.notifications.length = 0;
+		ctx.ui.select = async () => {
+			assert.ok(h.notifications.some((message) => message.includes("rule(s)/setting(s) converted")), "preview is shown before the confirmation dialog");
+			assert.equal(fs.existsSync(projectConfigPath(cwd)), false, "preview precedes writes");
+			return "Write";
+		};
 		await h.commandHandlers.get("guard")!("migrate", ctx);
+		ctx.ui.select = async () => "Write";
 		const projectCfg = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
 		assert.deepEqual(projectCfg.hostBash?.allow, ["HostBash(dotnet build *)"], "project scope written");
 		const userCfg = JSON.parse(fs.readFileSync(userConfigPath(home), "utf8")) as { hostBash?: { allow?: string[] }; readRoots?: string[] };
@@ -334,6 +350,50 @@ test("harness: /guard migrate with a confirm choice writes both scopes idempoten
 		h.notifications.length = 0;
 		await h.commandHandlers.get("guard")!("migrate", ctx);
 		assert.ok(h.notifications.some((n) => /wrote 0 new entries/.test(n)), "re-running adds nothing");
+	});
+});
+
+test("idempotent migration preserves worker namespace when no effective entries change", async () => {
+	if (sandboxMode === "degraded") return;
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-migrate-noop-worker-");
+		fs.mkdirSync(path.join(cwd, ".pi"));
+		const legacy = path.join(cwd, ".pi/pi-tool-permissions.local.json");
+		const source = JSON.stringify({ allow: ["Bash(echo imported)"] });
+		fs.writeFileSync(legacy, source);
+		const ctx = harnessCtx(h, cwd, "Write");
+		await h.handlers.session_start[0]({}, ctx);
+		await h.commandHandlers.get("guard")!("migrate", ctx);
+		const worker = h.registeredTools.get("python")!;
+		assert.equal((await worker.execute("id", { code: "retained = 73" }, undefined, undefined, ctx)).structuredContent.status, "ok");
+		await h.commandHandlers.get("guard")!("migrate", ctx);
+		const result = await worker.execute("id", { code: "retained" }, undefined, undefined, ctx);
+		assert.equal(result.structuredContent.status, "ok");
+		assert.equal(result.structuredContent.repr, "73");
+		assert.equal(fs.readFileSync(legacy, "utf8"), source);
+	});
+});
+
+test("migration confirmation from a replaced session expires even when the new epoch has the same number", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-migrate-stale-session-");
+		fs.mkdirSync(path.join(cwd, ".pi"));
+		fs.writeFileSync(path.join(cwd, ".pi/pi-tool-permissions.local.json"), JSON.stringify({ allow: ["Bash(echo imported)"] }));
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		let show!: () => void;
+		let answer!: (value: string) => void;
+		const shown = new Promise<void>((resolve) => { show = resolve; });
+		ctx.ui.select = async () => { show(); return new Promise<string>((resolve) => { answer = resolve; }); };
+		const migrating = h.commandHandlers.get("guard")!("migrate", ctx);
+		await shown;
+		await h.handlers.session_start[0]({}, ctx);
+		answer("Write");
+		await migrating;
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false);
+		assert.ok(h.notifications.some((message) => /migration expired/.test(message)));
 	});
 });
 
@@ -358,8 +418,325 @@ test("harness: /guard list and reload report the effective policy", async () => 
 		// help mentions the observe-only coexistence note.
 		h.notifications.length = 0;
 		await h.commandHandlers.get("guard")!("help", ctx);
-		assert.match(h.notifications.join("\n"), /OBSERVES/);
+		assert.match(h.notifications.join("\n"), /ENFORCES bash, host_bash, python and node; other tools remain observe-only/);
 		assert.match(h.notifications.join("\n"), /unrestricted is command-only/);
+	});
+});
+
+test("registered tools own all four names and reject calls before session initialization", async () => {
+	const h = makeHarness();
+	assert.deepEqual([...h.registeredTools.keys()].sort(), ["bash", "host_bash", "node", "python"]);
+	const ctx = harnessCtx(h, makeTempDir("guard-uninitialized-"));
+	for (const name of ["bash", "host_bash", "node", "python"]) {
+		await assert.rejects(h.registeredTools.get(name)!.execute("id", { command: "echo should-not-run", code: "1" }, undefined, undefined, ctx), /not initialized/);
+		const result = await h.handlers.tool_call[0]({ toolName: name, input: {} }, ctx) as { block: boolean };
+		assert.equal(result.block, true);
+	}
+});
+
+test("registered raw bash honors rules and fixed identities; unrestricted alone skips rules", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-raw-rules-");
+		fs.mkdirSync(path.join(cwd, ".pi"));
+		fs.writeFileSync(projectConfigPath(cwd), JSON.stringify({ hostBash: { deny: ["HostBash(echo blocked)"], ask: ["HostBash(echo asked)"] }, toolClasses: { "*": "meta", bash: "remote-read", host_bash: "meta" } }));
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		await h.commandHandlers.get("guard")!("profile yolo", ctx);
+		for (const name of ["bash", "host_bash"]) {
+			await assert.rejects(h.registeredTools.get(name)!.execute("id", { command: "echo blocked" }, undefined, undefined, ctx), /deny rule/);
+			const block = await h.handlers.tool_call[0]({ toolName: name, input: { command: "echo blocked" } }, ctx) as { block: boolean };
+			assert.equal(block.block, true);
+			await assert.rejects(h.registeredTools.get(name)!.execute("id", { command: "echo asked" }, undefined, undefined, ctx), /denied/);
+		}
+		await h.commandHandlers.get("guard")!("profile unrestricted", ctx);
+		const result = await h.registeredTools.get("bash")!.execute("id", { command: "echo blocked" }, undefined, undefined, ctx);
+		assert.equal(result.isError, undefined);
+		assert.equal(result.structuredContent.exit_code, 0);
+		assert.match(result.structuredContent.output, /blocked/);
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("explicit asks offer once/deny only; fallback saves exact effective rules", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialog-");
+		fs.mkdirSync(path.join(cwd, ".pi"));
+		fs.writeFileSync(projectConfigPath(cwd), JSON.stringify({ hostBash: { ask: ["HostBash(echo asked)"] } }));
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		let offered: string[] = [];
+		ctx.ui.select = async (_title?: string, options?: string[]) => { offered = options ?? []; return "Deny"; };
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx), /denied/);
+		assert.deepEqual(offered, ["Allow once", "Deny"]);
+		ctx.ui.select = async (title?: string, options?: string[]) => {
+			offered = options ?? [];
+			assert.match(title ?? "", /Exact rule: HostBash\(/);
+			return "Save for project";
+		};
+		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
+		assert.deepEqual(offered, ["Allow once", "Save for project", "Save for user", "Deny"]);
+		assert.equal(result.structuredContent.exit_code, 0);
+		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8"));
+		assert.deepEqual(saved.hostBash.ask, ["HostBash(echo asked)"]);
+		assert.deepEqual(saved.hostBash.allow, ["HostBash(/^echo \\$GUARD_HARNESS_UNSET$/)"]);
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("sandbox bash and both workers share writable scratch at one real host path", async () => {
+	if (sandboxMode === "degraded") return;
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-shared-scratch-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const python = h.registeredTools.get("python")!;
+		const node = h.registeredTools.get("node")!;
+		const pyStatus = await python.execute("id", { action: "status" }, undefined, undefined, ctx);
+		const nodeStatus = await node.execute("id", { action: "status" }, undefined, undefined, ctx);
+		const scratch = pyStatus.structuredContent.paths.scratchDir;
+		assert.equal(nodeStatus.structuredContent.paths.scratchDir, scratch);
+		assert.equal(fs.realpathSync(scratch), scratch);
+		const artifact = path.join(scratch, "artifact");
+		const shell = await h.registeredTools.get("bash")!.execute("id", { command: `printf shared > '${artifact}'` }, undefined, undefined, ctx);
+		assert.equal(shell.structuredContent.exit_code, 0);
+		assert.equal((await python.execute("id", { code: `open(${JSON.stringify(artifact)}).read()` }, undefined, undefined, ctx)).structuredContent.status, "ok");
+		const javascript = await node.execute("id", { code: `require('fs').readFileSync(${JSON.stringify(artifact)}, 'utf8')` }, undefined, undefined, ctx);
+		assert.equal(javascript.structuredContent.status, "ok");
+		assert.match(javascript.structuredContent.repr, /shared/);
+		await python.execute("id", { action: "reset" }, undefined, undefined, ctx);
+		assert.equal(fs.readFileSync(artifact, "utf8"), "shared");
+	});
+});
+
+test("accepting a save while sandbox work runs waits for teardown before writing protected config", async () => {
+	if (sandboxMode === "degraded") return;
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-save-active-worker-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const worker = h.registeredTools.get("python")!;
+		const status = await worker.execute("id", { action: "status" }, undefined, undefined, ctx);
+		const marker = path.join(status.structuredContent.paths.scratchDir, "active");
+		let show!: () => void;
+		let answer!: (choice: string) => void;
+		const shown = new Promise<void>((resolve) => { show = resolve; });
+		ctx.ui.select = async () => { show(); return new Promise<string>((resolve) => { answer = resolve; }); };
+		const saving = h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
+		void saving.catch(() => {});
+		await shown;
+		const executing = worker.execute("id", { code: `import time\nopen(${JSON.stringify(marker)}, 'w').write('ready')\ntime.sleep(2)` }, undefined, undefined, ctx);
+		for (let i = 0; i < 300 && !fs.existsSync(marker); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(fs.existsSync(marker), true);
+		answer("Save for project");
+		const saved = await saving;
+		await executing;
+		assert.equal(saved.structuredContent.exit_code, 0);
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), true);
+		assert.equal((h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { workspaceLocked: boolean }).workspaceLocked, false);
+	});
+});
+
+test("project rule saving does not quarantine guard's own newly created config when a worker remounts", async () => {
+	if (sandboxMode === "degraded") return;
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-save-idle-worker-");
+		const ctx = harnessCtx(h, cwd, "Save for project");
+		await h.handlers.session_start[0]({}, ctx);
+		const worker = h.registeredTools.get("python")!;
+		assert.equal((await worker.execute("id", { code: "1 + 1" }, undefined, undefined, ctx)).structuredContent.status, "ok");
+		await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
+		assert.equal((await worker.execute("id", { code: "2 + 2" }, undefined, undefined, ctx)).structuredContent.status, "ok");
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), true);
+		assert.equal((h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { workspaceLocked: boolean }).workspaceLocked, false);
+	});
+});
+
+test("compound suggestions are hidden unless the complete call is authorized", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialog-compound-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		let offered: string[] = [];
+		ctx.ui.select = async (_title?: string, options?: string[]) => { offered = options ?? []; return "Deny"; };
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET; echo $GUARD_SECOND_UNSET" }, undefined, undefined, ctx), /denied/);
+		assert.deepEqual(offered, ["Allow once", "Deny"]);
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("aborting a pending owned approval never saves its rule", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-aborted-approval-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		let show!: () => void;
+		let answer!: (choice: string) => void;
+		const shown = new Promise<void>((resolve) => { show = resolve; });
+		ctx.ui.select = async () => { show(); return new Promise<string>((resolve) => { answer = resolve; }); };
+		const abort = new AbortController();
+		const executing = h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, abort.signal, undefined, ctx);
+		await shown;
+		abort.abort();
+		answer("Save for project");
+		await assert.rejects(executing, /cancel|abort/);
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false);
+	});
+});
+
+test("stale approvals save nothing and headless dialogs fail closed", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialog-stale-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		let show!: () => void;
+		let answer!: (choice: string) => void;
+		const shown = new Promise<void>((resolve) => { show = resolve; });
+		ctx.ui.select = async () => { show(); return new Promise<string>((resolve) => { answer = resolve; }); };
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_UNSET" }, undefined, undefined, ctx);
+		await shown;
+		await h.commandHandlers.get("guard")!("profile research", ctx);
+		answer("Save for project");
+		await assert.rejects(pending, /expired/);
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false);
+		await h.commandHandlers.get("guard")!("profile default", ctx);
+		ctx.hasUI = false;
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_UNSET" }, undefined, undefined, ctx), /non-interactive|headless/);
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("guard read grants remount without replay, survive tree replacement and reset on session start", async () => {
+	if (sandboxMode === "degraded") return;
+	const external = fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), ".guard-read-grant-test-")));
+	tempDirs.push(external);
+	const target = path.join(external, "data.txt");
+	fs.writeFileSync(target, "granted-read");
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-root-session-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		let dialogs = 0;
+		ctx.ui.select = async (_title?: string, options?: string[]) => {
+			dialogs++;
+			assert.deepEqual(options, ["Grant for session", "Save for project", "Save for user", "Deny"]);
+			return "Grant for session";
+		};
+		const code = `open(${JSON.stringify(target)}).read()`;
+		const result = await h.registeredTools.get("python")!.execute("id", { code }, undefined, undefined, ctx);
+		assert.equal(result.structuredContent.status, "permission_needed");
+		assert.equal(result.structuredContent.stateLost, true);
+		assert.match(result.structuredContent.diagnostic, /not replayed/);
+		assert.equal(dialogs, 1);
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false);
+		const success = await h.registeredTools.get("python")!.execute("id", { code }, undefined, undefined, ctx);
+		assert.equal(success.structuredContent.status, "ok");
+		assert.match(success.structuredContent.repr, /granted-read/);
+		const before = await h.registeredTools.get("python")!.execute("id", { action: "status" }, undefined, undefined, ctx);
+		assert.deepEqual(before.structuredContent.readRoots, [external]);
+		const oldScratch = before.structuredContent.paths.scratchDir;
+		await h.handlers.session_tree[0]({}, ctx);
+		const after = await h.registeredTools.get("python")!.execute("id", { action: "status" }, undefined, undefined, ctx);
+		assert.deepEqual(after.structuredContent.readRoots, [external]);
+		assert.notEqual(after.structuredContent.paths.scratchDir, oldScratch);
+		assert.equal(fs.existsSync(oldScratch), false);
+		await h.handlers.session_start[0]({}, ctx);
+		const fresh = await h.registeredTools.get("python")!.execute("id", { action: "status" }, undefined, undefined, ctx);
+		assert.deepEqual(fresh.structuredContent.readRoots, []);
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("project/user read grants persist after teardown without quarantine or legacy events", async () => {
+	if (sandboxMode === "degraded") return;
+	const external = fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), ".guard-saved-grant-test-")));
+	tempDirs.push(external);
+	const target = path.join(external, "data.txt");
+	fs.writeFileSync(target, "allowed");
+	for (const choice of ["Save for project", "Save for user"]) await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-grant-persist-");
+		const ctx = harnessCtx(h, cwd, choice);
+		await h.handlers.session_start[0]({}, ctx);
+		const result = await h.registeredTools.get("python")!.execute("id", { code: `open(${JSON.stringify(target)}).read()` }, undefined, undefined, ctx);
+		assert.equal(result.structuredContent.status, "permission_needed");
+		assert.equal(result.structuredContent.stateLost, true);
+		const destination = choice === "Save for project" ? projectConfigPath(cwd) : userConfigPath(process.env.HOME!);
+		assert.deepEqual(JSON.parse(fs.readFileSync(destination, "utf8")).readRoots, [external]);
+		assert.equal((h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { workspaceLocked: boolean }).workspaceLocked, false);
+		assert.equal(h.emitted.some(([name]) => /permissions|read-root-granted/.test(name)), false);
+	});
+});
+
+test("registered raw worker is torn down before research profile and acknowledgment", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-worker-barrier-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		await h.commandHandlers.get("guard")!("profile unrestricted", ctx);
+		const marker = path.join(cwd, "started");
+		let executionSettled = false;
+		const pending = h.registeredTools.get("node")!.execute("id", { code: `(async () => { require('fs').writeFileSync(${JSON.stringify(marker)}, 'ready'); await new Promise(() => {}); })()`, timeoutSeconds: 30 }, undefined, undefined, ctx).finally(() => { executionSettled = true; });
+		for (let i = 0; i < 300 && !fs.existsSync(marker) && !executionSettled; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(fs.existsSync(marker), true, "worker reached the execution boundary");
+		h.emitted.length = 0;
+		await h.eventListeners["guard:research-request"][0]({ holder: "plan" });
+		assert.equal(executionSettled, true, "registered execution settles only after actual controller teardown");
+		const result = await pending;
+		assert.equal(result.isError, true);
+		assert.ok(["cancelled", "worker_error"].includes(result.structuredContent.status));
+		assert.deepEqual(h.emitted.map(([name]) => name), ["guard:profile", "guard:research-ack"]);
+		assert.equal((h.emitted[1][1] as { granted: boolean }).granted, true);
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("snapshot failure locks registered host/raw tools even in unrestricted", async () => {
+	if (sandboxMode === "degraded") return;
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-lock-tools-");
+		fs.mkdirSync(path.join(cwd, ".pi"));
+		fs.writeFileSync(projectConfigPath(cwd), JSON.stringify({ protectedPaths: ["../invalid-protection"] }));
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		await assert.rejects(h.registeredTools.get("bash")!.execute("id", { command: "echo safe" }, undefined, undefined, ctx), /protectedPaths/);
+		assert.ok(h.notifications.some((message) => /snapshot failed/.test(message)));
+		await h.commandHandlers.get("guard")!("profile unrestricted", ctx);
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo safe" }, undefined, undefined, ctx), /workspace locked/);
+		const profile = h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { workspaceLocked: boolean; sandbox: { workspaceMode: string } };
+		assert.equal(profile.workspaceLocked, true);
+		assert.equal(profile.sandbox.workspaceMode, "ro");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("research publishes effective profile before ack; initial requests fail", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		await h.eventListeners["guard:research-request"][0]({ holder: "plan" });
+		assert.equal((h.emitted.at(-1)![1] as { granted: boolean }).granted, false);
+		const ctx = harnessCtx(h, makeTempDir("guard-research-ack-"));
+		await h.handlers.session_start[0]({}, ctx);
+		h.emitted.length = 0;
+		await h.eventListeners["guard:research-request"][0]({ holder: "plan" });
+		assert.deepEqual(h.emitted.map(([name]) => name), ["guard:profile", "guard:research-ack"]);
+		assert.equal((h.emitted[0][1] as { profile: string }).profile, "research");
+		await h.handlers.session_tree[0]({}, ctx);
+		assert.equal((h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { profile: string }).profile, "research", "tree replacement preserves the active research hold");
+		await h.eventListeners["guard:research-release"][0]({ holder: "plan" });
+		assert.equal((h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { profile: string }).profile, "default");
+		await h.handlers.session_shutdown[0]({}, ctx);
+		await h.handlers.session_shutdown[0]({}, ctx);
 	});
 });
 

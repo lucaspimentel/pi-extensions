@@ -29,6 +29,28 @@ function test(name: string, fn: () => void | Promise<void>) {
 	tests.push({ name, fn });
 }
 
+test("migration reminds about the manual bare host_bash allow without writing legacy config", () => {
+	const home = makeTempDir("guard-mig-reminder-home-");
+	const cwd = makeTempDir("guard-mig-reminder-cwd-");
+	writeLegacy(home, cwd, { allow: ["Bash(ls *)"] }, {});
+	const legacy = path.join(home, ".pi/agent/pi-tool-permissions.json");
+	const before = fs.readFileSync(legacy, "utf8");
+	assert.match(computeMigration(home, cwd).summary, /manually add the bare "host_bash" allow entry/);
+	assert.equal(fs.readFileSync(legacy, "utf8"), before);
+	writeLegacy(home, cwd, { allow: ["host_bash"] }, {});
+	assert.doesNotMatch(computeMigration(home, cwd).summary, /Coexistence reminder/);
+});
+
+test("migration previews respect existing map entries that save helpers never overwrite", () => {
+	const home = makeTempDir("guard-mig-existing-map-home-");
+	const cwd = makeTempDir("guard-mig-existing-map-cwd-");
+	writeLegacy(home, cwd, undefined, { allow: ["mcp__slack__read"], bashValidators: { awk: "readonly-awk" } });
+	fs.writeFileSync(projectConfigPath(cwd), JSON.stringify({ toolClasses: { mcp__slack__read: "remote-write" }, bashValidators: { awk: "none" } }));
+	const report = computeMigration(home, cwd);
+	assert.equal(report.project.changes, 0);
+	assert.equal(addToConfigScope("project", report.project.patch, { cwd, home }).added, 0);
+});
+
 test("looksLikeProjectCodeRunner flags project-code runners only", () => {
 	assert.equal(looksLikeProjectCodeRunner("HostBash(cargo build --release)"), true);
 	assert.equal(looksLikeProjectCodeRunner("HostBash(dotnet test *)"), true);

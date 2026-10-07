@@ -4,8 +4,10 @@ Status: **design settled (2026-10-02 grilling sessions, including step 0:
 assumptions confirmed); step 1 (shared sandbox library) implemented in
 `extensions/guard/sandbox/`; step 2 (policy core) implemented and
 observe-only in `extensions/guard/index.ts` + `policy/` (2026-10-06); step 3
-(tools and enforcement) design settled (2026-10-06 grilling, see the
-decision log); steps 3+ not implemented.**
+(tools and enforcement) implemented in `runtime.ts`, `tools/`, and
+`filter.ts` after the 2026-10-06/07 design review closed the audit,
+lifecycle, and filter gaps (see the decision log); steps 4+ not
+implemented.**
 
 Scope: a new `guard` extension that replaces `extensions/pi-tool-permissions/`,
 `extensions/python/`, and `extensions/node/`, plus changes to
@@ -194,7 +196,7 @@ Holes, verified 2026-10-02:
 |---|---|
 | `bash` | Always sandboxed, except in yolo and unrestricted. Built with `createBashTool()` plus bwrap-spawning `BashOperations`. One process per call, no persistent shell. |
 | `host_bash` | The only escape from the sandbox. `HostBash(...)` rules plus the tightened host read-only tier (below) apply to it. |
-| `python`, `node` | Persistent sandboxed interpreters (existing design), moved into guard. In research: one throwaway overlay per worker lifetime. In yolo and unrestricted: fully raw (see below). |
+| `python`, `node` | Persistent interpreters moved into guard. Every sandboxed profile uses a worker-lifetime workspace overlay (read-only in reduced mode); workspace writes never reach the host. Persist outputs in shared scratch. Yolo/unrestricted are fully raw. |
 | `pwsh` | Windows only; host tier, like host_bash. |
 
 - **Read-only tier on both shells:** the read-only command tier, the
@@ -222,18 +224,45 @@ Holes, verified 2026-10-02:
 - **Failure hints:** when a sandboxed command fails (network unreachable,
   EROFS on a protected or read-only path, path not mounted), the result adds a
   hint to use `host_bash` if host access is required.
-- **Ask dialogs (settled 2026-10-06):** every guard ask offers allow once,
-  allow and save the suggested rule (the step-2 `suggestRule` helpers:
-  `HostBash(...)` for host shells, `webFetchAllow` globs, `toolClasses` for
-  MCP reads), or deny. No mid-dialog profile switching. Local reads outside
-  the roots keep the session/project/user/deny grant shape, and grants are
-  mounted read-only into the sandboxes. Non-interactive contexts (print
-  mode, subagent children) deny prompts; sandboxed work stays free.
-- **Protected-path audit (settled 2026-10-06):** the step-1 post-call audit
-  is wired into sandboxed bash. An escaped protected-path write is
-  quarantined and notified; the tool result itself is not failed. It is
-  defense-in-depth telemetry (a mount gap to investigate), not a denial
-  path, because the read-only mounts normally prevent these writes.
+- **Ask dialogs (revised step 3):** explicit ask rules offer allow once or
+  deny. Fallback prompts offer once, save for project, save for user, or
+  deny. Host suggestions are exact commands with escaped metacharacters;
+  saving is offered only if the merged patch authorizes the whole call.
+  Show the exact rule/destination and never remove ask/deny rules. Cancel
+  stale approvals without execution or persistence. Headless prompts deny.
+- **Read grants:** guard-owned session/project/user/deny grants are mounted
+  read-only. Legacy grants are not mirrored. A grant restarts workers and
+  reports state loss, then returns without automatically replaying code.
+- **Protected-path audit (revised step 3):** audit the host workspace around
+  all sandboxed executors, including worker teardown boundaries. Compare
+  the union of pre/post paths. Quarantine created/replaced protected entries
+  and notify without failing an otherwise successful result. Any violation,
+  incomplete audit, or quarantine failure locks the workspace. Auditing is
+  detection/containment, not kernel prevention; overlay writes are not
+  escaped host writes.
+- **Workspace lock:** stop writable workers and allow only read-only sandbox
+  execution until `/guard ack`. Deny host/raw execution even in
+  yolo/unrestricted. Ack cannot override an unresolved teardown.
+- **Execution barrier:** serialize guard's four tools, never holding the
+  queue during dialogs. Revalidate before spawning. Tightening preempts
+  active execution and awaits teardown before policy publication/ack.
+  Unresolved teardown blocks further guarded execution.
+- **Fixed identities:** toolClasses cannot reclassify guard's four executors.
+  Raw/degraded bash honors HostBash deny/ask; unrestricted ignores them
+  except for workspace locks. Keep unavailable worker registrations in
+  degraded mode; never fall back to host on a sandbox launch error.
+- **Worker refresh:** scan before every execute and restart on changed
+  effective mask/protected mounts. Research entry/exit, raw/sandbox changes,
+  roots/policy mounts, and lock/ack remounts discard interpreter and overlay.
+  Default/auto/trusted changes preserve workers when launch policy matches.
+- **Shared scratch:** all three sandboxed tools use one session/cwd scratch
+  directory at its real absolute host path, without /scratch or /workspace
+  aliases. Preserve scratch across reset/crash/remount; remove it on
+  session/cwd/tree replacement or shutdown. Logs/quarantine stay separate.
+- **Filter failure:** remove masked-file context/grouped blocks and replace
+  or remove structured data and secret-bearing metadata too. Unsupported or
+  ambiguous formats and filter failures suppress the entire original result
+  with a fixed notice.
 - Commands you type with `!` stay unsandboxed.
 
 ## Profiles
@@ -253,7 +282,7 @@ auto / trusted / yolo / unrestricted.
 
 | | research | default | auto | trusted | yolo | unrestricted |
 |---|---|---|---|---|---|---|
-| Sandboxed workspace | throwaway overlay (per call for bash, per worker lifetime for python/node) | read-write, protected paths read-only | same as default | same as default | **no sandbox** for bash, python, or node | **no sandbox** |
+| Sandboxed workspace | throwaway overlay (per call for bash, per worker lifetime for python/node) | bash read-write with protected paths read-only; python/node worker-lifetime overlay | same as default | same as default | **no sandbox** for bash, python, or node | **no sandbox** |
 | host_bash | deny (rules ignored) | prompt unless rule-allowed | classifier | allowed | allowed | allowed |
 | write/edit | deny | allowed in cwd and write roots, prompt outside | classifier | allowed | allowed | allowed |
 | Protected paths | deny | prompt | prompt | prompt | allowed | allowed |
@@ -430,6 +459,10 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
   HostBash deny/ask rules still apply. unrestricted is 100% unrestricted, at
   your own risk: no sandbox, no rules, no prompts.
 - Degraded mode relies on string-based rules, as today.
+- Persistent background work can read newly exposed live-workspace files
+  before the next execute refreshes mounts; overlays are not immutable
+  snapshots. Raw descendants can escape tracking, so tightening cannot
+  promise to revoke them or undo previous host effects.
 
 ## /plan integration
 
@@ -535,6 +568,14 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 | Step-3 dialogs (2026-10-06) | Allow once / allow and save the suggested rule / deny; no mid-dialog profile switching; local-read grants keep session/project/user/deny; headless prompts deny |
 | Step-3 mask filter (2026-10-06) | tool_result filter on grep/ffgrep: drop matches from masked paths, append a summary line, replace structuredContent too; every profile except yolo/unrestricted |
 | Step-3 audit response (2026-10-06) | Escaped protected-path writes are quarantined and notified; the tool result is not failed (defense-in-depth telemetry, not a denial path) |
+| Step-3 review: isolation | Worker-lifetime overlays in every sandboxed profile; shared real-path scratch persists across remounts; reduced workers read-only |
+| Step-3 review: lifecycle | Serialized execution; tightening preempts and awaits teardown; failed teardown blocks; research boundaries reset; scans before worker execute |
+| Step-3 review: audits | All sandboxed tools and teardown boundaries; union of pre/post paths; any violation or incomplete containment locks and denies host/raw even in unrestricted |
+| Step-3 review: dialogs | Explicit asks once/deny; fallback exact rules, project/user choice, save only effective patches; stale approvals cancel; grants never replay |
+| Step-3 review: ownership | Fixed executor identities; guard-owned roots only; raw bash honors HostBash rules; failed sandbox launches never fall back |
+| Step-3 review: filtering | Context, structured data and metadata redacted; unsupported or failed parsing suppresses the entire result |
+| Step-3 review: residual risks | Idle background reads may precede mount refresh; raw descendants may escape tracking |
+| Step-3 implementation (2026-10-07) | Shipped: four tools registered ahead of python/node (authoritative, dormant old extensions), one execution queue with pre-spawn revalidation and fail-closed transitions, worker-lifetime overlays plus shared real-path scratch, audits around all sandboxed execution with union pre/post comparison and violation/scan/quarantine locking, exact/effective rule saving with stale-approval cancellation, no grant replay, fixed executor identities, raw bash under HostBash rules, and the fail-closed grep/ffgrep mask filter; suites guard-{sandbox,policy,classes,migrate,filter,workers,runtime,harness} |
 
 ## Implementation outline (build alongside, switch over)
 

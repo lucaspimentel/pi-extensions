@@ -17,7 +17,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DEFAULT_BASH_VALIDATORS, BASH_VALIDATOR_NONE } from "./bashtier.ts";
 import { DEFAULT_CLASSIFIER } from "./classifier.ts";
-import { isToolClass, TOOL_CLASSES } from "./classes.ts";
+import { isToolClass, OWNED_EXECUTORS, TOOL_CLASSES } from "./classes.ts";
+import { compilePattern } from "./rules.ts";
 
 export const USER_CONFIG_REL = "guard.json";
 export const PROJECT_CONFIG_REL = join(".pi", "guard.local.json");
@@ -200,6 +201,13 @@ function coerceToolClasses(raw: unknown, warnings: string[]): Record<string, str
 		if (!isToolClass(v)) {
 			warnings.push(`guard config: toolClasses["${k}"] must be one of ${TOOL_CLASSES.join(", ")}; ignoring it`);
 			continue;
+		}
+		const owned = OWNED_EXECUTORS.filter((name) => {
+			try { return compilePattern(k).test(name); } catch { return false; }
+		});
+		if (owned.length) {
+			warnings.push(`guard config: toolClasses["${k}"] cannot reclassify owned executors (${owned.join(", ")}); ignored for those names`);
+			if (!k.includes("*") && !k.includes("?")) continue;
 		}
 		out[k] = v;
 	}

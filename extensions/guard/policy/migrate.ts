@@ -335,14 +335,14 @@ function countChanges(existing: GuardConfig, patch: GuardConfig): number {
 	}
 	if (patch.toolClasses) {
 		const base = existing.toolClasses ?? {};
-		for (const [k, v] of Object.entries(patch.toolClasses)) {
-			if (base[k] !== v) changes++;
+		for (const k of Object.keys(patch.toolClasses)) {
+			if (base[k] === undefined) changes++;
 		}
 	}
 	if (patch.bashValidators) {
 		const base = existing.bashValidators ?? {};
-		for (const [k, v] of Object.entries(patch.bashValidators)) {
-			if (base[k] !== v) changes++;
+		for (const k of Object.keys(patch.bashValidators)) {
+			if (base[k] === undefined) changes++;
 		}
 	}
 	if (patch.classifier && JSON.stringify(existing.classifier) !== JSON.stringify(patch.classifier)) changes++;
@@ -361,6 +361,9 @@ export function computeMigration(home: string = homedir(), cwd: string = process
 	const project = migrateScope(projectSrc, loadProjectConfigRaw(cwd));
 
 	const lines: string[] = [];
+	if (![...stringList(userSrc.cfg.allow), ...stringList(projectSrc.cfg.allow)].some((rule) => rule.trim().toLowerCase() === "host_bash")) {
+		lines.push('Coexistence reminder: manually add the bare "host_bash" allow entry to pi-tool-permissions.json so guard owns its prompts. Guard never writes the legacy config.');
+	}
 	for (const [label, scope, target] of [
 		["user", user, "~/.pi/agent/guard.json"],
 		["project", project, ".pi/guard.local.json"],

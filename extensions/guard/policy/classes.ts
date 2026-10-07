@@ -186,8 +186,16 @@ export interface ClassifyCallOptions {
  * Classify one tool call. `toolName` is the pi tool name; `input` is the call
  * input (used for web_fetch URLs, pup_run verbs, and MCP proxy names).
  */
+export const OWNED_EXECUTORS = ["bash", "host_bash", "python", "node"] as const;
+export type OwnedExecutor = typeof OWNED_EXECUTORS[number];
+export function isOwnedExecutor(name: string): name is OwnedExecutor {
+	return (OWNED_EXECUTORS as readonly string[]).includes(name);
+}
+
 export function classifyToolCall(toolName: string, input: Record<string, unknown> = {}, options: ClassifyCallOptions = {}): ToolClass {
 	const name = classificationName(toolName, input);
+	// These registrations are authoritative executors, not configurable hints.
+	if (isOwnedExecutor(toolName)) return toolName === "host_bash" ? "host-shell" : "sandboxed-exec";
 
 	// 1. guard.json toolClasses: exact key, then glob keys.
 	const toolClasses = options.toolClasses;

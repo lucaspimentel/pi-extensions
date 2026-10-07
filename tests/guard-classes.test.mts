@@ -17,8 +17,9 @@ import {
 	pupRunClass,
 	type ToolClass,
 } from "../extensions/guard/policy/classes.ts";
-import { suggestRule, suggestRemoteReadRule, readGrantSuggestion, addToConfigScope } from "../extensions/guard/policy/suggest.ts";
-import type { GuardCall, PolicyState } from "../extensions/guard/policy/decision.ts";
+import { suggestRule, suggestRemoteReadRule, readGrantSuggestion, addToConfigScope, effectiveAllowSuggestion } from "../extensions/guard/policy/suggest.ts";
+import { decide, type GuardCall, type PolicyState } from "../extensions/guard/policy/decision.ts";
+import { parseRule, ruleMatches } from "../extensions/guard/policy/rules.ts";
 
 const tempDirs: string[] = [];
 function makeTempDir(prefix: string): string {
@@ -43,6 +44,13 @@ const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 function test(name: string, fn: () => void | Promise<void>) {
 	tests.push({ name, fn });
 }
+
+test("guard executors keep fixed identities under exact and glob overrides", () => {
+	for (const name of ["bash", "python", "node", "host_bash"]) {
+		const expected = name === "host_bash" ? "host-shell" : "sandboxed-exec";
+		assert.equal(classifyToolCall(name, {}, { toolClasses: { [name]: "meta", "*": "meta" } }), expected);
+	}
+});
 
 // ── Built-in map ──────────────────────────────────────────────────────────────
 
@@ -136,8 +144,8 @@ test("toolClasses exact entries and globs beat the built-in map", () => {
 	);
 	assert.equal(
 		classifyToolCall("python", {}, { toolClasses: { "py*": "meta" } }),
-		"meta",
-		"glob entry overrides the built-in map",
+		"sandboxed-exec",
+		"glob entries cannot reclassify guard-owned executors",
 	);
 	// Invalid values are skipped (config coercion warns; defense in depth).
 	assert.equal(
@@ -209,15 +217,52 @@ test("isToolClass validates class names", () => {
 
 // ── suggestRule ───────────────────────────────────────────────────────────────
 
-test("suggestRule: host shell suggests the first two tokens with a wildcard", () => {
+test("suggestRule: host shell suggests exact escaped commands, never prefixes", () => {
 	const policy = makePolicy();
 	const two = suggestRule({ kind: "host-shell", shell: "host-bash", command: "cargo test --release foo" }, policy);
-	assert.deepEqual(two, { hostBash: { allow: ["HostBash(cargo test *)"] } });
+	assert.deepEqual(two, { hostBash: { allow: ["HostBash(/^cargo test --release foo$/)"] } });
 	const one = suggestRule({ kind: "host-shell", shell: "host-bash", command: "make" }, policy);
-	assert.deepEqual(one, { hostBash: { allow: ["HostBash(make *)"] } });
+	assert.deepEqual(one, { hostBash: { allow: ["HostBash(/^make$/)"] } });
 	const pwsh = suggestRule({ kind: "host-shell", shell: "pwsh", command: "Get-Content x.txt" }, policy);
-	assert.deepEqual(pwsh, { hostBash: { allow: ["Pwsh(Get-Content x.txt *)"] } });
+	assert.deepEqual(pwsh, { hostBash: { allow: ["Pwsh(/^Get-Content x\\.txt$/)"] } });
 	assert.equal(suggestRule({ kind: "host-shell", shell: "host-bash", command: "" }, policy), null);
+});
+
+test("exact host suggestions escape wildcard, regex and dollar metacharacters", () => {
+	const command = "echo 'x*?[]()$|/\\\\foo' > result.txt";
+	const policy = makePolicy();
+	const patch = effectiveAllowSuggestion({ kind: "host-shell", shell: "host-bash", command }, policy);
+	assert.ok(patch);
+	const parsed = parseRule(patch.hostBash!.allow![0])!;
+	assert.equal(ruleMatches(parsed, "HostBash", { command }, policy.cwd), true);
+	assert.equal(ruleMatches(parsed, "HostBash", { command: command + " extra" }, policy.cwd), false);
+	const config = mergeConfig({ hostBash: { deny: ["HostBash(echo *)"] } }, patch, policy.cwd);
+	assert.equal(decide({ ...policy, config }, { kind: "host-shell", shell: "host-bash", command }).action, "deny");
+	assert.equal(effectiveAllowSuggestion({ kind: "host-shell", shell: "host-bash", command }, { ...policy, config }), null);
+});
+
+test("effective suggestions cannot override ask/deny or authorize only part of a compound", () => {
+	const call: GuardCall = { kind: "host-shell", shell: "host-bash", command: "echo $UNSET; echo $SECOND" };
+	assert.equal(effectiveAllowSuggestion(call, makePolicy()), null);
+	const config = mergeConfig({ hostBash: { ask: ["HostBash(echo *)"], allow: ["HostBash(*)"] } }, {}, "/w");
+	assert.equal(effectiveAllowSuggestion({ kind: "host-shell", shell: "host-bash", command: "echo asked" }, makePolicy("/w", { config })), null);
+});
+
+test("read grants select existing directories themselves rather than broad parents", () => {
+	const cwd = makeTempDir("guard-grant-dir-");
+	fs.mkdirSync(path.join(cwd, "dir"));
+	assert.equal(readGrantSuggestion(path.join(cwd, "dir"), cwd), path.join(cwd, "dir"));
+});
+
+test("save unions dedupe duplicate existing lists without negative addition counts", () => {
+	const cwd = makeTempDir("guard-dedupe-");
+	const home = makeTempDir("guard-dedupe-home-");
+	fs.mkdirSync(path.join(cwd, ".pi"));
+	fs.writeFileSync(path.join(cwd, ".pi/guard.local.json"), JSON.stringify({ hostBash: { allow: ["HostBash(ls *)", "HostBash(ls *)"] }, readRoots: ["/r", "/r"] }));
+	const result = addToConfigScope("project", { hostBash: { allow: ["HostBash(ls *)"] }, readRoots: ["/r"] }, { cwd, home });
+	assert.equal(result.added, 0);
+	assert.deepEqual(loadProjectConfigRaw(cwd).hostBash?.allow, ["HostBash(ls *)"]);
+	assert.deepEqual(loadProjectConfigRaw(cwd).readRoots, ["/r"]);
 });
 
 test("suggestRule: web_fetch suggests an https host glob", () => {

@@ -43,6 +43,7 @@ import { detectSandboxMode, chmodTree, type SandboxDetection } from "./detect.ts
 import { scanWorkspace } from "./scan.ts";
 import { sanitizeNugetConfig } from "./nuget.ts";
 import { verifyCachePathPermissions } from "./launcher.ts";
+import { isWithin, sensitiveHostPaths } from "./host-paths.ts";
 
 export class SandboxUnavailableError extends Error {
 	diagnostics: string[];
@@ -199,8 +200,8 @@ export function disposeSession(runtimeDir: string): void {
 
 /**
  * Spawn a sandboxed process for the spec. Throws SandboxUnavailableError in
- * degraded mode (the caller runs host execution) and ScanFailure when the
- * workspace scan hits its timeout or cap.
+ * degraded mode and ScanFailure when the workspace scan fails, times out,
+ * or hits its cap. Launch errors must never trigger host fallback.
  */
 export function spawnSandboxed(spec: LaunchSpec, options: SpawnOptions = {}): SpawnResult {
 	const detection = options.detection ?? detectSandboxMode();
@@ -214,8 +215,11 @@ export function spawnSandboxed(spec: LaunchSpec, options: SpawnOptions = {}): Sp
 	const mode = detection.mode === "full" && detection.launcherPath !== null ? "full" : "reduced";
 
 	const workspace = realpathSync(spec.workspace);
-	const homePath = spec.homePath ?? realpathOrHome(os.homedir());
-	const cwd = spec.cwd ?? workspace;
+	const homePath = realpathSync(spec.homePath ?? os.homedir());
+	if (sensitiveHostPaths(homePath).some((p) => isWithin(workspace, p))) {
+		throw new Error("The workspace resolves to a sensitive host location that must never be mounted");
+	}
+	const cwd = spec.cwd === undefined ? workspace : realpathSync(spec.cwd);
 	const cacheOverlays = spec.cacheOverlays !== false;
 	const launchId = `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 
@@ -232,7 +236,11 @@ export function spawnSandboxed(spec: LaunchSpec, options: SpawnOptions = {}): Sp
 	const launchOverlaysRoot = path.join(sessionDir, "overlays", launchId);
 
 	// Discovery scan: fails the launch on timeout or cap; never unmasked.
-	const scan = scanWorkspace(workspace, { fdPath: detection.fdPath });
+	const scan = scanWorkspace(workspace, {
+		fdPath: detection.fdPath,
+		patterns: spec.maskPatterns,
+		exceptions: spec.maskExceptions,
+	});
 
 	// Effective workspace mode: overlay degrades to read-only in reduced mode.
 	const degradations: string[] = [];
@@ -262,7 +270,7 @@ export function spawnSandboxed(spec: LaunchSpec, options: SpawnOptions = {}): Sp
 	const nugetConfigPath = prepareNugetConfig(sessionDir, homePath);
 
 	// Read roots: filter and record skips.
-	const { mountable, skipped } = filterMountableReadRoots(spec.readRoots ?? [], workspace);
+	const { mountable, skipped } = filterMountableReadRoots(spec.readRoots ?? [], workspace, homePath);
 
 	const env = buildEnv({ homePath, extraEnv: spec.extraEnv });
 
@@ -282,7 +290,7 @@ export function spawnSandboxed(spec: LaunchSpec, options: SpawnOptions = {}): Sp
 		env,
 		cwd,
 	};
-	const bwrapArgs = buildBwrapArgs(spec, ctx);
+	const bwrapArgs = buildBwrapArgs({ ...spec, workspace }, ctx);
 
 	// Full mode: outer launcher mounts the overlays then execs bwrap. Reduced
 	// mode: bwrap directly (no overlays to mount).
@@ -349,12 +357,4 @@ function makeOverlay(root: string, name: string, lower: string, targetPath: stri
 	mkdirSync(work, { recursive: true, mode: 0o700 });
 	mkdirSync(merged, { recursive: true, mode: 0o700 });
 	return { name, lower, upper, work, merged, targetPath };
-}
-
-function realpathOrHome(p: string): string {
-	try {
-		return realpathSync(p);
-	} catch {
-		return p;
-	}
 }

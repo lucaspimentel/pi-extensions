@@ -196,6 +196,10 @@ export interface LaunchSpec {
 	cwd?: string;
 	/** Host paths mounted read-only 1:1 (filtered before mounting). */
 	readRoots?: string[];
+	/** Additional protected top-level workspace names, never paths. */
+	protectedPaths?: string[];
+	/** Trusted runtime scratch directories, bound writable at their real host paths only. */
+	extraRwBinds?: Array<[string, string]>;
 	/** Extra [host, sandbox] bind pairs, e.g. a worker implementation file. */
 	extraRoBinds?: Array<[string, string]>;
 	/** Added after the allowlisted env; reserved keys are dropped. */
@@ -217,6 +221,16 @@ export interface LaunchSpec {
 	maskExceptions?: string[];
 	/** Per-launch cache overlays (full mode only). Default: true. */
 	cacheOverlays?: boolean;
+}
+
+/** Validate extra protected names and merge them with the built-in protections. */
+export function protectedTopLevelNames(extra: readonly string[] = []): string[] {
+	for (const name of extra) {
+		if (typeof name !== "string" || name === "" || name === "." || name === ".." || /[/\\\\\0]/.test(name)) {
+			throw new Error("protectedPaths entries must be top-level names, not paths");
+		}
+	}
+	return [...new Set([...PROTECTED_TOP_LEVEL, ...extra])];
 }
 
 /** Match a filename against a mask pattern: `*` is a wildcard, everything else literal. */
