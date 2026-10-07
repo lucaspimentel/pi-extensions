@@ -6,8 +6,11 @@
  * yielding answers during the emit below. This module therefore subscribes
  * before emitting, accepts only the matching validated response, unsubscribes
  * in finally, and refuses absent, malformed, contradictory, or non-synchronous
- * responses. Never reuse the asynchronous research-transition acknowledgment
- * protocol here.
+ * responses. It also requires exactly one correlated synchronous
+ * acknowledgment: every additional matching acknowledgment is refused, even
+ * when identical, because multiple responses indicate an ambiguous or
+ * duplicated responder configuration. Never reuse the asynchronous
+ * research-transition acknowledgment protocol here.
  *
  * Pure bus plumbing: no process.env access and no guard imports beyond the
  * profile type guard, so the child bootstrap keeps a small dependency surface.
@@ -43,17 +46,27 @@ export function queryGuardSnapshot(events: QueryBus, cwd: string): GuardSnapshot
 	const id = randomUUID();
 	let ack: unknown;
 	let seen = false;
+	let duplicated = false;
 	const off = events.on(SUBAGENT_SNAPSHOT_ACK, (data: unknown) => {
-		if (seen) return;
-		if (isRecord(data) && data.id === id) {
-			seen = true;
-			ack = data;
+		if (!isRecord(data) || data.id !== id) return;
+		// Any second correlated acknowledgment fails the query, regardless of
+		// order, validity, version, success/refusal, or payload contents.
+		if (seen) {
+			duplicated = true;
+			return;
 		}
+		seen = true;
+		ack = data;
 	});
 	try {
 		events.emit(SUBAGENT_SNAPSHOT_REQUEST, { version: 1, id, cwd });
 	} finally {
 		off();
+	}
+	// Checked before the first payload's validity: a duplicate taints the
+	// whole exchange, so a later valid response must not recover it.
+	if (duplicated) {
+		return { ok: false, reason: "duplicate guard snapshot acknowledgment: exactly one synchronous responder must answer the snapshot request" };
 	}
 	if (!seen || !isRecord(ack)) {
 		return { ok: false, reason: "no synchronous guard snapshot response; the guard is absent, uninitialized, or not synchronous" };
@@ -77,17 +90,27 @@ export function requestChildContract(
 ): ContractProof {
 	let ack: unknown;
 	let seen = false;
+	let duplicated = false;
 	const off = events.on(CHILD_CONTRACT_ACK, (data: unknown) => {
-		if (seen) return;
-		if (isRecord(data) && data.nonce === contract.nonce) {
-			seen = true;
-			ack = data;
+		if (!isRecord(data) || data.nonce !== contract.nonce) return;
+		// Any second correlated acknowledgment fails the query, regardless of
+		// order, validity, version, success/refusal, or payload contents.
+		if (seen) {
+			duplicated = true;
+			return;
 		}
+		seen = true;
+		ack = data;
 	});
 	try {
 		events.emit(CHILD_CONTRACT_REQUEST, { version: contract.version, nonce: contract.nonce, profile: contract.profile });
 	} finally {
 		off();
+	}
+	// Checked before the first payload's validity: a duplicate taints the
+	// whole exchange, so a later valid response must not recover it.
+	if (duplicated) {
+		return { ok: false, reason: `duplicate ${CHILD_CONTRACT_ACK} acknowledgment: exactly one synchronous responder must answer the contract request` };
 	}
 	if (!seen || !isRecord(ack)) {
 		return { ok: false, reason: `no synchronous ${CHILD_CONTRACT_ACK} response; the child guard is absent, too old to acknowledge the contract, or not initialized` };

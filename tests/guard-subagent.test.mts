@@ -38,6 +38,7 @@ import guardExtension from "../extensions/guard/index.ts";
 import subagentExtension, { setBootstrapPathOverride, setSpawnOverride } from "../extensions/subagent/index.ts";
 import {
 	CHILD_CONTRACT_ACK,
+	CHILD_CONTRACT_REQUEST,
 	SUBAGENT_SNAPSHOT_ACK,
 	SUBAGENT_SNAPSHOT_REQUEST,
 	queryGuardSnapshot,
@@ -60,6 +61,7 @@ interface GuardHarness {
 	shortcuts: Array<{ shortcut: string; handler: (ctx: unknown) => Promise<void> }>;
 	eventListeners: Record<string, Array<(data: unknown) => void>>;
 	emitted: Array<[string, unknown]>;
+	emit: (channel: string, data: unknown) => void;
 	notifications: string[];
 	status: Map<string, string | undefined>;
 	registeredTools: Map<string, { execute: (...args: any[]) => Promise<any> }>;
@@ -74,6 +76,7 @@ function makeGuardHarness(): GuardHarness {
 		shortcuts: [],
 		eventListeners: {},
 		emitted: [],
+		emit: () => {},
 		notifications: [],
 		status: new Map(),
 		registeredTools: new Map(),
@@ -112,6 +115,7 @@ function makeGuardHarness(): GuardHarness {
 		},
 	};
 	(guardExtension as unknown as (api: unknown) => void)(api);
+	h.emit = (channel: string, data: unknown) => api.events.emit(channel, data);
 	return h;
 }
 
@@ -228,6 +232,7 @@ function fakeChild(): CapturedSpawn["child"] {
 interface SubagentHarness {
 	eventListeners: Record<string, Array<(data: unknown) => void>>;
 	emitted: Array<[string, unknown]>;
+	emit: (channel: string, data: unknown) => void;
 	registeredTools: Map<string, { execute: (...args: any[]) => Promise<any> }>;
 	spawns: CapturedSpawn[];
 	held: CapturedSpawn["child"][];
@@ -239,6 +244,7 @@ function makeSubagentHarness(): SubagentHarness {
 	const h: SubagentHarness = {
 		eventListeners: {},
 		emitted: [],
+		emit: () => {},
 		registeredTools: new Map(),
 		spawns: [],
 		held: [],
@@ -267,6 +273,7 @@ function makeSubagentHarness(): SubagentHarness {
 		},
 	};
 	(subagentExtension as unknown as (api: unknown) => void)(api);
+	h.emit = (channel: string, data: unknown) => api.events.emit(channel, data);
 	setSpawnOverride((command, args, options) => {
 		const child = fakeChild();
 		h.spawns.push({ command, args, options: options as Record<string, unknown>, child });
@@ -628,6 +635,136 @@ test("a child in research keeps sandboxed work usable and denies host shells hea
 	});
 });
 
+// ── C2. Duplicate acknowledgment matrix (scripted bus) ───────────────────────
+
+// Both handshake helpers must refuse every second correlated acknowledgment,
+// including identical duplicates: multiple responses indicate an ambiguous or
+// duplicated responder configuration. These tests exercise the actual exported
+// helpers against a small synchronous bus that supports several independent
+// responders for the same request.
+
+type DupStep = "ok" | "ok2" | "refuse" | "malformed" | "wrong-version" | "unrelated";
+type ScriptedBus = {
+	on(channel: string, handler: (data: unknown) => void): () => void;
+	emit(channel: string, data: unknown): void;
+};
+
+function makeScriptedBus(requestChannel: string, responders: Array<(bus: ScriptedBus, request: Record<string, unknown>) => void>): { bus: ScriptedBus; listeners: Map<string, Array<(data: unknown) => void>> } {
+	const listeners = new Map<string, Array<(data: unknown) => void>>();
+	const bus: ScriptedBus = {
+		on(channel: string, handler: (data: unknown) => void) {
+			const list = listeners.get(channel) ?? [];
+			list.push(handler);
+			listeners.set(channel, list);
+			return () => {
+				listeners.set(channel, (listeners.get(channel) ?? []).filter((f) => f !== handler));
+			};
+		},
+		emit(channel: string, data: unknown) {
+			for (const handler of [...(listeners.get(channel) ?? [])]) handler(data);
+		},
+	};
+	for (const responder of responders) {
+		bus.on(requestChannel, (raw) => responder(bus, raw as Record<string, unknown>));
+	}
+	return { bus, listeners };
+}
+
+function snapshotResponder(step: DupStep): (bus: ScriptedBus, request: Record<string, unknown>) => void {
+	return (bus, request) => {
+		const correlated = { id: request.id as string };
+		switch (step) {
+			case "ok": return void bus.emit(SUBAGENT_SNAPSHOT_ACK, { version: 1, ...correlated, ok: true, profile: "auto" });
+			case "ok2": return void bus.emit(SUBAGENT_SNAPSHOT_ACK, { version: 1, ...correlated, ok: true, profile: "research" });
+			case "refuse": return void bus.emit(SUBAGENT_SNAPSHOT_ACK, { version: 1, ...correlated, ok: false, reason: "responder refusal" });
+			// Correlated but missing the required ok/profile fields.
+			case "malformed": return void bus.emit(SUBAGENT_SNAPSHOT_ACK, { version: 1, ...correlated });
+			case "wrong-version": return void bus.emit(SUBAGENT_SNAPSHOT_ACK, { version: 2, ...correlated, ok: true, profile: "auto" });
+			case "unrelated": return void bus.emit(SUBAGENT_SNAPSHOT_ACK, { version: 1, id: "unrelated-id", ok: true, profile: "auto" });
+		}
+	};
+}
+
+function contractResponder(step: DupStep): (bus: ScriptedBus, request: Record<string, unknown>) => void {
+	return (bus, request) => {
+		const correlated = { nonce: request.nonce as string };
+		switch (step) {
+			case "ok": return void bus.emit(CHILD_CONTRACT_ACK, { version: 1, ...correlated, ok: true, inherited: "auto", profile: "auto" });
+			case "ok2": return void bus.emit(CHILD_CONTRACT_ACK, { version: 1, ...correlated, ok: true, inherited: "research", profile: "research" });
+			case "refuse": return void bus.emit(CHILD_CONTRACT_ACK, { version: 1, ...correlated, ok: false, reason: "responder refusal" });
+			// Correlated but missing the required ok field.
+			case "malformed": return void bus.emit(CHILD_CONTRACT_ACK, { version: 1, ...correlated });
+			case "wrong-version": return void bus.emit(CHILD_CONTRACT_ACK, { version: 2, ...correlated, ok: true, inherited: "auto", profile: "auto" });
+			case "unrelated": return void bus.emit(CHILD_CONTRACT_ACK, { version: 1, nonce: "unrelated-nonce", ok: true, inherited: "auto", profile: "auto" });
+		}
+	};
+}
+
+const DUPLICATE_SCENARIOS: Array<{ label: string; steps: DupStep[]; expectOk: boolean; duplicate: boolean }> = [
+	{ label: "a single success succeeds", steps: ["ok"], expectOk: true, duplicate: false },
+	{ label: "a single refusal keeps its diagnostic", steps: ["refuse"], expectOk: false, duplicate: false },
+	{ label: "no correlated response keeps the missing-response refusal", steps: [], expectOk: false, duplicate: false },
+	{ label: "identical duplicate successes refuse", steps: ["ok", "ok"], expectOk: false, duplicate: true },
+	{ label: "success then refusal refuses as a duplicate", steps: ["ok", "refuse"], expectOk: false, duplicate: true },
+	{ label: "refusal then success refuses as a duplicate", steps: ["refuse", "ok"], expectOk: false, duplicate: true },
+	{ label: "two successes with different profiles refuse", steps: ["ok", "ok2"], expectOk: false, duplicate: true },
+	{ label: "success then malformed correlated response refuses", steps: ["ok", "malformed"], expectOk: false, duplicate: true },
+	{ label: "malformed correlated response then success refuses", steps: ["malformed", "ok"], expectOk: false, duplicate: true },
+	{ label: "success then unsupported version refuses", steps: ["ok", "wrong-version"], expectOk: false, duplicate: true },
+	{ label: "three correlated responses refuse", steps: ["ok", "refuse", "malformed"], expectOk: false, duplicate: true },
+	{ label: "unrelated acknowledgments around one success succeed", steps: ["unrelated", "ok", "unrelated"], expectOk: true, duplicate: false },
+];
+
+for (const scenario of DUPLICATE_SCENARIOS) {
+	test(`snapshot handshake: ${scenario.label}`, () => {
+		const { bus, listeners } = makeScriptedBus(SUBAGENT_SNAPSHOT_REQUEST, scenario.steps.map(snapshotResponder));
+		const result = queryGuardSnapshot(bus, "/w");
+		assert.equal(result.ok, scenario.expectOk, JSON.stringify(result));
+		if (scenario.duplicate) {
+			assert.match(result.ok ? "" : result.reason, /duplicate/i, "diagnostic must identify the duplicate acknowledgment");
+			assert.match(result.ok ? "" : result.reason, /exactly one/i, "diagnostic must state the single-responder requirement");
+		}
+		assert.equal((listeners.get(SUBAGENT_SNAPSHOT_ACK) ?? []).length, 0, "the query helper unsubscribed in finally");
+	});
+	test(`child contract handshake: ${scenario.label}`, () => {
+		const { bus, listeners } = makeScriptedBus(CHILD_CONTRACT_REQUEST, scenario.steps.map(contractResponder));
+		const result = requestChildContract(bus, AUTO_CONTRACT);
+		assert.equal(result.ok, scenario.expectOk, JSON.stringify(result));
+		if (scenario.duplicate) {
+			assert.match(result.ok ? "" : result.reason, /duplicate/i, "diagnostic must identify the duplicate acknowledgment");
+			assert.match(result.ok ? "" : result.reason, /exactly one/i, "diagnostic must state the single-responder requirement");
+		}
+		assert.equal((listeners.get(CHILD_CONTRACT_ACK) ?? []).length, 0, "the query helper unsubscribed in finally");
+	});
+}
+
+function makeThrowingBus(): { bus: ScriptedBus; listeners: Map<string, Array<(data: unknown) => void>> } {
+	const listeners = new Map<string, Array<(data: unknown) => void>>();
+	return {
+		listeners,
+		bus: {
+			on(channel: string, handler: (data: unknown) => void) {
+				const list = listeners.get(channel) ?? [];
+				list.push(handler);
+				listeners.set(channel, list);
+				return () => {
+					listeners.set(channel, (listeners.get(channel) ?? []).filter((f) => f !== handler));
+				};
+			},
+			emit() { throw new Error("emitter failure"); },
+		},
+	};
+}
+
+test("an emission failure still unsubscribes both handshake listeners", () => {
+	const snapshotBus = makeThrowingBus();
+	assert.throws(() => queryGuardSnapshot(snapshotBus.bus, "/w"), /emitter failure/);
+	assert.equal((snapshotBus.listeners.get(SUBAGENT_SNAPSHOT_ACK) ?? []).length, 0);
+	const contractBus = makeThrowingBus();
+	assert.throws(() => requestChildContract(contractBus.bus, AUTO_CONTRACT), /emitter failure/);
+	assert.equal((contractBus.listeners.get(CHILD_CONTRACT_ACK) ?? []).length, 0);
+});
+
 // ── D. Subagent dispatch wiring (spawn seam) ──────────────────────────────────
 
 async function withGuardAndSubagent(envValue: string, fn: (guard: GuardHarness, sub: SubagentHarness, cwd: string) => Promise<void> | void) {
@@ -832,6 +969,26 @@ test("query listeners are cleaned up across repeated dispatches", async () => {
 	});
 });
 
+test("a duplicate snapshot acknowledgment refuses the dispatch without spawning", async () => {
+	await withGuardAndSubagent(serializeInheritance("auto", "n-16"), async (_guard, sub, cwd) => {
+		// A second responder answers every snapshot request with an identical
+		// correlated ack; the query must refuse the duplicate and never spawn.
+		(sub.eventListeners[SUBAGENT_SNAPSHOT_REQUEST] ??= []).push((raw) => {
+			const request = raw as { id: string };
+			sub.emit(SUBAGENT_SNAPSHOT_ACK, { version: 1, id: request.id, ok: true, profile: "auto" });
+		});
+		const before = tmpSubagentDirs().length;
+		const result = await runSubagent(sub, cwd, { agent: "scout", task: "duplicated ack" }) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+		assert.equal(sub.spawns.length, 0, "no child is spawned on a duplicate acknowledgment");
+		assert.equal(result.isError, true);
+		const text = result.content.map((c) => c.text ?? "").join("\n");
+		assert.match(text, /guard refused subagent dispatch/);
+		assert.match(text, /duplicate/i, "the refusal names the duplicate acknowledgment");
+		assert.match(text, /exactly one/i, "the refusal states the single-responder requirement");
+		assert.equal(tmpSubagentDirs().length, before, "temporary prompt directories are cleaned on duplicate refusal");
+	});
+});
+
 function tmpSubagentDirs(): string[] {
 	try {
 		return fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith("pi-subagent-"));
@@ -863,6 +1020,17 @@ test("the startup gate fails closed on absent, stale, or refused proofs", () => 
 		const r = runGateDriver(scenario);
 		assert.equal(r.status, 1, `${scenario}: expected a nonzero exit, got stdout=${r.stdout}`);
 		assert.match(r.stderr, /guard subagent startup gate/, `${scenario}: stderr diagnostic`);
+		assert.doesNotMatch(r.stdout, /GATE_OK/, `${scenario}: no success marker`);
+	}
+});
+
+test("the startup gate fails closed on duplicate contract acknowledgments", () => {
+	for (const scenario of ["duplicate-success", "success-then-refusal"]) {
+		const r = runGateDriver(scenario);
+		assert.equal(r.status, 1, `${scenario}: expected exit 1, got stdout=${r.stdout}`);
+		assert.match(r.stderr, /guard subagent startup gate/, `${scenario}: stderr diagnostic`);
+		assert.match(r.stderr, /duplicate/i, `${scenario}: the diagnostic names the duplicate acknowledgment`);
+		assert.match(r.stderr, /exactly one/i, `${scenario}: the diagnostic states the single-responder requirement`);
 		assert.doesNotMatch(r.stdout, /GATE_OK/, `${scenario}: no success marker`);
 	}
 });

@@ -6,7 +6,8 @@
  *
  * Usage: node tests/fixtures/guard-subagent/gate-driver.mts <scenario>
  * Scenarios: ok | absent-listener | wrong-nonce | wrong-profile |
- *            wrong-version | refuse | malformed-ack | no-env | bad-env
+ *            wrong-version | refuse | malformed-ack | duplicate-success |
+ *            success-then-refusal | no-env | bad-env
  */
 
 import bootstrap from "../../../extensions/subagent/guard-bootstrap.ts";
@@ -45,6 +46,7 @@ const bus = {
 bus.on(CHILD_CONTRACT_REQUEST, (raw) => {
 	const request = raw as { nonce?: string };
 	const ack = (payload: Record<string, unknown>) => bus.emit(CHILD_CONTRACT_ACK, payload);
+	const ok = () => ack({ version: 1, ok: true, nonce: request.nonce, inherited: PROFILE, profile: PROFILE });
 	switch (scenario) {
 		case "absent-listener":
 			return; // never acks: the bootstrap must refuse
@@ -58,8 +60,15 @@ bus.on(CHILD_CONTRACT_REQUEST, (raw) => {
 			return ack({ version: 1, ok: false, nonce: request.nonce, reason: "guard runtime not initialized" });
 		case "malformed-ack":
 			return ack({ version: 1, nonce: request.nonce });
+		case "duplicate-success":
+			// Two identical matching acks: exactly one responder is required.
+			ok();
+			return ok();
+		case "success-then-refusal":
+			ok();
+			return ack({ version: 1, ok: false, nonce: request.nonce, reason: "second responder refuses" });
 		default:
-			return ack({ version: 1, ok: true, nonce: request.nonce, inherited: PROFILE, profile: PROFILE });
+			return ok();
 	}
 });
 

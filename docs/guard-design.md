@@ -524,7 +524,12 @@ progress. The responder is synchronous and read-only, and refuses when the
 guard is absent or uninitialized, transitioning, workspace-locked, blocked by
 unresolved teardown, has invalid inheritance, or answers for a mismatched
 cwd. Dispatch fails closed: no defaulting to `default`, no unguarded
-fallback. Already-running children keep their launch snapshot; entering
+fallback. The handshake requires exactly one correlated synchronous
+acknowledgment: every additional matching acknowledgment, including an
+identical duplicate, refuses the dispatch, because multiple responses
+indicate an ambiguous or duplicated responder configuration. Responses with
+unrelated correlation identifiers are ignored and do not count as
+duplicates. Already-running children keep their launch snapshot; entering
 research does not retroactively tighten existing children, and there is no
 live policy propagation.
 
@@ -537,9 +542,12 @@ first delegated model request, it demands proof over a second synchronous
 channel (`guard:child-contract-request`/`ack`) that the child's guard
 consumed the exact contract: supported version, matching nonce, matching
 inherited profile, the restriction installed, and a valid current profile
-with an available runtime. An ordinary `guard:profile` event or a
-coincidentally matching `default` profile is not proof; a guard without the
-responder never answers, so older implementations fail the gate. The gate
+with an available runtime. Exactly one correlated synchronous
+acknowledgment is required; every additional matching acknowledgment,
+including an identical duplicate, fails the gate. An ordinary
+`guard:profile` event or a coincidentally matching `default` profile is not
+proof; a guard without the responder never answers, so older implementations
+fail the gate. The gate
 revalidates on every run and blocks tool calls until proof exists. On
 missing, stale, invalid, or refused proof the dedicated child writes one
 bounded stderr line and exits nonzero before any delegated execution; stdout
@@ -663,6 +671,7 @@ remain useful.
 | Step-5 child config (2026-10-07) | Profile only: the child loads its own config for its cwd; locks are never transmitted (locked parents refuse dispatch) |
 | Step-5 gate (2026-10-07) | Dedicated bootstrap extension passed with --extension; synchronous contract ack proves version/nonce/profile/restriction/runtime; child-only fatal path (stderr + exit 1) because pi catches handler errors and print mode has no shutdown handler |
 | Step-5 scope (2026-10-07) | Profile inheritance and startup validation only: write/edit/local reads/remote tools stay observe-only; parent prompt forwarding and broader process supervision deferred |
+| Step-5 single responder (2026-10-07) | Require exactly one correlated synchronous acknowledgment per handshake query; every additional matching acknowledgment, including an identical duplicate, fails closed regardless of order, validity, version, or payload |
 
 ## Implementation outline (build alongside, switch over)
 

@@ -110,7 +110,10 @@ uninitialized, transitioning, workspace-locked, teardown-blocked, or
 mismatched parent guard refuses the spawn with a diagnostic instead of
 defaulting. Only the profile is inherited; the child loads its own guard
 configuration for its cwd, and a locked parent refuses dispatch rather than
-transmitting its lock.
+transmitting its lock. Each synchronous handshake query requires exactly one
+correlated acknowledgment: every additional matching acknowledgment,
+including an identical duplicate, fails closed (the dispatch refuses; the
+child exits nonzero before any delegated execution).
 
 The child's guard proves contract consumption (version, nonce, profile,
 restriction installed, runtime available) to the child startup gate over
