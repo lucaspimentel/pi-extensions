@@ -234,6 +234,11 @@ Holes, verified 2026-10-02:
   saving is offered only if the merged patch authorizes the whole call.
   Show the exact rule/destination and never remove ask/deny rules. Cancel
   stale approvals without execution or persistence. Headless prompts deny.
+  Dialog-UX parity items pi-tool-permissions had (concurrent-dialog mutex,
+  hiding the working spinner, the ctrl+] hideable overlay, edit-before-save,
+  deny-rule saving and steer, herdr signaling, breakdown rendering) are not
+  specified here; they are tracked as pending work in the root TODO.md guard
+  section and must land by the step 6 switchover.
 - **Read grants:** guard-owned session/project/user/deny grants are mounted
   read-only. Legacy grants are not mirrored. A grant restarts workers and
   reports state loss, then returns without automatically replaying code.
@@ -672,6 +677,7 @@ remain useful.
 | Step-5 gate (2026-10-07) | Dedicated bootstrap extension passed with --extension; synchronous contract ack proves version/nonce/profile/restriction/runtime; child-only fatal path (stderr + exit 1) because pi catches handler errors and print mode has no shutdown handler |
 | Step-5 scope (2026-10-07) | Profile inheritance and startup validation only: write/edit/local reads/remote tools stay observe-only; parent prompt forwarding and broader process supervision deferred |
 | Step-5 single responder (2026-10-07) | Require exactly one correlated synchronous acknowledgment per handshake query; every additional matching acknowledgment, including an identical duplicate, fails closed regardless of order, validity, version, or payload |
+| Bash ask read-root escalation (2026-10-07) | Deliberate omission: bash/host_bash ask dialogs offer no inline read-root grant (pi-tool-permissions did, `extensions/pi-tool-permissions/index.ts:999-1129`). Read roots are granted only via the python/node permission_needed path, where kernel-enforced read-only mounts make the grant meaningful |
 
 ## Implementation outline (build alongside, switch over)
 

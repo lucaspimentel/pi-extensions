@@ -20,7 +20,7 @@
 
 - [ ] Evaluate switching multi-step Bash breakdown indicators to emoji
 
-  (Superseded by guard: the multi-step Bash breakdown rendering is re-created there.)
+  (Superseded by guard, pending there: guard computes worst-subcommand decisions only (`guard/policy/decision.ts:336-346`) and prompts once per compound command; the breakdown rendering is not re-created yet and is tracked in the root TODO's guard prompt-UX parity list.)
   - Follow-up to the breakdown marker-placement task. The current rendering uses ASCII-safe action glyphs (`[✓]` / `[✗]` / `[?]`) plus a leading `»` (U+00BB) for the active step — see `actionIcon` / `formatBreakdownLine` / `formatBreakdown` in `rules.ts` (re-exported via `test-helpers.mjs`).
   - Consider replacing the glyphs with emoji for readability: e.g. `✅` (allow), `❌` or `🚫` (deny), `❓` (ask), `👉` (current step). The `actionIcon` indirection was added specifically so this swap is local to that helper.
   - Investigate terminal/TUI compatibility first: emoji width is often reported as 1 cell but renders as 2, which can break the column-alignment invariant exercised by the `icon column aligned across current/non-current` test in `test-bash.mjs`. Check how pi's TUI (`ctx.ui.select` title block) handles wide characters and whether other extensions already emit emoji.
