@@ -6,7 +6,10 @@
  * Session-only: every session starts at "default"; nothing is persisted.
  * While a research hold is active, every profile change is blocked except
  * staying in research; releasing the hold restores the profile that was
- * active before it. Runtime failure checks precede /guard ack.
+ * active before it. Runtime failure checks precede /guard ack. Step 5 adds
+ * the subagent inheritance constraint: a child session starts in its
+ * inherited profile and may only keep it or move to research; an invalid
+ * ambient contract blocks the session entirely.
  */
 
 import type { SandboxDetection } from "../sandbox/detect.ts";
@@ -16,6 +19,7 @@ import { classifyToolCall, type ToolClass } from "./classes.ts";
 import { effectiveWorkspaceMode, type GuardCall, type PolicyState } from "./decision.ts";
 import { makeIsProtectedPath } from "./protected.ts";
 import { nextProfile, profileFooterLabel, type Profile } from "./profiles.ts";
+import type { InheritanceConstraint } from "./inheritance.ts";
 
 export type SandboxMode = SandboxDetection["mode"];
 
@@ -32,6 +36,14 @@ export interface GuardSessionState {
 	sandbox: SandboxDetection | null;
 	/** Resolved classifier model id for the auto footer label, when known. */
 	classifierLabel: string | null;
+	/**
+	 * Step-5 subagent inheritance. null in ordinary sessions. A valid
+	 * constraint pins the profile the child starts in; the child may only keep
+	 * it or switch to research. An error constraint blocks the session: no
+	 * executable runtime, every owned executor fails closed. Never persisted;
+	 * the extension entry point re-derives it from the process environment.
+	 */
+	inherited: InheritanceConstraint | null;
 }
 
 export interface CreateStateOptions {
@@ -39,6 +51,8 @@ export interface CreateStateOptions {
 	sandbox: SandboxDetection | null;
 	cwd: string;
 	interactive: boolean;
+	/** Step-5 inheritance constraint captured once by the extension factory. */
+	inherited?: InheritanceConstraint | null;
 }
 
 export function createSessionState(options: CreateStateOptions): GuardSessionState {
@@ -46,14 +60,43 @@ export function createSessionState(options: CreateStateOptions): GuardSessionSta
 	void options.cwd;
 	void options.interactive;
 	return {
-		profile: "default",
+		profile: options.inherited && "profile" in options.inherited ? options.inherited.profile : "default",
 		researchHolder: null,
 		profileBeforeHold: null,
 		workspaceLocked: false,
 		workspaceLockReason: null,
 		sandbox: options.sandbox,
 		classifierLabel: null,
+		inherited: options.inherited ?? null,
 	};
+}
+
+/**
+ * Central profile-change validation: research holds (step 4) and the step-5
+ * inherited restriction. Every mutation path (set, cycle, commands, picker,
+ * reload, recovery) must route through setProfile or cycleProfile, which both
+ * call this; nothing may assign state.profile directly from a handler.
+ */
+export function profileChangeAllowed(
+	state: GuardSessionState,
+	profile: Profile,
+): { ok: true } | { ok: false; notice: string } {
+	if (state.inherited && "error" in state.inherited) {
+		return { ok: false, notice: `guard inheritance is invalid (${state.inherited.error}); profile changes are disabled` };
+	}
+	if (state.researchHolder !== null && profile !== "research") {
+		return { ok: false, notice: HOLD_NOTICE(state.researchHolder) };
+	}
+	if (state.inherited && profile !== state.inherited.profile && profile !== "research") {
+		return {
+			ok: false,
+			// The ladder is not a permission ordering: default can allow what
+			// auto denies through classification, so there is no ceiling to
+			// clamp to. Refuse instead of silently choosing another profile.
+			notice: `inherited profile ${state.inherited.profile}: only "${state.inherited.profile}" and "research" are allowed in this subagent`,
+		};
+	}
+	return { ok: true };
 }
 
 const HOLD_NOTICE = (holder: string) =>
@@ -63,10 +106,10 @@ const HOLD_NOTICE = (holder: string) =>
 export function cycleProfile(
 	state: GuardSessionState,
 ): { ok: true; profile: Profile } | { ok: false; notice: string } {
-	if (state.researchHolder !== null) {
-		return { ok: false, notice: HOLD_NOTICE(state.researchHolder) };
-	}
-	state.profile = nextProfile(state.profile);
+	const next = nextProfile(state.profile);
+	const allowed = profileChangeAllowed(state, next);
+	if (!allowed.ok) return allowed;
+	state.profile = next;
 	return { ok: true, profile: state.profile };
 }
 
@@ -78,9 +121,8 @@ export function setProfile(
 	state: GuardSessionState,
 	profile: Profile,
 ): { ok: true } | { ok: false; notice: string } {
-	if (state.researchHolder !== null && profile !== "research") {
-		return { ok: false, notice: HOLD_NOTICE(state.researchHolder) };
-	}
+	const allowed = profileChangeAllowed(state, profile);
+	if (!allowed.ok) return allowed;
 	state.profile = profile;
 	return { ok: true };
 }
@@ -91,6 +133,9 @@ export function setProfile(
  * profile change is blocked until release. The holder is recorded.
  */
 export function requestResearchHold(state: GuardSessionState, holder: string): { granted: boolean; reason: string; profile: Profile } {
+	if (state.inherited && "error" in state.inherited) {
+		return { granted: false, reason: `guard inheritance is invalid (${state.inherited.error}); research is unavailable`, profile: state.profile };
+	}
 	if (state.researchHolder !== null && state.researchHolder !== holder) {
 		return { granted: false, reason: `research is already held by ${state.researchHolder}`, profile: state.profile };
 	}
@@ -179,6 +224,10 @@ export function profileEventPayload(state: GuardSessionState, config: ResolvedGu
 /** Footer label for the current state (blank in default + full sandbox). */
 export function footerLabel(state: GuardSessionState): string {
 	const parts: string[] = [];
+	if (state.inherited) {
+		if ("error" in state.inherited) parts.push("inheritance invalid");
+		else parts.push(`inherited ${state.inherited.profile}`);
+	}
 	const label = profileFooterLabel(state.profile, state.classifierLabel ?? undefined);
 	if (label) parts.push(label);
 	if (state.sandbox?.mode === "degraded") parts.push("no sandbox");

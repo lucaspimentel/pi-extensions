@@ -20,9 +20,11 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -36,6 +38,8 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { INHERIT_ENV, serializeInheritance } from "../guard/policy/inheritance.ts";
+import { queryGuardSnapshot, type GuardSnapshot } from "./guard-snapshot.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -287,6 +291,47 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
+/**
+ * Guard step 5: per-spawn coupling with the parent guard. The snapshot query
+ * must run synchronously immediately before spawn; the bootstrap path is the
+ * child startup gate passed with --extension.
+ */
+interface GuardDispatch {
+	bootstrapPath: string;
+	snapshot: (cwd: string) => GuardSnapshot;
+}
+
+/** Absolute path of the child startup gate, resolved next to this module. */
+const GUARD_BOOTSTRAP_PATH = fileURLToPath(new URL("./guard-bootstrap.ts", import.meta.url));
+
+type SpawnFunction = typeof spawn;
+let spawnOverride: SpawnFunction | null = null;
+let bootstrapOverride: string | null = null;
+
+/** Test seam: capture child argv/env and control spawn timing. */
+export function setSpawnOverride(fn: SpawnFunction | null): void {
+	spawnOverride = fn;
+}
+
+/** Test seam: point the child startup gate elsewhere (e.g. a missing file). */
+export function setBootstrapPathOverride(path: string | null): void {
+	bootstrapOverride = path;
+}
+
+function refusedResult(agentName: string, agentSource: SingleResult["agentSource"], task: string, step: number | undefined, reason: string): SingleResult {
+	return {
+		agent: agentName,
+		agentSource,
+		task,
+		exitCode: 1,
+		messages: [],
+		stderr: `guard: ${reason}`,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		errorMessage: `guard refused subagent dispatch: ${reason}`,
+		step,
+	};
+}
+
 interface DispatchDefaults {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
@@ -304,6 +349,7 @@ async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
+	guard: GuardDispatch,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -368,12 +414,36 @@ async function runSingleAgent(
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
 
+		// Guard step 5: fail-closed dispatch. Every child carries the child
+		// startup gate and a fresh snapshot of the parent's effective profile,
+		// taken after all asynchronous prompt preparation and immediately
+		// before spawn, with no await in between. An unavailable or unsafe
+		// parent guard refuses the dispatch instead of defaulting to default.
+		if (signal?.aborted) throw new Error("Subagent was aborted");
+		const bootstrapPath = bootstrapOverride ?? guard.bootstrapPath;
+		if (!fs.existsSync(bootstrapPath)) {
+			return refusedResult(agentName, agent.source, task, step, `child startup gate not found: ${bootstrapPath}`);
+		}
+		const snapshot = guard.snapshot(defaultCwd);
+		if (!snapshot.ok) {
+			return refusedResult(agentName, agent.source, task, step, snapshot.reason);
+		}
+		args.push("--extension", bootstrapPath);
+		// Only the profile is inherited. The child loads its own guard
+		// configuration for its cwd; parent rules, masks, roots, grants, locks,
+		// scratch, workers, and research-holder ownership are never copied.
+		// Overriding the key also replaces stale ambient inheritance so nested
+		// dispatch reflects the current effective profile.
+		const childEnv = { ...process.env, [INHERIT_ENV]: serializeInheritance(snapshot.profile, randomUUID()) };
+
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
-			const proc = spawn(invocation.command, invocation.args, {
+			const spawnFn = spawnOverride ?? spawn;
+			const proc = spawnFn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				env: childEnv,
 			});
 			let buffer = "";
 
@@ -496,6 +566,13 @@ const SubagentParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+	// Guard step 5: every spawn asks the parent guard for a fresh profile
+	// snapshot over the synchronous bus handshake and passes the child startup
+	// gate to the child. Fail-closed: dispatch without a working guard refuses.
+	const guardDispatch: GuardDispatch = {
+		bootstrapPath: bootstrapOverride ?? GUARD_BOOTSTRAP_PATH,
+		snapshot: (cwd) => queryGuardSnapshot(pi.events, cwd),
+	};
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
@@ -611,6 +688,7 @@ export default function (pi: ExtensionAPI) {
 						signal,
 						chainUpdate,
 						makeDetails("chain"),
+						guardDispatch,
 					);
 					results.push(result);
 
@@ -691,6 +769,7 @@ export default function (pi: ExtensionAPI) {
 							}
 						},
 						makeDetails("parallel"),
+						guardDispatch,
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
@@ -729,6 +808,7 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onUpdate,
 					makeDetails("single"),
+					guardDispatch,
 				);
 				const isError = isFailedResult(result);
 				if (isError) {

@@ -4,11 +4,12 @@ Sandbox-first permission redesign. Guard replaces `pi-tool-permissions`,
 `python`, and `node` with one extension built around a kernel-enforced
 sandbox. See `docs/guard-design.md` for the settled design.
 
-**Status: steps 1 to 3 are built here. Step 3 registers guard's own tools
+**Status: steps 1 to 5 are built here. Step 3 registers guard's own tools
 (`bash`, `host_bash`, `python`, `node`) and enforces decisions on them;
 every other tool call stays observe-only** (decisions on `guard:decision`,
 nothing blocked or prompted), except the grep/ffgrep secret-mask
-`tool_result` filter below. pi-tool-permissions stays loaded and enforcing
+`tool_result` filter below. **Step 5 adds subagent profile inheritance**
+(below). pi-tool-permissions stays loaded and enforcing
 until switchover (step 6); the old python/node extensions are dormant
 because guard is declared first and pi's registry is
 first-extension-wins.
@@ -91,6 +92,39 @@ Registration details:
   pi-tool-permissions grants are not mirrored during coexistence.
 - Non-interactive contexts (print mode, subagent children) deny prompts;
   sandboxed work stays free.
+
+### Subagent inheritance (step 5)
+
+When the subagent extension dispatches a child, it asks guard for a fresh
+snapshot of the effective profile over a synchronous bus handshake
+(`guard:subagent-snapshot-request`/`guard:subagent-snapshot-ack`) immediately
+before each spawn, and passes the profile in `PI_GUARD_INHERIT` together with
+a child startup gate extension. The child's guard initializes in that profile
+and cannot leave it except for research (the ladder is not a permission
+ordering, so there is no ceiling to clamp to); the restriction survives
+commands, the picker, the cycle shortcut, reload, and session replacement.
+An explicitly present but invalid `PI_GUARD_INHERIT` blocks the child's guard
+entirely (no runtime, owned executors fail closed) instead of falling back to
+an ordinary default session. Dispatch is fail-closed: an absent,
+uninitialized, transitioning, workspace-locked, teardown-blocked, or
+mismatched parent guard refuses the spawn with a diagnostic instead of
+defaulting. Only the profile is inherited; the child loads its own guard
+configuration for its cwd, and a locked parent refuses dispatch rather than
+transmitting its lock.
+
+The child's guard proves contract consumption (version, nonce, profile,
+restriction installed, runtime available) to the child startup gate over
+`guard:child-contract-request`/`guard:child-contract-ack`; without that proof
+the child exits nonzero before any delegated model or tool execution.
+
+Limits: guard still enforces only its four executors, so `write`, `edit`,
+local reads, and remote tools in the child remain observe-only during
+coexistence; child cwd/config differences can change per-call permissions;
+running children keep their launch snapshot (entering research does not
+tighten them retroactively); environment inheritance governs supported
+subagent dispatch, not arbitrary processes launched through permitted raw
+host execution; and trusted extensions run with host privileges, so the
+handshake is not a defense against malicious extensions.
 
 ### grep/ffgrep secret-mask filter
 

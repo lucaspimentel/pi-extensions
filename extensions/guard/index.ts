@@ -16,10 +16,32 @@ import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
 import { computeMigration } from "./policy/migrate.ts";
 import { pickClassifierModel, classifyAction } from "./policy/classifier.ts";
 import { addToConfigScope, effectiveAllowSuggestion, readGrantSuggestion } from "./policy/suggest.ts";
-import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, releaseResearchHold, requestResearchHold, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
+import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, releaseResearchHold, requestResearchHold, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
+import { constraintFromParse, INHERIT_ENV, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
 import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
 
 const DEFAULT_CYCLE_SHORTCUT = "ctrl+alt+g";
+
+/** Shape of the step-5 snapshot/contract ack payloads this extension emits. */
+interface SubagentAckBase {
+	version: 1;
+	ok: boolean;
+	reason?: string;
+}
+
+function isSubagentRequest(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+	if (typeof value !== "object" || value === null) return false;
+	const record = value as Record<string, unknown>;
+	return keys.every((key) => typeof record[key] === "string" && (record[key] as string).length > 0);
+}
+
+function ackId(request: Record<string, unknown> | null): string | null {
+	return request && typeof request.id === "string" && request.id ? request.id : null;
+}
+
+function ackNonce(request: Record<string, unknown> | null): string | null {
+	return request && typeof request.nonce === "string" && request.nonce ? request.nonce : null;
+}
 const workerParameters = Type.Object({
 	action: Type.Optional(Type.Union([Type.Literal("execute"), Type.Literal("status"), Type.Literal("reset")])),
 	code: Type.Optional(Type.String()),
@@ -27,6 +49,13 @@ const workerParameters = Type.Object({
 });
 
 export default function guard(pi: ExtensionAPI) {
+	// Step 5: parse the subagent inheritance contract once per process. Later
+	// environment changes must not relax an already-initialized child, and an
+	// explicitly present but invalid contract blocks the session instead of
+	// falling back to an ordinary default-profile runtime.
+	const parsedInheritance = parseInheritance(process.env[INHERIT_ENV]);
+	const inheritedConstraint: InheritanceConstraint | null = constraintFromParse(parsedInheritance);
+	const inheritedContract: InheritanceContract | null = parsedInheritance.ok ? parsedInheritance.contract : null;
 	let state: GuardSessionState | null = null;
 	let config: ResolvedGuardConfig | null = null;
 	let runtime: GuardRuntime | null = null;
@@ -108,12 +137,21 @@ export default function guard(pi: ExtensionAPI) {
 		if (fresh || !state || !config) {
 			config = loadConfig(ctx.cwd);
 			sessionReadRoots = [];
-			state = createSessionState({ config, sandbox: detectSandboxMode(), cwd: ctx.cwd, interactive: ctx.hasUI });
+			state = createSessionState({ config, sandbox: detectSandboxMode(), cwd: ctx.cwd, interactive: ctx.hasUI, inherited: inheritedConstraint });
 		} else if (config.cwd !== ctx.cwd) {
 			config = loadConfig(ctx.cwd);
 		}
 		annotationSnapshot = null;
 		classifierCache.clear();
+		if (inheritedConstraint && "error" in inheritedConstraint) {
+			// Invalid inheritance: keep the explicit blocked state, never an
+			// executable default-profile runtime. Owned executors fail closed
+			// because policyFor() and authorize() require a runtime.
+			state.classifierLabel = null;
+			notify(ctx, `guard: subagent inheritance is invalid; guard is blocked for this session: ${inheritedConstraint.error}`, "warning");
+			publish(ctx);
+			return;
+		}
 		try { state.classifierLabel = classifierModel(ctx)?.id ?? null; } catch { state.classifierLabel = null; }
 		runtime = new GuardRuntime({
 			policy: toPolicyState(state, effectiveConfig(), ctx.cwd, ctx.hasUI), detection: state.sandbox ?? detectSandboxMode(),
@@ -303,6 +341,44 @@ export default function guard(pi: ExtensionAPI) {
 		catch (err) { pi.events.emit("guard:research-release-ack", { released: false, reason: String(err), profile: state?.profile ?? "default" }); }
 	});
 
+	// Step 5: subagent dispatch handshake. The subagent's query helper
+	// subscribes, emits, and unsubscribes without yielding, so this responder
+	// must acknowledge synchronously: no await may appear before the emit.
+	// Read-only and fail-closed: only an initialized, valid, unlocked runtime
+	// answers with a profile.
+	pi.events.on("guard:subagent-snapshot-request", (data: unknown) => {
+		const valid = isSubagentRequest(data, ["id", "cwd"]);
+		const request = valid ? (data as Record<string, unknown>) : null;
+		const refuse = (reason: string) => pi.events.emit("guard:subagent-snapshot-ack", { version: 1, id: ackId(request), ok: false, reason } satisfies SubagentAckBase & { id: string | null });
+		if (!valid || !request) { refuse("malformed subagent snapshot request"); return; }
+		if (!state || !config) { refuse("guard session state not initialized"); return; }
+		if (inheritedConstraint && "error" in inheritedConstraint) { refuse("guard inheritance is invalid; this session cannot dispatch subagents"); return; }
+		if (!runtime) { refuse("guard runtime not initialized"); return; }
+		try { runtime.assertAvailable(); } catch (err) { refuse(String(err instanceof Error ? err.message : err)); return; }
+		if (runtime.policy.cwd !== request.cwd) { refuse(`guard is bound to ${runtime.policy.cwd}, not ${request.cwd}; reload the session before dispatching`); return; }
+		if (runtime.policy.workspaceLocked) { refuse(`workspace locked (${state.workspaceLockReason ?? "no reason recorded"}); /guard ack is required before dispatching subagents`); return; }
+		pi.events.emit("guard:subagent-snapshot-ack", { version: 1, id: request.id as string, ok: true, profile: state.profile });
+	});
+
+	// Step 5: child startup gate (child side). The bootstrap extension in a
+	// dispatched child asks this responder to prove that this guard consumed
+	// the exact inheritance contract. An older guard without this responder
+	// never answers, so the gate fails closed. Synchronous for the same
+	// reason as the snapshot responder.
+	pi.events.on("guard:child-contract-request", (data: unknown) => {
+		const request = data as { version?: unknown; nonce?: unknown; profile?: unknown } | null;
+		const refuse = (reason: string) => pi.events.emit("guard:child-contract-ack", { version: 1, ok: false, reason, nonce: ackNonce(request as Record<string, unknown> | null) } satisfies SubagentAckBase & { nonce: string | null });
+		if (!request || request.version !== 1 || ackNonce(request) === null || !isProfile(request.profile)) { refuse("malformed child contract request"); return; }
+		if (!inheritedContract) { refuse("guard has no inherited contract; this is not a guard-dispatched subagent"); return; }
+		if (inheritedContract.nonce !== request.nonce) { refuse("child contract nonce mismatch"); return; }
+		if (inheritedContract.profile !== request.profile) { refuse("child contract profile mismatch"); return; }
+		if (!state || !runtime) { refuse("guard session state not initialized"); return; }
+		if (!state.inherited || !("profile" in state.inherited) || state.inherited.profile !== inheritedContract.profile) { refuse("the inherited restriction is not installed"); return; }
+		if (state.profile !== inheritedContract.profile && state.profile !== "research") { refuse(`current profile ${state.profile} is outside the inherited restriction`); return; }
+		try { runtime.assertAvailable(); } catch (err) { refuse(String(err instanceof Error ? err.message : err)); return; }
+		pi.events.emit("guard:child-contract-ack", { version: 1, ok: true, nonce: request.nonce as string, inherited: inheritedContract.profile, profile: state.profile });
+	});
+
 	async function applyProfile(profile: Profile, ctx: ExtensionContext): Promise<void> {
 		if (!state || !config) { notify(ctx, "guard: no active session state yet.", "warning"); return; }
 		const next = { ...state };
@@ -314,9 +390,12 @@ export default function guard(pi: ExtensionAPI) {
 	async function pickProfile(ctx: ExtensionContext): Promise<void> {
 		const current = state?.profile ?? "default";
 		if (!ctx.hasUI || !state) { notify(ctx, `Profile (this session): ${current}`); return; }
+		// Step 5: children may only pick their inherited profile or research.
+		const allowed = ALL_PROFILES.filter((p) => p !== current && profileChangeAllowed(state!, p).ok);
+		if (allowed.length === 0) { notify(ctx, `Profile (this session): ${current} (no other profile is allowed)`); return; }
 		const rt = runtime;
 		const epoch = rt?.epoch;
-		const choice = await ctx.ui.select("Guard profile (this session):", [current, ...ALL_PROFILES.filter((p) => p !== current)]);
+		const choice = await ctx.ui.select("Guard profile (this session):", [current, ...allowed]);
 		if (rt !== runtime || epoch !== runtime?.epoch) { notify(ctx, "guard: profile selection expired after a session/policy change.", "warning"); return; }
 		if (choice && isProfile(choice)) await applyProfile(choice, ctx);
 	}
@@ -355,8 +434,12 @@ export default function guard(pi: ExtensionAPI) {
 	function showList(ctx: ExtensionContext): void {
 		if (!state || !config) { notify(ctx, "guard: no active session state yet."); return; }
 		const cfg = effectiveConfig();
+		const inheritedLine = !state.inherited ? null
+			: "error" in state.inherited ? `inherited (subagent): INVALID (${state.inherited.error}); guard is blocked`
+			: `inherited (subagent): ${state.inherited.profile} (only "${state.inherited.profile}" and "research" are allowed)`;
 		notify(ctx, [
 			`profile (this session): ${state.profile}${state.researchHolder ? ` (research held by ${state.researchHolder})` : ""}`,
+			...(inheritedLine ? [inheritedLine] : []),
 			`sandbox: ${state.sandbox?.mode ?? "unknown"} (${state.sandbox?.diagnostics.join("; ") ?? ""})`,
 			`workspace: ${state.workspaceLocked ? `LOCKED (/guard ack): ${state.workspaceLockReason}` : "unlocked"}`,
 			`unresolved teardown: ${runtime?.teardownFailure ?? "none"}`,
@@ -375,21 +458,26 @@ export default function guard(pi: ExtensionAPI) {
 	pi.registerCommand("guard", {
 		description: "Guard sandbox permissions: profiles, policy, read-only lock acknowledgment and migration (/guard help)",
 		getArgumentCompletions: (prefix) => {
-			const filtered = ["help", "list", "reload", "profile", ...ALL_PROFILES.map((p) => `profile ${p}`), "migrate", "migrate dry", "ack", "debug on", "debug off"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s }));
+			const inheritedProfile = state?.inherited && "profile" in state.inherited ? state.inherited.profile : null;
+			const selectable = inheritedProfile
+				? ALL_PROFILES.filter((p) => p === inheritedProfile || p === "research")
+				: ALL_PROFILES;
+			const filtered = ["help", "list", "reload", "profile", ...selectable.map((p) => `profile ${p}`), "migrate", "migrate dry", "ack", "debug on", "debug off"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s }));
 			return filtered.length ? filtered : null;
 		},
 		handler: async (args, ctx) => {
 			const command = args.trim();
 			if (!command || command === "profile") { await pickProfile(ctx); return; }
 			if (command === "help") {
-				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy and shared scratch", "/guard reload            Reload guard.json", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python and node; other tools remain observe-only (grep results are secret-filtered).", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects."].join("\n"));
+				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy and shared scratch", "/guard reload            Reload guard.json", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python and node; other tools remain observe-only (grep results are secret-filtered).", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects.", "Subagent children inherit this session's effective profile at each spawn and cannot leave it except for research (guard:subagent-snapshot-request)."].join("\n"));
 				return;
 			}
 			if (command === "list") { showList(ctx); return; }
 			if (command === "debug on" || command === "debug off") { debugEnabled = command.endsWith("on"); notify(ctx, `guard: debug ${debugEnabled ? "ON" : "OFF"}; owned tools enforce, others observe.`); return; }
 			if (command === "migrate" || command === "migrate dry") { await migrate(ctx, command.endsWith("dry")); return; }
 			if (command === "reload") {
-				if (state) await transition({ ...state, sandbox: detectSandboxMode() }, loadConfig(ctx.cwd), ctx);
+				if (!state || !runtime) { notify(ctx, "guard: no active runtime (an invalid inheritance blocks this session); nothing to reload.", "warning"); return; }
+				await transition({ ...state, sandbox: detectSandboxMode() }, loadConfig(ctx.cwd), ctx);
 				notify(ctx, "guard: config reloaded."); return;
 			}
 			if (command === "ack") {

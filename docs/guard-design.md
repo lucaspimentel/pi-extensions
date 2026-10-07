@@ -480,17 +480,93 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
   `host_bash`.
 - Research is also reachable directly through the cycle.
 
-## Subagents
+## Subagents (step 5)
 
-- Children inherit the parent's profile through an environment variable read
-  by the child's guard. They cannot loosen it.
-- Any prompt in a headless run is denied, including host_bash.
-  `nonInteractiveAsk` is deleted.
-- Sandboxed work stays free, so workers remain useful.
+Each dispatched child runs with an immutable inherited profile for its
+process lifetime. It can only keep that profile or switch to research
+(subject to the usual research-hold rules); there is no ordinal ceiling,
+because the ladder is not a permission ordering (`default` can allow what
+`auto` denies through classification, so an `auto` child must not be able to
+move to `default`). Ordinary sessions without inheritance keep their existing
+behavior.
+
+### Contract
+
+- One environment variable, `PI_GUARD_INHERIT`, carries a bounded, strictly
+  validated JSON object `{ version: 1, profile, nonce }` (`policy/inheritance.ts`,
+  pure, no `process.env` access). An absent variable denotes an ordinary
+  session; an explicitly present empty or invalid variable blocks the child:
+  guard keeps an explicit blocked state (no executable runtime, owned
+  executors fail closed, profile changes and research refuse) and never
+  initializes a default-profile fallback.
+- The guard factory parses the contract once per process, so later
+  environment changes cannot relax a running child. The nonce is a fresh
+  per-child correlation identifier, not a credential; no credentials or
+  policy configuration travel in the contract.
+- Only the profile is inherited. The child loads its own user/project guard
+  configuration for its cwd; parent rules, masks, roots, session read grants,
+  workspace locks, scratch, workers, and research-holder ownership are never
+  copied. A locked parent refuses dispatch rather than transmitting its lock.
+
+### Snapshot at each spawn
+
+The subagent extension queries the parent guard over a synchronous bus
+handshake (`guard:subagent-snapshot-request`/`ack`, versioned, correlated) at
+every actual spawn: single dispatch, each parallel task (including tasks
+waiting for a concurrency slot), each later chain step, and nested dispatch.
+The query runs after all asynchronous prompt preparation and immediately
+before `spawn()`, with no await in between; cached `guard:profile` events are
+not used because they cannot distinguish an idle runtime from a transition in
+progress. The responder is synchronous and read-only, and refuses when the
+guard is absent or uninitialized, transitioning, workspace-locked, blocked by
+unresolved teardown, has invalid inheritance, or answers for a mismatched
+cwd. Dispatch fails closed: no defaulting to `default`, no unguarded
+fallback. Already-running children keep their launch snapshot; entering
+research does not retroactively tighten existing children, and there is no
+live policy propagation.
+
+### Child startup gate
+
+The child also receives `extensions/subagent/guard-bootstrap.ts` via
+`--extension` (resolved through `import.meta.url`, never the child cwd). At
+the child's first agent start, after session initialization and before the
+first delegated model request, it demands proof over a second synchronous
+channel (`guard:child-contract-request`/`ack`) that the child's guard
+consumed the exact contract: supported version, matching nonce, matching
+inherited profile, the restriction installed, and a valid current profile
+with an available runtime. An ordinary `guard:profile` event or a
+coincidentally matching `default` profile is not proof; a guard without the
+responder never answers, so older implementations fail the gate. The gate
+revalidates on every run and blocks tool calls until proof exists. On
+missing, stale, invalid, or refused proof the dedicated child writes one
+bounded stderr line and exits nonzero before any delegated execution; stdout
+stays reserved for pi's JSON events. The fatal path is child-only: pi catches
+handler errors and print mode has no shutdown handler, so an ordinary parent
+session must never load this bootstrap.
+
+### Headless denial
+
+Any prompt in a headless run is denied, including host_bash, regardless of
+the legacy `nonInteractiveAsk` setting. Sandboxed work stays free, so workers
+remain useful.
+
+### Accepted limitations
+
+- This step provides profile inheritance and startup validation only, not
+  complete child-tool containment: guard enforces `bash`, `host_bash`,
+  `python`, and `node`; `write`, `edit`, local reads, and remote tools stay
+  observe-only during coexistence.
+- Child cwd/config differences can change per-call permissions.
+- Running children retain their original snapshot.
+- Environment inheritance governs supported subagent dispatch, not arbitrary
+  processes launched through permitted raw host execution.
+- Trusted extensions run with host privileges; the handshake is not a defense
+  against malicious extensions.
 - **Deferred:** forwarding child prompts to the parent UI.
 - Reminder: children load the **installed** extensions from
   `~/.pi/agent/git/github.com/lucaspimentel/pi-extensions`, not the working
-  tree. End-to-end testing needs commit, push, and `pi update`.
+  tree. End-to-end testing against the installed package needs commit, push,
+  and `pi update`.
 
 ## Decision log (2026-10-02)
 
@@ -578,6 +654,11 @@ A built-in list of patterns (`.env*`, `*.pem`, `*.key`, and similar):
 | Step-3 review: residual risks | Idle background reads may precede mount refresh; raw descendants may escape tracking |
 | Step-3 implementation (2026-10-07) | Shipped: four tools registered ahead of python/node (authoritative, dormant old extensions), one execution queue with pre-spawn revalidation and fail-closed transitions, worker-lifetime overlays plus shared real-path scratch, audits around all sandboxed execution with union pre/post comparison and violation/scan/quarantine locking, exact/effective rule saving with stale-approval cancellation, no grant replay, fixed executor identities, raw bash under HostBash rules, and the fail-closed grep/ffgrep mask filter; suites guard-{sandbox,policy,classes,migrate,filter,workers,runtime,harness} |
 | Step-4 implementation (2026-10-07) | Shipped: /plan requests the research hold before narrowing and refuses without an ack (timeout covers guard-absent); narrowTools hides host_bash; every exit path releases (awaited release-ack, background release on recovery/clear-context, warning on failed release); menu only on completed agent_before_settle (Batch B) |
+| Step-5 restriction shape (2026-10-07) | Allow-list (inherited profile + research), not an ordinal ceiling: the ladder is not a permission ordering, so an auto child must not reach default; refusals explain instead of clamping |
+| Step-5 snapshot (2026-10-07) | Fresh synchronous snapshot query per actual spawn (single, each parallel task, each chain step, nested); no cached profile events; no retroactive tightening of running children |
+| Step-5 child config (2026-10-07) | Profile only: the child loads its own config for its cwd; locks are never transmitted (locked parents refuse dispatch) |
+| Step-5 gate (2026-10-07) | Dedicated bootstrap extension passed with --extension; synchronous contract ack proves version/nonce/profile/restriction/runtime; child-only fatal path (stderr + exit 1) because pi catches handler errors and print mode has no shutdown handler |
+| Step-5 scope (2026-10-07) | Profile inheritance and startup validation only: write/edit/local reads/remote tools stay observe-only; parent prompt forwarding and broader process supervision deferred |
 
 ## Implementation outline (build alongside, switch over)
 

@@ -49,10 +49,22 @@ Notes:
   Name the files (or describe the changes) in the task.
 - Worker has no `tools:` line and therefore gets the child process's default
   tool set (your `defaultTools` settings apply). Child processes are
-  non-interactive, so tool-permission `ask` outcomes there follow the
-  `nonInteractiveAsk` setting in `pi-tool-permissions` (see its README); set it
-  to `"allow"` for children to act. Interactive subagent dispatches keep
-  prompting under the normal rules.
+  non-interactive, so any guard-owned prompt in a child is denied regardless
+  of the legacy `nonInteractiveAsk` setting; sandboxed work stays free.
+- **Guard requirement (guard step 5)**: every dispatch asks the parent
+  session's guard extension for a fresh snapshot of its effective profile
+  immediately before each spawn (single, parallel, chain, and nested alike)
+  and refuses to spawn when the guard is absent, uninitialized, transitioning,
+  workspace-locked, blocked by unresolved teardown, or mismatched. The child
+  receives that profile via `PI_GUARD_INHERIT` plus a startup gate extension
+  (`guard-bootstrap.ts`, passed with `--extension`); the child's guard may
+  only keep the inherited profile or switch to research, and the child exits
+  nonzero before any model or tool execution unless its guard proves it
+  consumed the exact contract. Only the profile is inherited: the child loads
+  its own guard configuration for its cwd. This is profile inheritance and
+  startup validation, not complete child-tool containment: tools guard does
+  not own remain observe-only, and running children keep their launch
+  snapshot.
 
 ## Workflow prompts
 
