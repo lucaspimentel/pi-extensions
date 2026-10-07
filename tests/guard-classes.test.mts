@@ -13,6 +13,7 @@ import { mergeConfig, loadUserConfigRaw, loadProjectConfigRaw, type GuardConfig 
 import {
 	classificationName,
 	classifyToolCall,
+	isPlanningToolAllowed,
 	isToolClass,
 	pupRunClass,
 	type ToolClass,
@@ -162,10 +163,28 @@ test("annotation fallback: readOnlyHint to remote-read, destructiveHint to remot
 	const destructive = { readOnlyHint: false, destructiveHint: true };
 	assert.equal(classifyToolCall("widget_flip", {}, { getAnnotations: () => readOnly }), "remote-read");
 	assert.equal(classifyToolCall("widget_flip", {}, { getAnnotations: () => destructive }), "remote-write");
-	// readOnlyHint wins when both are set (read is the weaker claim; the
-	// heuristic and fallback still catch write-ish names only without hints).
+	// A destructive hint wins over a contradictory read-only hint: conflicting
+	// self-declared claims fail closed as remote-write.
 	const both = { readOnlyHint: true, destructiveHint: true };
-	assert.equal(classifyToolCall("widget_flip", {}, { getAnnotations: () => both }), "remote-read");
+	assert.equal(classifyToolCall("widget_flip", {}, { getAnnotations: () => both }), "remote-write");
+	// read-only with destructiveHint explicitly false stays a read.
+	assert.equal(
+		classifyToolCall("widget_flip", {}, { getAnnotations: () => ({ readOnlyHint: true, destructiveHint: false }) }),
+		"remote-read",
+	);
+	// Higher-priority classifications are untouched by the fallback change:
+	// fixed executor identities, configured overrides, and built-in entries.
+	assert.equal(classifyToolCall("python", {}, { getAnnotations: () => both }), "sandboxed-exec");
+	assert.equal(classifyToolCall("host_bash", {}, { getAnnotations: () => both }), "host-shell");
+	assert.equal(classifyToolCall("memory_write", {}, { getAnnotations: () => both }), "local-write");
+	assert.equal(
+		classifyToolCall("widget_flip", {}, { toolClasses: { widget_flip: "meta" }, getAnnotations: () => both }),
+		"meta",
+	);
+	assert.equal(
+		classifyToolCall("mcp", { tool: "flip", server: "s" }, { toolClasses: { "mcp__s__*": "remote-read" }, getAnnotations: () => both }),
+		"remote-read",
+	);
 	// The injected lookup is consulted with the classification name (proxy style included).
 	const seen: string[] = [];
 	classifyToolCall("mcp", { tool: "flip", server: "s" }, { getAnnotations: (n) => { seen.push(n); return undefined; } });
@@ -208,6 +227,44 @@ test("pup_run classifies by subcommand verb", () => {
 	assert.equal(pupRunClass({ args: "logs search --q x" }), "remote-read");
 	assert.equal(pupRunClass({}), "remote-write");
 	assert.equal(classifyToolCall("pup_run", { args: ["logs", "search"] }), "remote-read");
+});
+
+test("isPlanningToolAllowed: built-in exceptions, annotations, and fail-closed unknowns", () => {
+	const readOnly = { readOnlyHint: true, destructiveHint: false } as const;
+	const writeCapable = { readOnlyHint: false, destructiveHint: true } as const;
+	// 1. Host-shell and local-write tools are removed regardless of hints.
+	for (const name of ["write", "edit", "host_bash", "pwsh", "powershell", "memory_write", "memory_forget", "memory_restore", "scratchpad"]) {
+		assert.equal(isPlanningToolAllowed(name, readOnly), false, name);
+		assert.equal(isPlanningToolAllowed(name, writeCapable), false, name);
+		assert.equal(isPlanningToolAllowed(name), false, name);
+	}
+	// 2. Built-in safe classes stay without annotations.
+	for (const name of ["read", "grep", "find", "ls", "fffind", "ffgrep", "session_search", "memory_read", "memory_search", "memory_status", "web_search", "slack_search", "pup_logs_search", "bash", "python", "node", "codemode", "tool_search", "subagent", "ask_user_question"]) {
+		assert.equal(isPlanningToolAllowed(name), true, name);
+	}
+	// Built-in removal ignores even a perfect read-only declaration.
+	assert.equal(
+		isPlanningToolAllowed("host_bash", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+		false,
+	);
+	// 3. Unknown/custom/MCP tools need explicit adequate annotations.
+	assert.equal(isPlanningToolAllowed("mcp__slack__post_message"), false, "no annotations: fail closed");
+	assert.equal(isPlanningToolAllowed("mcp__slack__post_message", {}), false);
+	assert.equal(isPlanningToolAllowed("mcp__slack__post_message", { readOnlyHint: false, destructiveHint: false }), false);
+	assert.equal(isPlanningToolAllowed("mcp__slack__post_message", { readOnlyHint: true, destructiveHint: true }), false, "contradictory hints: fail closed");
+	assert.equal(isPlanningToolAllowed("mcp__slack__search", readOnly), true);
+	assert.equal(isPlanningToolAllowed("jira_read", { readOnlyHint: true, openWorldHint: true, idempotentHint: true }), true);
+	assert.equal(isPlanningToolAllowed("jira_update", { readOnlyHint: false, openWorldHint: true }), false);
+	// Input-dependent wrappers qualify only through explicit annotations.
+	assert.equal(isPlanningToolAllowed("pup_run"), false, "unannotated pup_run is not planning-safe");
+	assert.equal(isPlanningToolAllowed("web_fetch"), false);
+	assert.equal(isPlanningToolAllowed("web_fetch", readOnly), true);
+	// The generic unknown-tool fallback does not make every remote-write result
+	// a name-based prohibition: an unknown tool with adequate hints qualifies.
+	assert.equal(isPlanningToolAllowed("totally_unknown_custom_tool", readOnly), true);
+	// Case-insensitive built-in lookup, matching classifyToolCall.
+	assert.equal(isPlanningToolAllowed("Write", readOnly), false);
+	assert.equal(isPlanningToolAllowed("Session_Search"), true);
 });
 
 test("isToolClass validates class names", () => {

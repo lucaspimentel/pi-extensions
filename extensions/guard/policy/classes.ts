@@ -225,9 +225,11 @@ export function classifyToolCall(toolName: string, input: Record<string, unknown
 	const builtin = BUILTIN_CLASSES[lower];
 	if (builtin) return builtin;
 
-	// 3. Annotations (self-declared, unverified).
+	// 3. Annotations (self-declared, unverified). A destructive hint wins over
+	// a read-only hint: contradictory hints classify as remote-write (fail
+	// closed) instead of trusting the weaker-looking read-only claim.
 	const annotations = options.getAnnotations?.(name);
-	if (annotations?.readOnlyHint === true) return "remote-read";
+	if (annotations?.readOnlyHint === true && annotations?.destructiveHint !== true) return "remote-read";
 	if (annotations?.destructiveHint === true) return "remote-write";
 
 	// 4. Name heuristic.
@@ -235,4 +237,38 @@ export function classifyToolCall(toolName: string, input: Record<string, unknown
 
 	// 5. Unknown: remote write (fail closed).
 	return "remote-write";
+}
+
+/**
+ * Planning eligibility: may an ACTIVE tool stay active during a `/plan`
+ * research turn? Pure: reuses the built-in map; no fs, no config, no pi
+ * runtime. The caller passes the annotations from a fresh `pi.getAllTools()`
+ * lookup at planning entry; there is no long-lived annotation cache.
+ *
+ * Rules, in order:
+ *   1. Built-in host-shell and local-write tools are removed regardless of
+ *      annotations (host_bash, pwsh, powershell, write, edit, and the
+ *      memory/scratchpad writes). Misleading read-only hints cannot revive
+ *      them.
+ *   2. Built-in local-read, remote-read, sandboxed-exec, and meta tools stay
+ *      (safe reads, the guard-owned sandboxed interpreters, and the approved
+ *      orchestration tools).
+ *   3. Every other tool needs explicit author annotations:
+ *      `readOnlyHint === true && destructiveHint !== true`. Unknown custom
+ *      and MCP tools without adequate hints are removed (fail closed).
+ *
+ * Input-dependent wrappers (web_fetch, pup_run) are deliberately NOT in the
+ * built-in map, so they qualify only through explicit annotations: possible
+ * read-only argument combinations never make the whole tool planning-safe.
+ * This is entry-time declaration filtering, not execution containment:
+ * codemode/deferred tools can remain callable, and annotations are unverified
+ * author hints.
+ */
+export function isPlanningToolAllowed(
+	name: string,
+	annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean },
+): boolean {
+	const builtin = BUILTIN_CLASSES[name.toLowerCase()];
+	if (builtin) return builtin !== "host-shell" && builtin !== "local-write";
+	return annotations?.readOnlyHint === true && annotations?.destructiveHint !== true;
 }

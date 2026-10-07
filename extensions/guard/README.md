@@ -206,8 +206,9 @@ table row. Resolution order:
    `codemode`/`tool_search`/`subagent`/`ask_user_question` meta; `web_fetch`
    by URL against `webFetchAllow`; `pup_run` by subcommand verb),
 3. the tool's self-declared **annotations** (`readOnlyHint` -> remote read,
-   `destructiveHint` -> remote write), looked up from `pi.getAllTools()` on
-   first use and cached per session,
+   `destructiveHint` -> remote write; a contradictory pair fails closed:
+   `destructiveHint: true` wins over `readOnlyHint: true`), looked up from
+   `pi.getAllTools()` on first use and cached per session,
 4. a **name heuristic** (post/send/create/update/delete/... -> remote write),
 5. anything still unknown is a **remote write** (fail closed).
 
@@ -215,6 +216,34 @@ MCP calls in both naming styles classify the same way: built-in
 `mcp__<server>__<tool>` names pass through; the `mcp` proxy classifies as
 `mcp__<server>__<input.tool>` (or `mcp:<input.tool>` with no server), so
 globs like `mcp__slack__*read*` match.
+
+Annotations are author-provided, unverified hints. Missing hints do not
+establish read-only behavior, and `destructiveHint: false` means
+non-destructive, not necessarily non-writing.
+
+### Planning eligibility
+
+While `/plan` holds the research profile, plan.ts filters the CURRENTLY
+ACTIVE tool set through `isPlanningToolAllowed` (`policy/classes.ts`) with a
+fresh `pi.getAllTools()` annotation lookup at planning entry:
+
+1. built-in host-shell and local-write tools (`host_bash`, `pwsh`,
+   `powershell`, `write`, `edit`, memory/scratchpad writes) are removed
+   regardless of annotations;
+2. built-in local-read, remote-read, sandboxed-exec, and meta tools stay
+   (safe reads, the guard-owned sandboxed interpreters, `codemode`,
+   `tool_search`, `subagent`, `ask_user_question`);
+3. every other tool needs `readOnlyHint === true && destructiveHint !== true`
+   (write-capable or unknown MCP/custom tools are removed; `toolClasses`
+   overrides create no planning exceptions; input-dependent wrappers like
+   `pup_run` qualify only via explicit annotations).
+
+Registered-but-inactive tools are never activated, the pre-plan set is
+restored exactly on every exit path, and this is entry-time declaration
+filtering rather than execution containment: codemode/deferred tools can
+remain callable, other extensions can change activation afterwards, nested
+non-owned calls stay observe-only until the switchover, and trusted
+extensions have host privileges.
 
 ### Local reads and the directory-grep gap
 

@@ -3,18 +3,22 @@
  *
  * When the user runs `/plan <task>`, guard (if loaded) is asked to hold its
  * research profile for the planning turn (a refusal refuses to start `/plan`:
- * planning must be read-only), pi disables the `write`, `edit`, and
- * `host_bash` tools (everything else stays active, including unrestricted
- * bash and MCP tools), and sends a planning prompt as a user message. `/plan` with no task tells
- * the planner to infer what to plan from the conversation, asking the user
- * (via ask_user_question when available, plain text otherwise) if the intent
- * is ambiguous. If the optional
- * ask_user_question tool is installed (rpiv-ask-user-question package), the
- * planner is instructed to ask clarifying questions before writing the
- * handoff. The planner is asked to
- * produce a self-contained "handoff" prompt: written in imperative voice and
- * addressed to a fresh agent session with no memory of this conversation, so
- * it can be pasted verbatim elsewhere.
+ * planning must be read-only), and the ACTIVE tool set is narrowed to
+ * planning-safe tools: write/edit, the guard host escape, and every
+ * write-capable or unannotated MCP/custom tool are removed, while built-in
+ * reads, the guard sandboxed interpreters, and the approved meta tools stay.
+ * Annotations come from a fresh `pi.getAllTools()` lookup at planning entry;
+ * they are author-provided hints, so this is entry-time declaration
+ * filtering, not execution containment. The narrowed prompt is sent as a user
+ * message. `/plan` with no task tells the planner to infer what to plan from
+ * the conversation, asking the user (via ask_user_question when available and
+ * already active, plain text otherwise) if the intent is ambiguous. If the
+ * optional ask_user_question tool is installed (rpiv-ask-user-question
+ * package), the planner is instructed to ask clarifying questions before
+ * writing the handoff. The planner is asked to produce a self-contained
+ * "handoff" prompt: written in imperative voice and addressed to a fresh
+ * agent session with no memory of this conversation, so it can be pasted
+ * verbatim elsewhere.
  *
  * When the planning turn settles, the final assistant message is captured as
  * the plan, copied to the clipboard (platform-detected; override or disable
@@ -43,6 +47,7 @@ import type {
 	ExtensionContext,
 	SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import { isPlanningToolAllowed } from "./guard/policy/classes.ts";
 
 // ── guard research handshake (step 4) ────────────────────────────────────
 // guard owns the research profile. /plan requests it before narrowing tools
@@ -277,15 +282,28 @@ export default function plan(pi: ExtensionAPI) {
 	}
 
 	function narrowTools(): void {
-		// Disable write/edit and the guard host escape among the CURRENTLY ACTIVE
-		// tools. Tools the user or another extension had deactivated stay
-		// deactivated, and hidden/deferred/MCP tools that are not active
-		// (codemode, tool_search, etc.) are not flooded into the tool
-		// declarations; only getAllTools-based narrowing would do that, and it
-		// would also invalidate the prompt cache.
+		// Filter the CURRENTLY ACTIVE tools down to planning-safe ones. Tools the
+		// user or another extension had deactivated stay deactivated, and
+		// hidden/deferred/MCP tools that are not active (codemode, tool_search,
+		// etc.) are not flooded into the tool declarations; only getAllTools-based
+		// narrowing would do that, and it would also invalidate the prompt cache.
+		//
+		// Beyond the built-in write pair and guard's host escape, every active
+		// tool must be planning-safe: built-in safe classes (reads, the guard
+		// sandboxed interpreters, approved meta tools) stay, and everything else
+		// needs explicit read-only annotations from a fresh getAllTools lookup at
+		// planning entry (write-capable or unknown MCP/custom tools are removed).
+		// Annotations are author-provided hints; this is declaration filtering,
+		// not execution containment: codemode/deferred tools can remain callable
+		// and another extension can still change activation afterwards.
+		const registeredAnnotations = new Map(
+			pi.getAllTools().map((tool) => [tool.name, tool.annotations] as const),
+		);
 		pi.setActiveTools(
 			pi.getActiveTools().filter(
-				(name) => name !== "write" && name !== "edit" && !(EXTRA_NARROWED_TOOLS as readonly string[]).includes(name),
+				(name) =>
+					!(EXTRA_NARROWED_TOOLS as readonly string[]).includes(name) &&
+					isPlanningToolAllowed(name, registeredAnnotations.get(name)),
 			),
 		);
 	}
@@ -305,8 +323,10 @@ export default function plan(pi: ExtensionAPI) {
 		// Snapshot the active tool set so it can be restored later (narrowTools()
 		// filters this same set, so restore is exact). Also check whether the
 		// questionnaire tool is registered (optional dependency on the
-		// rpiv-ask-user-question package); it stays active if it was already
-		// active. getAllTools() is used here for registration detection only.
+		// rpiv-ask-user-question package); activation is separate from
+		// registration: it stays active only if it was already active and is
+		// never activated here. getAllTools() is used for registration detection
+		// and, inside narrowTools(), a fresh annotation lookup at planning entry.
 		savedTools = pi.getActiveTools();
 		const canAskUser = pi.getAllTools().some((t) => t.name === ASK_USER_TOOL_NAME);
 		narrowTools();
@@ -321,8 +341,8 @@ export default function plan(pi: ExtensionAPI) {
 		updateStatus(ctx);
 		ctx.ui.notify(
 			canAskUser
-				? "Planning (write/edit and host_bash disabled; research held; clarifying questions enabled)."
-				: "Planning (write/edit and host_bash disabled; research held).",
+				? "Planning (write/edit, host tools, and write-capable or unannotated tools disabled; research held; clarifying questions enabled)."
+				: "Planning (write/edit, host tools, and write-capable or unannotated tools disabled; research held).",
 			"info",
 		);
 

@@ -35,7 +35,7 @@ Holes, verified 2026-10-02:
 | Hole | Evidence |
 |---|---|
 | Allow rules run project code on the host with no prompt, with network, credentials, and pi's full environment (API keys) | `~/.pi/agent/pi-tool-permissions.json` allows `cargo build *`, `cargo test *`, `dotnet build *`, `dotnet test *`, `PYTHONPATH=. pytest *`. Two-step escape: edit a test file (allowed in edits mode), then run `cargo test` (allowed). |
-| `/plan` is not read-only | `plan.ts:199` (`narrowTools()`) hides only write/edit. bash, pwsh, python, node, MCP, and subagent stay active. The only other safeguard is prompt text (`plan.ts:55`). |
+| `/plan` is not read-only | `plan.ts:199` (`narrowTools()`) hides only write/edit. bash, pwsh, python, node, MCP, and subagent stay active. The only other safeguard is prompt text (`plan.ts:55`). (Historical; closed by the research handshake and the 2026-10-07 annotation-aware narrowing, see Planning eligibility below.) |
 | python/node writable mounts do not protect paths whose contents later execute outside the sandbox | `python/sandbox.ts` and `node/sandbox.ts` never mention `.git` or `.pi`. In edits/auto/yolo, sandboxed code can write `.git/hooks/*`, `.git/config`, and `.pi/pi-tool-permissions*.json` (the model could grant itself allow rules). |
 | `pwsh` ran on the host | The since-removed `pwsh` extension spawned it directly; on Linux it was equivalent to unsandboxed bash. pi's built-in `powershell` tool is opt-in (`defaultTools`) and guard classifies it as a host shell. |
 | Headless subagent children are safe only because of a config default | `nonInteractiveAsk` is unset in the user config and defaults to deny. Setting it to `"allow"` would let children write freely. |
@@ -342,7 +342,8 @@ remote write, meta). Resolution order:
 2. the guard.json **`toolClasses`** map (exact names or globs), which
    overrides the built-in map;
 3. the tool's **annotations** (`readOnlyHint` -> remote read,
-   `destructiveHint` -> remote write);
+   `destructiveHint` -> remote write; a contradictory pair fails closed:
+   `destructiveHint: true` wins over `readOnlyHint: true`);
 4. a **name heuristic** (post/send/create/update/delete/write/... ->
    remote write);
 5. anything still unknown is a **remote write** (prompt in default, deny in
@@ -353,6 +354,51 @@ plain arguments, and the pi-mcp-adapter `mcp` proxy with `input.tool`) go
 through the same order. **`pup_run`** is classified by its subcommand verb:
 list/get/search/query/show/status/aggregate -> remote read;
 create/update/delete/mute/edit and anything unrecognized -> remote write.
+Annotations are author-provided, unverified hints; missing hints do not
+establish read-only behavior, and `destructiveHint: false` means
+non-destructive, not necessarily non-writing.
+
+### Planning eligibility (`/plan` narrowing)
+
+When `/plan` holds the research profile, the CURRENTLY ACTIVE tool set is
+filtered at planning entry (`isPlanningToolAllowed` in `policy/classes.ts`,
+applied in `plan.ts` over a fresh `pi.getAllTools()` annotation lookup; no
+long-lived planning cache). Rules, in order:
+
+1. Built-in **host-shell and local-write** tools are removed regardless of
+   annotations: `host_bash`, `pwsh`, `powershell`, `write`, `edit`, and the
+   memory/scratchpad writes. A misleading read-only hint cannot revive them.
+2. Built-in **local-read, remote-read, sandboxed-exec, and meta** tools stay:
+   safe reads, the guard-owned sandboxed interpreters (`bash`, `python`,
+   `node`), and the approved orchestration tools (`codemode`, `tool_search`,
+   `subagent`, `ask_user_question`).
+3. Every other tool needs explicit adequate annotations:
+   `readOnlyHint === true && destructiveHint !== true`. Unknown custom tools
+   and write-capable MCP tools are removed (fail closed).
+
+Notes:
+
+- guard.json `toolClasses` overrides do NOT create planning exceptions; the
+  built-in map is authoritative for the exceptions.
+- Input-dependent wrappers (`web_fetch`, `pup_run`) are not in the built-in
+  map, so they qualify only through explicit annotations. Possible read-only
+  argument combinations never make a whole tool planning-safe; unannotated
+  `pup_run` is removed.
+- Only the active set is filtered; registered-but-inactive tools are never
+  activated. The pre-plan set is snapshotted before narrowing and restored
+  exactly on every exit path.
+- **This is entry-time declaration filtering, not execution containment.**
+  Registered `codemode`/`deferred` tools can remain callable without being
+  declared active; `tool_search` or another extension can change activation
+  afterwards; nested non-owned calls stay observe-only until the step-6
+  switchover; trusted extensions have host privileges; and annotations are
+  unverified author hints.
+
+Conservative static capability metadata is declared on this repo's own
+tools so they qualify correctly: web_fetch/web_search and the Slack reads
+are read-only open-world; session_search is read-only closed-domain (its
+index maintenance is separate); guard's python/node are declared
+write-capable and open-world because raw profiles expose the host.
 
 **Auto mode's classifier** screens only host_bash, pwsh, write/edit,
 exfil-capable remote reads, and remote writes. Every sandboxed call skips it;
@@ -678,6 +724,10 @@ remain useful.
 | Step-5 scope (2026-10-07) | Profile inheritance and startup validation only: write/edit/local reads/remote tools stay observe-only; parent prompt forwarding and broader process supervision deferred |
 | Step-5 single responder (2026-10-07) | Require exactly one correlated synchronous acknowledgment per handshake query; every additional matching acknowledgment, including an identical duplicate, fails closed regardless of order, validity, version, or payload |
 | Bash ask read-root escalation (2026-10-07) | Deliberate omission: bash/host_bash ask dialogs offer no inline read-root grant (pi-tool-permissions did, `extensions/pi-tool-permissions/index.ts:999-1129`). Read roots are granted only via the python/node permission_needed path, where kernel-enforced read-only mounts make the grant meaningful |
+| Annotation fallback (2026-10-07) | A destructive hint wins over a contradictory read-only hint: conflicting self-declared claims classify as remote-write; the rest of the precedence order is unchanged |
+| Planning eligibility (2026-10-07) | `/plan` filters the ACTIVE set through `isPlanningToolAllowed`: built-in host-shell/local-write removed regardless of hints; built-in read/sandboxed/meta classes stay; everything else needs `readOnlyHint === true && destructiveHint !== true` from a fresh getAllTools lookup; toolClasses overrides create no planning exceptions; input-dependent wrappers qualify only via explicit annotations |
+| Worker capability metadata (2026-10-07) | Conservative static annotations on this repo's tools: web/web_search/Slack reads read-only open-world, session_search read-only closed-domain, guard python/node write-capable open-world (raw profiles expose the host); read-only hints describe intended operations, not the absence of internal caches or index files |
+| Plan narrowing limits (2026-10-07) | Entry-time declaration filtering only, not execution containment: codemode/deferred tools can remain callable, tool_search or another extension can change activation afterwards, nested non-owned calls stay observe-only until step 6, trusted extensions have host privileges, annotations are unverified author hints |
 
 ## Implementation outline (build alongside, switch over)
 

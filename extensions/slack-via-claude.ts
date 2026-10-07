@@ -258,6 +258,10 @@ const slackSearchTool = defineTool({
 		"Search Slack messages, files, channels, and users using Claude's Slack MCP. " +
 		"Searches both public and private channels the authenticated user can access.",
 	promptSnippet: "Search Slack messages, channels, and users",
+	// Conservative capability hints: read-only queries against Slack. These
+	// describe the tool's intended operations, not a guarantee that the
+	// claude subprocess writes nothing locally.
+	annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 	promptGuidelines: [
 		"Use slack_search to find Slack messages, files, channels, or users matching a query.",
 	],
@@ -299,6 +303,7 @@ const slackReadChannelTool = defineTool({
 	label: "Read Slack Channel",
 	description: "Read recent messages from a Slack channel using Claude's Slack MCP.",
 	promptSnippet: "Read recent messages from a Slack channel",
+	annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 	promptGuidelines: [
 		"Use slack_read_channel to read recent message history from a Slack channel by name or ID.",
 	],
@@ -350,6 +355,7 @@ const slackReadThreadTool = defineTool({
 	label: "Read Slack Thread",
 	description: "Read all messages in a Slack thread using Claude's Slack MCP.",
 	promptSnippet: "Read a complete Slack message thread",
+	annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 	promptGuidelines: [
 		"Use slack_read_thread to read all replies in a Slack thread given a channel name and thread timestamp.",
 	],

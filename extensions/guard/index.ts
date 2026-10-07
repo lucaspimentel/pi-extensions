@@ -270,6 +270,11 @@ export default function guard(pi: ExtensionAPI) {
 	});
 	for (const name of ["python", "node"] as const) pi.registerTool({
 		name, label: name, parameters: workerParameters, outputSchema: Type.Any(),
+		// Static capability metadata for the registered tool: the interpreters
+		// execute arbitrary code and can write, so they are declared write-capable
+		// and open-world (raw profiles expose the host; sandboxed profiles
+		// constrain it at execution time, which annotations do not describe).
+		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 		description: `Persistent ${name} interpreter managed by guard. Sandboxed workers use throwaway workspace overlays, no network and shared real-path scratch. action=reset discards state, not scratch; action=status never starts a worker. Raw profiles expose the host. Unavailable in degraded mode.`,
 		execute: async (_id, input, signal, _onUpdate, ctx) => {
 			const rt = runtime;

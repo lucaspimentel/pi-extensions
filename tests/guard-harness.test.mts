@@ -29,7 +29,7 @@ interface Harness {
 	status: Map<string, string | undefined>;
 	commandHandlers: Map<string, (args: string, ctx: unknown) => Promise<void>>;
 	tools: Array<{ name: string; annotations?: Record<string, boolean> }>;
-	registeredTools: Map<string, { execute: (...args: any[]) => Promise<any> }>;
+	registeredTools: Map<string, { execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined> }>;
 }
 
 const harnesses: Harness[] = [];
@@ -52,7 +52,7 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 			(h.handlers[event] ??= []).push(handler);
 			return () => {};
 		},
-		registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => h.registeredTools.set(tool.name, tool),
+		registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined> }) => h.registeredTools.set(tool.name, tool),
 		registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
 			h.commands.push({ name });
 			h.commandHandlers.set(name, options.handler);
@@ -421,6 +421,19 @@ test("harness: /guard list and reload report the effective policy", async () => 
 		assert.match(h.notifications.join("\n"), /ENFORCES bash, host_bash, python and node; other tools remain observe-only/);
 		assert.match(h.notifications.join("\n"), /unrestricted is command-only/);
 	});
+});
+
+test("registered python/node workers declare conservative capability metadata", () => {
+	const h = makeHarness();
+	for (const name of ["python", "node"]) {
+		const tool = h.registeredTools.get(name)!;
+		assert.deepEqual(tool.annotations, {
+			readOnlyHint: false,
+			destructiveHint: true,
+			idempotentHint: false,
+			openWorldHint: true,
+		}, name);
+	}
 });
 
 test("registered tools own all four names and reject calls before session initialization", async () => {

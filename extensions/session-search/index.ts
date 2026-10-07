@@ -100,6 +100,10 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 		description:
 			"Search the user's past pi coding sessions across all projects by keyword. Returns ranked hits with session path, date, project cwd, name, and labeled snippets (user message / assistant text / summary). Excludes the current session from results. Use it to recall past work: the user often half-remembers a session by keywords from what was said or built, not by project or date. After finding a hit, read the session file at `path` directly for the full transcript.",
 		promptSnippet: "Search past pi sessions by keyword across all projects",
+		// Conservative capability hints: read-only queries over a closed domain
+		// (local session files). The search maintains its own on-disk index; the
+		// hint describes the tool's operations, not that nothing is ever written.
+		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		promptGuidelines: [
 			"Use session_search when the user references past work ('that time we...', 'the session where...') without naming the project or date. The current session is always excluded from results.",
 			"Searches globally across all projects by default; pass cwd to narrow to a project, since/until to bound dates, in to restrict to user/assistant/summary text.",

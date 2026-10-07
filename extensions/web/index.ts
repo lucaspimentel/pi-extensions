@@ -432,6 +432,11 @@ export default function webExtension(pi: ExtensionAPI) {
 		description:
 			"Fetch a web page and return its readable content. When TAVILY_API_KEY is set, uses Tavily Extract for cleaner content (handles JS-rendered pages, tables, embedded content). Markdown, source, and data-file URLs are always fetched with raw HTTP to preserve exact contents. Set format='raw' for JSON APIs or source files, or engine='raw' to skip Tavily entirely. For GitHub pull requests and issues, prefer the `gh` CLI over this tool.",
 		promptSnippet: "Fetch a URL and return readable text content from web pages",
+		// Conservative capability hints (author-declared, unverified): fetches are
+		// read-only against the open web, and repeating a fetch has no further
+		// effect. These describe the tool's intended operations, not a guarantee
+		// that no local cache or log file is written.
+		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 		promptGuidelines: [
 			"Use web_fetch when the user provides a URL or when web_search results need to be read in full.",
 			"Prefer the default engine for articles, docs, and HTML pages. Markdown, source, and data-file URLs are fetched with raw HTTP automatically; use format='raw' for any other URL where the literal bytes matter.",
@@ -555,6 +560,8 @@ export default function webExtension(pi: ExtensionAPI) {
 		description:
 			"Search the web and return a ranked list of results (title, URL, snippet). Pair with web_fetch to read full pages. Backend auto-selected from TAVILY_API_KEY / BRAVE_API_KEY / SERPER_API_KEY, falling back to DuckDuckGo (no key).",
 		promptSnippet: "Search the web for current information using web_search",
+		// Same conservative hints as web_fetch: read-only open-world queries.
+		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 		promptGuidelines: [
 			"Use web_search when the user asks about current events, recent docs, or anything outside training data; follow up with web_fetch to read promising results.",
 		],

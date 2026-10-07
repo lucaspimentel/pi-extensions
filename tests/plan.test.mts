@@ -28,12 +28,20 @@ const CHOICE_STOP = "Decline: stop";
 //   releaseFail - requests grant, but releases fail (transition error)
 type GuardMode = "granted" | "refused" | "absent" | "wedged" | "releaseFail";
 
+// Registered-tool descriptors for getAllTools(): name plus optional MCP-style
+// annotations. Existing callers pass name-only lists via allToolNames.
+interface RegisteredToolDescriptor {
+	name: string;
+	annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean };
+}
+
 function makeHarness(
 	selectChoice?: string,
 	editorText?: string,
 	allToolNames?: string[],
 	initialActiveTools?: string[],
 	guardMode: GuardMode = "granted",
+	registeredDescriptors?: RegisteredToolDescriptor[],
 ) {
 	const commands: Record<string, any> = {};
 	const events: Record<string, any> = {};
@@ -45,7 +53,10 @@ function makeHarness(
 	const entries: { customType: string; data: unknown }[] = [];
 	const busListeners: Record<string, Array<(data: any) => void>> = {};
 	const emitted: Array<[string, any]> = [];
-	let activeTools: string[] = [];
+	// null = pi's initial active set (never narrowed); [] = an intentionally
+	// empty active set. Conflating the two would make getActiveTools() fall back
+	// to the baseline after a narrowing that removes every tool.
+	let activeTools: string[] | null = null;
 
 	const originalTools = ["read", "write", "edit", "bash"];
 	const baselineTools = initialActiveTools ?? originalTools;
@@ -55,8 +66,8 @@ function makeHarness(
 		registerCommand(name: string, opts: any) { commands[name] = opts; },
 		registerShortcut() {},
 		on(event: string, handler: any) { events[event] = handler; },
-		getActiveTools: () => (activeTools.length ? activeTools.slice() : baselineTools.slice()),
-		getAllTools: () => allToolNamesFinal.map((name) => ({ name })),
+		getActiveTools: () => (activeTools === null ? baselineTools.slice() : activeTools.slice()),
+		getAllTools: () => registeredDescriptors ?? allToolNamesFinal.map((name) => ({ name })),
 		setActiveTools(tools: string[]) { activeTools = tools.slice(); },
 		appendEntry(customType: string, data?: unknown) { entries.push({ customType, data }); },
 		sendUserMessage(msg: string) { sent.push(msg); },
@@ -130,9 +141,9 @@ function makeHarness(
 
 	planExtension(pi);
 
-	const narrowed = () => activeTools.length > 0 && activeTools.every((t) => t !== "write" && t !== "edit");
-	const restored = () => activeTools.length > 0 && activeTools.includes("write") && activeTools.includes("edit");
-	const tools = () => activeTools.slice();
+	const narrowed = () => (activeTools?.length ?? 0) > 0 && activeTools!.every((t) => t !== "write" && t !== "edit");
+	const restored = () => (activeTools?.length ?? 0) > 0 && activeTools!.includes("write") && activeTools!.includes("edit");
+	const tools = () => (activeTools ?? []).slice();
 
 	return { commands, events, sent, notifications, selects, editors, newSessions, entries, emitted, ctx, branch, narrowed, restored, tools };
 }
@@ -210,6 +221,115 @@ async function main() {
 		assert.ok(tools.includes("grep"), "restored set includes the pre-plan active tools");
 		assert.ok(!tools.includes("bash"), "restored set does not re-activate pre-plan deactivated tools");
 		assert.ok(!tools.includes("mcp__slack"), "restored set does not activate registered-but-inactive tools");
+	}
+
+	// ── Annotation-aware narrowing: descriptors and eligibility rules ──────
+	{
+		// A realistic registered-tool surface: annotated MCP/custom tools, write-
+		// capable and unknown tools, built-in reads, the guard sandboxed
+		// interpreters, meta tools, and known host-shell/local-write tools.
+		const descriptors: RegisteredToolDescriptor[] = [
+			{ name: "read" },
+			{ name: "grep" },
+			{ name: "write" },
+			{ name: "edit" },
+			{ name: "bash" },
+			{ name: "python", annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } },
+			{ name: "node", annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } },
+			{ name: "host_bash" },
+			{ name: "pwsh" },
+			{ name: "powershell", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
+			{ name: "memory_write", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false } },
+			{ name: "scratchpad" },
+			{ name: "web_fetch", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } },
+			{ name: "web_search", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } },
+			{ name: "pup_run" },
+			{ name: "mcp__notes__search", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
+			{ name: "mcp__notes__create_page", annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } },
+			{ name: "mcp__fs__delete", annotations: { readOnlyHint: true, destructiveHint: true, idempotentHint: false, openWorldHint: false } },
+			{ name: "custom_deploy" },
+			{ name: "custom_lookup", annotations: { destructiveHint: false } },
+			{ name: "jira_read", annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true } },
+			{ name: "jira_update", annotations: { readOnlyHint: false, openWorldHint: true } },
+			{ name: "codemode" },
+			{ name: "tool_search" },
+			{ name: "subagent" },
+			{ name: "ask_user_question" },
+		];
+		const initial = ["read", "grep", "write", "edit", "bash", "python", "node", "host_bash", "pwsh", "powershell", "memory_write", "scratchpad", "web_fetch", "web_search", "pup_run", "mcp__notes__search", "mcp__notes__create_page", "mcp__fs__delete", "custom_deploy", "custom_lookup", "jira_read", "jira_update", "codemode", "tool_search", "subagent", "ask_user_question"];
+		const h = makeHarness(CHOICE_STOP, undefined, undefined, initial, "granted", descriptors);
+		await h.commands["plan"].handler("do a thing", h.ctx);
+
+		// Order is preserved; only ineligible tools are dropped.
+		assert.deepEqual(h.tools(), [
+			"read", "grep", "bash", "python", "node", "web_fetch", "web_search",
+			"mcp__notes__search", "jira_read", "codemode", "tool_search", "subagent", "ask_user_question",
+		]);
+		// Annotated read-only MCP and custom tools stay active.
+		assert.ok(h.tools().includes("mcp__notes__search"));
+		// Write-capable and unknown MCP/custom tools are removed.
+		assert.ok(!h.tools().includes("mcp__notes__create_page"));
+		assert.ok(!h.tools().includes("custom_deploy"));
+		// destructiveHint: false alone is insufficient.
+		assert.ok(!h.tools().includes("custom_lookup"));
+		// readOnlyHint: true plus destructiveHint: true is rejected.
+		assert.ok(!h.tools().includes("mcp__fs__delete"));
+		// Missing or non-true readOnlyHint is insufficient outside the exceptions.
+		assert.ok(!h.tools().includes("jira_update"));
+		// Safe built-in reads stay available without annotations.
+		assert.ok(h.tools().includes("read") && h.tools().includes("grep"));
+		// Sandboxed interpreters stay despite write-capable hints.
+		assert.ok(h.tools().includes("python") && h.tools().includes("node"));
+		// The approved meta tools stay available.
+		for (const meta of ["codemode", "tool_search", "subagent", "ask_user_question"]) {
+			assert.ok(h.tools().includes(meta), meta);
+		}
+		// Known host-shell and local-write tools are removed even with misleading
+		// read-only hints (powershell, memory_write).
+		for (const removed of ["write", "edit", "host_bash", "pwsh", "powershell", "memory_write", "scratchpad"]) {
+			assert.ok(!h.tools().includes(removed), removed);
+		}
+		// Unannotated pup_run is removed: invocation-dependent read combinations
+		// never make the whole wrapper planning-safe.
+		assert.ok(!h.tools().includes("pup_run"));
+		// jira_read is retained (read-only annotations without destructiveHint);
+		// jira_update is removed (readOnlyHint: false).
+		assert.ok(h.tools().includes("jira_read"));
+		assert.ok(!h.tools().includes("jira_update"));
+
+		// The persisted snapshot is the ORIGINAL active set; exact restoration.
+		const startEntry = h.entries.find((e: any) => e.customType === "plan-state");
+		assert.deepEqual(startEntry.data, { active: true, savedTools: initial });
+		await h.commands["plan"].handler("cancel", h.ctx);
+		assert.deepEqual(h.tools(), initial, "cancel must restore the exact pre-plan set, in order");
+	}
+
+	{
+		// An active set that narrows to EMPTY is distinct from an uninitialized
+		// set: getActiveTools() must not fall back to the baseline.
+		const h = makeHarness(CHOICE_STOP, undefined, undefined, ["write", "edit"]);
+		await h.commands["plan"].handler("do a thing", h.ctx);
+		assert.deepEqual(h.tools(), [], "a fully narrowed set must stay empty");
+		assert.equal(h.sent.length, 1, "planning still starts with an empty tool set");
+		await h.commands["plan"].handler("cancel", h.ctx);
+		assert.deepEqual(h.tools(), ["write", "edit"], "restore puts the pre-plan set back");
+	}
+
+	{
+		// Registered-but-inactive tools stay inactive even when read-only
+		// annotated; narrowing must never activate them.
+		const descriptors: RegisteredToolDescriptor[] = [
+			{ name: "read" },
+			{ name: "write" },
+			{ name: "edit" },
+			{ name: "bash" },
+			{ name: "mcp__docs__search", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
+		];
+		const h = makeHarness(CHOICE_STOP, undefined, undefined, undefined, "granted", descriptors);
+		await h.commands["plan"].handler("do a thing", h.ctx);
+		assert.ok(!h.tools().includes("mcp__docs__search"), "inactive registered tools are not activated");
+		await h.commands["plan"].handler("cancel", h.ctx);
+		assert.ok(!h.tools().includes("mcp__docs__search"), "restore does not activate them either");
 	}
 
 	// ── Plan-state persistence and mid-plan recovery ───────────────────────────
