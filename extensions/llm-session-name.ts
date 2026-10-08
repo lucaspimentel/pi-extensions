@@ -49,8 +49,8 @@ import { join } from "node:path";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const MAX_TITLE_LENGTH = 60;
-const FALLBACK_LENGTH = 50;
+const MAX_TITLE_LENGTH = 40;
+const FALLBACK_LENGTH = 36;
 const PROMPT_SAMPLE_LENGTH = 2000;
 const MAX_TOKENS = 64;
 const DEFAULT_TURN_INTERVAL = 10;

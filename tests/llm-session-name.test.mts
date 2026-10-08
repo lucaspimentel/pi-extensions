@@ -35,14 +35,14 @@ const msgEntry = (role: string, text: string) => ({
 assert.equal(collapseWhitespace("  a \n\t b  "), "a b");
 
 assert.equal(truncateFallbackName("short prompt"), "short prompt");
-assert.equal(truncateFallbackName("a".repeat(50)), "a".repeat(50));
+assert.equal(truncateFallbackName("a".repeat(36)), "a".repeat(36));
 const truncated = truncateFallbackName("x".repeat(80));
-assert.equal(truncated.length, 53); // 50 chars + "..."
+assert.equal(truncated.length, 39); // 36 chars + "..."
 assert.ok(truncated.endsWith("..."));
 
 assert.equal(sanitizeTitle('  "Fix   auth\nbug"  '), "Fix auth bug");
 assert.equal(sanitizeTitle("`Add tests`"), "Add tests");
-assert.equal(sanitizeTitle("y".repeat(70)).length, 60);
+assert.equal(sanitizeTitle("y".repeat(70)).length, 40);
 assert.equal(sanitizeTitle("   "), "");
 
 const titlePrompt = buildTitlePrompt("please   fix\nthe login bug");
@@ -273,8 +273,8 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 		},
 	});
 	await handlers.turn_end({}, ctx);
-	await waitFor(() => pi.name() === `${"w".repeat(50)}...`);
-	assert.equal(pi.name(), `${"w".repeat(50)}...`);
+	await waitFor(() => pi.name() === `${"w".repeat(36)}...`);
+	assert.equal(pi.name(), `${"w".repeat(36)}...`);
 }
 
 // 4. Error response (errorMessage, empty content) also falls back.
