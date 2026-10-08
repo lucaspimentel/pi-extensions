@@ -28,11 +28,13 @@
       "./extensions/node",
       "./extensions/session-search",
       "./extensions/subagent",
-      "./extensions/update-jira"
+      "./extensions/update-jira",
+      "./extensions/timestamps"
     ],
     "prompts": ["./extensions/subagent/prompts/*.md"]
   },
   "scripts": {
+    "test:timestamps": "node --test tests/timestamps.test.mts",
     "test:python": "node --test tests/python-unit.test.mts tests/python-integration.test.mts",
     "test:node": "node --test tests/node-unit.test.mts tests/node-integration.test.mts",
     "test:jira": "node --test tests/update-jira-unit.test.mts tests/update-jira-tools.test.mts",
