@@ -187,11 +187,20 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 
 				ctx.ui.notify(formatHit(hit), "info");
 
-				const action = await ctx.ui.select(
-					"Next:",
-					["Copy path", "Load context into session", "Back to list"],
-					{ signal: ctx.signal },
-				);
+				const actions = hit.isSubagent
+					? ["Load context into session", "Copy path", "Back to list"]
+					: ["Resume session", "Load context into session", "Copy path", "Back to list"];
+				const action = await ctx.ui.select("Next:", actions, { signal: ctx.signal });
+				if (action === "Resume session") {
+					try {
+						const result = await ctx.switchSession(hit.path);
+						if (!result.cancelled) return;
+						ctx.ui.notify("Resume was cancelled.", "info");
+					} catch (err) {
+						ctx.ui.notify(`Could not resume session: ${err instanceof Error ? err.message : String(err)}`, "warning");
+					}
+					continue; // back to the list
+				}
 				if (action === "Copy path") {
 					if (copyToClipboard(hit.path)) {
 						ctx.ui.notify(`Copied: ${hit.path}`, "info");

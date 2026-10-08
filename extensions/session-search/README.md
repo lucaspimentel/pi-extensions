@@ -20,6 +20,11 @@ branch dupes, tool-result noise).
   path), then **Copy path**, **Load context into session**, or go back to the
   list. Without a UI (RPC/print modes), it prints the tool-style rendering
   instead.
+- **Resume session**: switches the running pi process to the selected session via
+  `ctx.switchSession` (the same flow as `/resume`): full history, no excerpt,
+  no model turn. Offered for non-subagent hits only; cancel or error falls back
+  to the list. After a successful switch the previous session stays resumable
+  via `/resume`, and the resumed session becomes the one excluded from search.
 - **Load context into session**: extracts a transcript excerpt (±5 user/assistant
   messages around the matched entry, plus summaries; per-message cap 2KB, total
   cap 16KB; tool results excluded) and injects it into the current session as a
