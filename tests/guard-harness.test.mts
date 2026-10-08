@@ -384,13 +384,18 @@ test("migration confirmation from a replaced session expires even when the new e
 		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
 		let show!: () => void;
-		let answer!: (value: string) => void;
 		const shown = new Promise<void>((resolve) => { show = resolve; });
-		ctx.ui.select = async () => { show(); return new Promise<string>((resolve) => { answer = resolve; }); };
+		ctx.ui.select = async (_title?: string, _options?: string[], opts?: { signal?: AbortSignal }) => {
+			show();
+			if (opts?.signal?.aborted) return undefined;
+			return new Promise<string>((resolve) => {
+				opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+			});
+		};
 		const migrating = h.commandHandlers.get("guard")!("migrate", ctx);
 		await shown;
+		// Cancellation settles automatically when the replacement session starts.
 		await h.handlers.session_start[0]({}, ctx);
-		answer("Write");
 		await migrating;
 		assert.equal(fs.existsSync(projectConfigPath(cwd)), false);
 		assert.ok(h.notifications.some((message) => /migration expired/.test(message)));
@@ -537,7 +542,14 @@ test("accepting a save while sandbox work runs waits for teardown before writing
 		let show!: () => void;
 		let answer!: (choice: string) => void;
 		const shown = new Promise<void>((resolve) => { show = resolve; });
-		ctx.ui.select = async () => { show(); return new Promise<string>((resolve) => { answer = resolve; }); };
+		ctx.ui.select = async (_title?: string, _options?: string[], opts?: { signal?: AbortSignal }) => {
+			show();
+			if (opts?.signal?.aborted) return undefined;
+			return new Promise<string>((resolve) => {
+				answer = (choice) => resolve(choice);
+				opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+			});
+		};
 		const saving = h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
 		void saving.catch(() => {});
 		await shown;
@@ -592,9 +604,17 @@ test("aborting a pending owned approval never saves its rule", async () => {
 		let show!: () => void;
 		let answer!: (choice: string) => void;
 		const shown = new Promise<void>((resolve) => { show = resolve; });
-		ctx.ui.select = async () => { show(); return new Promise<string>((resolve) => { answer = resolve; }); };
+		ctx.ui.select = async (_title?: string, _options?: string[], opts?: { signal?: AbortSignal }) => {
+			show();
+			if (opts?.signal?.aborted) return undefined;
+			return new Promise<string>((resolve) => {
+				answer = (choice) => resolve(choice);
+				opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+			});
+		};
 		const abort = new AbortController();
 		const executing = h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, abort.signal, undefined, ctx);
+		void executing.catch(() => {});
 		await shown;
 		abort.abort();
 		answer("Save for project");
@@ -610,13 +630,19 @@ test("stale approvals save nothing and headless dialogs fail closed", async () =
 		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
 		let show!: () => void;
-		let answer!: (choice: string) => void;
 		const shown = new Promise<void>((resolve) => { show = resolve; });
-		ctx.ui.select = async () => { show(); return new Promise<string>((resolve) => { answer = resolve; }); };
+		ctx.ui.select = async (_title?: string, _options?: string[], opts?: { signal?: AbortSignal }) => {
+			show();
+			if (opts?.signal?.aborted) return undefined;
+			return new Promise<string>((resolve) => {
+				opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+			});
+		};
 		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_UNSET" }, undefined, undefined, ctx);
+		void pending.catch(() => {});
 		await shown;
+		// Cancellation settles automatically; no manual answer is needed.
 		await h.commandHandlers.get("guard")!("profile research", ctx);
-		answer("Save for project");
 		await assert.rejects(pending, /expired/);
 		assert.equal(fs.existsSync(projectConfigPath(cwd)), false);
 		await h.commandHandlers.get("guard")!("profile default", ctx);

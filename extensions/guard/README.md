@@ -46,7 +46,8 @@ Registration details:
 ### Execution queue and transitions
 
 - The four tools serialize through one queue; permission dialogs do not hold
-  it (other calls proceed; the dialog's call waits).
+  it (other calls proceed; the dialog's call waits). Dialogs themselves
+  serialize through the separate guard-owned dialog gate.
 - Policy is revalidated after the queue wait and immediately before spawn.
 - A tightening transition (research entry/exit, raw/sandbox change, effective
   root/mask/protected change, lock/ack remount) preempts active execution,
@@ -77,6 +78,26 @@ Registration details:
 
 ### Dialogs and grants
 
+- All four guard dialogs (execution approval, read grant, `/guard` profile
+  picker, `/guard migrate` confirmation) serialize through **one dialog
+  gate** owned by the guard factory (`extensions/guard/dialogs.ts`). Pi's TUI
+  keeps at most one extension selector alive; the gate guarantees two live
+  guard dialog bodies never overlap. The gate is independent of the
+  execution queue: dialogs never hold it, and already-authorized executor
+  work proceeds while another call awaits a dialog.
+- Cancellation: aborting the owning operation's signal removes an aborted
+  queued request promptly and cancels an open selector through the SDK's
+  `{ signal }` option. The gate never aborts a caller-owned controller, holds
+  the UI lease until the dialog body actually settles, and rejects answers
+  that arrive after cancellation. Scope is guard-local: unrelated extensions
+  can still open competing selectors, and in RPC mode the remote client
+  decides whether a cancelled dialog's display closes.
+- Invalidation: policy transitions, audit workspace locking, session/tree/cwd
+  replacement, and shutdown cancel queued and open dialogs synchronously and
+  fail closed. Fresh requests are accepted after the new runtime or policy
+  exists; old requests are never retried or replayed. The gate lease covers
+  only validation plus the selector interaction, so a successful save, grant,
+  or profile choice cannot cancel itself.
 - An explicit HostBash/Pwsh **ask-rule match** offers allow once or deny
   (saving a rule cannot override the ask).
 - A fallback prompt offers allow once, save for this project

@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { homedir } from "node:os";
 import { GuardRuntime, validateReadGrant } from "./runtime.ts";
+import { DialogGate } from "./dialogs.ts";
 import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
 import { FAILURE_STATUSES as NODE_FAILURES } from "./tools/node/session.ts";
 import { createGuardShellOperations, SANDBOX_FAILURE_HINT } from "./tools/shell.ts";
@@ -60,6 +61,10 @@ export default function guard(pi: ExtensionAPI) {
 	let state: GuardSessionState | null = null;
 	let config: ResolvedGuardConfig | null = null;
 	let runtime: GuardRuntime | null = null;
+	// One gate per factory serializes every guard-owned dialog. It is never
+	// replaced: a stale selector may still own the TUI's single dialog slot
+	// during a session change, so only its requests are invalidated.
+	const dialogs = new DialogGate();
 	let lastCtx: ExtensionContext | null = null;
 	let debugEnabled = false;
 	let sessionReadRoots: string[] = [];
@@ -108,12 +113,28 @@ export default function guard(pi: ExtensionAPI) {
 	async function decisionFor(name: string, input: Record<string, unknown>, ctx: ExtensionContext, policy = policyFor(ctx)): Promise<Decision> {
 		return resolveDecision({ ...policy, interactive: ctx.hasUI }, mappedCall(name, input).call, (call) => classify(call, ctx));
 	}
+	/**
+	 * Revalidate a captured dialog context immediately before display and
+	 * after answering: operation cancellation is checked separately through
+	 * the gate's dialog signal (throwIfAborted), this covers runtime identity,
+	 * epoch, availability, unresolved teardown, and cwd compatibility.
+	 */
+	function assertDialogCurrent(rt: GuardRuntime, epoch: number, ctx: ExtensionContext, cwd: string, expired: string): void {
+		if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw new Error(expired);
+		rt.assertAvailable();
+		if (rt.policy.cwd !== cwd || ctx.cwd !== cwd) throw new Error("guard cwd changed; awaiting session replacement");
+	}
 	function configSignature(cfg: ResolvedGuardConfig): string {
 		const { warnings: _warnings, ...policy } = cfg as ResolvedGuardConfig & { warnings?: string[] };
 		return JSON.stringify(policy);
 	}
 	async function transition(next: GuardSessionState, cfg: ResolvedGuardConfig, ctx: ExtensionContext, persistence?: { epoch: number; beforeCommit: () => ResolvedGuardConfig }): Promise<void> {
 		if (!runtime) throw new Error("guard session state not initialized");
+		// A policy boundary invalidates every queued or open dialog
+		// synchronously, before the first await. A dialog that produced this
+		// transition already left the gate, so a successful save, grant, or
+		// profile choice cannot cancel itself; other pending dialogs fail closed.
+		dialogs.invalidate("approval expired after a policy change");
 		const rt = runtime;
 		const baseState = state;
 		let committedConfig = cfg;
@@ -133,7 +154,10 @@ export default function guard(pi: ExtensionAPI) {
 	}
 
 	async function startSession(ctx: ExtensionContext, fresh: boolean): Promise<void> {
-		if (runtime) await runtime.dispose(fresh ? "session replacement" : "session tree/cwd replacement");
+		if (runtime) {
+			dialogs.invalidate("approval expired after a session replacement");
+			await runtime.dispose(fresh ? "session replacement" : "session tree/cwd replacement");
+		}
 		lastCtx = ctx;
 		if (fresh || !state || !config) {
 			config = loadConfig(ctx.cwd);
@@ -156,7 +180,9 @@ export default function guard(pi: ExtensionAPI) {
 		try { state.classifierLabel = classifierModel(ctx)?.id ?? null; } catch { state.classifierLabel = null; }
 		runtime = new GuardRuntime({
 			policy: toPolicyState(state, effectiveConfig(), ctx.cwd, ctx.hasUI), detection: state.sandbox ?? detectSandboxMode(),
-			onLock: (reason) => { if (state) { lockWorkspace(state, reason); updateFooter(ctx); } },
+			// Audit locking advances the epoch without the central transition
+			// wrapper, so invalidation happens here, synchronously in the callback.
+			onLock: (reason) => { dialogs.invalidate("approval expired; the workspace locked"); if (state) { lockWorkspace(state, reason); updateFooter(ctx); } },
 			onWarning: (message) => { updateFooter(ctx); notify(ctx, message, "warning"); },
 			onLockSettled: () => publish(ctx),
 		});
@@ -166,6 +192,7 @@ export default function guard(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => { await startSession(ctx, true); });
 	pi.on("session_tree", async (_event, ctx) => { await startSession(ctx, false); });
 	pi.on("session_shutdown", async () => {
+		dialogs.invalidate("approval expired during shutdown");
 		if (runtime) await runtime.dispose();
 		runtime = null;
 		lastCtx = null;
@@ -214,10 +241,20 @@ export default function guard(pi: ExtensionAPI) {
 		const call: GuardCall = mapped.kind === "sandboxed-exec" && name === "bash" ? { kind: "host-shell", shell: "host-bash", command: String(input.command ?? "") } : mapped;
 		const patch = decision.provenance === "explicit-ask" ? null : effectiveAllowSuggestion(call, policy);
 		const options = ["Allow once", ...(patch ? ["Save for project", "Save for user"] : []), "Deny"];
-		const choice = await ctx.ui.select(`guard: ${name}\n${decision.reason}\n${String(input.command ?? "")}\n${patch ? `Exact rule: ${patch.hostBash?.allow?.join(", ")}\nProject: ${ctx.cwd}/.pi/guard.local.json\nUser: ${homedir()}/.pi/agent/guard.json` : ""}`, options);
+		// The gate holds the UI lease only across pre-display validation, the
+		// selector interaction, and post-answer validation. Persistence and
+		// execution happen after the lease is released, so the transition this
+		// choice triggers cannot cancel its own dialog.
+		const cwd = rt.policy.cwd;
+		const choice = await dialogs.run({ signal }, async (dialogSignal) => {
+			dialogSignal.throwIfAborted();
+			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
+			const answer = await ctx.ui.select(`guard: ${name}\n${decision.reason}\n${String(input.command ?? "")}\n${patch ? `Exact rule: ${patch.hostBash?.allow?.join(", ")}\nProject: ${ctx.cwd}/.pi/guard.local.json\nUser: ${homedir()}/.pi/agent/guard.json` : ""}`, options, { signal: dialogSignal });
+			dialogSignal.throwIfAborted();
+			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
+			return answer;
+		});
 		assertCallActive(signal);
-		if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw new Error("guard: approval expired; nothing saved or executed");
-		rt.assertAvailable();
 		if (choice === "Allow once") return epoch;
 		if (patch && (choice === "Save for project" || choice === "Save for user")) {
 			// Recheck the complete hypothetical merge immediately before persistence.
@@ -297,12 +334,21 @@ export default function guard(pi: ExtensionAPI) {
 		if (signal?.aborted) return { ...data, diagnostic: "No read grant: call aborted." };
 		if (!ctx.hasUI) return data;
 		const epoch = rt.epoch;
+		const cwd = rt.policy.cwd;
 		try {
 			rt.assertAvailable();
 			const root = validateReadGrant(readGrantSuggestion(data.permissionPath, ctx.cwd), ctx.cwd);
-			const choice = await ctx.ui.select(`guard: ${name} requests read-only access to ${root}. Granting discards worker state; code is never replayed.`, ["Grant for session", "Save for project", "Save for user", "Deny"]);
+			const title = `guard: ${name} requests read-only access to ${root}. Granting discards worker state; code is never replayed.`;
+			// Same narrow lease as approvals: validation, selector, validation.
+			const choice = await dialogs.run({ signal }, async (dialogSignal) => {
+				dialogSignal.throwIfAborted();
+				assertDialogCurrent(rt, epoch, ctx, cwd, "Read grant expired; nothing saved or replayed.");
+				const answer = await ctx.ui.select(title, ["Grant for session", "Save for project", "Save for user", "Deny"], { signal: dialogSignal });
+				dialogSignal.throwIfAborted();
+				assertDialogCurrent(rt, epoch, ctx, cwd, "Read grant expired; nothing saved or replayed.");
+				return answer;
+			});
 			assertCallActive(signal);
-			if (rt !== runtime || rt.epoch !== epoch || rt.teardownFailure) return { ...data, diagnostic: "Read grant expired; nothing saved or replayed." };
 			if (choice !== "Grant for session" && choice !== "Save for project" && choice !== "Save for user") return data;
 			rt.assertAvailable();
 			validateReadGrant(root, ctx.cwd);
@@ -402,7 +448,24 @@ export default function guard(pi: ExtensionAPI) {
 		if (allowed.length === 0) { notify(ctx, `Profile (this session): ${current} (no other profile is allowed)`); return; }
 		const rt = runtime;
 		const epoch = rt?.epoch;
-		const choice = await ctx.ui.select("Guard profile (this session):", [current, ...allowed]);
+		const cwd = rt?.policy.cwd;
+		let choice: string | undefined;
+		try {
+			// Command dialogs share the approval gate: a queued or open picker
+			// must not replace or be replaced by a permission prompt.
+			choice = await dialogs.run({}, async (dialogSignal) => {
+				dialogSignal.throwIfAborted();
+				if (!rt) throw new Error("guard: profile selection expired after a session/policy change.");
+				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: profile selection expired after a session/policy change.");
+				const answer = await ctx.ui.select("Guard profile (this session):", [current, ...allowed], { signal: dialogSignal });
+				dialogSignal.throwIfAborted();
+				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: profile selection expired after a session/policy change.");
+				return answer;
+			});
+		} catch (err) {
+			notify(ctx, /expired/.test(String(err)) ? "guard: profile selection expired after a session/policy change." : "guard: profile selection cancelled.", "warning");
+			return;
+		}
 		if (rt !== runtime || epoch !== runtime?.epoch) { notify(ctx, "guard: profile selection expired after a session/policy change.", "warning"); return; }
 		if (choice && isProfile(choice)) await applyProfile(choice, ctx);
 	}
@@ -414,7 +477,25 @@ export default function guard(pi: ExtensionAPI) {
 		const diskConfig = loadConfig(ctx.cwd);
 		const rt = runtime;
 		const epoch = rt?.epoch;
-		const choice = await ctx.ui.select("Write the migration into guard.json (union, never removes)?", ["Write", "Cancel"]);
+		const cwd = rt?.policy.cwd;
+		let choice: string | undefined;
+		try {
+			// The migration confirmation shares the approval gate; headless and
+			// dry runs above never enqueue a dialog.
+			choice = await dialogs.run({}, async (dialogSignal) => {
+				dialogSignal.throwIfAborted();
+				if (!rt) throw new Error("guard: migration expired; nothing was written.");
+				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: migration expired; nothing was written.");
+				const answer = await ctx.ui.select("Write the migration into guard.json (union, never removes)?", ["Write", "Cancel"], { signal: dialogSignal });
+				dialogSignal.throwIfAborted();
+				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: migration expired; nothing was written.");
+				return answer;
+			});
+		} catch (err) {
+			// Expected command-dialog cancellation is a notice, not a rejection.
+			notify(ctx, /expired/.test(String(err)) ? "guard: migration expired; nothing was written." : "guard: migrate cancelled; nothing was written.", "warning");
+			return;
+		}
 		if (choice !== "Write") { notify(ctx, "guard: migrate cancelled; nothing was written."); return; }
 		if (rt !== runtime || epoch !== runtime?.epoch || runtime?.teardownFailure) { notify(ctx, "guard: migration expired; nothing was written.", "warning"); return; }
 		runtime?.assertAvailable();

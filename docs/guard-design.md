@@ -234,11 +234,41 @@ Holes, verified 2026-10-02:
   saving is offered only if the merged patch authorizes the whole call.
   Show the exact rule/destination and never remove ask/deny rules. Cancel
   stale approvals without execution or persistence. Headless prompts deny.
-  Dialog-UX parity items pi-tool-permissions had (concurrent-dialog mutex,
-  hiding the working spinner, the ctrl+] hideable overlay, edit-before-save,
-  deny-rule saving and steer, herdr signaling, breakdown rendering) are not
-  specified here; they are tracked as pending work in the root TODO.md guard
-  section and must land by the step 6 switchover.
+  Dialog-UX parity items pi-tool-permissions had (hiding the working
+  spinner, the ctrl+] hideable overlay, edit-before-save, deny-rule saving
+  and steer, herdr signaling, breakdown rendering) are not specified here;
+  they are tracked as pending work in the root TODO.md guard section and must
+  land by the step 6 switchover. The concurrent-dialog mutex is no longer
+  pending: all four guard dialogs serialize through the guard-owned FIFO gate
+  described below.
+- **Dialog gate (2026-10-08):** one `DialogGate` instance per guard factory
+  serializes execution approvals, read-grant prompts, the profile picker, and
+  the migrate confirmation. Ordering is FIFO among requests that reach the
+  gate; ordering by original tool-call invocation is not promised when
+  asynchronous classification precedes enqueueing. The gate is independent of
+  the execution queue:
+  dialogs never hold it, and already-authorized executor work proceeds while
+  a dialog is open. A caller's AbortSignal removes an aborted queued request
+  promptly and, through the SDK selector's `{ signal }` option, cancels an
+  open selector; the gate never aborts a caller-owned controller and holds
+  the UI lease until the dialog body actually settles (a body that ignores
+  cancellation cannot let a second selector open). An answer that arrives
+  after cancellation is rejected, not applied. Policy transitions (via the
+  central transition wrapper, synchronously before its first await), audit
+  workspace locking (via the runtime's lock callback, since locking advances
+  the epoch outside the wrapper), session/tree/cwd replacement, and shutdown
+  invalidate queued and open dialogs synchronously without awaiting drainage;
+  fresh requests are accepted after the new runtime or policy exists and old
+  requests are never retried, replayed, or transferred. The lease covers only
+  pre-display validation, the selector interaction, and post-answer
+  validation, so a successful save, grant, or profile choice releases the
+  gate before its own transition and cannot cancel itself while other pending
+  dialogs fail closed. Scope is guard-local: unrelated extensions can still
+  open competing selectors, and in RPC mode the remote client decides whether
+  a cancelled dialog's display closes (the SDK sends no cancellation
+  notification). Unresolved-teardown failures are not an invalidation
+  trigger; post-answer availability checks reject answers that arrive after
+  one appears.
 - **Read grants:** guard-owned session/project/user/deny grants are mounted
   read-only. Legacy grants are not mirrored. A grant restarts workers and
   reports state loss, then returns without automatically replaying code.
@@ -737,6 +767,7 @@ remain useful.
 | Bash ask read-root escalation (2026-10-07) | Deliberate omission: bash/host_bash ask dialogs offer no inline read-root grant (pi-tool-permissions did, `extensions/pi-tool-permissions/index.ts:999-1129`). Read roots are granted only via the python/node permission_needed path, where kernel-enforced read-only mounts make the grant meaningful |
 | Annotation fallback (2026-10-07) | A destructive hint wins over a contradictory read-only hint: conflicting self-declared claims classify as remote-write; the rest of the precedence order is unchanged |
 | Built-in lookup hardening (2026-10-07) | Built-in recognition uses explicit own map entries only (`Object.hasOwn`) in both `classifyToolCall` and `isPlanningToolAllowed`: inherited Object.prototype names (`constructor`, `__proto__`) are ordinary custom tools, so they follow the normal annotation/configuration/fallback rules (unannotated or conflicting-hint instances are removed during planning and classified remote-write; adequately read-only annotated instances stay and classify remote-read); no name is reserved or prohibited |
+| Dialog mutex (2026-10-08) | One guard-owned FIFO `DialogGate` per factory (not per dialog kind, runtime, or session) serializes approvals, read grants, the profile picker, and migrate confirmation. A plain promise-chain mutex was rejected as the mechanism: it cannot remove aborted queued requests promptly or cancel open selectors. Cancellation combines the caller's signal with a private per-request signal passed to the SDK selector's `{ signal }` option; policy and lifecycle boundaries invalidate synchronously; the lease spans pre-display validation, the selector, and post-answer validation only. See the Ask dialogs section for the full contract. |
 | Planning eligibility (2026-10-07) | `/plan` filters the ACTIVE set through `isPlanningToolAllowed`: built-in host-shell/local-write removed regardless of hints; built-in read/sandboxed/meta classes stay; everything else needs `readOnlyHint === true && destructiveHint !== true` from a fresh getAllTools lookup; toolClasses overrides create no planning exceptions; input-dependent wrappers qualify only via explicit annotations |
 | Worker capability metadata (2026-10-07) | Conservative static annotations on this repo's tools: web/web_search/Slack reads read-only open-world, session_search read-only closed-domain, guard python/node write-capable open-world (raw profiles expose the host); read-only hints describe intended operations, not the absence of internal caches or index files |
 | Plan narrowing limits (2026-10-07) | Entry-time declaration filtering only, not execution containment: codemode/deferred tools can remain callable, tool_search or another extension can change activation afterwards, nested non-owned calls stay observe-only until step 6, trusted extensions have host privileges, annotations are unverified author hints |
