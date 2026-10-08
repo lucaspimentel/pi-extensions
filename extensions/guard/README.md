@@ -89,7 +89,16 @@ Registration details:
   queued request promptly and cancels an open selector through the SDK's
   `{ signal }` option. The gate never aborts a caller-owned controller, holds
   the UI lease until the dialog body actually settles, and rejects answers
-  that arrive after cancellation. Scope is guard-local: unrelated extensions
+  that arrive after cancellation. The profile picker and migrate confirmation
+  additionally capture the initiating command operation's `ctx.signal` once
+  (a live getter that would return `undefined` or another operation's signal
+  if reread) and honour it through the final synchronous commit: cancellation
+  after selection prevents profile publication and migration writes, including
+  while worker teardown is still pending. Idle commands may have no owning
+  signal; teardown, invalidation, and epoch advancement already begun are not
+  reversed, and a completed synchronous commit is never rolled back. Expected
+  cancellation is a warning notice and a normal return, not an unhandled
+  rejection. Scope is guard-local: unrelated extensions
   can still open competing selectors, and in RPC mode the remote client
   decides whether a cancelled dialog's display closes.
 - Invalidation: policy transitions, audit workspace locking, session/tree/cwd

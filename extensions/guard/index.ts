@@ -145,7 +145,7 @@ export default function guard(pi: ExtensionAPI) {
 		const { warnings: _warnings, ...policy } = cfg as ResolvedGuardConfig & { warnings?: string[] };
 		return JSON.stringify(policy);
 	}
-	async function transition(next: GuardSessionState, cfg: ResolvedGuardConfig, ctx: ExtensionContext, persistence?: { epoch: number; beforeCommit: () => ResolvedGuardConfig }): Promise<void> {
+	async function transition(next: GuardSessionState, cfg: ResolvedGuardConfig, ctx: ExtensionContext, persistence?: { epoch: number; beforeCommit: () => ResolvedGuardConfig }, commandGuard?: { epoch: number; check: () => void }): Promise<void> {
 		if (!runtime) throw new Error("guard session state not initialized");
 		// A policy boundary invalidates every queued or open dialog
 		// synchronously, before the first await. A dialog that produced this
@@ -165,9 +165,13 @@ export default function guard(pi: ExtensionAPI) {
 		}, () => {
 			if (rt !== runtime || state !== baseState) throw new Error("guard: stale policy transition; retry the request");
 		}, persistence ? { preempt: true, invalidateWorkers: true, expectedEpoch: persistence.epoch, beforeCommit: () => {
+			// Command-only final commit guard: recheck the captured owner signal
+			// after all asynchronous teardown, immediately before persistence or
+			// policy assignment. Never a general cancellation framework.
+			commandGuard?.check();
 			committedConfig = persistence.beforeCommit();
 			return toPolicyState(next, { ...committedConfig, readRoots: [...new Set([...committedConfig.readRoots, ...sessionReadRoots])] }, ctx.cwd, ctx.hasUI);
-		} } : undefined);
+		} } : commandGuard ? { expectedEpoch: commandGuard.epoch, beforeCommit: commandGuard.check } : undefined);
 	}
 
 	async function startSession(ctx: ExtensionContext, fresh: boolean): Promise<void> {
@@ -239,6 +243,24 @@ export default function guard(pi: ExtensionAPI) {
 
 	function assertCallActive(signal?: AbortSignal): void {
 		if (signal?.aborted) throw new Error("guard: call aborted; nothing saved or executed");
+	}
+	/**
+	 * Ownership of one interactive command operation (profile picker, migrate
+	 * confirmation). The initiating context's signal is captured once: it is a
+	 * live getter that later returns the current agent operation's signal or
+	 * undefined when idle, so rereading it after the dialog would transfer or
+	 * drop ownership, and an operation that began without a signal must never
+	 * attach itself to a later one. The cancelled marker is a per-operation
+	 * Error instance: only identity against it classifies a failure as
+	 * expected command cancellation, never a signal that merely happens to be
+	 * aborted at the same time as a genuine failure.
+	 */
+	interface CommandOwnership {
+		signal: AbortSignal | undefined;
+		cancelled: Error;
+	}
+	function assertOwnerLive(ownership: CommandOwnership): void {
+		if (ownership.signal?.aborted) throw ownership.cancelled;
 	}
 	/** Return an epoch-bound once token. Never hold the runtime queue in a dialog. */
 	async function authorize(rt: GuardRuntime, name: OwnedExecutor, input: Record<string, unknown>, ctx: ExtensionContext, signal?: AbortSignal): Promise<number> {
@@ -449,13 +471,26 @@ export default function guard(pi: ExtensionAPI) {
 		pi.events.emit("guard:child-contract-ack", { version: 1, ok: true, nonce: request.nonce as string, inherited: inheritedContract.profile, profile: state.profile });
 	});
 
-	async function applyProfile(profile: Profile, ctx: ExtensionContext): Promise<void> {
+	async function applyProfile(profile: Profile, ctx: ExtensionContext, ownership?: CommandOwnership): Promise<void> {
 		if (!state || !config) { notify(ctx, "guard: no active session state yet.", "warning"); return; }
 		const next = { ...state };
 		const result = setProfile(next, profile);
 		if (!result.ok) { notify(ctx, result.notice, "warning"); return; }
-		try { await transition(next, config, ctx); notify(ctx, `Profile: ${profile} (this session only)`); }
-		catch (err) { notify(ctx, `guard: profile transition failed: ${String(err)}`, "warning"); }
+		// Picker-originated transitions carry a command-only final commit guard:
+		// the captured owner signal is rechecked inside the runtime queue, after
+		// any asynchronous teardown and before policy assignment or publication.
+		// Direct profile commands and the cycle shortcut pass no guard and behave
+		// exactly as before.
+		const epoch = runtime?.epoch;
+		const commandGuard = ownership && epoch !== undefined ? { epoch, check: () => assertOwnerLive(ownership) } : undefined;
+		try {
+			await transition(next, config, ctx, undefined, commandGuard);
+			notify(ctx, `Profile: ${profile} (this session only)`);
+		}
+		catch (err) {
+			if (ownership && err === ownership.cancelled) { notify(ctx, ownership.cancelled.message, "warning"); return; }
+			notify(ctx, `guard: profile transition failed: ${String(err)}`, "warning");
+		}
 	}
 	async function pickProfile(ctx: ExtensionContext): Promise<void> {
 		const current = state?.profile ?? "default";
@@ -466,11 +501,15 @@ export default function guard(pi: ExtensionAPI) {
 		const rt = runtime;
 		const epoch = rt?.epoch;
 		const cwd = rt?.policy.cwd;
+		// Capture the owning operation's signal once, before any await: the
+		// SDK's ctx.signal is a live getter that would return undefined or
+		// another operation's signal if reread after the dialog.
+		const ownership: CommandOwnership = { signal: ctx.signal, cancelled: new Error("guard: profile selection cancelled; profile unchanged.") };
 		let choice: string | undefined;
 		try {
 			// Command dialogs share the approval gate: a queued or open picker
 			// must not replace or be replaced by a permission prompt.
-			choice = await dialogs.run({}, async (dialogSignal) => {
+			choice = await dialogs.run({ signal: ownership.signal }, async (dialogSignal) => {
 				dialogSignal.throwIfAborted();
 				if (!rt) throw new Error("guard: profile selection expired after a session/policy change.");
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: profile selection expired after a session/policy change.");
@@ -484,7 +523,10 @@ export default function guard(pi: ExtensionAPI) {
 			return;
 		}
 		if (rt !== runtime || epoch !== runtime?.epoch) { notify(ctx, "guard: profile selection expired after a session/policy change.", "warning"); return; }
-		if (choice && isProfile(choice)) await applyProfile(choice, ctx);
+		if (choice && isProfile(choice)) {
+			if (ownership.signal?.aborted) { notify(ctx, ownership.cancelled.message, "warning"); return; }
+			await applyProfile(choice, ctx, ownership);
+		}
 	}
 	async function migrate(ctx: ExtensionCommandContext, dry: boolean): Promise<void> {
 		const report = computeMigration(homedir(), ctx.cwd);
@@ -495,11 +537,15 @@ export default function guard(pi: ExtensionAPI) {
 		const rt = runtime;
 		const epoch = rt?.epoch;
 		const cwd = rt?.policy.cwd;
+		// Capture the owning operation's signal once, before any await: the
+		// SDK's ctx.signal is a live getter that would return undefined or
+		// another operation's signal if reread after the dialog.
+		const ownership: CommandOwnership = { signal: ctx.signal, cancelled: new Error("guard: migrate cancelled; nothing was written.") };
 		let choice: string | undefined;
 		try {
 			// The migration confirmation shares the approval gate; headless and
 			// dry runs above never enqueue a dialog.
-			choice = await dialogs.run({}, async (dialogSignal) => {
+			choice = await dialogs.run({ signal: ownership.signal }, async (dialogSignal) => {
 				dialogSignal.throwIfAborted();
 				if (!rt) throw new Error("guard: migration expired; nothing was written.");
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: migration expired; nothing was written.");
@@ -517,23 +563,37 @@ export default function guard(pi: ExtensionAPI) {
 		if (rt !== runtime || epoch !== runtime?.epoch || runtime?.teardownFailure) { notify(ctx, "guard: migration expired; nothing was written.", "warning"); return; }
 		runtime?.assertAvailable();
 		if (!state || !config || !runtime || epoch === undefined) { notify(ctx, "guard: no active session; migration not saved.", "warning"); return; }
+		if (ownership.signal?.aborted) { notify(ctx, ownership.cancelled.message, "warning"); return; }
 		const scopes = (["user", "project"] as const).filter((scope) => report[scope].sourceFound && Object.keys(report[scope].patch).length);
 		if (!scopes.length) { notify(ctx, "guard: migrate: nothing to write."); return; }
 		if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) { notify(ctx, "guard: migration expired after a config change; nothing was written.", "warning"); return; }
 		if (scopes.every((scope) => report[scope].changes === 0)) { notify(ctx, "guard: migrate wrote 0 new entries: already merged; no files or worker state changed. Re-running adds nothing (union with dedupe)."); return; }
 		let added = 0;
 		const written: string[] = [];
-		await transition({ ...state }, diskConfig, ctx, { epoch, beforeCommit: () => {
-			if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; migration not saved");
-			const fresh = computeMigration(homedir(), ctx.cwd);
-			if (JSON.stringify([fresh.user.patch, fresh.project.patch]) !== JSON.stringify([report.user.patch, report.project.patch])) throw new Error("guard: legacy migration sources changed; preview again before saving");
-			for (const scope of scopes) {
-				const result = addToConfigScope(scope, report[scope].patch, { cwd: ctx.cwd });
-				added += result.added;
-				written.push(`${result.path} (+${result.added})`);
-			}
-			return loadConfig(ctx.cwd);
-		} });
+		try {
+			// The final commit guard rechecks the captured owner signal inside the
+			// runtime queue, after any asynchronous teardown and immediately
+			// before the privileged writes in beforeCommit. Genuine persistence
+			// failures keep their existing diagnostic path.
+			await transition({ ...state }, diskConfig, ctx, { epoch, beforeCommit: () => {
+				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; migration not saved");
+				const fresh = computeMigration(homedir(), ctx.cwd);
+				if (JSON.stringify([fresh.user.patch, fresh.project.patch]) !== JSON.stringify([report.user.patch, report.project.patch])) throw new Error("guard: legacy migration sources changed; preview again before saving");
+				for (const scope of scopes) {
+					const result = addToConfigScope(scope, report[scope].patch, { cwd: ctx.cwd });
+					added += result.added;
+					written.push(`${result.path} (+${result.added})`);
+				}
+				return loadConfig(ctx.cwd);
+			} }, { epoch, check: () => assertOwnerLive(ownership) });
+		}
+		catch (err) {
+			// Expected owner cancellation while teardown is pending is a notice,
+			// not an unhandled command rejection; completed writes are never
+			// rolled back.
+			if (err === ownership.cancelled) { notify(ctx, ownership.cancelled.message, "warning"); return; }
+			throw err;
+		}
 		notify(ctx, `guard: migrate wrote ${added} new entr${added === 1 ? "y" : "ies"}:\n${written.join("\n")}\nRe-running adds nothing (union with dedupe).`);
 	}
 	function showList(ctx: ExtensionContext): void {

@@ -254,7 +254,26 @@ Holes, verified 2026-10-02:
   open selector; the gate never aborts a caller-owned controller and holds
   the UI lease until the dialog body actually settles (a body that ignores
   cancellation cannot let a second selector open). An answer that arrives
-  after cancellation is rejected, not applied. Policy transitions (via the
+  after cancellation is rejected, not applied. The profile picker and the
+  migrate confirmation capture the initiating command operation's `ctx.signal`
+  once, before the first await (it is a live getter that returns the current
+  agent operation's signal or `undefined` when idle, so rereading it after the
+  dialog would transfer or drop ownership, and an operation that began without
+  a signal must never attach itself to a later one), pass it to the gate, and
+  recheck it through a command-only final commit guard inside the runtime's
+  existing `beforeCommit` hook with the captured expected epoch: after all
+  asynchronous worker teardown, immediately before runtime policy assignment
+  or profile publication (picker) and immediately before the privileged
+  configuration writes (migration). Cancellation can therefore prevent the
+  requested change even when it lands after selection while teardown is
+  pending. The check is a per-operation `Error` marker compared by identity,
+  so genuine teardown, storage, audit, and source-validation failures keep
+  their existing diagnostics and are never reclassified as cancellation;
+  a signal that merely happens to be aborted proves nothing on its own.
+  Teardown, approval invalidation, epoch advancement, and audit findings
+  already begun are not reversed, workers are never revived, and a completed
+  synchronous commit is never rolled back. Expected cancellation is a warning
+  notice and a normal command return, not an unhandled rejection. Policy transitions (via the
   central transition wrapper, synchronously before its first await), audit
   workspace locking (via the runtime's lock callback, since locking advances
   the epoch outside the wrapper), session/tree/cwd replacement, and shutdown
@@ -770,6 +789,7 @@ remain useful.
 | Built-in lookup hardening (2026-10-07) | Built-in recognition uses explicit own map entries only (`Object.hasOwn`) in both `classifyToolCall` and `isPlanningToolAllowed`: inherited Object.prototype names (`constructor`, `__proto__`) are ordinary custom tools, so they follow the normal annotation/configuration/fallback rules (unannotated or conflicting-hint instances are removed during planning and classified remote-write; adequately read-only annotated instances stay and classify remote-read); no name is reserved or prohibited |
 | Dialog mutex (2026-10-08) | One guard-owned FIFO `DialogGate` per factory (not per dialog kind, runtime, or session) serializes approvals, read grants, the profile picker, and migrate confirmation. A plain promise-chain mutex was rejected as the mechanism: it cannot remove aborted queued requests promptly or cancel open selectors. Cancellation combines the caller's signal with a private per-request signal passed to the SDK selector's `{ signal }` option; policy and lifecycle boundaries invalidate synchronously; the lease spans pre-display validation, the selector, and post-answer validation only. See the Ask dialogs section for the full contract. |
 | Spinner hiding (2026-10-08) | All four admitted TUI selectors hide the working spinner before opening and restore it on every settle path through one TUI-only selector wrapper (`gatedSelect` in `guard/index.ts`); restoration always passes `true` because the UI API has no visibility getter, matching the legacy extension. Visibility failures are caught as presentation-only: they never change authorization, replace a selector result or error, or block gate cleanup. Queued, stale-before-display, headless, and dry requests never toggle visibility, and queued cancellation cannot restore the spinner underneath another open selector. RPC is untouched: its setter is a no-op, so non-TUI modes skip the toggling entirely |
+| Command cancellation through final commit (2026-10-08) | The profile picker and migrate confirmation capture the initiating command operation's `ctx.signal` once (a live SDK getter; rereading after the dialog would return `undefined` or another operation's signal) and pass it to the shared gate, closing the gap where the two command dialogs ran with empty gate options. The captured signal is rechecked through a command-only final commit guard inside the runtime's existing `beforeCommit` hook with the captured expected epoch: after asynchronous teardown, before policy assignment/publication (picker) and before privileged configuration writes (migration), so cancellation during pending teardown prevents the requested change. Classification is by per-operation Error identity only; genuine teardown, storage, audit, and source-validation failures keep their diagnostics. Direct `/guard profile <name>`, profile cycling, reload, ack, approvals, and read grants are unchanged; no rollback of completed commits or started teardown; expected cancellation is a warning notice and a normal return. Suites: `tests/guard-dialogs.test.mts` (registration-level, both commands), `tests/guard-runtime.test.mts` (teardown ordering). |
 | Planning eligibility (2026-10-07) | `/plan` filters the ACTIVE set through `isPlanningToolAllowed`: built-in host-shell/local-write removed regardless of hints; built-in read/sandboxed/meta classes stay; everything else needs `readOnlyHint === true && destructiveHint !== true` from a fresh getAllTools lookup; toolClasses overrides create no planning exceptions; input-dependent wrappers qualify only via explicit annotations |
 | Worker capability metadata (2026-10-07) | Conservative static annotations on this repo's tools: web/web_search/Slack reads read-only open-world, session_search read-only closed-domain, guard python/node write-capable open-world (raw profiles expose the host); read-only hints describe intended operations, not the absence of internal caches or index files |
 | Plan narrowing limits (2026-10-07) | Entry-time declaration filtering only, not execution containment: codemode/deferred tools can remain callable, tool_search or another extension can change activation afterwards, nested non-owned calls stay observe-only until step 6, trusted extensions have host privileges, annotations are unverified author hints |

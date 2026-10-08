@@ -7,13 +7,14 @@
 // through one factory-scoped gate, cancel promptly when their owning
 // operation aborts, and invalidate on policy and lifecycle boundaries.
 // Run: node --test tests/guard-dialogs.test.mts
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import { DialogGate } from "../extensions/guard/dialogs.ts";
+import { GuardRuntime } from "../extensions/guard/runtime.ts";
 import { projectConfigPath } from "../extensions/guard/policy/config.ts";
 import { detectSandboxMode } from "../extensions/guard/sandbox/detect.ts";
 import guardExtension from "../extensions/guard/index.ts";
@@ -230,6 +231,317 @@ const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 function writeAskRule(cwd: string, command: string): void {
 	fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
 	fs.writeFileSync(projectConfigPath(cwd), JSON.stringify({ hostBash: { ask: [`HostBash(${command})`] } }), "utf8");
+}
+
+// ── Command ownership: cancellation through final commit ─────────────────────
+// The profile picker and the migrate confirmation capture the initiating
+// command operation's ctx.signal once (a live SDK getter) and honour it
+// through the final synchronous commit: a cancelled command must not apply a
+// profile or write migration configuration, even when cancellation lands
+// while worker teardown is pending. Expected cancellation is a warning notice
+// and a normal return, never an unhandled rejection.
+
+/** Settable ctx.signal stand-in mirroring the SDK's live getter: reads can
+ * return different values over time, so a command must capture it once. */
+function signalSource(ctx: Record<string, any>, initial?: AbortSignal): { current: AbortSignal | undefined } {
+	const ref: { current: AbortSignal | undefined } = { current: initial };
+	Object.defineProperty(ctx, "signal", {
+		configurable: true,
+		get: () => ref.current,
+		set: (value: AbortSignal | undefined) => { ref.current = value; },
+	});
+	return ref;
+}
+
+/** Legacy project and user configs whose entries would actually be imported.
+ * Must run while the temporary HOME override is active. */
+function writeLegacyFixtures(cwd: string): void {
+	fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "pi-tool-permissions.local.json"), JSON.stringify({ allow: ["Bash(echo imported)"] }), "utf8");
+	fs.mkdirSync(path.join(process.env.HOME!, ".pi", "agent"), { recursive: true });
+	fs.writeFileSync(path.join(process.env.HOME!, ".pi", "agent", "pi-tool-permissions.json"), JSON.stringify({ allow: ["Bash(echo home-imported)"] }), "utf8");
+}
+
+/** Clean only the fixture directories created by one test (including its
+ * temporary HOME); the suite-wide tempDirs repair is a separate follow-up. */
+function cleanupNewFixtures(t: TestContext): void {
+	const start = tempDirs.length;
+	t.after(() => {
+		for (const dir of tempDirs.splice(start)) fs.rmSync(dir, { recursive: true, force: true });
+	});
+}
+
+/** withTempHome plus per-test cleanup of the fixture directories the test
+ * body and the temporary HOME itself create. */
+function withCleanTempHome(t: TestContext, fn: () => Promise<void>): Promise<void> {
+	cleanupNewFixtures(t);
+	return withTempHome(fn);
+}
+
+/** Byte snapshot of the two guard.json scopes: absent stays absent and
+ * existing files must remain byte-for-byte unchanged. */
+function snapshotScopes(cwd: string): { user: string | null; project: string | null } {
+	const read = (p: string): string | null => (fs.existsSync(p) ? fs.readFileSync(p, "utf8") : null);
+	return {
+		user: read(path.join(process.env.HOME!, ".pi", "agent", "guard.json")),
+		project: read(projectConfigPath(cwd)),
+	};
+}
+
+/** One harness with a started session; for migrate, legacy fixtures whose
+ * entries would actually be imported in both scopes, plus a scope snapshot
+ * taken before the command runs. */
+async function commandHarness(kind: "profile" | "migrate", prepare?: (cwd: string) => void): Promise<{ h: Harness; cwd: string; ctx: Record<string, any>; before: { user: string | null; project: string | null } | null }> {
+	const h = makeHarness();
+	const cwd = makeTempDir(`guard-dialogs-${kind}-owner-`);
+	prepare?.(cwd);
+	const ctx = harnessCtx(h, cwd);
+	if (kind === "migrate") writeLegacyFixtures(cwd);
+	await startSession(h, ctx);
+	return { h, cwd, ctx, before: kind === "migrate" ? snapshotScopes(cwd) : null };
+}
+
+/** No success publication and no mutation of either configuration scope:
+ * absent files remain absent, existing files remain byte-for-byte unchanged. */
+function assertNoMutation(kind: "profile" | "migrate", h: Harness, cwd: string, before: { user: string | null; project: string | null } | null): void {
+	assert.ok(!h.notifications.some((n) => kind === "profile" ? /Profile: /.test(n) : /migrate wrote/.test(n)), "no success publication");
+	if (kind === "profile") {
+		assert.doesNotMatch(h.status.get("guard") ?? "", /auto/, "the profile did not change");
+	} else {
+		const after = snapshotScopes(cwd);
+		assert.equal(after.project, before!.project, "the project scope is byte-for-byte unchanged");
+		assert.equal(after.user, before!.user, "the user scope is byte-for-byte unchanged");
+	}
+}
+
+/** The requested change was applied and published. */
+function assertMutationApplied(kind: "profile" | "migrate", h: Harness, cwd: string): void {
+	if (kind === "profile") {
+		assert.ok(h.notifications.some((n) => /Profile: auto/.test(n)), "the profile was applied");
+	} else {
+		const project = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
+		assert.deepEqual(project.hostBash?.allow, ["HostBash(echo imported)"], "the project scope was written");
+		const user = JSON.parse(fs.readFileSync(path.join(process.env.HOME!, ".pi", "agent", "guard.json"), "utf8")) as { hostBash?: { allow?: string[] } };
+		assert.deepEqual(user.hostBash?.allow, ["HostBash(echo home-imported)"], "the user scope was written");
+	}
+}
+
+/** Test-only injection at guard's own public GuardRuntime.transition
+ * boundary: wrap the original method, keep the real transition execution,
+ * and restore the wrapper in finally. Never patches SDK internals. */
+function wrapTransition(replace: (original: typeof GuardRuntime.prototype.transition) => typeof GuardRuntime.prototype.transition): () => void {
+	const original = GuardRuntime.prototype.transition;
+	(GuardRuntime.prototype as { transition: typeof original }).transition = replace(original);
+	return () => { (GuardRuntime.prototype as { transition: typeof original }).transition = original; };
+}
+
+for (const kind of ["profile", "migrate"] as const) {
+	const answer = kind === "profile" ? "auto" : "Write";
+	const cancelled = kind === "profile" ? /profile selection cancelled/ : /migrate cancelled/;
+	const handler = (h: Harness) => h.commandHandlers.get("guard")!;
+
+	test(`a pre-aborted ${kind} command never opens its selector and never applies its change`, (t) => withCleanTempHome(t, async () => {
+		const { h, cwd, ctx, before } = await commandHarness(kind);
+		const owner = new AbortController();
+		signalSource(ctx, owner.signal);
+		owner.abort();
+		const selector = installSelector(ctx);
+		await handler(h)(kind, ctx);
+		assert.equal(selector.opened.length, 0, "no selector was displayed");
+		assert.ok(h.notifications.some((n) => cancelled.test(n)), "normal return with a cancellation notice");
+		assertNoMutation(kind, h, cwd, before);
+	}));
+
+	test(`a queued ${kind} command aborts promptly behind an open approval and never displays its selector`, (t) => withCleanTempHome(t, async () => {
+		const { h, cwd, ctx, before } = await commandHarness(kind, (c) => writeAskRule(c, "echo asked"));
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const approval = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void approval.catch(() => {});
+		await selector.waitFor(1);
+		const beforeCommand = log.length; // the approval's own hide is already recorded
+		const owner = new AbortController();
+		signalSource(ctx, owner.signal);
+		const command = handler(h)(kind, ctx);
+		await tick();
+		await tick();
+		assert.equal(selector.opened.length, 1, "the command's dialog stayed queued");
+		owner.abort();
+		await command;
+		assert.ok(h.notifications.some((n) => cancelled.test(n)), "normal return with a cancellation notice");
+		assert.equal(selector.opened.length, 1, "the queued selector was never displayed");
+		assert.equal(selector.currentlyOpen(), 1, "the open approval is unaffected");
+		assert.deepEqual(log.slice(beforeCommand), [], "queued cancellation never toggles visibility or opens a selector");
+		selector.answer("Allow once");
+		await approval;
+		assertNoMutation(kind, h, cwd, before);
+	}));
+
+	test(`aborting an open ${kind} dialog settles the command normally with a cancellation notice`, (t) => withCleanTempHome(t, async () => {
+		const { h, cwd, ctx, before } = await commandHarness(kind);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const owner = new AbortController();
+		signalSource(ctx, owner.signal);
+		const command = handler(h)(kind, ctx);
+		await selector.waitFor(1);
+		assert.match(selector.opened[0], kind === "profile" ? /Guard profile/ : /migration/, "the dialog opened");
+		assert.deepEqual(log, ["visible:false", "open"], "the spinner is hidden while the dialog is open");
+		// Allowed executor work stays independent of the pending dialog.
+		const allowed = await h.registeredTools.get("bash")!.execute("id", { command: "echo ok" }, undefined, undefined, ctx);
+		assert.match(String(allowed.structuredContent.output), /ok/, "allowed executor work does not wait for the command dialog");
+		owner.abort();
+		await command;
+		assert.ok(h.notifications.some((n) => cancelled.test(n)), "normal return with a cancellation notice");
+		assert.equal(selector.currentlyOpen(), 0, "the selector closed through its private cancellation signal");
+		assert.deepEqual(log, ["visible:false", "open", "close", "visible:true"], "spinner visibility was restored exactly once");
+		assertNoMutation(kind, h, cwd, before);
+	}));
+
+	test(`a late ${kind} answer that ignores cancellation is never applied`, (t) => withCleanTempHome(t, async () => {
+		const { h, cwd, ctx, before } = await commandHarness(kind);
+		const log: string[] = [];
+		installSelector(ctx, log);
+		// A selector that deliberately ignores abort: it settles only when
+		// answered, like a remote client that never observes cancellation.
+		let lateAnswer!: (value: string | undefined) => void;
+		(ctx.ui as Record<string, unknown>).select = (_title: string, _options: string[]) => new Promise<string | undefined>((resolve) => { lateAnswer = resolve; });
+		const owner = new AbortController();
+		signalSource(ctx, owner.signal);
+		const command = handler(h)(kind, ctx);
+		await tick();
+		await tick();
+		owner.abort();
+		await tick();
+		assert.deepEqual(log.filter((entry) => entry.startsWith("visible")), ["visible:false"], "the lease and hidden spinner are retained while the selector ignores cancellation");
+		lateAnswer(answer);
+		await command;
+		assert.ok(h.notifications.some((n) => cancelled.test(n)), "the obsolete answer is not applied and the command returns normally");
+		assert.deepEqual(log.filter((entry) => entry.startsWith("visible")), ["visible:false", "visible:true"], "visibility is restored once the ignoring selector actually settles");
+		assertNoMutation(kind, h, cwd, before);
+	}));
+
+	test(`changing ctx.signal mid-flight cannot transfer ${kind} ownership`, (t) => withCleanTempHome(t, async () => {
+		const { h, cwd, ctx, before } = await commandHarness(kind);
+		const selector = installSelector(ctx);
+		const first = new AbortController();
+		const second = new AbortController();
+		const ref = signalSource(ctx, first.signal);
+		const command = handler(h)(kind, ctx);
+		await selector.waitFor(1);
+		ref.current = undefined;
+		ref.current = second.signal;
+		first.abort();
+		await command;
+		assert.ok(h.notifications.some((n) => cancelled.test(n)), "cancellation still follows the captured signal");
+		assert.equal(second.signal.aborted, false, "the later operation's signal was never adopted or aborted");
+		assertNoMutation(kind, h, cwd, before);
+	}));
+
+	test(`an initially undefined signal never binds a ${kind} command to a later operation`, (t) => withCleanTempHome(t, async () => {
+		const { h, cwd, ctx } = await commandHarness(kind);
+		const selector = installSelector(ctx);
+		const later = new AbortController();
+		const ref = signalSource(ctx, undefined);
+		const command = handler(h)(kind, ctx);
+		await selector.waitFor(1);
+		ref.current = later.signal;
+		later.abort();
+		await tick();
+		assert.equal(selector.currentlyOpen(), 1, "the dialog is not cancelled by a signal it never captured");
+		selector.answer(answer);
+		await command;
+		assert.ok(!h.notifications.some((n) => cancelled.test(n)), "the command was never bound to the later signal");
+		assertMutationApplied(kind, h, cwd);
+	}));
+
+	test(`cancelling a ${kind} command after its answer prevents the final commit while teardown is pending`, (t) => withCleanTempHome(t, async () => {
+		const { h, cwd, ctx, before } = await commandHarness(kind);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const owner = new AbortController();
+		signalSource(ctx, owner.signal);
+		// Abort the captured owner immediately before the original beforeCommit
+		// callback runs, simulating cancellation that lands after selection and
+		// inside pending teardown.
+		const restore = wrapTransition((original) => function (this: GuardRuntime, policy, detection, commit, validate, options) {
+			const wrapped = options?.beforeCommit ? { ...options, beforeCommit: () => { owner.abort(); return options.beforeCommit(); } } : options;
+			return original.call(this, policy, detection, commit, validate, wrapped);
+		});
+		try {
+			const command = handler(h)(kind, ctx);
+			await selector.waitFor(1);
+			assert.deepEqual(log, ["visible:false", "open"], "the dialog opened");
+			selector.answer(answer);
+			await command;
+			assert.ok(h.notifications.some((n) => cancelled.test(n)), "expected cancellation is a notice, not an unhandled rejection");
+			assert.equal(selector.currentlyOpen(), 0, "the selector closed before the final commit");
+			assert.deepEqual(log, ["visible:false", "open", "close", "visible:true"], "spinner visibility was restored when the dialog settled");
+			assertNoMutation(kind, h, cwd, before);
+		} finally { restore(); }
+		// A fresh command with its own fresh operation signal still succeeds.
+		signalSource(ctx, new AbortController().signal);
+		if (kind === "profile") {
+			await handler(h)("profile auto", ctx);
+			assert.ok(h.notifications.some((n) => /Profile: auto/.test(n)), "a fresh direct profile command succeeds");
+		} else {
+			const fresh = handler(h)("migrate", ctx);
+			await selector.waitFor(2);
+			selector.answer("Write");
+			await fresh;
+			assert.ok(h.notifications.some((n) => /migrate wrote 2 new entries/.test(n)), "a fresh migration still writes both scopes");
+		}
+	}));
+
+	test(`aborting a ${kind} command at commit time does not undo the completed commit`, (t) => withCleanTempHome(t, async () => {
+		const { h, cwd, ctx } = await commandHarness(kind);
+		const selector = installSelector(ctx);
+		const owner = new AbortController();
+		signalSource(ctx, owner.signal);
+		// Abort the owner inside the commit callback: after the writes and the
+		// policy assignment, before the command settles.
+		const restore = wrapTransition((original) => function (this: GuardRuntime, policy, detection, commit, validate, options) {
+			const wrappedCommit = commit ? () => { commit(); owner.abort(); } : undefined;
+			return original.call(this, policy, detection, wrappedCommit, validate, options);
+		});
+		try {
+			const command = handler(h)(kind, ctx);
+			await selector.waitFor(1);
+			selector.answer(answer);
+			await command;
+			assertMutationApplied(kind, h, cwd);
+		} finally { restore(); }
+		// Aborting afterwards is inert: no rejection, no state change.
+		owner.abort();
+		await tick();
+		assertMutationApplied(kind, h, cwd);
+	}));
+
+	test(`a settled ${kind} owner cannot cancel a fresh dialog`, (t) => withCleanTempHome(t, async () => {
+		const { h, cwd, ctx } = await commandHarness(kind);
+		const selector = installSelector(ctx);
+		const stale = new AbortController();
+		signalSource(ctx, stale.signal);
+		const first = handler(h)(kind, ctx);
+		await selector.waitFor(1);
+		selector.answer(answer);
+		await first;
+		assertMutationApplied(kind, h, cwd);
+		// A fresh command with a fresh owner must not be affected when the
+		// settled first owner's signal aborts.
+		const fresh = new AbortController();
+		signalSource(ctx, fresh.signal);
+		const second = handler(h)(kind, ctx);
+		await selector.waitFor(2);
+		stale.abort();
+		await tick();
+		assert.equal(selector.currentlyOpen(), 1, "the fresh dialog stays open");
+		assert.equal(fresh.signal.aborted, false, "the fresh owner is unaffected");
+		selector.answer(kind === "profile" ? "default" : "Write");
+		await second;
+		assert.ok(h.notifications.some((n) => /migrate wrote/.test(n)) || kind === "profile", "the fresh command completes");
+		if (kind === "profile") assert.ok(h.notifications.some((n) => /Profile: default/.test(n)), "the fresh profile change applied");
+	}));
 }
 
 // ── Public gate tests ────────────────────────────────────────────────────────

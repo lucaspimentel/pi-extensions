@@ -281,3 +281,77 @@ test("read grants reject hard exclusions and their covering directories", (t) =>
 	t.after(() => rmSync(external, { recursive: true, force: true }));
 	assert.equal(validateReadGrant(external, "/different-workspace", home), external);
 });
+
+// ── Command cancellation through final commit ────────────────────────────────
+// The profile picker and migrate confirmation capture the initiating command
+// operation's signal and recheck it inside the runtime queue through a
+// command-only beforeCommit guard: cancellation that lands while teardown is
+// pending must prevent the commit, without touching genuine failure paths.
+
+test("a command cancellation guard runs after teardown and before policy assignment", async (t) => {
+	const { runtime, policy } = setup(t);
+	const started = deferred();
+	const stopped = deferred();
+	const exited = deferred();
+	const active = runtime.run(allow, async (ctx) => {
+		ctx.setTeardown(async () => { stopped.resolve(); await exited.promise; });
+		started.resolve();
+		await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve(), { once: true }));
+	});
+	await started.promise;
+	const owner = new AbortController();
+	const cancelled = new Error("guard: command cancelled; nothing was changed.");
+	let published = false;
+	// Same shape guard's picker passes for picker-originated transitions:
+	// expectedEpoch plus a command-only beforeCommit guard.
+	const saving = runtime.transition({ ...policy, profile: "research" }, detection, () => { published = true; }, undefined, {
+		expectedEpoch: runtime.epoch,
+		beforeCommit: () => { if (owner.signal.aborted) throw cancelled; },
+	});
+	void saving.catch(() => {});
+	await stopped.promise;
+	owner.abort();
+	exited.resolve();
+	await active;
+	const failure = await saving.catch((err: unknown) => err);
+	assert.equal(failure, cancelled, "the owner's cancellation marker surfaces only after teardown finished");
+	assert.equal(published, false, "the commit callback never ran");
+	assert.equal(runtime.policy.profile, "default", "policy was never assigned");
+	// Started teardown finished; the runtime is usable and nothing was resurrected.
+	await runtime.run(allow, async () => {});
+	assert.equal(runtime.policy.profile, "default");
+});
+
+test("a teardown failure stays sticky even when the command owner is cancelled", async (t) => {
+	const { runtime, policy } = setup(t);
+	const started = deferred();
+	const active = runtime.run(allow, async (ctx) => {
+		ctx.setTeardown(async () => { throw new Error("kill failed"); });
+		started.resolve();
+		await new Promise<void>(() => {});
+	}).catch(() => {});
+	await started.promise;
+	const owner = new AbortController();
+	const cancelled = new Error("guard: command cancelled; nothing was changed.");
+	const saving = runtime.transition({ ...policy, profile: "research" }, detection, undefined, undefined, {
+		expectedEpoch: runtime.epoch,
+		beforeCommit: () => { if (owner.signal.aborted) throw cancelled; },
+	});
+	owner.abort();
+	const failure = await saving.catch((err: unknown) => err);
+	assert.notEqual(failure, cancelled, "cancellation must not swallow a genuine teardown failure");
+	assert.match(String(failure), /unresolved teardown/, "the sticky teardown diagnostic is preserved");
+	assert.equal(runtime.policy.profile, "default");
+	assert.equal(existsSync(runtime.scratchDir), true);
+	void active;
+});
+
+test("aborting the owner after a completed commit leaves the committed policy in place", async (t) => {
+	const { runtime, policy } = setup(t);
+	const owner = new AbortController();
+	await runtime.transition({ ...policy, profile: "research" });
+	owner.abort();
+	assert.equal(runtime.policy.profile, "research", "the completed synchronous commit is not rolled back");
+	// The runtime stays usable; no workers were resurrected.
+	await runtime.run(allow, async () => {});
+});
