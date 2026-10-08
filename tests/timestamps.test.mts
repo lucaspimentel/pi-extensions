@@ -13,7 +13,7 @@ import timestampsExtension from "../extensions/timestamps/index.ts";
 import {
 	formatAbsolute,
 	formatDelta,
-	formatElapsed,
+	formatDuration,
 	formatResultLine,
 } from "../extensions/timestamps/format.ts";
 
@@ -121,25 +121,23 @@ test("formatDelta switches units at 60s and 1h", () => {
 	assert.equal(formatDelta(3723000), "+1:02:03");
 });
 
-test("formatElapsed uses one decimal under 10s and adaptive units above", () => {
-	assert.equal(formatElapsed(2100, false), "ran 2.1s");
-	assert.equal(formatElapsed(9950, false), "ran 9.9s");
-	assert.equal(formatElapsed(10000, false), "ran 10s");
-	assert.equal(formatElapsed(14000, false), "ran 14s");
-	assert.equal(formatElapsed(59900, false), "ran 59s");
-	assert.equal(formatElapsed(74000, false), "ran 1m14s");
-	assert.equal(formatElapsed(3723000, false), "ran 1:02:03");
+test("formatDuration uses one decimal under 10s and adaptive units above", () => {
+	assert.equal(formatDuration(2100), "2.1s");
+	assert.equal(formatDuration(9950), "9.9s");
+	assert.equal(formatDuration(10000), "10s");
+	assert.equal(formatDuration(14000), "14s");
+	assert.equal(formatDuration(59900), "59s");
+	assert.equal(formatDuration(74000), "1m14s");
+	assert.equal(formatDuration(3723000), "1:02:03");
 });
 
-test("formatElapsed appends an ellipsis while running", () => {
-	assert.equal(formatElapsed(7200, true), "ran 7.2s\u2026");
-	assert.equal(formatElapsed(7200, false), "ran 7.2s");
-});
-
-test("formatResultLine renders the ended line", () => {
+test("formatResultLine prefixes the duration only when included and known", () => {
 	const now = new Date(2026, 9, 8, 15, 0, 0).getTime();
 	const end = new Date(2026, 9, 8, 14, 32, 7).getTime();
-	assert.equal(formatResultLine(end, now), "ended 14:32:07");
+	assert.equal(formatResultLine(2100, end, now, true), "ran 2.1s  ended 14:32:07");
+	assert.equal(formatResultLine(2100, end, now, false), "ended 14:32:07");
+	assert.equal(formatResultLine(undefined, end, now, true), "ended 14:32:07");
+	assert.equal(formatResultLine(undefined, end, now, false), "ended 14:32:07");
 });
 
 // ── Resolver wiring ───────────────────────────────────────────────────────────
@@ -175,7 +173,7 @@ test("call line is omitted entirely when the call id is unknown", () => {
 test("live call renders absolute, delta, and running elapsed", () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
-	const wrapped = loaded.resolver("bash", () => base.renderers);
+	const wrapped = loaded.resolver("read", () => base.renderers);
 
 	const userTs = Date.now() - 3000;
 	loaded.handler("message_end")!({ type: "message_end", message: { role: "user", timestamp: userTs } });
@@ -186,17 +184,17 @@ test("live call renders absolute, delta, and running elapsed", () => {
 	assert.match(tsLine!, /^\s*⟨dim⟩\d\d:\d\d:\d\d  \+3s  ran \d+\.\ds…⟨\/role⟩$/);
 });
 
-test("completed call shows elapsed from durationMs without the running suffix", () => {
+test("completed call line drops the ran segment; the duration moves to the result line", () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
-	const wrapped = loaded.resolver("bash", () => base.renderers);
+	const wrapped = loaded.resolver("read", () => base.renderers);
 
 	loaded.handler("message_end")!({ type: "message_end", message: { role: "user", timestamp: Date.now() - 10_000 } });
-	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "c2", toolName: "bash", args: {} });
+	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "c2", toolName: "read", args: {} });
 	loaded.handler("tool_execution_end")!({
 		type: "tool_execution_end",
 		toolCallId: "c2",
-		toolName: "bash",
+		toolName: "read",
 		result: {},
 		isError: false,
 		durationMs: 2100,
@@ -204,8 +202,48 @@ test("completed call shows elapsed from durationMs without the running suffix", 
 
 	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c2"))));
 	assert.ok(tsLine, "no dim timestamp line");
-	assert.match(tsLine!, /ran 2\.1s⟨\/role⟩$/);
+	assert.match(tsLine!, /^\s*⟨dim⟩\d\d:\d\d:\d\d  \+\d+s⟨\/role⟩$/);
+	assert.ok(!tsLine!.includes("ran "), "completed call line must not show the duration");
 	assert.ok(!tsLine!.includes("…"), "completed call must not show the running suffix");
+
+	const resultLine = tsLineOf(
+		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("c2"))),
+	);
+	assert.ok(resultLine, "no dim result line");
+	assert.match(resultLine!, /^\s*⟨dim⟩ran 2\.1s  ended \d\d:\d\d:\d\d⟨\/role⟩$/);
+});
+
+test("shell tools never show the extension's own duration", () => {
+	const loaded = loadExtension();
+	const base = makeBaseRenderers();
+	const wrapped = loaded.resolver("bash", () => base.renderers);
+
+	loaded.handler("message_end")!({ type: "message_end", message: { role: "user", timestamp: Date.now() - 5000 } });
+	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "s1", toolName: "bash", args: {} });
+
+	const running = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("s1"))));
+	assert.ok(running, "no dim line while running");
+	assert.match(running!, /^\s*⟨dim⟩\d\d:\d\d:\d\d  \+\d+s⟨\/role⟩$/);
+	assert.ok(!running!.includes("ran "), "running shell call line must not show the duration");
+
+	loaded.handler("tool_execution_end")!({
+		type: "tool_execution_end",
+		toolCallId: "s1",
+		toolName: "bash",
+		result: {},
+		isError: false,
+		durationMs: 3000,
+	});
+
+	const done = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("s1"))));
+	assert.ok(done, "no dim line when completed");
+	assert.ok(!done!.includes("ran "), "completed shell call line must not show the duration");
+
+	const resultLine = tsLineOf(
+		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("s1"))),
+	);
+	assert.ok(resultLine, "no dim result line");
+	assert.match(resultLine!, /^\s*⟨dim⟩ended \d\d:\d\d:\d\d⟨\/role⟩$/);
 });
 
 // ── Backfill from session history ─────────────────────────────────────────────
@@ -224,7 +262,7 @@ function branchEntry(message: FakeMessage) {
 test("backfill approximates start and end and anchors the first delta at the user prompt", () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
-	const wrapped = loaded.resolver("bash", () => base.renderers);
+	const wrapped = loaded.resolver("read", () => base.renderers);
 
 	const userTs = new Date(2026, 9, 8, 14, 32, 0).getTime();
 	const assistantTs = new Date(2026, 9, 8, 14, 32, 5).getTime();
@@ -246,21 +284,33 @@ test("backfill approximates start and end and anchors the first delta at the use
 	);
 
 	// Parallel calls share the assistant timestamp as their start proxy, so both
-	// show the same delta (from the user prompt) and their own approximate
-	// elapsed value.
+	// show the same delta (from the user prompt). The approximate elapsed value
+	// (end minus the start proxy) appears on the result line, not the call line.
 	const first = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("b1"))));
 	assert.ok(first, "no dim line for b1");
-	assert.match(first!, /14:32:05  \+5s  ran 4\.0s/);
+	assert.match(first!, /^\s*⟨dim⟩14:32:05  \+5s⟨\/role⟩$/);
+
+	const firstResult = tsLineOf(
+		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("b1"))),
+	);
+	assert.ok(firstResult, "no dim result line for b1");
+	assert.match(firstResult!, /^\s*⟨dim⟩ran 4\.0s  ended 14:32:09⟨\/role⟩$/);
 
 	const second = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("b2"))));
 	assert.ok(second, "no dim line for b2");
-	assert.match(second!, /14:32:05  \+5s  ran 55s/);
+	assert.match(second!, /^\s*⟨dim⟩14:32:05  \+5s⟨\/role⟩$/);
+
+	const secondResult = tsLineOf(
+		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("b2"))),
+	);
+	assert.ok(secondResult, "no dim result line for b2");
+	assert.match(secondResult!, /^\s*⟨dim⟩ran 55s  ended 14:33:00⟨\/role⟩$/);
 });
 
 test("later backfilled batch anchors its delta at the previous tool result", () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
-	const wrapped = loaded.resolver("bash", () => base.renderers);
+	const wrapped = loaded.resolver("read", () => base.renderers);
 
 	const userTs = new Date(2026, 9, 8, 14, 32, 0).getTime();
 	const assistant1Ts = new Date(2026, 9, 8, 14, 32, 5).getTime();
@@ -281,7 +331,13 @@ test("later backfilled batch anchors its delta at the previous tool result", () 
 
 	const second = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("n2"))));
 	assert.ok(second, "no dim line for n2");
-	assert.match(second!, /14:32:30  \+21s  ran 10s/);
+	assert.match(second!, /^\s*⟨dim⟩14:32:30  \+21s⟨\/role⟩$/);
+
+	const secondResult = tsLineOf(
+		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("n2"))),
+	);
+	assert.ok(secondResult, "no dim result line for n2");
+	assert.match(secondResult!, /^\s*⟨dim⟩ran 10s  ended 14:32:40⟨\/role⟩$/);
 });
 
 test("historical call without an end omits the elapsed segment", () => {
@@ -328,19 +384,19 @@ test("message_end events anchor live deltas between calls", () => {
 test("result line is spliced under the header of a Container result", () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
-	const wrapped = loaded.resolver("bash", () => base.renderers);
+	const wrapped = loaded.resolver("read", () => base.renderers);
 
-	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "r1", toolName: "bash", args: {} });
-	loaded.handler("tool_execution_end")!({ type: "tool_execution_end", toolCallId: "r1", toolName: "bash", result: {}, isError: false, durationMs: 500 });
+	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "r1", toolName: "read", args: {} });
+	loaded.handler("tool_execution_end")!({ type: "tool_execution_end", toolCallId: "r1", toolName: "read", result: {}, isError: false, durationMs: 500 });
 
 	const result = wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("r1"));
 	const lines = renderLines(result);
 	const headerIndex = lines.findIndex((line) => line.includes("⎿ result header"));
-	const endIndex = lines.findIndex((line) => line.includes("⟨dim⟩ended"));
+	const endIndex = lines.findIndex((line) => line.includes("⟨dim⟩"));
 	const bodyIndex = lines.findIndex((line) => line.includes("result body"));
 	assert.ok(headerIndex !== -1 && endIndex !== -1 && bodyIndex !== -1, JSON.stringify(lines));
 	assert.ok(endIndex > headerIndex && endIndex < bodyIndex, `ended line misplaced: ${JSON.stringify(lines)}`);
-	assert.match(lines[endIndex]!, /ended \d\d:\d\d:\d\d/);
+	assert.match(lines[endIndex]!, /ran 0\.5s  ended \d\d:\d\d:\d\d/);
 });
 
 test("partial results do not show an ended line", () => {

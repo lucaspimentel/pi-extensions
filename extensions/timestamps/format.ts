@@ -35,14 +35,10 @@ export function formatDelta(deltaMs: number): string {
 }
 
 /**
- * How long the tool ran: ran 2.1s (one decimal under 10s), ran 14s, ran 1m14s,
- * ran 1:02:03. Appends an ellipsis while the tool is still running.
+ * How long the tool ran: 2.1s (one decimal under 10s), 14s, 1m14s, 1:02:03.
+ * Call sites prefix the "ran " label themselves.
  */
-export function formatElapsed(elapsedMs: number, running: boolean): string {
-	return `ran ${formatDuration(elapsedMs)}${running ? "\u2026" : ""}`;
-}
-
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
 	const s = Math.max(0, ms / 1000);
 	if (s < 60) {
 		// One decimal under 10s, floored so 9.99s never renders as 10.0s.
@@ -55,7 +51,19 @@ function formatDuration(ms: number): string {
 	return `${h}:${pad2(m % 60)}:${pad2(Math.floor(s % 60))}`;
 }
 
-/** Dim line under a tool result header: ended 14:32:07 (date prefix when not today). */
-export function formatResultLine(timestampMs: number, nowMs: number): string {
-	return `ended ${formatAbsolute(timestampMs, nowMs)}`;
+/**
+ * Dim line under a tool result header: `ran 2.1s  ended 14:32:07` when the
+ * duration is known and should be shown, `ended 14:32:07` otherwise (date
+ * prefix when not today). Shell tools pass includeDuration=false because the
+ * shell renderer already displays the duration (Elapsed/Took).
+ */
+export function formatResultLine(
+	durationMs: number | undefined,
+	timestampMs: number,
+	nowMs: number,
+	includeDuration: boolean,
+): string {
+	const ended = `ended ${formatAbsolute(timestampMs, nowMs)}`;
+	if (includeDuration && durationMs !== undefined) return `ran ${formatDuration(durationMs)}  ${ended}`;
+	return ended;
 }
