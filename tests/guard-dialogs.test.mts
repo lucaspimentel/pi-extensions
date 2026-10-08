@@ -102,8 +102,10 @@ interface SelectorControl {
 	answer(choice: string | undefined): void;
 }
 
-function makeSelector(): SelectorControl {
+function makeSelector(log?: string[]): SelectorControl {
 	const waiters: Array<{ count: number; resolve: () => void }> = [];
+	// Settlement handle for the currently open selector; null once settled.
+	let settle: ((value: string | undefined) => void) | null = null;
 	const ctrl = {
 		select: undefined as unknown as SelectorControl["select"],
 		opened: [] as string[],
@@ -121,20 +123,29 @@ function makeSelector(): SelectorControl {
 			waiter.resolve();
 		}
 	};
-	let settle!: (value: string | undefined) => void;
-	let settlePromise: Promise<string | undefined> | null = null;
 	ctrl.select = (title, _options, opts) => {
+		log?.push("open");
 		ctrl.opened.push(title);
 		ctrl.open++;
 		ctrl.max = Math.max(ctrl.max, ctrl.open);
 		notifyWaiters();
 		const signal = opts?.signal;
-		if (signal?.aborted) { ctrl.open--; return Promise.resolve(undefined); }
-		settlePromise = new Promise<string | undefined>((resolve) => {
-			settle = (value) => { ctrl.open--; resolve(value); };
-			signal?.addEventListener("abort", () => { ctrl.open--; resolve(undefined); }, { once: true });
+		if (signal?.aborted) { ctrl.open--; log?.push("close"); return Promise.resolve(undefined); }
+		return new Promise<string | undefined>((resolve) => {
+			let settled = false;
+			const finish = (value: string | undefined): void => {
+				if (settled) return; // abort and answer are idempotent
+				settled = true;
+				settle = null; // a stale answer callback cannot settle again
+				signal?.removeEventListener("abort", onAbort);
+				ctrl.open--;
+				log?.push("close");
+				resolve(value);
+			};
+			const onAbort = (): void => finish(undefined);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			settle = finish;
 		});
-		return settlePromise;
 	};
 	ctrl.currentlyOpen = () => ctrl.open;
 	ctrl.maxConcurrent = () => ctrl.max;
@@ -143,18 +154,32 @@ function makeSelector(): SelectorControl {
 		else waiters.push({ count, resolve });
 	});
 	ctrl.answer = (choice) => {
-		if (!settlePromise) throw new Error("no selector is open");
-		settlePromise = null;
+		if (!settle) throw new Error("no selector is open");
 		settle(choice);
 	};
 	return ctrl;
 }
 
-/** Attach a select recorder to a context and return its control handle. */
-function installSelector(ctx: Record<string, any>): SelectorControl {
-	const selector = makeSelector();
+/** Attach a select recorder and a setWorkingVisible recorder to a context.
+ * When `log` is given, visibility toggles and selector open/close events are
+ * interleaved in one ordered timeline for spinner-contract assertions. */
+function installSelector(ctx: Record<string, any>, log?: string[]): SelectorControl {
+	const selector = makeSelector(log);
 	(ctx.ui as Record<string, unknown>).select = selector.select;
+	(ctx.ui as Record<string, unknown>).setWorkingVisible = (visible: boolean) => { log?.push(visible ? "visible:true" : "visible:false"); };
+	// Guard must never touch spinner configuration, only visibility.
+	(ctx.ui as Record<string, unknown>).setWorkingMessage = () => { log?.push("working-message"); };
+	(ctx.ui as Record<string, unknown>).setWorkingIndicator = () => { log?.push("working-indicator"); };
 	return selector;
+}
+
+/** Replace the visibility stub with one that records every call and throws
+ * for the directions in `fail`, so best-effort handling can be asserted. */
+function failVisibility(ctx: Record<string, any>, calls: string[], fail: { hide?: boolean; restore?: boolean }): void {
+	(ctx.ui as Record<string, unknown>).setWorkingVisible = (visible: boolean) => {
+		calls.push(visible ? "restore" : "hide");
+		if (visible ? fail.restore : fail.hide) throw new Error("visibility render failed");
+	};
 }
 
 function harnessCtx(h: Harness, cwd: string): Record<string, any> {
@@ -582,6 +607,271 @@ test("headless contexts never open selectors", async () => {
 	});
 });
 
+test("an admitted approval hides the working spinner while its selector is open and restores it when it settles", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void pending.catch(() => {});
+		await selector.waitFor(1);
+		assert.deepEqual(log, ["visible:false", "open"], "the spinner is hidden before the selector opens and stays hidden while it is pending");
+		selector.answer("Allow once");
+		const result = await pending;
+		assert.equal(result.structuredContent.exit_code, 0, "the approved call executes");
+		assert.deepEqual(log, ["visible:false", "open", "close", "visible:true"], "the spinner is restored exactly once when the selector settles");
+	});
+});
+
+test("profile picker and migration confirmation each hide and restore the spinner in ordered pairs", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-commands-");
+		fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+		fs.writeFileSync(path.join(cwd, ".pi", "pi-tool-permissions.local.json"), JSON.stringify({ allow: ["Bash(echo imported)"] }), "utf8");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const picker = h.commandHandlers.get("guard")!("profile", ctx);
+		await selector.waitFor(1);
+		assert.deepEqual(log, ["visible:false", "open"], "the picker hides the spinner before opening");
+		selector.answer("auto");
+		await picker;
+		assert.deepEqual(log, ["visible:false", "open", "close", "visible:true"], "the picker restores the spinner when it settles");
+		const migrate = h.commandHandlers.get("guard")!("migrate", ctx);
+		await selector.waitFor(2);
+		selector.answer("Write");
+		await migrate;
+		assert.deepEqual(log, ["visible:false", "open", "close", "visible:true", "visible:false", "open", "close", "visible:true"], "consecutive admitted dialogs produce ordered hide/restore pairs with no late cleanup");
+	});
+});
+
+test("aborting the execution signal of an open approval restores the spinner", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-abort-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const abort = new AbortController();
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, abort.signal, undefined, ctx);
+		void pending.catch(() => {});
+		await selector.waitFor(1);
+		assert.deepEqual(log, ["visible:false", "open"]);
+		abort.abort();
+		await assert.rejects(pending, /abort|cancel/);
+		assert.deepEqual(log, ["visible:false", "open", "close", "visible:true"], "cancellation through the execution signal restores visibility");
+		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
+		assert.equal(saved.hostBash?.allow?.length ?? 0, 0, "cancellation saves nothing");
+	});
+});
+
+test("a policy transition and shutdown restore the spinner when they settle an open approval", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-invalidate-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void pending.catch(() => {});
+		await selector.waitFor(1);
+		await h.commandHandlers.get("guard")!("profile research", ctx);
+		await assert.rejects(pending, /expired|cancel/, "the transition settles the dialog without a manual answer");
+		assert.deepEqual(log, ["visible:false", "open", "close", "visible:true"], "policy invalidation restores visibility");
+		await h.commandHandlers.get("guard")!("profile default", ctx);
+		const fresh = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void fresh.catch(() => {});
+		await selector.waitFor(2);
+		for (const shutdown of h.handlers.session_shutdown ?? []) await shutdown({}, ctx);
+		await assert.rejects(fresh, /expired|cancel/);
+		assert.deepEqual(log, ["visible:false", "open", "close", "visible:true", "visible:false", "open", "close", "visible:true"], "shutdown restores visibility");
+	});
+});
+
+test("stale and queued requests produce no visibility changes; queued cancellation never restores under an open selector", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-queue-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const tool = h.registeredTools.get("host_bash")!;
+		const stale = new AbortController();
+		stale.abort();
+		await assert.rejects(tool.execute("id", { command: "echo asked" }, stale.signal, undefined, ctx), /aborted/);
+		assert.deepEqual(log, [], "a stale request rejected before display never toggles visibility");
+		const first = tool.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void first.catch(() => {});
+		await selector.waitFor(1);
+		assert.deepEqual(log, ["visible:false", "open"]);
+		const queuedCtl = new AbortController();
+		const second = tool.execute("id", { command: "echo asked" }, queuedCtl.signal, undefined, ctx);
+		void second.catch(() => {});
+		await tick();
+		await tick();
+		assert.deepEqual(log, ["visible:false", "open"], "a queued request does not toggle visibility before admission");
+		queuedCtl.abort();
+		await assert.rejects(second, /abort|cancel/);
+		assert.deepEqual(log, ["visible:false", "open"], "queued cancellation must not restore the spinner under the open selector");
+		selector.answer("Allow once");
+		await first;
+		assert.deepEqual(log, ["visible:false", "open", "close", "visible:true"]);
+	});
+});
+
+test("headless contexts and dry migration never toggle the spinner", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-headless-");
+		writeAskRule(cwd, "echo asked");
+		fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+		fs.writeFileSync(path.join(cwd, ".pi", "pi-tool-permissions.local.json"), JSON.stringify({ allow: ["Bash(echo imported)"] }), "utf8");
+		const ctx = harnessCtx(h, cwd);
+		ctx.hasUI = false;
+		await startSession(h, ctx);
+		const log: string[] = [];
+		installSelector(ctx, log);
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx), /headless|non-interactive/);
+		await h.commandHandlers.get("guard")!("migrate", ctx);
+		assert.deepEqual(log, [], "headless calls never toggle visibility");
+		// A TUI dry run also never enqueues a dialog, so it never toggles.
+		const h2 = makeHarness();
+		const ctx2 = harnessCtx(h2, cwd);
+		await startSession(h2, ctx2);
+		const log2: string[] = [];
+		installSelector(ctx2, log2);
+		await h2.commandHandlers.get("guard")!("migrate dry", ctx2);
+		assert.deepEqual(log2, [], "a dry migration never toggles visibility");
+	});
+});
+
+test("RPC mode still opens the selector but never toggles spinner visibility", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-rpc-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		ctx.mode = "rpc";
+		await startSession(h, ctx);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void pending.catch(() => {});
+		await selector.waitFor(1);
+		assert.deepEqual(log, ["open"], "RPC opens the selector without visibility toggles");
+		selector.answer("Allow once");
+		const result = await pending;
+		assert.equal(result.structuredContent.exit_code, 0, "RPC approvals still work");
+		assert.deepEqual(log, ["open", "close"]);
+	});
+});
+
+test("a failed hide stays cosmetic: dismissal still denies and the gate stays usable", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-hide-fail-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		const calls: string[] = [];
+		failVisibility(ctx, calls, { hide: true });
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void pending.catch(() => {});
+		await selector.waitFor(1);
+		selector.answer(undefined); // dismissal
+		await assert.rejects(pending, /denied/, "a dismissed approval still denies");
+		assert.deepEqual(calls, ["hide", "restore"], "restoration is attempted even though hiding threw");
+		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
+		assert.equal(saved.hostBash?.allow?.length ?? 0, 0, "denial saves nothing");
+		const freshSelector = installSelector(ctx);
+		const fresh = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void fresh.catch(() => {});
+		await freshSelector.waitFor(1);
+		freshSelector.answer("Allow once");
+		const result = await fresh;
+		assert.equal(result.structuredContent.exit_code, 0, "the gate remains usable after cosmetic failures");
+	});
+});
+
+test("a failed restore stays cosmetic: acceptance still executes", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-restore-fail-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		const calls: string[] = [];
+		failVisibility(ctx, calls, { restore: true });
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void pending.catch(() => {});
+		await selector.waitFor(1);
+		selector.answer("Allow once");
+		const result = await pending;
+		assert.equal(result.structuredContent.exit_code, 0, "a visibility failure on restore never changes the outcome");
+		assert.deepEqual(calls, ["hide", "restore"]);
+	});
+});
+
+test("selector errors stay original when visibility also fails", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-error-fail-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		installSelector(ctx);
+		const calls: string[] = [];
+		failVisibility(ctx, calls, { hide: true, restore: true });
+		const tool = h.registeredTools.get("host_bash")!;
+		(ctx.ui as Record<string, unknown>).select = () => Promise.reject(new Error("selector exploded"));
+		const async = tool.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void async.catch(() => {});
+		await assert.rejects(async, /selector exploded/, "the original selector rejection is preserved");
+		assert.deepEqual(calls, ["hide", "restore"]);
+		calls.length = 0;
+		(ctx.ui as Record<string, unknown>).select = () => { throw new Error("selector blew up synchronously"); };
+		const sync = tool.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void sync.catch(() => {});
+		await assert.rejects(sync, /selector blew up synchronously/, "the original selector throw is preserved");
+		assert.deepEqual(calls, ["hide", "restore"]);
+	});
+});
+
+test("a failed visibility toggle around denial saves and executes nothing", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-spinner-deny-fail-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		const calls: string[] = [];
+		failVisibility(ctx, calls, { hide: true, restore: true });
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void pending.catch(() => {});
+		await selector.waitFor(1);
+		selector.answer("Deny");
+		await assert.rejects(pending, /denied/);
+		assert.deepEqual(calls, ["hide", "restore"], "restoration is still attempted around a denial");
+		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
+		assert.equal(saved.hostBash?.allow?.length ?? 0, 0, "denial saves nothing");
+	});
+});
+
 test("a real worker read grant serializes with approval prompts and never replays code", { skip: sandboxMode === "degraded" ? "sandbox is degraded; workers are unavailable" : false }, async () => {
 	// Created under the real home before the HOME override: the worker sandbox
 	// resolves mounts from the real home, and a /tmp fixture would be invisible.
@@ -595,12 +885,14 @@ test("a real worker read grant serializes with approval prompts and never replay
 		writeAskRule(cwd, "echo asked");
 		const ctx = harnessCtx(h, cwd);
 		await startSession(h, ctx);
-		const selector = installSelector(ctx);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
 		const code = `open(${JSON.stringify(target)}).read()`;
 		const worker = h.registeredTools.get("python")!.execute("id", { code }, undefined, undefined, ctx);
 		void worker.catch(() => {});
 		await selector.waitFor(1);
 		assert.match(selector.opened[0], /read-only access/, "the read-grant prompt opens");
+		assert.deepEqual(log, ["visible:false", "open"], "the read grant hides the spinner before opening");
 		const approval = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
 		void approval.catch(() => {});
 		await tick();
@@ -620,5 +912,6 @@ test("a real worker read grant serializes with approval prompts and never replay
 		selector.answer("Allow once");
 		const approvalResult = await fresh;
 		assert.equal(approvalResult.structuredContent.exit_code, 0);
+		assert.deepEqual(log, ["visible:false", "open", "close", "visible:true", "visible:false", "open", "close", "visible:true"], "the grant and the fresh approval each restore the spinner when they settle");
 	});
 });

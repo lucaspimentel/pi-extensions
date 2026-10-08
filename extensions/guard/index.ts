@@ -97,6 +97,23 @@ export default function guard(pi: ExtensionAPI) {
 	function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" = "info"): void {
 		try { ctx.ui.notify(message, level); } catch { /* notification does not weaken enforcement */ }
 	}
+	/**
+	 * Open one guard dialog selector with the TUI working spinner hidden for
+	 * its duration. Presentation only: visibility failures never change the
+	 * selector's result or error, and restoration is attempted on every settle
+	 * path. Only TUI mode toggles: RPC and print have no terminal spinner (the
+	 * RPC setter is a no-op), and restoration always passes true, matching the
+	 * legacy extension, because the UI API has no visibility getter.
+	 */
+	async function gatedSelect(ctx: ExtensionContext, title: string, options: string[], signal: AbortSignal): Promise<string | undefined> {
+		if (ctx.mode !== "tui") return ctx.ui.select(title, options, { signal });
+		try {
+			try { ctx.ui.setWorkingVisible(false); } catch { /* cosmetic; the dialog outcome is unaffected */ }
+			return await ctx.ui.select(title, options, { signal });
+		} finally {
+			try { ctx.ui.setWorkingVisible(true); } catch { /* cosmetic; never masks the selector's result or error */ }
+		}
+	}
 	function classifierModel(ctx: ExtensionContext): Model<Api> | undefined {
 		return pickClassifierModel(ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable(), ctx.model?.provider, (m) => ctx.modelRegistry.hasConfiguredAuth(m), config?.classifier, (provider, modelId) => ctx.modelRegistry.find(provider, modelId));
 	}
@@ -249,7 +266,7 @@ export default function guard(pi: ExtensionAPI) {
 		const choice = await dialogs.run({ signal }, async (dialogSignal) => {
 			dialogSignal.throwIfAborted();
 			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
-			const answer = await ctx.ui.select(`guard: ${name}\n${decision.reason}\n${String(input.command ?? "")}\n${patch ? `Exact rule: ${patch.hostBash?.allow?.join(", ")}\nProject: ${ctx.cwd}/.pi/guard.local.json\nUser: ${homedir()}/.pi/agent/guard.json` : ""}`, options, { signal: dialogSignal });
+			const answer = await gatedSelect(ctx, `guard: ${name}\n${decision.reason}\n${String(input.command ?? "")}\n${patch ? `Exact rule: ${patch.hostBash?.allow?.join(", ")}\nProject: ${ctx.cwd}/.pi/guard.local.json\nUser: ${homedir()}/.pi/agent/guard.json` : ""}`, options, dialogSignal);
 			dialogSignal.throwIfAborted();
 			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
 			return answer;
@@ -343,7 +360,7 @@ export default function guard(pi: ExtensionAPI) {
 			const choice = await dialogs.run({ signal }, async (dialogSignal) => {
 				dialogSignal.throwIfAborted();
 				assertDialogCurrent(rt, epoch, ctx, cwd, "Read grant expired; nothing saved or replayed.");
-				const answer = await ctx.ui.select(title, ["Grant for session", "Save for project", "Save for user", "Deny"], { signal: dialogSignal });
+				const answer = await gatedSelect(ctx, title, ["Grant for session", "Save for project", "Save for user", "Deny"], dialogSignal);
 				dialogSignal.throwIfAborted();
 				assertDialogCurrent(rt, epoch, ctx, cwd, "Read grant expired; nothing saved or replayed.");
 				return answer;
@@ -457,7 +474,7 @@ export default function guard(pi: ExtensionAPI) {
 				dialogSignal.throwIfAborted();
 				if (!rt) throw new Error("guard: profile selection expired after a session/policy change.");
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: profile selection expired after a session/policy change.");
-				const answer = await ctx.ui.select("Guard profile (this session):", [current, ...allowed], { signal: dialogSignal });
+				const answer = await gatedSelect(ctx, "Guard profile (this session):", [current, ...allowed], dialogSignal);
 				dialogSignal.throwIfAborted();
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: profile selection expired after a session/policy change.");
 				return answer;
@@ -486,7 +503,7 @@ export default function guard(pi: ExtensionAPI) {
 				dialogSignal.throwIfAborted();
 				if (!rt) throw new Error("guard: migration expired; nothing was written.");
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: migration expired; nothing was written.");
-				const answer = await ctx.ui.select("Write the migration into guard.json (union, never removes)?", ["Write", "Cancel"], { signal: dialogSignal });
+				const answer = await gatedSelect(ctx, "Write the migration into guard.json (union, never removes)?", ["Write", "Cancel"], dialogSignal);
 				dialogSignal.throwIfAborted();
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: migration expired; nothing was written.");
 				return answer;

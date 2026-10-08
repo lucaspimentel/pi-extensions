@@ -98,6 +98,11 @@ Registration details:
   exists; old requests are never retried or replayed. The gate lease covers
   only validation plus the selector interaction, so a successful save, grant,
   or profile choice cannot cancel itself.
+- While an admitted dialog's selector is open in TUI mode, guard hides the
+  working spinner and restores it when the dialog settles (presentation
+  only: visibility failures are ignored and never change the outcome).
+  Queued requests do not affect spinner visibility; only the active
+  selector toggles it.
 - An explicit HostBash/Pwsh **ask-rule match** offers allow once or deny
   (saving a rule cannot override the ask).
 - A fallback prompt offers allow once, save for this project

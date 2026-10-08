@@ -234,13 +234,14 @@ Holes, verified 2026-10-02:
   saving is offered only if the merged patch authorizes the whole call.
   Show the exact rule/destination and never remove ask/deny rules. Cancel
   stale approvals without execution or persistence. Headless prompts deny.
-  Dialog-UX parity items pi-tool-permissions had (hiding the working
-  spinner, the ctrl+] hideable overlay, edit-before-save, deny-rule saving
-  and steer, herdr signaling, breakdown rendering) are not specified here;
-  they are tracked as pending work in the root TODO.md guard section and must
-  land by the step 6 switchover. The concurrent-dialog mutex is no longer
+  Dialog-UX parity items pi-tool-permissions had (the ctrl+] hideable
+  overlay, edit-before-save, deny-rule saving and steer, herdr signaling,
+  breakdown rendering) are not specified here; they are tracked as pending
+  work in the root TODO.md guard section and must land by the step 6
+  switchover. The concurrent-dialog mutex and spinner hiding are no longer
   pending: all four guard dialogs serialize through the guard-owned FIFO gate
-  described below.
+  described below, and each admitted TUI selector hides the working spinner
+  while it is open.
 - **Dialog gate (2026-10-08):** one `DialogGate` instance per guard factory
   serializes execution approvals, read-grant prompts, the profile picker, and
   the migrate confirmation. Ordering is FIFO among requests that reach the
@@ -768,6 +769,7 @@ remain useful.
 | Annotation fallback (2026-10-07) | A destructive hint wins over a contradictory read-only hint: conflicting self-declared claims classify as remote-write; the rest of the precedence order is unchanged |
 | Built-in lookup hardening (2026-10-07) | Built-in recognition uses explicit own map entries only (`Object.hasOwn`) in both `classifyToolCall` and `isPlanningToolAllowed`: inherited Object.prototype names (`constructor`, `__proto__`) are ordinary custom tools, so they follow the normal annotation/configuration/fallback rules (unannotated or conflicting-hint instances are removed during planning and classified remote-write; adequately read-only annotated instances stay and classify remote-read); no name is reserved or prohibited |
 | Dialog mutex (2026-10-08) | One guard-owned FIFO `DialogGate` per factory (not per dialog kind, runtime, or session) serializes approvals, read grants, the profile picker, and migrate confirmation. A plain promise-chain mutex was rejected as the mechanism: it cannot remove aborted queued requests promptly or cancel open selectors. Cancellation combines the caller's signal with a private per-request signal passed to the SDK selector's `{ signal }` option; policy and lifecycle boundaries invalidate synchronously; the lease spans pre-display validation, the selector, and post-answer validation only. See the Ask dialogs section for the full contract. |
+| Spinner hiding (2026-10-08) | All four admitted TUI selectors hide the working spinner before opening and restore it on every settle path through one TUI-only selector wrapper (`gatedSelect` in `guard/index.ts`); restoration always passes `true` because the UI API has no visibility getter, matching the legacy extension. Visibility failures are caught as presentation-only: they never change authorization, replace a selector result or error, or block gate cleanup. Queued, stale-before-display, headless, and dry requests never toggle visibility, and queued cancellation cannot restore the spinner underneath another open selector. RPC is untouched: its setter is a no-op, so non-TUI modes skip the toggling entirely |
 | Planning eligibility (2026-10-07) | `/plan` filters the ACTIVE set through `isPlanningToolAllowed`: built-in host-shell/local-write removed regardless of hints; built-in read/sandboxed/meta classes stay; everything else needs `readOnlyHint === true && destructiveHint !== true` from a fresh getAllTools lookup; toolClasses overrides create no planning exceptions; input-dependent wrappers qualify only via explicit annotations |
 | Worker capability metadata (2026-10-07) | Conservative static annotations on this repo's tools: web/web_search/Slack reads read-only open-world, session_search read-only closed-domain, guard python/node write-capable open-world (raw profiles expose the host); read-only hints describe intended operations, not the absence of internal caches or index files |
 | Plan narrowing limits (2026-10-07) | Entry-time declaration filtering only, not execution containment: codemode/deferred tools can remain callable, tool_search or another extension can change activation afterwards, nested non-owned calls stay observe-only until step 6, trusted extensions have host privileges, annotations are unverified author hints |

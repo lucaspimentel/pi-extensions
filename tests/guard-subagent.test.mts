@@ -135,6 +135,7 @@ function guardCtx(h: GuardHarness, cwd: string) {
 		ui: {
 			notify: (message: string) => h.notifications.push(message),
 			setStatus: (key: string, value: string | undefined) => h.status.set(key, value),
+			setWorkingVisible: (_visible: boolean) => {},
 			select: async (title: string, options: string[]) => {
 				h.selects.push({ title, options });
 				return h.selectChoice ?? options[0];

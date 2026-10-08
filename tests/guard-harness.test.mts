@@ -97,6 +97,7 @@ function harnessCtx(h: Harness, cwd: string, selectResult: string | undefined = 
 		ui: {
 			notify: (message: string) => h.notifications.push(message),
 			setStatus: (key: string, value: string | undefined) => h.status.set(key, value),
+			setWorkingVisible: (_visible: boolean) => {},
 			select: async () => selectResult,
 			theme: { fg: (_role: string, s: string) => s },
 		},
