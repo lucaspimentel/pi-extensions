@@ -7,9 +7,9 @@
  *   - Tool `session_search`: ranked session hits (path, date, cwd, name,
  *     snippets with origin labels, score). The agent can then read a hit's
  *     session file directly for the deep dive.
- *   - Command `/find-sessions <query>`: same search interactively; with a UI,
+ *   - Command `/session-search <query>`: same search interactively; with a UI,
  *     arrow-select a session to copy its path.
- *   - `/find-sessions rebuild`: force a full re-parse (normally refresh is
+ *   - `/session-search rebuild`: force a full re-parse (normally refresh is
  *     lazy and incremental).
  *
  * Index: ~/.pi/agent/session-search-index.jsonl, one line per session.
@@ -132,8 +132,8 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("find-sessions", {
-		description: "Search past pi sessions (/find-sessions <query>; /find-sessions rebuild forces a full re-index)",
+	pi.registerCommand("session-search", {
+		description: "Search past pi sessions (/session-search <query>; /session-search rebuild forces a full re-index)",
 		getArgumentCompletions: (prefix: string) => {
 			if (!prefix.includes(" ")) {
 				const items = [{ value: "rebuild", label: "rebuild", description: "Force a full re-parse of all sessions" }];
@@ -146,7 +146,7 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 			const currentSessionPath = ctx.sessionManager.getSessionFile();
 			const input = args.trim();
 			if (!input || input === "help") {
-				ctx.ui.notify("Usage: /find-sessions <query>\n       /find-sessions rebuild", "info");
+				ctx.ui.notify("Usage: /session-search <query>\n       /session-search rebuild", "info");
 				return;
 			}
 			if (input === "rebuild") {
@@ -223,7 +223,7 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 						ctx.ui.notify("No indexable content found around the match in that session.", "warning");
 						continue;
 					}
-					const header = `Context from session "${hit.name ?? hit.sessionId}" (${hit.cwd}, ${hit.lastActivity.slice(0, 10)}), loaded by /find-sessions. Transcript excerpt around the matched entry:`;
+					const header = `Context from session "${hit.name ?? hit.sessionId}" (${hit.cwd}, ${hit.lastActivity.slice(0, 10)}), loaded by /session-search. Transcript excerpt around the matched entry:`;
 					try {
 						pi.sendMessage(
 							{

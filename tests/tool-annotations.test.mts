@@ -66,7 +66,7 @@ test("session-search declares read-only closed-domain metadata", () => {
 	sessionSearchExtension(pi as never);
 	assert.deepEqual(tools.map((t) => t.name), ["session_search"]);
 	assert.deepEqual(tools[0].annotations, READ_ONLY_CLOSED);
-	assert.ok(commands.includes("find-sessions"), "the /find-sessions command registration is preserved");
+	assert.ok(commands.includes("session-search"), "the /session-search command registration is preserved");
 });
 
 test("slack-via-claude declares read-only open-world metadata on all three tools", () => {

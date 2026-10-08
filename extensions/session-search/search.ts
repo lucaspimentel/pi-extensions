@@ -68,7 +68,7 @@ const TIER_WEIGHT: Record<"user" | "assistant" | "summary", number> = {
 
 const SNIPPET_RADIUS = 60;
 /** Snippets kept per hit. The tool output renders TOOL_SNIPPETS of these; the
- *  /find-sessions preview card renders all of them. */
+ *  /session-search preview card renders all of them. */
 const MAX_SNIPPETS_PER_HIT = 4;
 const TOOL_SNIPPETS = 2;
 const RESPONSE_CAP = 4 * 1024;
@@ -298,7 +298,7 @@ export function formatHits(hits: SearchHit[], query: string): string {
 }
 
 /** Render one hit in full: every snippet, both dates. Used by the
- *  /find-sessions preview card, where the row was too short to decide. */
+ *  /session-search preview card, where the row was too short to decide. */
 export function formatHit(h: SearchHit): string {
 	const lines: string[] = [];
 	lines.push(`${h.lastActivity.slice(0, 10)} score=${h.score} tier=${h.tier}${h.isSubagent ? " [subagent]" : ""}`);

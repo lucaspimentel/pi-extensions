@@ -15,10 +15,10 @@ branch dupes, tool-result noise).
   date, project cwd, name, and snippets labeled by origin (user message /
   assistant text / summary). The agent can then read the hit's session file
   directly for the full transcript (JSONL, one JSON object per line).
-- **Command `/find-sessions <query>`**: same search interactively; with a UI,
+- **Command `/session-search <query>`**: same search interactively; with a UI,
   arrow-select a session to preview its full card (all snippets, name, dates,
-  path), then **Copy path**, **Load context into session**, or go back to the
-  list. Without a UI (RPC/print modes), it prints the tool-style rendering
+  path), then **Resume session**, **Copy path**, **Load context into
+  session**, or go back to the list. Without a UI (RPC/print modes), it prints the tool-style rendering
   instead.
 - **Resume session**: switches the running pi process to the selected session via
   `ctx.switchSession` (the same flow as `/resume`): full history, no excerpt,
@@ -32,9 +32,9 @@ branch dupes, tool-result noise).
   up the context immediately. Note: the injected message is itself a
   custom_message, so future refreshes index it as a summary of the session that
   loaded it.
-- **`/find-sessions rebuild`**: force a full re-parse (normally refresh is
+- **`/session-search rebuild`**: force a full re-parse (normally refresh is
   lazy and incremental).
-- **`/find-sessions help`**: usage.
+- **`/session-search help`**: usage.
 
 ## Query syntax
 
@@ -44,7 +44,7 @@ branch dupes, tool-result noise).
 - Tool-only filters: `cwd` (substring), `since`/`until` (ISO dates on last
   activity), `in` (`user` | `assistant` | `summary`), `limit` (default 10).
 - The active session (the one doing the searching) is always excluded from
-  results, in both the tool and `/find-sessions`.
+  results, in both the tool and `/session-search`.
 
 ## Ranking
 
@@ -52,7 +52,7 @@ Tiers by match origin: **user (300) > assistant (200) > summary (100)**;
 subagent sessions are halved within their tier; then total hit count and
 recency (<=7d +50, <=30d +25, <=365d +10). Up to 4 snippets are kept per hit,
 clipped to +-60 characters and labeled with origin: the tool output shows the
-first 2, the `/find-sessions` preview card shows all. Summaries include
+first 2, the `/session-search` preview card shows all. Summaries include
 their source: `compaction`, `idle-summary`, etc.
 
 ## Index
@@ -86,7 +86,7 @@ starting with `<skill`, `<system`, `<extension`, ... — see the data-driven
 - `search.ts` - query parsing, AND/regex matching, ranking, snippets
 - `store.ts` - index load/save + incremental refresh
 - `context.ts` - windowed transcript extraction for "Load context into session"
-- `index.ts` - extension factory: registers the tool and `/find-sessions`
+- `index.ts` - extension factory: registers the tool and `/session-search`
 
 ## Tests
 
