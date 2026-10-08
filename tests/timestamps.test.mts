@@ -131,13 +131,18 @@ test("formatDuration uses one decimal under 10s and adaptive units above", () =>
 	assert.equal(formatDuration(3723000), "1:02:03");
 });
 
-test("formatResultLine prefixes the duration only when included and known", () => {
+test("formatResultLine prefixes the duration only when included, known, and non-zero", () => {
 	const now = new Date(2026, 9, 8, 15, 0, 0).getTime();
 	const end = new Date(2026, 9, 8, 14, 32, 7).getTime();
 	assert.equal(formatResultLine(2100, end, now, true), "ran 2.1s  ended 14:32:07");
 	assert.equal(formatResultLine(2100, end, now, false), "ended 14:32:07");
 	assert.equal(formatResultLine(undefined, end, now, true), "ended 14:32:07");
 	assert.equal(formatResultLine(undefined, end, now, false), "ended 14:32:07");
+	// Sub-100ms durations would read as 0.0s, so they are omitted.
+	assert.equal(formatResultLine(0, end, now, true), "ended 14:32:07");
+	assert.equal(formatResultLine(40, end, now, true), "ended 14:32:07");
+	assert.equal(formatResultLine(99, end, now, true), "ended 14:32:07");
+	assert.equal(formatResultLine(100, end, now, true), "ran 0.1s  ended 14:32:07");
 });
 
 // ── Resolver wiring ───────────────────────────────────────────────────────────
@@ -170,18 +175,51 @@ test("call line is omitted entirely when the call id is unknown", () => {
 
 // ── Live capture and rendering ────────────────────────────────────────────────
 
-test("live call renders absolute, delta, and running elapsed", () => {
+test("live call renders absolute and delta immediately, running elapsed once 100ms pass", async () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("read", () => base.renderers);
 
 	const userTs = Date.now() - 3000;
 	loaded.handler("message_end")!({ type: "message_end", message: { role: "user", timestamp: userTs } });
-	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: {} });
+	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "c1", toolName: "read", args: {} });
 
+	// Right after execution starts the elapsed time is sub-100ms and omitted.
+	const instant = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c1"))));
+	assert.ok(instant, "no dim timestamp line");
+	assert.match(instant!, /^\s*⟨dim⟩\d\d:\d\d:\d\d  \+3s⟨\/role⟩$/);
+	assert.ok(!instant!.includes("ran "), "sub-100ms elapsed must be omitted");
+
+	await new Promise((resolve) => setTimeout(resolve, 150));
 	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c1"))));
-	assert.ok(tsLine, "no dim timestamp line");
+	assert.ok(tsLine, "no dim timestamp line after 100ms");
 	assert.match(tsLine!, /^\s*⟨dim⟩\d\d:\d\d:\d\d  \+3s  ran \d+\.\ds…⟨\/role⟩$/);
+});
+
+test("instant tool shows no duration anywhere", () => {
+	const loaded = loadExtension();
+	const base = makeBaseRenderers();
+	const wrapped = loaded.resolver("read", () => base.renderers);
+
+	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "z1", toolName: "read", args: {} });
+	loaded.handler("tool_execution_end")!({
+		type: "tool_execution_end",
+		toolCallId: "z1",
+		toolName: "read",
+		result: {},
+		isError: false,
+		durationMs: 0,
+	});
+
+	const callLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("z1"))));
+	assert.ok(callLine, "no dim call line");
+	assert.ok(!callLine!.includes("ran "), `zero-duration call line must omit ran: ${callLine}`);
+
+	const resultLine = tsLineOf(
+		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("z1"))),
+	);
+	assert.ok(resultLine, "no dim result line");
+	assert.match(resultLine!, /^\s*⟨dim⟩ended \d\d:\d\d:\d\d⟨\/role⟩$/);
 });
 
 test("completed call line drops the ran segment; the duration moves to the result line", () => {

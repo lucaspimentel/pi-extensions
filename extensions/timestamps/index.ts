@@ -14,7 +14,8 @@
  * entries from previous days) and the delta since the previous transcript event
  * of any kind (user message, tool result; the first call of a turn measures
  * from the user prompt). While the tool is still running, the call line also
- * shows a live-ticking `ran 2.1s…`; once the result arrives the duration moves
+ * shows a live-ticking `ran 2.1s…` (omitted until 100ms have elapsed); once the
+ * result arrives the duration moves
  * down to the result line, which shows `ran 2.1s  ended 14:32:07`. Shell tools
  * (bash, powershell) never show the extension's own duration: their renderer
  * already displays Elapsed/Took, so their call line stays start + delta and
@@ -38,7 +39,7 @@ import type {
 	ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Text, type Component } from "@earendil-works/pi-tui";
-import { formatAbsolute, formatDelta, formatDuration, formatResultLine } from "./format.ts";
+import { durationIsDisplayable, formatAbsolute, formatDelta, formatDuration, formatResultLine } from "./format.ts";
 
 // ── Timestamp state ───────────────────────────────────────────────────────────
 
@@ -165,15 +166,17 @@ function ensureState(state: Record<string, unknown>): TimestampsState {
 /**
  * Compose the call row's dim line, showing only the segments that are known:
  * start and delta always (when known), plus a live-ticking `ran Xs…` while the
- * tool is still executing. Shell tools never get the ticking duration because
- * their own renderer shows Elapsed while running.
+ * tool is still executing (once at least 100ms have elapsed; before that the
+ * duration would read as 0.0s). Shell tools never get the ticking duration
+ * because their own renderer shows Elapsed while running.
  */
 function callLineText(call: CallTimes, nowMs: number, isShellTool: boolean): string {
 	const segments: string[] = [formatAbsolute(call.start, nowMs)];
 	const delta = deltaFor(call.start);
 	if (delta !== undefined) segments.push(formatDelta(delta));
 	if (call.end === undefined && call.live && !isShellTool) {
-		segments.push(`ran ${formatDuration(Math.max(0, nowMs - call.start))}\u2026`);
+		const elapsed = Math.max(0, nowMs - call.start);
+		if (durationIsDisplayable(elapsed)) segments.push(`ran ${formatDuration(elapsed)}\u2026`);
 	}
 	return segments.join("  ");
 }

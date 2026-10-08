@@ -35,6 +35,14 @@ export function formatDelta(deltaMs: number): string {
 }
 
 /**
+ * Durations under 100ms would render as "ran 0.0s", which reads as noise;
+ * callers omit the duration segment entirely for them.
+ */
+export function durationIsDisplayable(durationMs: number): boolean {
+	return durationMs >= 100;
+}
+
+/**
  * How long the tool ran: 2.1s (one decimal under 10s), 14s, 1m14s, 1:02:03.
  * Call sites prefix the "ran " label themselves.
  */
@@ -53,9 +61,10 @@ export function formatDuration(ms: number): string {
 
 /**
  * Dim line under a tool result header: `ran 2.1s  ended 14:32:07` when the
- * duration is known and should be shown, `ended 14:32:07` otherwise (date
- * prefix when not today). Shell tools pass includeDuration=false because the
- * shell renderer already displays the duration (Elapsed/Took).
+ * duration is known and worth showing, `ended 14:32:07` otherwise (date prefix
+ * when not today). Sub-100ms durations are omitted (they would read as 0.0s),
+ * and shell tools pass includeDuration=false because the shell renderer
+ * already displays the duration (Elapsed/Took).
  */
 export function formatResultLine(
 	durationMs: number | undefined,
@@ -64,6 +73,8 @@ export function formatResultLine(
 	includeDuration: boolean,
 ): string {
 	const ended = `ended ${formatAbsolute(timestampMs, nowMs)}`;
-	if (includeDuration && durationMs !== undefined) return `ran ${formatDuration(durationMs)}  ${ended}`;
+	if (includeDuration && durationMs !== undefined && durationIsDisplayable(durationMs)) {
+		return `ran ${formatDuration(durationMs)}  ${ended}`;
+	}
 	return ended;
 }
