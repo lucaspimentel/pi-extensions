@@ -325,25 +325,30 @@ test("a command cancellation guard runs after teardown and before policy assignm
 test("a teardown failure stays sticky even when the command owner is cancelled", async (t) => {
 	const { runtime, policy } = setup(t);
 	const started = deferred();
+	const released = deferred();
 	const active = runtime.run(allow, async (ctx) => {
 		ctx.setTeardown(async () => { throw new Error("kill failed"); });
 		started.resolve();
-		await new Promise<void>(() => {});
+		await released.promise;
 	}).catch(() => {});
 	await started.promise;
-	const owner = new AbortController();
-	const cancelled = new Error("guard: command cancelled; nothing was changed.");
-	const saving = runtime.transition({ ...policy, profile: "research" }, detection, undefined, undefined, {
-		expectedEpoch: runtime.epoch,
-		beforeCommit: () => { if (owner.signal.aborted) throw cancelled; },
-	});
-	owner.abort();
-	const failure = await saving.catch((err: unknown) => err);
-	assert.notEqual(failure, cancelled, "cancellation must not swallow a genuine teardown failure");
-	assert.match(String(failure), /unresolved teardown/, "the sticky teardown diagnostic is preserved");
-	assert.equal(runtime.policy.profile, "default");
-	assert.equal(existsSync(runtime.scratchDir), true);
-	void active;
+	try {
+		const owner = new AbortController();
+		const cancelled = new Error("guard: command cancelled; nothing was changed.");
+		const saving = runtime.transition({ ...policy, profile: "research" }, detection, undefined, undefined, {
+			expectedEpoch: runtime.epoch,
+			beforeCommit: () => { if (owner.signal.aborted) throw cancelled; },
+		});
+		owner.abort();
+		const failure = await saving.catch((err: unknown) => err);
+		assert.notEqual(failure, cancelled, "cancellation must not swallow a genuine teardown failure");
+		assert.match(String(failure), /unresolved teardown/, "the sticky teardown diagnostic is preserved");
+		assert.equal(runtime.policy.profile, "default");
+		assert.equal(existsSync(runtime.scratchDir), true);
+	} finally {
+		released.resolve();
+		await active;
+	}
 });
 
 test("aborting the owner after a completed commit leaves the committed policy in place", async (t) => {
