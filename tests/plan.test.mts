@@ -305,6 +305,40 @@ async function main() {
 	}
 
 	{
+		// Inherited property names (`constructor`, `__proto__`) are ordinary
+		// custom tools for planning eligibility: built-in recognition must use
+		// own map entries only, so unannotated instances are removed from the
+		// active set like any other unknown custom tool.
+		const initial = ["read", "constructor", "__proto__"];
+		const h = makeHarness(CHOICE_STOP, undefined, undefined, initial, "granted");
+		await h.commands["plan"].handler("do a thing", h.ctx);
+		assert.deepEqual(h.tools(), ["read"], "unannotated inherited-name tools are removed during planning");
+		// The persisted snapshot is the ORIGINAL active set, custom names and
+		// order included; cancellation restores it exactly.
+		const startEntry = h.entries.find((e: any) => e.customType === "plan-state");
+		assert.deepEqual(startEntry.data, { active: true, savedTools: initial });
+		await h.commands["plan"].handler("cancel", h.ctx);
+		assert.deepEqual(h.tools(), initial, "cancel restores the exact pre-plan set, inherited names included");
+	}
+
+	{
+		// Annotated inherited-name instances follow the same annotation rules as
+		// any other custom tool: adequate read-only hints stay active, and a
+		// conflicting destructive hint is removed. No name is prohibited.
+		const descriptors: RegisteredToolDescriptor[] = [
+			{ name: "read" },
+			{ name: "constructor", annotations: { readOnlyHint: true, destructiveHint: false } },
+			{ name: "__proto__", annotations: { readOnlyHint: true, destructiveHint: true } },
+		];
+		const initial = ["read", "constructor", "__proto__"];
+		const h = makeHarness(CHOICE_STOP, undefined, undefined, initial, "granted", descriptors);
+		await h.commands["plan"].handler("do a thing", h.ctx);
+		assert.deepEqual(h.tools(), ["read", "constructor"], "adequately annotated inherited-name tools stay; conflicting hints are removed");
+		await h.commands["plan"].handler("cancel", h.ctx);
+		assert.deepEqual(h.tools(), initial, "cancel restores the exact pre-plan set");
+	}
+
+	{
 		// An active set that narrows to EMPTY is distinct from an uninitialized
 		// set: getActiveTools() must not fall back to the baseline.
 		const h = makeHarness(CHOICE_STOP, undefined, undefined, ["write", "edit"]);

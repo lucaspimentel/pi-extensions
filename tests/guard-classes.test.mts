@@ -267,6 +267,64 @@ test("isPlanningToolAllowed: built-in exceptions, annotations, and fail-closed u
 	assert.equal(isPlanningToolAllowed("Session_Search"), true);
 });
 
+// ── Inherited property names ─────────────────────────────────────────────────
+
+// `constructor` and `__proto__` resolve through Object.prototype on an ordinary
+// frozen object, so built-in recognition must consult own entries only. These
+// names are ordinary custom tools: they follow the normal
+// annotation/configuration/fallback rules and are never reserved or prohibited.
+const INHERITED_NAMES = ["constructor", "__proto__", "Constructor", "__PROTO__"] as const;
+const inheritedMatrix: Array<[string, boolean, ToolClass]> = [
+	// [annotations, planning allowed, classification]
+	[undefined, false, "remote-write"],
+	[{}, false, "remote-write"],
+	[{ destructiveHint: false }, false, "remote-write"],
+	[{ readOnlyHint: false, destructiveHint: false }, false, "remote-write"],
+	[{ readOnlyHint: true }, true, "remote-read"],
+	[{ readOnlyHint: true, destructiveHint: false }, true, "remote-read"],
+	[{ destructiveHint: true }, false, "remote-write"],
+	[{ readOnlyHint: true, destructiveHint: true }, false, "remote-write"],
+];
+
+for (const name of INHERITED_NAMES) {
+	test(`inherited-name tool "${name}" classifies through the normal fallback rules`, () => {
+		for (const [annotations, , cls] of inheritedMatrix) {
+			const result = classifyToolCall(name, {}, { getAnnotations: () => annotations });
+			assert.equal(result, cls, `${name} with ${JSON.stringify(annotations) ?? "no annotations"}`);
+			// Always a valid class, never an inherited object or function.
+			assert.ok(isToolClass(result), name);
+		}
+	});
+	test(`inherited-name tool "${name}" follows the custom-tool planning rules`, () => {
+		for (const [annotations, allowed] of inheritedMatrix) {
+			assert.equal(
+				isPlanningToolAllowed(name, annotations),
+				allowed,
+				`${name} with ${JSON.stringify(annotations) ?? "no annotations"}`,
+			);
+		}
+	});
+}
+
+// Ordinary custom-name control: identical behavior, no inherited lookup involved.
+test("ordinary custom names behave like inherited-name tools without built-in entries", () => {
+	for (const [annotations, allowed, cls] of inheritedMatrix) {
+		assert.equal(classifyToolCall("widget_flip", {}, { getAnnotations: () => annotations }), cls);
+		assert.equal(isPlanningToolAllowed("widget_flip", annotations), allowed);
+	}
+});
+
+test("configured overrides apply to inherited names during classification, never planning", () => {
+	// A computed __proto__ key is a real own key; a bare object-literal
+	// __proto__ property would set the prototype instead.
+	assert.equal(classifyToolCall("__proto__", {}, { toolClasses: { ["__proto__"]: "meta" } }), "meta");
+	assert.equal(classifyToolCall("Constructor", {}, { toolClasses: { constructor: "local-read" } }), "local-read");
+	assert.equal(classifyToolCall("constructor", {}, { toolClasses: { "con*": "remote-read" } }), "remote-read");
+	// Overrides configure classification only: isPlanningToolAllowed takes no
+	// configuration at all, so an override can never create a planning exception.
+	// The matrix above already pins planning to the annotation rules alone.
+});
+
 test("isToolClass validates class names", () => {
 	assert.equal(isToolClass("remote-read"), true);
 	assert.equal(isToolClass("nonsense"), false);

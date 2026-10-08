@@ -358,6 +358,13 @@ Annotations are author-provided, unverified hints; missing hints do not
 establish read-only behavior, and `destructiveHint: false` means
 non-destructive, not necessarily non-writing.
 
+Built-in recognition consults own map entries only (`Object.hasOwn`), in
+classification and planning alike: the built-in map is an ordinary frozen
+object, so inherited Object.prototype names such as `constructor` or
+`__proto__` are NOT built-ins. They are ordinary custom tools and follow the
+normal annotation/configuration/fallback rules; no name is reserved or
+prohibited.
+
 ### Planning eligibility (`/plan` narrowing)
 
 When `/plan` holds the research profile, the CURRENTLY ACTIVE tool set is
@@ -384,6 +391,10 @@ Notes:
   map, so they qualify only through explicit annotations. Possible read-only
   argument combinations never make a whole tool planning-safe; unannotated
   `pup_run` is removed.
+- Built-in recognition uses explicit own map entries only, so inherited
+  property names (`constructor`, `__proto__`) are ordinary custom tools:
+  unannotated or conflicting-hint instances are removed, adequately
+  read-only annotated instances stay, and no name is prohibited.
 - Only the active set is filtered; registered-but-inactive tools are never
   activated. The pre-plan set is snapshotted before narrowing and restored
   exactly on every exit path.
@@ -725,6 +736,7 @@ remain useful.
 | Step-5 single responder (2026-10-07) | Require exactly one correlated synchronous acknowledgment per handshake query; every additional matching acknowledgment, including an identical duplicate, fails closed regardless of order, validity, version, or payload |
 | Bash ask read-root escalation (2026-10-07) | Deliberate omission: bash/host_bash ask dialogs offer no inline read-root grant (pi-tool-permissions did, `extensions/pi-tool-permissions/index.ts:999-1129`). Read roots are granted only via the python/node permission_needed path, where kernel-enforced read-only mounts make the grant meaningful |
 | Annotation fallback (2026-10-07) | A destructive hint wins over a contradictory read-only hint: conflicting self-declared claims classify as remote-write; the rest of the precedence order is unchanged |
+| Built-in lookup hardening (2026-10-07) | Built-in recognition uses explicit own map entries only (`Object.hasOwn`) in both `classifyToolCall` and `isPlanningToolAllowed`: inherited Object.prototype names (`constructor`, `__proto__`) are ordinary custom tools, so they follow the normal annotation/configuration/fallback rules (unannotated or conflicting-hint instances are removed during planning and classified remote-write; adequately read-only annotated instances stay and classify remote-read); no name is reserved or prohibited |
 | Planning eligibility (2026-10-07) | `/plan` filters the ACTIVE set through `isPlanningToolAllowed`: built-in host-shell/local-write removed regardless of hints; built-in read/sandboxed/meta classes stay; everything else needs `readOnlyHint === true && destructiveHint !== true` from a fresh getAllTools lookup; toolClasses overrides create no planning exceptions; input-dependent wrappers qualify only via explicit annotations |
 | Worker capability metadata (2026-10-07) | Conservative static annotations on this repo's tools: web/web_search/Slack reads read-only open-world, session_search read-only closed-domain, guard python/node write-capable open-world (raw profiles expose the host); read-only hints describe intended operations, not the absence of internal caches or index files |
 | Plan narrowing limits (2026-10-07) | Entry-time declaration filtering only, not execution containment: codemode/deferred tools can remain callable, tool_search or another extension can change activation afterwards, nested non-owned calls stay observe-only until step 6, trusted extensions have host privileges, annotations are unverified author hints |

@@ -120,6 +120,18 @@ const BUILTIN_CLASSES: Readonly<Record<string, ToolClass>> = Object.freeze({
 	ask_user_question: "meta",
 });
 
+/**
+ * Own-property-only built-in lookup. `BUILTIN_CLASSES` is an ordinary frozen
+ * object, so a plain member access would resolve inherited Object.prototype
+ * names (`constructor`, `__proto__`, ...) as built-ins. Names without an own
+ * entry are ordinary custom tools: they follow the normal
+ * annotation/configuration/fallback rules and are never reserved.
+ */
+function builtinToolClass(name: string): ToolClass | undefined {
+	const key = name.toLowerCase();
+	return Object.hasOwn(BUILTIN_CLASSES, key) ? BUILTIN_CLASSES[key] : undefined;
+}
+
 /** web_fetch's class depends on the URL: allowlisted is a plain remote read, anything else is exfil-capable. */
 function webFetchClass(input: Record<string, unknown>, webFetchAllow: readonly string[] | undefined): ToolClass {
 	const url = String(input.url ?? "");
@@ -222,7 +234,7 @@ export function classifyToolCall(toolName: string, input: Record<string, unknown
 	const lower = toolName.toLowerCase();
 	if (lower === "web_fetch") return webFetchClass(input, options.webFetchAllow);
 	if (lower === "pup_run") return pupRunClass(input);
-	const builtin = BUILTIN_CLASSES[lower];
+	const builtin = builtinToolClass(lower);
 	if (builtin) return builtin;
 
 	// 3. Annotations (self-declared, unverified). A destructive hint wins over
@@ -268,7 +280,7 @@ export function isPlanningToolAllowed(
 	name: string,
 	annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean },
 ): boolean {
-	const builtin = BUILTIN_CLASSES[name.toLowerCase()];
+	const builtin = builtinToolClass(name);
 	if (builtin) return builtin !== "host-shell" && builtin !== "local-write";
 	return annotations?.readOnlyHint === true && annotations?.destructiveHint !== true;
 }

@@ -221,6 +221,11 @@ Annotations are author-provided, unverified hints. Missing hints do not
 establish read-only behavior, and `destructiveHint: false` means
 non-destructive, not necessarily non-writing.
 
+Built-in recognition consults own map entries only: inherited
+Object.prototype names such as `constructor` or `__proto__` are ordinary
+custom tools (classification and planning follow the normal
+annotation/configuration/fallback rules; no name is reserved).
+
 ### Planning eligibility
 
 While `/plan` holds the research profile, plan.ts filters the CURRENTLY
@@ -237,6 +242,11 @@ fresh `pi.getAllTools()` annotation lookup at planning entry:
    (write-capable or unknown MCP/custom tools are removed; `toolClasses`
    overrides create no planning exceptions; input-dependent wrappers like
    `pup_run` qualify only via explicit annotations).
+
+Built-in recognition uses explicit own map entries only: inherited property
+names (`constructor`, `__proto__`) are ordinary custom tools, so
+unannotated or conflicting-hint instances are removed and adequately
+read-only annotated instances stay; no name is prohibited.
 
 Registered-but-inactive tools are never activated, the pre-plan set is
 restored exactly on every exit path, and this is entry-time declaration
