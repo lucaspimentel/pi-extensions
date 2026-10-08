@@ -7,28 +7,29 @@
 // through one factory-scoped gate, cancel promptly when their owning
 // operation aborts, and invalidate on policy and lifecycle boundaries.
 // Run: node --test tests/guard-dialogs.test.mts
-import { test, type TestContext } from "node:test";
+import { after, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { DialogGate } from "../extensions/guard/dialogs.ts";
 import { GuardRuntime } from "../extensions/guard/runtime.ts";
 import { projectConfigPath } from "../extensions/guard/policy/config.ts";
 import { detectSandboxMode } from "../extensions/guard/sandbox/detect.ts";
 import guardExtension from "../extensions/guard/index.ts";
+import { drainTempDirs, makeTempDir, tempDirs } from "./guard-test-temp.mts";
 
 const sandboxMode = detectSandboxMode().mode;
 
-// ── Shared harness scaffolding (mirrors tests/guard-harness.test.mts) ────────
+// Suite-wide fixture drain: every tracked directory is deleted once all tests
+// have finished, including after a failed test, so a passing run no longer
+// hides leaked fixtures behind an outer runner's cleanup.
+after(() => drainTempDirs());
 
-const tempDirs: string[] = [];
-function makeTempDir(prefix: string): string {
-	const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
-	tempDirs.push(dir);
-	return dir;
-}
+// ── Shared harness scaffolding (mirrors tests/guard-harness.test.mts) ────────
 
 interface Harness {
 	handlers: Record<string, Array<(event: unknown, ctx: unknown) => unknown>>;
@@ -262,8 +263,9 @@ function writeLegacyFixtures(cwd: string): void {
 	fs.writeFileSync(path.join(process.env.HOME!, ".pi", "agent", "pi-tool-permissions.json"), JSON.stringify({ allow: ["Bash(echo home-imported)"] }), "utf8");
 }
 
-/** Clean only the fixture directories created by one test (including its
- * temporary HOME); the suite-wide tempDirs repair is a separate follow-up. */
+/** Clean the fixture directories created by one test (including its temporary
+ * HOME) as soon as it ends; the suite-wide drainTempDirs after-hook is the
+ * final safety net for everything else, such as the read-grant fixture. */
 function cleanupNewFixtures(t: TestContext): void {
 	const start = tempDirs.length;
 	t.after(() => {
@@ -1226,4 +1228,49 @@ test("a real worker read grant serializes with approval prompts and never replay
 		assert.equal(approvalResult.structuredContent.exit_code, 0);
 		assert.deepEqual(log, ["visible:false", "open", "close", "visible:true", "visible:false", "open", "close", "visible:true"], "the grant and the fresh approval each restore the spinner when they settle");
 	});
+});
+
+// ── Fixture cleanup regression ────────────────────────────────────────────
+// The suite must delete every directory it created, on success and after a
+// failed test: drainTempDirs() removes exactly the tracked fixtures, and the
+// root after-hook keeps that promise even when an assertion fails.
+
+test("draining tracked fixtures deletes them and tolerates repeats", () => {
+	const tracked = makeTempDir("guard-dialogs-drain-");
+	// Adopted external in the style of the read-grant fixture, which is created
+	// under a different root before the HOME override and still tracked.
+	const adopted = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-dialogs-drain-adopted-")));
+	tempDirs.push(adopted);
+	fs.writeFileSync(path.join(tracked, "marker"), "x");
+	drainTempDirs();
+	assert.equal(fs.existsSync(tracked), false, "makeTempDir fixtures are deleted");
+	assert.equal(fs.existsSync(adopted), false, "adopted externals are deleted too");
+	assert.equal(tempDirs.length, 0, "the registry is emptied");
+	drainTempDirs(); // Repeating after an empty registry is a no-op.
+});
+
+test("a failed test still drains its tracked fixtures", () => {
+	const fixture = makeTempDir("guard-dialogs-drain-child-");
+	const marker = path.join(fixture, "leaked-dir.txt");
+	const script = path.join(fixture, "leak-child.mts");
+	const helper = JSON.stringify(pathToFileURL(path.join(import.meta.dirname, "guard-test-temp.mts")).href);
+	fs.writeFileSync(script, [
+		`import { after, test } from "node:test";`,
+		`import assert from "node:assert/strict";`,
+		`import * as fs from "node:fs";`,
+		`import { makeTempDir, drainTempDirs } from ${helper};`,
+		``,
+		`fs.writeFileSync(process.argv[2], makeTempDir("guard-dialogs-child-leak-"));`,
+		`after(() => drainTempDirs());`,
+		``,
+		`test("fails on purpose", () => {`,
+		`\tassert.fail("expected failure: proves cleanup runs after a failed test");`,
+		`});`,
+		"",
+	].join("\n"));
+	const run = spawnSync(process.execPath, [script, marker], { encoding: "utf8", timeout: 30_000 });
+	assert.equal(run.status, 1, "the child exits with the test-failure code");
+	const leaked = fs.readFileSync(marker, "utf8").trim();
+	assert.match(leaked, /guard-dialogs-child-leak-/);
+	assert.equal(fs.existsSync(leaked), false, "the failed child still deleted its tracked fixtures");
 });
