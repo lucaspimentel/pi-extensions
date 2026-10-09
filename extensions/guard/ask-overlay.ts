@@ -50,9 +50,12 @@
  * mounting) runs the same owned-resource cleanup and propagates the genuine
  * error; the display is never retried. Non-TUI hosts and hosts missing the
  * required capabilities fall back to the signal-aware native selector before
- * anything is mounted; bridge removal capability is verified with a canary
- * removal before the bridge is borrowed, so a removal failure can never
- * leave a retained widget entry.
+ * anything is mounted. Bridge removal is verified with a canary removal
+ * before the bridge is borrowed, which filters hosts that refuse every
+ * deletion; a host that fails only the populated bridge's deletion still
+ * fails the dialog with its genuine error while the owned-resource cleanup
+ * retries that deletion best-effort, so a permanently refusing host is the
+ * only case where an entry can remain.
  */
 
 import {
@@ -144,9 +147,11 @@ export function createGuardAskSelect(deps: GuardAskOverlayDeps) {
 		if (typeof ui.setWidget !== "function" || typeof ui.onTerminalInput !== "function") {
 			return ui.select(title, options, { signal });
 		}
-		// Verify bridge removal before borrowing the renderer: a host whose
-		// widget removal fails must fail this dialog before any entry exists,
-		// so the zero-persistent-widget guarantee can never be violated.
+		// Verify the host's widget-removal path before borrowing the renderer:
+		// a host whose removal fails for every key fails this dialog before any
+		// entry exists. This preflight cannot guarantee that deleting the later
+		// populated bridge succeeds, so the bridge key stays inside the
+		// owned-resource cleanup boundary, which retries the deletion.
 		const canaryKey = `guard-dialog-bridge-${++bridgeCounter}-canary`;
 		try {
 			ui.setWidget(canaryKey, undefined);
@@ -183,6 +188,10 @@ export function createGuardAskSelect(deps: GuardAskOverlayDeps) {
 		let onAbort: (() => void) | null = null;
 		let selector: GuardSelectorLike | undefined;
 		let twin: GuardSelectorLike | undefined;
+		// The borrowed bridge key stays owned from the acquisition attempt until a
+		// deletion is observed, so every failure path retries the deletion.
+		let bridgeKey: string | undefined;
+		let bridgeCleared = false;
 		const cleanup = (): void => {
 			if (onAbort) {
 				try { signal.removeEventListener("abort", onAbort); } catch { /* never throws on standard signals */ }
@@ -192,6 +201,15 @@ export function createGuardAskSelect(deps: GuardAskOverlayDeps) {
 			try { handle?.hide(); } catch { /* owned-handle removal is best effort */ }
 			try { selector?.dispose(); } catch { /* dispose is best effort */ }
 			try { twin?.dispose(); } catch { /* dispose is best effort */ }
+			if (bridgeKey !== undefined && !bridgeCleared) {
+				// Bounded, idempotent retry: a host that permanently refuses deletion
+				// keeps the entry, and this cleanup failure must never mask the
+				// original diagnostic.
+				try {
+					ui.setWidget(bridgeKey, undefined);
+					bridgeCleared = true;
+				} catch { /* best effort; the genuine error propagates unchanged */ }
+			}
 			handle = undefined;
 		};
 		let settleValue: (value: string | undefined) => void = () => {};
@@ -228,9 +246,10 @@ export function createGuardAskSelect(deps: GuardAskOverlayDeps) {
 			// Borrow the renderer and theme through a uniquely keyed zero-height
 			// widget; remove the bridge immediately, even when acquisition fails, so
 			// no persistent widget entry survives the dialog. A removal failure is a
-			// genuine setup error: the dialog fails instead of mounting with a
-			// possibly retained entry.
+			// genuine setup error: the dialog fails instead of mounting, and the
+			// bridge key stays owned so cleanup retries the deletion.
 			const key = `guard-dialog-bridge-${++bridgeCounter}`;
+			bridgeKey = key;
 			let acquisitionError: unknown;
 			try {
 				ui.setWidget(key, (borrowedTui, borrowedTheme) => {
@@ -244,6 +263,7 @@ export function createGuardAskSelect(deps: GuardAskOverlayDeps) {
 			let removalError: unknown;
 			try {
 				ui.setWidget(key, undefined);
+				bridgeCleared = true;
 			} catch (error) {
 				removalError = error;
 			}

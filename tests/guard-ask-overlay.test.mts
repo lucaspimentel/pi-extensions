@@ -268,6 +268,29 @@ test("the bridge is acquired with a unique key and removed immediately; the over
 	assert.equal(await promise, undefined);
 });
 
+test("a post-canary bridge removal failure retries deletion in cleanup and propagates the original error", async () => {
+	const removalFailure = new Error("probe populated bridge removal failed");
+	const { tui, overlays } = makeFakeTui();
+	const host = makeFakeUI(tui);
+	let failed = false;
+	const originalSetWidget = host.ui.setWidget as (key: string, content: unknown) => void;
+	(host.ui as Record<string, unknown>).setWidget = (key: string, content: unknown) => {
+		// Throw exactly once, only for a populated entry, so the canary succeeds.
+		if (content === undefined && host.widgetEntries.has(key) && !failed) {
+			failed = true;
+			throw removalFailure;
+		}
+		originalSetWidget(key, content);
+	};
+	const controller = new AbortController();
+	await assert.rejects(open(host.ui, "t", ["a"], controller.signal).raw, (error: unknown) => error === removalFailure, "the original diagnostic propagates unchanged");
+	assert.equal(failed, true, "the failure was the populated bridge's deletion, not the canary");
+	assert.equal(host.widgetEntries.size, 0, "cleanup's deletion retry removed the populated bridge");
+	assert.equal(overlays.length, 0, "the overlay never mounted");
+	assert.equal(host.inputHandlers.length, 0, "the raw listener was removed");
+	assert.equal(host.selectCalls.length, 0, "a failed display is never retried through the native selector");
+});
+
 test("a bridge removal failure fails the dialog before any widget exists or mounts", async () => {
 	const removalFailure = new Error("probe removal failed");
 	const { tui, overlays } = makeFakeTui();
