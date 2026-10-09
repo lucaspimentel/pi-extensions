@@ -392,6 +392,13 @@ removed.
   reload, and research release. Step-3 tools subscribe to this.
 - `guard:decision`: `{ toolName, class, call, action, reason }` - emitted for
   every mapped tool call, observe-only.
+- `herdr:blocked`: `{ active: true, label: "guard: awaiting user input" }`
+  while a guard dialog (approval, read grant, profile picker, migrate
+  confirm) awaits the user, and `{ active: false }` when it settles.
+  Reported so the herdr pane shows blocked instead of "working"; ignored
+  outside herdr. Emitted from the single dialog choke point, unconditionally
+  (no `HERDR_ENV` check), matching pi-tool-permissions and the herdr
+  ask-user bridge.
 - `guard:research-request` / `guard:research-release` (in) and
   `guard:research-ack` / `guard:research-release-ack` (out): the plan.ts
   handshake, wired in step 4. `/plan` requests the hold before narrowing

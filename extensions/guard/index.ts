@@ -111,15 +111,24 @@ export default function guard(pi: ExtensionAPI) {
 	 * legacy extension, because the UI API has no visibility getter. In TUI
 	 * mode the selector renders as the guard-owned hideable overlay
 	 * (ask-overlay.ts); hosts or modes without the required capabilities fall
-	 * back to the plain signal-aware native selector inside the adapter.
+	 * back to the plain signal-aware native selector inside the adapter. Also
+	 * emits `herdr:blocked` true/false around the selector so herdr panes show
+	 * blocked status for every dialog kind.
 	 */
 	async function gatedSelect(ctx: ExtensionContext, title: string, options: string[], signal: AbortSignal): Promise<string | undefined> {
-		if (ctx.mode !== "tui") return ctx.ui.select(title, options, { signal });
+		// Report blocked to herdr while a guard dialog awaits user input (the
+		// pane would otherwise show "working"). Ignored outside herdr; released
+		// in the finally below on every settle path.
+		pi.events.emit("herdr:blocked", { active: true, label: "guard: awaiting user input" });
 		try {
+			if (ctx.mode !== "tui") return ctx.ui.select(title, options, { signal });
 			try { ctx.ui.setWorkingVisible(false); } catch { /* cosmetic; the dialog outcome is unaffected */ }
 			return await askSelect(ctx.ui, title, options, signal);
 		} finally {
-			try { ctx.ui.setWorkingVisible(true); } catch { /* cosmetic; never masks the selector's result or error */ }
+			if (ctx.mode === "tui") {
+				try { ctx.ui.setWorkingVisible(true); } catch { /* cosmetic; never masks the selector's result or error */ }
+			}
+			pi.events.emit("herdr:blocked", { active: false });
 		}
 	}
 	function classifierModel(ctx: ExtensionContext): Model<Api> | undefined {
