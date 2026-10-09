@@ -15,6 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { DialogGate } from "../extensions/guard/dialogs.ts";
 import { GuardRuntime } from "../extensions/guard/runtime.ts";
 import { projectConfigPath } from "../extensions/guard/policy/config.ts";
@@ -23,6 +24,10 @@ import guardExtension from "../extensions/guard/index.ts";
 import { drainTempDirs, makeTempDir, tempDirs } from "./guard-test-temp.mts";
 
 const sandboxMode = detectSandboxMode().mode;
+
+// The overlay wiring tests below construct the real ExtensionSelectorComponent
+// through the guard adapter, which requires an initialized host theme.
+initTheme("dark", false);
 
 // Suite-wide fixture drain: every tracked directory is deleted once all tests
 // have finished, including after a failed test, so a passing run no longer
@@ -1273,4 +1278,167 @@ test("a failed test still drains its tracked fixtures", () => {
 	const leaked = fs.readFileSync(marker, "utf8").trim();
 	assert.match(leaked, /guard-dialogs-child-leak-/);
 	assert.equal(fs.existsSync(leaked), false, "the failed child still deleted its tracked fixtures");
+});
+
+// ── Hideable overlay wiring through the real handlers ────────────────────────
+// In TUI mode gatedSelect renders every guard dialog through the guard-owned
+// hideable overlay adapter (extensions/guard/ask-overlay.ts) instead of the
+// native selector. These tests drive the real registered handlers against a
+// fake host whose setWidget/onTerminalInput mirror the TUI contract; layout,
+// focus, and toggle behavior of the adapter itself are covered in
+// tests/guard-ask-overlay.test.mts.
+
+/** Install the overlay capabilities on a context's ui: setWidget runs widget
+ * factories against a fake TUI whose showOverlay records the mounted overlay
+ * component and returns a controllable handle; onTerminalInput records raw
+ * listeners. The select recorder stays installed as the fallback spy. */
+function installOverlay(ctx: Record<string, any>) {
+	const rows = { value: 24 };
+	type OverlayComponent = { render(width: number): string[]; handleInput(data: string): void; dispose(): void };
+	let component: OverlayComponent | null = null;
+	let handle: { hidden: boolean; hideCalls: number; isHidden(): boolean; setHidden(hidden: boolean): void } | null = null;
+	const bridgeEntries = new Map<string, unknown>();
+	const handlers: Array<(data: string) => unknown> = [];
+	const fakeTui = {
+		terminal: { get rows() { return rows.value; }, columns: 80 },
+		requestRender() {},
+		showOverlay(overlayComponent: OverlayComponent) {
+			const h = {
+				hidden: false,
+				focused: true,
+				hideCalls: 0,
+				isHidden: () => h.hidden,
+				setHidden: (hidden: boolean) => { h.hidden = hidden; },
+				isFocused: () => h.focused && !h.hidden,
+				hide: () => { h.hideCalls++; },
+			};
+			handle = h;
+			component = overlayComponent;
+			return h;
+		},
+	};
+	const ui = ctx.ui as Record<string, unknown>;
+	ui.setWidget = (key: string, content: unknown) => {
+		if (content === undefined) { bridgeEntries.delete(key); return; }
+		if (typeof content === "function") bridgeEntries.set(key, (content as (tui: unknown, theme: unknown) => unknown)(fakeTui, { fg: (_color: string, text: string) => text, bold: (text: string) => text }));
+	};
+	ui.onTerminalInput = (handler: (data: string) => unknown) => {
+		handlers.push(handler);
+		return () => {
+			const index = handlers.indexOf(handler);
+			if (index >= 0) handlers.splice(index, 1);
+		};
+	};
+	return {
+		rows,
+		async waitMounted(): Promise<void> {
+			for (let i = 0; i < 200 && !component; i++) await tick();
+			if (!component) throw new Error("the overlay never mounted");
+		},
+		answer: () => { component!.handleInput("\r"); },
+		down: () => { component!.handleInput("\x1b[B"); },
+		toggle: () => { for (const handler of [...handlers]) handler("\x1d"); },
+		hidden: () => handle?.hidden ?? null,
+		hideCalls: () => handle?.hideCalls ?? 0,
+		bridgeSize: () => bridgeEntries.size,
+		handlerCount: () => handlers.length,
+	};
+}
+
+test("an approval renders as the hideable overlay and never opens the native selector", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-overlay-approval-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const overlay = installOverlay(ctx);
+		const approval = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void approval.catch(() => {});
+		await overlay.waitMounted();
+		assert.equal(selector.opened.length, 0, "the native selector was never used");
+		assert.deepEqual(log, ["visible:false"], "the spinner is hidden while the overlay is up");
+		overlay.answer();
+		const result = await approval;
+		assert.equal(result.structuredContent.exit_code, 0, "the approved call executes");
+		assert.deepEqual(log, ["visible:false", "visible:true"], "the spinner was restored exactly once");
+		assert.equal(overlay.hideCalls(), 1, "the owned handle removed the overlay");
+		assert.equal(overlay.bridgeSize(), 0, "no widget bridge entry remains");
+		assert.equal(overlay.handlerCount(), 0, "the raw listener was removed");
+	});
+});
+
+test("ctrl+] hides the approval overlay while the decision stays pending", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-overlay-hide-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const overlay = installOverlay(ctx);
+		const approval = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void approval.catch(() => {});
+		await overlay.waitMounted();
+		overlay.toggle();
+		assert.equal(overlay.hidden(), true, "the overlay is hidden");
+		assert.ok(h.notifications.some((n) => /prompt hidden/.test(n)), "the hidden notification fired");
+		assert.deepEqual(log, ["visible:false"], "hiding neither restores the spinner nor settles the dialog");
+		await tick();
+		assert.equal(selector.opened.length, 0, "the hidden decision was never delegated to the native selector");
+		overlay.toggle();
+		assert.equal(overlay.hidden(), false, "the overlay is shown again");
+		assert.equal(h.notifications.filter((n) => /prompt hidden/.test(n)).length, 1, "the notification is not repeated");
+		overlay.answer();
+		const result = await approval;
+		assert.equal(result.structuredContent.exit_code, 0, "the decision survives hide/show");
+		assert.deepEqual(log, ["visible:false", "visible:true"], "the spinner was restored when the dialog settled");
+	});
+});
+
+test("aborting the call while the approval overlay is hidden still cleans up", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-overlay-abort-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const log: string[] = [];
+		const selector = installSelector(ctx, log);
+		const overlay = installOverlay(ctx);
+		const owner = new AbortController();
+		const approval = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, owner.signal, undefined, ctx);
+		void approval.catch(() => {});
+		await overlay.waitMounted();
+		overlay.toggle();
+		owner.abort();
+		await assert.rejects(approval, /abort|cancel/, "the cancelled call rejects");
+		assert.equal(overlay.hideCalls(), 1, "the hidden overlay was still removed");
+		assert.equal(overlay.bridgeSize(), 0, "no widget bridge entry remains");
+		assert.equal(overlay.handlerCount(), 0, "the raw listener was removed");
+		assert.equal(selector.opened.length, 0, "no native selector was involved");
+		assert.deepEqual(log, ["visible:false", "visible:true"], "the spinner was restored after the cancellation");
+	});
+});
+
+test("the profile picker renders as the overlay and applies the chosen profile", async (t) => {
+	await withCleanTempHome(t, async () => {
+		const { h, ctx } = await commandHarness("profile");
+		const selector = installSelector(ctx);
+		const overlay = installOverlay(ctx);
+		const command = h.commandHandlers.get("guard")!("profile", ctx);
+		await overlay.waitMounted();
+		assert.equal(selector.opened.length, 0, "the picker never opened as a native selector");
+		overlay.down();
+		overlay.down();
+		overlay.answer();
+		await command;
+		assert.ok(h.notifications.some((n) => /Profile: auto/.test(n)), "the profile chosen inside the overlay applied");
+		assert.equal(overlay.hideCalls(), 1, "the owned handle removed the overlay");
+		assert.equal(overlay.bridgeSize(), 0, "no widget bridge entry remains");
+		assert.equal(overlay.handlerCount(), 0, "the raw listener was removed");
+	});
 });

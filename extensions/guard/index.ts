@@ -1,7 +1,9 @@
 /** Guard owns four executors. All other tool decisions remain observe-only. */
-import { createBashTool, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type ToolAnnotations, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { createBashTool, ExtensionSelectorComponent, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type ToolAnnotations, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { createGuardAskSelect } from "./ask-overlay.ts";
 import { homedir } from "node:os";
 import { GuardRuntime, validateReadGrant } from "./runtime.ts";
 import { DialogGate } from "./dialogs.ts";
@@ -23,6 +25,9 @@ import { constraintFromParse, INHERIT_ENV, parseInheritance, type InheritanceCon
 import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
 
 const DEFAULT_CYCLE_SHORTCUT = "ctrl+alt+g";
+
+/** Hideable, bounded dialog overlay for guard's four TUI dialogs (see ask-overlay.ts). */
+const askSelect = createGuardAskSelect({ ExtensionSelectorComponent, matchesKey, isKeyRelease, isKeyRepeat });
 
 /** Shape of the step-5 snapshot/contract ack payloads this extension emits. */
 interface SubagentAckBase {
@@ -103,13 +108,16 @@ export default function guard(pi: ExtensionAPI) {
 	 * selector's result or error, and restoration is attempted on every settle
 	 * path. Only TUI mode toggles: RPC and print have no terminal spinner (the
 	 * RPC setter is a no-op), and restoration always passes true, matching the
-	 * legacy extension, because the UI API has no visibility getter.
+	 * legacy extension, because the UI API has no visibility getter. In TUI
+	 * mode the selector renders as the guard-owned hideable overlay
+	 * (ask-overlay.ts); hosts or modes without the required capabilities fall
+	 * back to the plain signal-aware native selector inside the adapter.
 	 */
 	async function gatedSelect(ctx: ExtensionContext, title: string, options: string[], signal: AbortSignal): Promise<string | undefined> {
 		if (ctx.mode !== "tui") return ctx.ui.select(title, options, { signal });
 		try {
 			try { ctx.ui.setWorkingVisible(false); } catch { /* cosmetic; the dialog outcome is unaffected */ }
-			return await ctx.ui.select(title, options, { signal });
+			return await askSelect(ctx.ui, title, options, signal);
 		} finally {
 			try { ctx.ui.setWorkingVisible(true); } catch { /* cosmetic; never masks the selector's result or error */ }
 		}

@@ -112,6 +112,24 @@ Registration details:
   only: visibility failures are ignored and never change the outcome).
   Queued requests do not affect spinner visibility; only the active
   selector toggles it.
+- In TUI mode each dialog renders as a **hideable overlay**
+  (`extensions/guard/ask-overlay.ts`): full-width, anchored to the bottom,
+  with a ctrl+] hide/show toggle registered on raw terminal input
+  (press-only, active while the overlay is focused or hidden, consumed so
+  pi's editor binding never fires, one "prompt hidden" notice). The dialog
+  deliberately does not use `ctx.ui.custom`: the SDK's custom-overlay
+  completion callback pops the last overlay, which under a foreign overlay
+  removes the wrong one. The adapter borrows the renderer through a
+  zero-height widget bridge it removes immediately, mounts through the
+  public `TUI.showOverlay`, and owns the returned handle (`setHidden` for
+  the toggle, `handle.hide()` for removal), so cancelling under a foreign
+  overlay leaves the foreign overlay focused and mounted. Long details are
+  bounded to the terminal height with PgUp/PgDn access to the overflow, and
+  a terminal too short to show the decision controls disables approval
+  while keeping Esc. Hosts without the required capabilities fall back to
+  the plain signal-aware selector before anything is mounted; failed or
+  cancelled displays are never retried. Ownership is guard-local: foreign
+  extensions using the unsafe `ui.custom` path are not fixed by this.
 - An explicit HostBash/Pwsh **ask-rule match** offers allow once or deny
   (saving a rule cannot override the ask).
 - A fallback prompt offers allow once, save for this project
