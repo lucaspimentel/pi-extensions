@@ -7,8 +7,11 @@ observe-only in `extensions/guard/index.ts` + `policy/` (2026-10-06); step 3
 (tools and enforcement) implemented in `runtime.ts`, `tools/`, and
 `filter.ts` after the 2026-10-06/07 design review closed the audit,
 lifecycle, and filter gaps (see the decision log); step 4 (plan.ts
-integration) implemented in `extensions/plan.ts` (2026-10-07); steps 5+ not
-implemented.**
+integration) implemented in `extensions/plan.ts` (2026-10-07); step 5
+(subagent inheritance) implemented (2026-10-07); dialog gate, spinner,
+cancellation, and owned overlays implemented and visually confirmed by the
+user (2026-10-09). The save/deny/compound prompt contract below is confirmed
+but not implemented; step 6 switchover is not authorized.**
 
 Scope: a new `guard` extension that replaces `extensions/pi-tool-permissions/`,
 `extensions/python/`, and `extensions/node/`, plus changes to
@@ -228,20 +231,20 @@ Holes, verified 2026-10-02:
 - **Failure hints:** when a sandboxed command fails (network unreachable,
   EROFS on a protected or read-only path, path not mounted), the result adds a
   hint to use `host_bash` if host access is required.
-- **Ask dialogs (revised step 3):** explicit ask rules offer allow once or
-  deny. Fallback prompts offer once, save for project, save for user, or
-  deny. Host suggestions are exact commands with escaped metacharacters;
-  saving is offered only if the merged patch authorizes the whole call.
-  Show the exact rule/destination and never remove ask/deny rules. Cancel
-  stale approvals without execution or persistence. Headless prompts deny.
-  Dialog-UX parity items pi-tool-permissions had (the ctrl+] hideable
-  overlay, edit-before-save, deny-rule saving and steer, herdr signaling,
-  breakdown rendering) are not specified here; they are tracked as pending
-  work in the root TODO.md guard section and must land by the step 6
-  switchover. The concurrent-dialog mutex and spinner hiding are no longer
-  pending: all four guard dialogs serialize through the guard-owned FIFO gate
-  described below, and each admitted TUI selector hides the working spinner
-  while it is open.
+- **Ask dialogs (implemented step 3):** explicit ask rules currently offer
+  allow once or deny. Fallback prompts offer once, save for project, save
+  for user, or deny. Host suggestions are exact commands with escaped
+  metacharacters; saving is offered only if the merged patch authorizes the
+  whole call. Show the exact rule/destination and never remove ask/deny
+  rules. Cancel stale approvals without execution or persistence. Headless
+  prompts deny. The dialog gate, spinner hiding, final-commit cancellation,
+  and ctrl+] owned overlays are implemented; the user confirmed the visual
+  check on 2026-10-09. The confirmed but unimplemented editor, deny-save,
+  steering, and compound-breakdown behavior is specified in
+  [Save, deny, and compound prompts](#save-deny-and-compound-prompts).
+  Herdr signaling and other remaining UX items stay separately tracked in
+  the root TODO.md; documenting this contract does not authorize
+  implementation or step 6.
 - **Dialog gate (2026-10-08):** one `DialogGate` instance per guard factory
   serializes execution approvals, read-grant prompts, the profile picker, and
   the migrate confirmation. Ordering is FIFO among requests that reach the
@@ -323,6 +326,129 @@ Holes, verified 2026-10-02:
   ambiguous formats and filter failures suppress the entire original result
   with a fixed notice.
 - Commands you type with `!` stay unsandboxed.
+
+## Save, deny, and compound prompts
+
+**Status: design confirmed by the user on 2026-10-09; not implemented.**
+This extends the implemented ask-dialog behavior above. The interview closed
+with design agreement only: implementation, configuration changes, and the
+step-6 switchover still require authorization.
+
+### Scope and action menu
+
+- Rule-saving actions initially use the existing deterministic host-shell
+  representation: `HostBash(...)` and `Pwsh(...)`, including bash routed to
+  the host. This does not enable guard enforcement on additional tools;
+  Pwsh and other non-owned calls retain their current observation boundary.
+- Add no generic per-tool deny schema, worker-code deny representation,
+  session deny store, or "Deny and stop" action. Session denial was considered
+  and explicitly removed from this scope. Ordinary denial blocks the current
+  call without automatically aborting the agent operation.
+- Read grants retain their session/project/user/deny choices. The editor
+  changes below apply to persistent project/user root saves; no new read-deny
+  rule representation is introduced.
+- Use flat, explicit execution-approval choices: **Allow once**, **Save allow
+  for project**, **Save allow for user**, **Deny once**, **Save deny for
+  project**, and **Save deny for user**. Offer save actions only where the
+  representation and effective policy support them.
+- Explicit ask rules still prohibit allow-saving, but permit supported
+  project/user deny saves. Add the deny rule without removing the ask rule;
+  existing deny-over-ask precedence applies. Automatic policy denial opens no
+  new dialog.
+
+### Compound breakdown and rule suggestions
+
+- Show one prompt containing the original command and each reliably parsed
+  step's decision. The breakdown is an explanation, not an execution plan:
+  execute the original command unchanged, never the fragments separately.
+- For an allow save, suggest anchored, escaped exact rules only for steps
+  lacking effective permission. Do not add redundant rules for already
+  allowed steps. Offer a generated bundle only when the complete hypothetical
+  merge authorizes the entire original call; existing ask/deny rules are not
+  removed or bypassed.
+- Edit and save that bundle as one logical scope update, with no deliberate
+  partial installation of its rules. This is not a new guarantee of
+  crash-safe filesystem writes. The user explicitly accepts that the saved
+  rules grant each matching step independently, including outside this
+  particular sequence; they are not an exact-sequence-only permission.
+- For a compound deny save, first show a multi-select of reliably parsed
+  steps and their decisions, with nothing preselected. Require at least one
+  selection to continue. Prefill exact deny rules for the selected commands,
+  then open the rule editor. Matching a selected step can deny the whole call;
+  those rules also deny matching commands outside this sequence.
+- If parsing is unreliable, show the original command and mark the breakdown
+  unavailable. Retain existing whole-call policy, rather than tightening it
+  or presenting guessed fragments as reliable. Generate no guessed allow
+  bundle. A deny-save action opens a blank rule editor; manually entered
+  rules must be validated against the current whole call before saving.
+
+### Editor, validation, and preview
+
+- Every persistent save opens an editor. Shell editors contain one complete
+  rule expression per line, initially using anchored, escaped exact
+  suggestions. Every rule must parse and compile and use the original shell
+  namespace. Scope, allow/deny slot, and destination are controlled by the
+  chosen action, not editable configuration fields.
+- Deliberate broadening to the existing glob, regex, or tool-wide grammar is
+  permitted with explicit review. A malformed expression, wrong shell, or
+  hypothetical merge that fails to allow/deny the entire current call as
+  intended is a validation error. Preserve the entered text, explain the
+  problem, and return to editing; do not save or execute while invalid.
+- A persistent read-root editor contains one plain path. The edited root
+  must cover the path that caused the request and pass existing root,
+  protected-path, and secret restrictions. Unrelated roots are invalid.
+  Grants remain read-only, discard worker state when applied, and never
+  replay the code that requested access.
+- After valid submission, always show a separate preview, including unchanged
+  text: final rules/path, destination, and effect on the current call. For
+  bundles, make the independent grants explicit. Provide **Confirm**,
+  **Edit**, and **Cancel save**. Edit returns to the editor without mutation.
+
+### Cancellation and denial steering
+
+| Ordinary editor/preview cancellation or empty submission | Outcome |
+|---|---|
+| Allow-rule save | Save nothing; allow the current call once |
+| Deny-rule save | Save nothing; deny the current call once |
+| Persistent read-root save | Save nothing; grant no access |
+
+- Display these cancellation consequences explicitly. They apply to ordinary
+  user cancellation of a save, not owner abort, stale policy/context, or
+  lifecycle invalidation. Those failures must never become allow-once or
+  grant fallbacks. Cancelling the initial approval selector denies without
+  saving or steering.
+- After an explicit user denial, including a deny-save that becomes deny-once,
+  collect an optional instruction for the agent. Empty or cancelled instruction
+  input still denies, without steering. Automatic policy denial and initial
+  selector cancellation skip this field.
+- For a deny-rule save, collect the optional instruction before the final
+  commit. Finish all UI, then perform final validity checks and write the
+  rule. Aborting the owner before commit saves nothing; cancelling only the
+  instruction field merely skips steering. A nonempty instruction uses the
+  existing steering delivery mechanism, not an automatic agent abort.
+
+### Ownership and commit boundaries
+
+- The step picker, editor, preview, and steering field belong to the same
+  admitted guard interaction. Every TUI stage retains ctrl+] hide/show;
+  hiding preserves selections/text and the FIFO lease, grants nothing, and
+  does not restore the spinner. Hide the spinner for the whole admitted
+  interaction and restore it before releasing the lease on settlement.
+- Retain the factory-scoped gate, owned-resource cleanup, private selector
+  signal, captured owner signal, and context/runtime/epoch checks. Use public
+  components/APIs for signal-aware editors; native `ui.editor()` has no signal
+  option and is not sufficient on its own. No SDK patches/upgrades, private
+  field access, global dialog coordinator, or extra execution queue.
+- Complete the UI and post-answer validation and release the narrow lease
+  before persistence or policy transition. Re-read configuration and validate
+  the actual edited patch against the latest effective policy, not a newly
+  generated suggestion. Retain final commit barriers through any teardown;
+  no await separates the final check from the synchronous commit.
+- Aborted/stale requests are never retried, replayed, or transferred to a new
+  owner. Preserve genuine storage/teardown/audit errors, do not revive workers
+  or roll back completed commits, and retain headless denial and the existing
+  RPC display-cancellation limitation. The executor queue remains independent;
+  authorized work does not wait for interaction.
 
 ## Profiles
 
@@ -790,7 +916,8 @@ remain useful.
 | Dialog mutex (2026-10-08) | One guard-owned FIFO `DialogGate` per factory (not per dialog kind, runtime, or session) serializes approvals, read grants, the profile picker, and migrate confirmation. A plain promise-chain mutex was rejected as the mechanism: it cannot remove aborted queued requests promptly or cancel open selectors. Cancellation combines the caller's signal with a private per-request signal passed to the SDK selector's `{ signal }` option; policy and lifecycle boundaries invalidate synchronously; the lease spans pre-display validation, the selector, and post-answer validation only. See the Ask dialogs section for the full contract. |
 | Spinner hiding (2026-10-08) | All four admitted TUI selectors hide the working spinner before opening and restore it on every settle path through one TUI-only selector wrapper (`gatedSelect` in `guard/index.ts`); restoration always passes `true` because the UI API has no visibility getter, matching the legacy extension. Visibility failures are caught as presentation-only: they never change authorization, replace a selector result or error, or block gate cleanup. Queued, stale-before-display, headless, and dry requests never toggle visibility, and queued cancellation cannot restore the spinner underneath another open selector. RPC is untouched: its setter is a no-op, so non-TUI modes skip the toggling entirely |
 | Command cancellation through final commit (2026-10-08) | The profile picker and migrate confirmation capture the initiating command operation's `ctx.signal` once (a live SDK getter; rereading after the dialog would return `undefined` or another operation's signal) and pass it to the shared gate, closing the gap where the two command dialogs ran with empty gate options. The captured signal is rechecked through a command-only final commit guard inside the runtime's existing `beforeCommit` hook with the captured expected epoch: after asynchronous teardown, before policy assignment/publication (picker) and before privileged configuration writes (migration), so cancellation during pending teardown prevents the requested change. Classification is by per-operation Error identity only; genuine teardown, storage, audit, and source-validation failures keep their diagnostics. Direct `/guard profile <name>`, profile cycling, reload, ack, approvals, and read grants are unchanged; no rollback of completed commits or started teardown; expected cancellation is a warning notice and a normal return. Suites: `tests/guard-dialogs.test.mts` (registration-level, both commands), `tests/guard-runtime.test.mts` (teardown ordering). |
-| Hideable overlay delivery (2026-10-09) | The four TUI dialogs render through a guard-owned overlay adapter (`guard/ask-overlay.ts`) instead of `ctx.ui.custom`: the SDK's custom-overlay completion callback pops the LAST overlay, and a controlled probe proved that cancelling a hidden guard overlay under a foreign overlay removes the foreign overlay while its promise stays pending and leaves the cancelled overlay mounted (host 1.1.0 has the same implementation; do not patch or upgrade the SDK for this). The adapter borrows the renderer through a uniquely keyed zero-height `ui.setWidget` bridge removed immediately (the host's removal path is verified with a canary removal before borrowing, which filters hosts that refuse every deletion; the bridge key stays inside the owned-resource cleanup boundary so a post-canary deletion failure is retried best-effort there, and an entry can only remain if both deletion attempts fail), mounts through public `TUI.showOverlay`, and owns the returned handle: `setHidden` for the ctrl+] toggle (raw `ui.onTerminalInput`, press-only, focused-or-hidden only, consumes the key) and `handle.hide()` for removal, which preserves a foreign overlay's focus. Every setup failure (bridge removal, acquisition, selector construction, mounting) runs one owned-resource cleanup and propagates the genuine error; failed or cancelled displays are never retried. The details body is bounded by MEASURED chrome (a one-line-title twin selector verifies the recomposition of the selector's public render output at the current width, so wrapped option labels and key hints are budgeted exactly; the adapter never touches SDK-private fields), with PgUp/PgDn access to overflow at any title budget including a one-line window; approval eligibility is recomputed from the live terminal dimensions on every input (fail closed before the first paint), and a terminal whose controls alone cannot fit disables approval with a wrapped warning while keeping Esc. Capability gaps fall back to the signal-aware native selector before mounting. Ownership is guard-local: no global overlay coordinator, and foreign extensions using the unsafe `ui.custom` completion path remain exposed. Suites: `tests/guard-ask-overlay.test.mts` (adapter + real pi-tui boundary), `tests/guard-dialogs.test.mts` (wiring through the registered handlers); offline PTY smoke with a real pi subprocess verified open/hide/show/apply. Review follow-up (2026-10-09): the five findings from the post-commit review are fixed; the review probe asserting visible choices and the hide hint in an 8-column terminal is unsatisfiable (the compositor truncates overlay lines to the resolved width, and the measured chrome alone is 27 rows), so the fail-closed blocked state is the implemented behavior there |
+| Hideable overlay delivery (2026-10-09) | The four TUI dialogs render through a guard-owned overlay adapter (`guard/ask-overlay.ts`) instead of `ctx.ui.custom`: the SDK's custom-overlay completion callback pops the LAST overlay, and a controlled probe proved that cancelling a hidden guard overlay under a foreign overlay removes the foreign overlay while its promise stays pending and leaves the cancelled overlay mounted (host 1.1.0 has the same implementation; do not patch or upgrade the SDK for this). The adapter borrows the renderer through a uniquely keyed zero-height `ui.setWidget` bridge removed immediately (the host's removal path is verified with a canary removal before borrowing, which filters hosts that refuse every deletion; the bridge key stays inside the owned-resource cleanup boundary so a post-canary deletion failure is retried best-effort there, and an entry can only remain if both deletion attempts fail), mounts through public `TUI.showOverlay`, and owns the returned handle: `setHidden` for the ctrl+] toggle (raw `ui.onTerminalInput`, press-only, focused-or-hidden only, consumes the key) and `handle.hide()` for removal, which preserves a foreign overlay's focus. Every setup failure (bridge removal, acquisition, selector construction, mounting) runs one owned-resource cleanup and propagates the genuine error; failed or cancelled displays are never retried. The details body is bounded by MEASURED chrome (a one-line-title twin selector verifies the recomposition of the selector's public render output at the current width, so wrapped option labels and key hints are budgeted exactly; the adapter never touches SDK-private fields), with PgUp/PgDn access to overflow at any title budget including a one-line window; approval eligibility is recomputed from the live terminal dimensions on every input (fail closed before the first paint), and a terminal whose controls alone cannot fit disables approval with a wrapped warning while keeping Esc. Capability gaps fall back to the signal-aware native selector before mounting. Ownership is guard-local: no global overlay coordinator, and foreign extensions using the unsafe `ui.custom` completion path remain exposed. Suites: `tests/guard-ask-overlay.test.mts` (adapter + real pi-tui boundary), `tests/guard-dialogs.test.mts` (wiring through the registered handlers); offline PTY smoke with a real pi subprocess verified open/hide/show/apply; the user completed the visual checklist and reported "done, looks good" on 2026-10-09 (user-confirmed, not assistant-observed). Review follow-up (2026-10-09): the five findings from the post-commit review are fixed; the review probe asserting visible choices and the hide hint in an 8-column terminal is unsatisfiable (the compositor truncates overlay lines to the resolved width, and the measured chrome alone is 27 rows), so the fail-closed blocked state is the implemented behavior there |
+| Save/deny/compound prompt design (2026-10-09) | User-confirmed design only, not implemented: flat actions, persistent rule/root editors, validated preview, independent allow-rule bundles for needed steps, multi-select deny suggestions, manual deny entry on unreliable parsing, and optional steering collected before commit. No session deny or deny-and-stop; all TUI stages retain owned hide/show and the existing gate/commit barriers. See Save, deny, and compound prompts. Implementation and step 6 remain unauthorized. |
 | Planning eligibility (2026-10-07) | `/plan` filters the ACTIVE set through `isPlanningToolAllowed`: built-in host-shell/local-write removed regardless of hints; built-in read/sandboxed/meta classes stay; everything else needs `readOnlyHint === true && destructiveHint !== true` from a fresh getAllTools lookup; toolClasses overrides create no planning exceptions; input-dependent wrappers qualify only via explicit annotations |
 | Worker capability metadata (2026-10-07) | Conservative static annotations on this repo's tools: web/web_search/Slack reads read-only open-world, session_search read-only closed-domain, guard python/node write-capable open-world (raw profiles expose the host); read-only hints describe intended operations, not the absence of internal caches or index files |
 | Plan narrowing limits (2026-10-07) | Entry-time declaration filtering only, not execution containment: codemode/deferred tools can remain callable, tool_search or another extension can change activation afterwards, nested non-owned calls stay observe-only until step 6, trusted extensions have host privileges, annotations are unverified author hints |
