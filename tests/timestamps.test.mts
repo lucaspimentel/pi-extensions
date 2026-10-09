@@ -297,15 +297,21 @@ function branchEntry(message: FakeMessage) {
 	return { type: "message", message };
 }
 
+/** Today's wall-clock time, so same-day (time-only) assertions hold on any run date. */
+function atToday(h: number, m: number, s: number): number {
+	const now = new Date();
+	return new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s).getTime();
+}
+
 test("backfill approximates start and end and anchors the first delta at the user prompt", () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("read", () => base.renderers);
 
-	const userTs = new Date(2026, 9, 8, 14, 32, 0).getTime();
-	const assistantTs = new Date(2026, 9, 8, 14, 32, 5).getTime();
-	const firstResultTs = new Date(2026, 9, 8, 14, 32, 9).getTime();
-	const secondResultTs = new Date(2026, 9, 8, 14, 33, 0).getTime();
+	const userTs = atToday(14, 32, 0);
+	const assistantTs = atToday(14, 32, 5);
+	const firstResultTs = atToday(14, 32, 9);
+	const secondResultTs = atToday(14, 33, 0);
 	const branch = [
 		branchEntry({ role: "user", timestamp: userTs }),
 		branchEntry({
@@ -350,11 +356,11 @@ test("later backfilled batch anchors its delta at the previous tool result", () 
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("read", () => base.renderers);
 
-	const userTs = new Date(2026, 9, 8, 14, 32, 0).getTime();
-	const assistant1Ts = new Date(2026, 9, 8, 14, 32, 5).getTime();
-	const result1Ts = new Date(2026, 9, 8, 14, 32, 9).getTime();
-	const assistant2Ts = new Date(2026, 9, 8, 14, 32, 30).getTime();
-	const result2Ts = new Date(2026, 9, 8, 14, 32, 40).getTime();
+	const userTs = atToday(14, 32, 0);
+	const assistant1Ts = atToday(14, 32, 5);
+	const result1Ts = atToday(14, 32, 9);
+	const assistant2Ts = atToday(14, 32, 30);
+	const result2Ts = atToday(14, 32, 40);
 	const branch = [
 		branchEntry({ role: "user", timestamp: userTs }),
 		branchEntry({ role: "assistant", timestamp: assistant1Ts, content: [{ type: "toolCall", id: "n1" }] }),
@@ -419,7 +425,7 @@ test("message_end events anchor live deltas between calls", () => {
 
 // ── Result rendering ──────────────────────────────────────────────────────────
 
-test("result line is spliced under the header of a Container result", () => {
+test("result line sits at the bottom of a Container result", () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("read", () => base.renderers);
@@ -433,7 +439,9 @@ test("result line is spliced under the header of a Container result", () => {
 	const endIndex = lines.findIndex((line) => line.includes("⟨dim⟩"));
 	const bodyIndex = lines.findIndex((line) => line.includes("result body"));
 	assert.ok(headerIndex !== -1 && endIndex !== -1 && bodyIndex !== -1, JSON.stringify(lines));
-	assert.ok(endIndex > headerIndex && endIndex < bodyIndex, `ended line misplaced: ${JSON.stringify(lines)}`);
+	assert.ok(endIndex > headerIndex && endIndex > bodyIndex, `ended line misplaced: ${JSON.stringify(lines)}`);
+	const lastContentIndex = lines.reduce((last, line, index) => (line.trim() ? index : last), -1);
+	assert.equal(endIndex, lastContentIndex, `ended line must be the last content line: ${JSON.stringify(lines)}`);
 	assert.match(lines[endIndex]!, /ran 0\.5s  ended \d\d:\d\d:\d\d/);
 });
 

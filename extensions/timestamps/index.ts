@@ -8,6 +8,7 @@
  *     14:32:05  +0:03
  *
  *     ⎿ docs/extensions.md:190 ...
+ *     ...
  *     ran 2.1s  ended 14:32:07
  *
  * The call line shows the absolute start time (local timezone, MM-DD prefix on
@@ -274,13 +275,13 @@ function wrapResult(
 	const durationMs = call.durationMs ?? Math.max(0, call.end - call.start);
 	line.setText(theme.fg("dim", formatResultLine(durationMs, call.end, Date.now(), !isShellTool)));
 
-	// Preferred placement: directly under the result header, which is the first
-	// child when the base result renders as a Container. Otherwise wrap and
-	// append below the whole block.
+	// Preferred placement: the very bottom of the result block, after the body
+	// (and after the shell renderer's Took line). When the base result renders
+	// as a Container the line is appended to it; otherwise wrap and append below
+	// the whole block.
 	if (inner instanceof Container) {
 		if (inner.children.includes(line)) inner.removeChild(line);
-		const insertAt = Math.min(1, inner.children.length);
-		inner.children.splice(insertAt, 0, line);
+		inner.addChild(line);
 		return inner;
 	}
 	const container = st.resultContainer ?? new Container();
