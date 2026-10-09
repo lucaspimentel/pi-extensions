@@ -29,7 +29,8 @@
       "./extensions/session-search",
       "./extensions/subagent",
       "./extensions/update-jira",
-      "./extensions/timestamps"
+      "./extensions/timestamps",
+      "./extensions/git-read"
     ],
     "prompts": ["./extensions/subagent/prompts/*.md"]
   },
