@@ -187,13 +187,13 @@ test("live call renders absolute and delta immediately, running elapsed once 100
 	// Right after execution starts the elapsed time is sub-100ms and omitted.
 	const instant = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c1"))));
 	assert.ok(instant, "no dim timestamp line");
-	assert.match(instant!, /^\s*⟨dim⟩\d\d:\d\d:\d\d  \+3s⟨\/role⟩$/);
+	assert.match(instant!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  \+3s⟨\/role⟩$/);
 	assert.ok(!instant!.includes("ran "), "sub-100ms elapsed must be omitted");
 
 	await new Promise((resolve) => setTimeout(resolve, 150));
 	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c1"))));
 	assert.ok(tsLine, "no dim timestamp line after 100ms");
-	assert.match(tsLine!, /^\s*⟨dim⟩\d\d:\d\d:\d\d  \+3s  ran \d+\.\ds…⟨\/role⟩$/);
+	assert.match(tsLine!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  \+3s  ran \d+\.\ds…⟨\/role⟩$/);
 });
 
 test("instant tool shows no duration anywhere", () => {
@@ -240,7 +240,7 @@ test("completed call line drops the ran segment; the duration moves to the resul
 
 	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c2"))));
 	assert.ok(tsLine, "no dim timestamp line");
-	assert.match(tsLine!, /^\s*⟨dim⟩\d\d:\d\d:\d\d  \+\d+s⟨\/role⟩$/);
+	assert.match(tsLine!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  \+\d+s⟨\/role⟩$/);
 	assert.ok(!tsLine!.includes("ran "), "completed call line must not show the duration");
 	assert.ok(!tsLine!.includes("…"), "completed call must not show the running suffix");
 
@@ -261,7 +261,7 @@ test("shell tools never show the extension's own duration", () => {
 
 	const running = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("s1"))));
 	assert.ok(running, "no dim line while running");
-	assert.match(running!, /^\s*⟨dim⟩\d\d:\d\d:\d\d  \+\d+s⟨\/role⟩$/);
+	assert.match(running!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  \+\d+s⟨\/role⟩$/);
 	assert.ok(!running!.includes("ran "), "running shell call line must not show the duration");
 
 	loaded.handler("tool_execution_end")!({
@@ -332,7 +332,7 @@ test("backfill approximates start and end and anchors the first delta at the use
 	// (end minus the start proxy) appears on the result line, not the call line.
 	const first = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("b1"))));
 	assert.ok(first, "no dim line for b1");
-	assert.match(first!, /^\s*⟨dim⟩14:32:05  \+5s⟨\/role⟩$/);
+	assert.match(first!, /^\s*⟨dim⟩started 14:32:05  \+5s⟨\/role⟩$/);
 
 	const firstResult = tsLineOf(
 		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("b1"))),
@@ -342,7 +342,7 @@ test("backfill approximates start and end and anchors the first delta at the use
 
 	const second = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("b2"))));
 	assert.ok(second, "no dim line for b2");
-	assert.match(second!, /^\s*⟨dim⟩14:32:05  \+5s⟨\/role⟩$/);
+	assert.match(second!, /^\s*⟨dim⟩started 14:32:05  \+5s⟨\/role⟩$/);
 
 	const secondResult = tsLineOf(
 		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("b2"))),
@@ -375,7 +375,7 @@ test("later backfilled batch anchors its delta at the previous tool result", () 
 
 	const second = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("n2"))));
 	assert.ok(second, "no dim line for n2");
-	assert.match(second!, /^\s*⟨dim⟩14:32:30  \+21s⟨\/role⟩$/);
+	assert.match(second!, /^\s*⟨dim⟩started 14:32:30  \+21s⟨\/role⟩$/);
 
 	const secondResult = tsLineOf(
 		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("n2"))),
@@ -403,7 +403,7 @@ test("historical call without an end omits the elapsed segment", () => {
 
 	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("h1"))));
 	assert.ok(tsLine, "no dim timestamp line");
-	assert.ok(tsLine!.includes("10-07 10:00:00"), `date-prefixed absolute missing: ${tsLine}`);
+	assert.ok(tsLine!.includes("started 10-07 10:00:00"), `date-prefixed absolute missing: ${tsLine}`);
 	assert.ok(!/ran /.test(tsLine!), `elapsed must be omitted without an end: ${tsLine}`);
 });
 

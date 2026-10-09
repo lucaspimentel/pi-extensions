@@ -5,7 +5,7 @@
  *
  *   ● bash
  *     └ rg -n "registerToolRenderer" docs/
- *     14:32:05  +0:03
+ *     started 14:32:05  +0:03
  *
  *     ⎿ docs/extensions.md:190 ...
  *     ...
@@ -172,7 +172,7 @@ function ensureState(state: Record<string, unknown>): TimestampsState {
  * because their own renderer shows Elapsed while running.
  */
 function callLineText(call: CallTimes, nowMs: number, isShellTool: boolean): string {
-	const segments: string[] = [formatAbsolute(call.start, nowMs)];
+	const segments: string[] = [`started ${formatAbsolute(call.start, nowMs)}`];
 	const delta = deltaFor(call.start);
 	if (delta !== undefined) segments.push(formatDelta(delta));
 	if (call.end === undefined && call.live && !isShellTool) {
