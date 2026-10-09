@@ -169,6 +169,64 @@ test("a host without onTerminalInput falls back to the native selector", async (
 	assert.equal(host.widgetCalls.length, 0);
 });
 
+test("a widget acquisition failure removes the raw listener and propagates", async () => {
+	const acquisitionFailure = new Error("probe acquisition failed");
+	const { tui, overlays } = makeFakeTui();
+	const host = makeFakeUI(tui);
+	(host.ui as Record<string, unknown>).setWidget = () => {
+		throw acquisitionFailure;
+	};
+	const controller = new AbortController();
+	await assert.rejects(open(host.ui, "t", ["a"], controller.signal).raw, (error: unknown) => error === acquisitionFailure);
+	assert.equal(host.inputHandlers.length, 0, "the raw listener was removed");
+	assert.equal(overlays.length, 0, "the overlay never mounted");
+});
+
+test("a selector construction failure removes the raw listener and propagates", async () => {
+	const constructionFailure = new Error("probe construction failed");
+	const failingAsk = createGuardAskSelect({
+		matchesKey, isKeyRelease, isKeyRepeat,
+		ExtensionSelectorComponent: function () {
+			throw constructionFailure;
+		} as unknown as typeof ExtensionSelectorComponent,
+	});
+	const { tui, overlays } = makeFakeTui();
+	const host = makeFakeUI(tui);
+	const controller = new AbortController();
+	await assert.rejects((failingAsk as (ui: unknown, title: string, options: string[], signal: AbortSignal) => Promise<string | undefined>)(host.ui, "t", ["a"], controller.signal), (error: unknown) => error === constructionFailure);
+	assert.equal(host.inputHandlers.length, 0, "the raw listener was removed");
+	assert.equal(overlays.length, 0, "the overlay never mounted");
+	assert.equal(host.widgetEntries.size, 0, "the bridge was removed");
+});
+
+test("a contract-conforming selector without SDK internals renders through the recomposition fallback", async () => {
+	class MinimalSelector {
+		onSelect: (option: string) => void;
+		onCancel: () => void;
+		constructor(_title: string, _options: string[], onSelect: (option: string) => void, onCancel: () => void) {
+			this.onSelect = onSelect;
+			this.onCancel = onCancel;
+		}
+		render() { return ["Allow once", "Deny"]; }
+		handleInput(data: string) { if (data === ESC) this.onCancel(); if (data === ENTER) this.onSelect("Allow once"); }
+		dispose() {}
+		invalidate() {}
+	}
+	const minimalAsk = createGuardAskSelect({
+		matchesKey, isKeyRelease, isKeyRepeat,
+		ExtensionSelectorComponent: MinimalSelector as unknown as typeof ExtensionSelectorComponent,
+	});
+	const { tui, overlays } = makeFakeTui();
+	const host = makeFakeUI(tui);
+	const controller = new AbortController();
+	const promise = (minimalAsk as (ui: unknown, title: string, options: string[], signal: AbortSignal) => Promise<string | undefined>)(host.ui, longTitle(20), ["Allow once", "Deny"], controller.signal);
+	promise.catch(() => {});
+	assert.doesNotThrow(() => overlays[0].component.render(80), "a selector without the standard output shape renders through the fallback");
+	assert.doesNotThrow(() => overlays[0].component.handleInput(DOWN), "input works without SDK internals");
+	overlays[0].component.handleInput(ESC);
+	assert.equal(await promise, undefined);
+});
+
 test("a bridge factory that yields no TUI falls back and leaves no entries", async () => {
 	const host = makeFakeUI(undefined, { factoryTui: undefined });
 	const controller = new AbortController();
@@ -196,16 +254,35 @@ test("the bridge is acquired with a unique key and removed immediately; the over
 	const host = makeFakeUI(tui);
 	const controller = new AbortController();
 	const { promise } = open(host.ui, "t", ["a", "b"], controller.signal);
-	assert.equal(host.widgetCalls.length, 2, "exactly one acquisition and one removal");
-	assert.equal(host.widgetCalls[0].factory, true);
-	assert.equal(host.widgetCalls[1].removal, true);
-	assert.notEqual(host.widgetCalls[0].key, "", "the bridge key is non-empty");
+	assert.equal(host.widgetCalls.length, 3, "a canary removal precedes the acquisition and the bridge removal");
+	assert.equal(host.widgetCalls[0].removal, true, "the canary removal runs first");
+	assert.equal(host.widgetCalls[1].factory, true);
+	assert.equal(host.widgetCalls[2].removal, true);
+	assert.notEqual(host.widgetCalls[1].key, "", "the bridge key is non-empty");
+	assert.notEqual(host.widgetCalls[1].key, host.widgetCalls[0].key, "the canary key is unique");
 	assert.equal(host.widgetEntries.size, 0, "no persistent widget entry survives");
 	assert.equal(overlays.length, 1, "the dialog mounted through TUI.showOverlay");
 	assert.deepEqual(overlays[0].options, { anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: { left: 0, right: 0, bottom: 0 } }, "full-width bottom-anchored geometry");
 	assert.equal(hideOverlayCount(), 0, "TUI.hideOverlay is never used");
 	overlays[0].component.handleInput(ESC);
 	assert.equal(await promise, undefined);
+});
+
+test("a bridge removal failure fails the dialog before any widget exists or mounts", async () => {
+	const removalFailure = new Error("probe removal failed");
+	const { tui, overlays } = makeFakeTui();
+	const host = makeFakeUI(tui);
+	const originalSetWidget = host.ui.setWidget as (key: string, content: unknown) => void;
+	(host.ui as Record<string, unknown>).setWidget = (key: string, content: unknown) => {
+		if (content === undefined) throw removalFailure; // every removal fails, canary included
+		originalSetWidget(key, content);
+	};
+	const controller = new AbortController();
+	await assert.rejects(open(host.ui, "t", ["a"], controller.signal).raw, (error: unknown) => error === removalFailure, "the removal failure propagates as a genuine setup error");
+	assert.equal(host.widgetEntries.size, 0, "no bridge entry was ever created");
+	assert.equal(overlays.length, 0, "the overlay never mounted");
+	assert.equal(host.inputHandlers.length, 0, "the raw listener was removed");
+	assert.equal(host.selectCalls.length, 0, "a failed display is never retried through the native selector");
 });
 
 test("the bridge component renders zero lines", async () => {
@@ -413,6 +490,77 @@ test("a terminal too short for the decision controls disables approval but keeps
 	overlay.handleInput(ENTER);
 	assert.equal(await raw, "Allow once", "approval works again after the resize");
 	void promise;
+});
+
+test("enter before the first render stays pending in a too-short terminal", async () => {
+	const rows = { value: 5 };
+	const { tui, overlays } = makeFakeTui(rows);
+	const host = makeFakeUI(tui);
+	const controller = new AbortController();
+	const { promise, raw } = open(host.ui, longTitle(10), ["Allow once", "Deny"], controller.signal);
+	// No render has happened; the input path must evaluate the live geometry.
+	overlays[0].component.handleInput(ENTER);
+	const stillPending = await Promise.race([
+		promise.then(() => "settled"),
+		tick().then(() => "pending"),
+	]);
+	assert.equal(stillPending, "pending", "confirmation is disabled before the first paint in a five-row terminal");
+	overlays[0].component.handleInput(ESC);
+	assert.equal(await raw, undefined, "esc still cancels");
+	void promise;
+});
+
+test("shrinking without a repaint disables confirmation on the next input", async () => {
+	const rows = { value: 24 };
+	const { tui, overlays } = makeFakeTui(rows);
+	const host = makeFakeUI(tui);
+	const controller = new AbortController();
+	const { promise, raw } = open(host.ui, longTitle(10), ["Allow once", "Deny"], controller.signal);
+	overlays[0].component.render(80); // painted at 24 rows
+	rows.value = 5; // shrink without a repaint
+	overlays[0].component.handleInput(ENTER);
+	const stillPending = await Promise.race([
+		promise.then(() => "settled"),
+		tick().then(() => "pending"),
+	]);
+	assert.equal(stillPending, "pending", "confirmation must not use the previous render's safety flag");
+	overlays[0].component.handleInput(ESC);
+	assert.equal(await raw, undefined);
+	void promise;
+});
+
+test("a one-row title budget pages to the hidden tail", async () => {
+	const rows = { value: 11 };
+	const { tui, overlays } = makeFakeTui(rows);
+	const host = makeFakeUI(tui);
+	const controller = new AbortController();
+	const { promise } = open(host.ui, `${longTitle(40)}\nexact rule: echo asked`, ["Allow once", "Deny"], controller.signal);
+	const overlay = overlays[0].component;
+	const first = overlay.render(80).map(stripTerminalSequences);
+	assert.ok(first.length <= 11, `the dialog fits eleven rows (${first.length})`);
+	assert.ok(!first.some((line) => line.includes("exact rule")), "the tail starts out of view");
+	for (let i = 0; i < 50; i++) {
+		overlay.handleInput(PAGE_DOWN);
+		overlay.render(80);
+	}
+	const paged = overlay.render(80).map(stripTerminalSequences);
+	assert.ok(paged.some((line) => line.includes("exact rule")), "fifty page-downs reach the exact-rule tail through the one-line window");
+	overlay.handleInput(ESC);
+	await promise;
+});
+
+test("an 18-column viewport keeps every control and the hide hint within 24 rows", async () => {
+	const { tui, overlays } = makeFakeTui();
+	const host = makeFakeUI(tui);
+	const controller = new AbortController();
+	const { promise } = open(host.ui, longTitle(40), ["Allow once", "Deny"], controller.signal);
+	const lines = overlays[0].component.render(18).map(stripTerminalSequences);
+	assert.ok(lines.length <= 24, `the measured budget fits the viewport (${lines.length} rows)`);
+	assert.ok(lines.some((line) => line.includes("Allow once")), "Allow once is visible");
+	assert.ok(lines.some((line) => line.includes("Deny")), "Deny is visible");
+	assert.ok(lines.some((line) => line.includes(HIDE_HINT)), "the hide hint survived the narrow viewport");
+	overlays[0].component.handleInput(ESC);
+	await promise;
 });
 
 test("shrinking the terminal re-bounds the window on the next render", async () => {

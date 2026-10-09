@@ -18,11 +18,22 @@
  * the next visible overlay or the previous target without touching foreign
  * overlays.
  *
- * The details body (everything past the dialog header) is bounded to the
+ * The details body (everything past the first title line) is bounded to the
  * terminal height so the choice list, key hints, and the hide hint always
- * stay visible; overflow stays reachable with PgUp/PgDn. When the terminal is
- * too short to show the decision controls at all, approval is disabled: the
- * overlay renders a warning line and only Esc (cancel) is honored.
+ * stay visible; overflow stays reachable with PgUp/PgDn at any title budget,
+ * including a one-line window. The bounded title is rendered by this adapter
+ * with public API only: the selector is constructed once with the full title
+ * and never mutated; each render measures the real rendered controls at the
+ * current width (wrapped option labels and key hints included) through a
+ * one-line-title twin instance, verifies that measurement against the
+ * computed title wrap, and recomposes the selector's public render output
+ * with the windowed title lines. When the controls alone cannot fit the
+ * terminal, approval is disabled (only Esc passes) and a warning renders;
+ * eligibility is recomputed from the live terminal dimensions on every input,
+ * never from a previous paint. If the measurement cannot be verified against
+ * the twin (a selector that does not match the standard component's output
+ * shape), the adapter falls back to rendering the selector's own output
+ * unchanged and applies the same fit check.
  *
  * The toggle is registered at the raw terminal level (`ui.onTerminalInput`)
  * because pi-tui does not deliver input to a hidden overlay's handleInput, so
@@ -34,15 +45,20 @@
  * The adapter observes only the supplied dialog signal: it never aborts a
  * caller-owned controller, settlement and cleanup are idempotent, late
  * selector callbacks are ignored, and only guard-owned resources (the raw
- * listener, the owned overlay, the selector component) are removed. Non-TUI
- * hosts and hosts missing the required capabilities fall back to the
- * signal-aware native selector before anything is mounted; a failed or
- * cancelled overlay display is never retried.
+ * listener, the owned overlay, the selector components) are removed. Every
+ * setup failure (bridge removal, acquisition, selector construction,
+ * mounting) runs the same owned-resource cleanup and propagates the genuine
+ * error; the display is never retried. Non-TUI hosts and hosts missing the
+ * required capabilities fall back to the signal-aware native selector before
+ * anything is mounted; bridge removal capability is verified with a canary
+ * removal before the bridge is borrowed, so a removal failure can never
+ * leave a retained widget entry.
  */
 
 import {
 	getKeybindings,
 	truncateToWidth,
+	visibleWidth,
 	wrapTextWithAnsi,
 	type Component,
 	type OverlayHandle,
@@ -92,17 +108,27 @@ export interface GuardAskOverlayDeps {
 	) => GuardSelectorLike;
 }
 
-/** Fixed line budget around the title window inside the selector: two
- * borders, four spacers, the selector's key hint, and the hide hint. */
-const CHROME_LINES = 8;
-
 function abortReason(signal: AbortSignal): Error {
 	return signal.reason instanceof Error ? signal.reason : new Error("guard: dialog cancelled: call aborted");
 }
 
-function terminalRows(tui: TUI): number {
-	const rows = (tui as { terminal?: { rows?: unknown } }).terminal?.rows;
-	return typeof rows === "number" && Number.isFinite(rows) && rows >= 1 ? rows : Number.POSITIVE_INFINITY;
+function terminalMetric(tui: TUI, metric: "rows" | "columns"): number {
+	const value = (tui as unknown as { terminal?: { rows?: unknown; columns?: unknown } }).terminal?.[metric];
+	return typeof value === "number" && Number.isFinite(value) && value >= 1 ? value : Number.POSITIVE_INFINITY;
+}
+
+/** Text component padding math, mirrored from the public pi-tui Text so the
+ * computed title wrap matches the selector's own rendering exactly. */
+function textContentWidth(width: number): number {
+	const padX = Math.min(1, Math.max(0, Math.floor((width - 1) / 2)));
+	return Math.max(1, width - padX * 2);
+}
+
+/** One rendered title/hint line, padded to the full width like Text does. */
+function paddedLine(line: string, width: number): string {
+	const padX = Math.min(1, Math.max(0, Math.floor((width - 1) / 2)));
+	const text = " ".repeat(padX) + line;
+	return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
 }
 
 /**
@@ -117,6 +143,15 @@ export function createGuardAskSelect(deps: GuardAskOverlayDeps) {
 		if (signal.aborted) throw abortReason(signal);
 		if (typeof ui.setWidget !== "function" || typeof ui.onTerminalInput !== "function") {
 			return ui.select(title, options, { signal });
+		}
+		// Verify bridge removal before borrowing the renderer: a host whose
+		// widget removal fails must fail this dialog before any entry exists,
+		// so the zero-persistent-widget guarantee can never be violated.
+		const canaryKey = `guard-dialog-bridge-${++bridgeCounter}-canary`;
+		try {
+			ui.setWidget(canaryKey, undefined);
+		} catch (error) {
+			throw error instanceof Error ? error : new Error(String(error));
 		}
 
 		// Operation-scoped raw toggle listener. Registered before the synchronous
@@ -141,33 +176,13 @@ export function createGuardAskSelect(deps: GuardAskOverlayDeps) {
 			return { consume: true };
 		});
 
-		// Borrow the renderer and theme through a uniquely keyed zero-height
-		// widget; remove the bridge immediately, even when acquisition fails, so
-		// no persistent widget entry survives the dialog.
-		let tui: TUI | undefined;
-		let theme: GuardAskTheme | undefined;
-		const key = `guard-dialog-bridge-${++bridgeCounter}`;
-		try {
-			ui.setWidget(key, (borrowedTui, borrowedTheme) => {
-				tui = borrowedTui;
-				theme = borrowedTheme;
-				return { render: () => [] as string[], invalidate: () => {}, dispose: () => {} };
-			});
-		} finally {
-			try { ui.setWidget(key, undefined); } catch { /* the bridge renders zero lines; removal is best effort */ }
-		}
-		if (!tui || !theme || typeof tui.showOverlay !== "function") {
-			// Missing capability: signal-aware native selector. A failed or
-			// cancelled display is never retried.
-			try { removeToggle(); } catch { /* unsubscribe is best effort */ }
-			return ui.select(title, options, { signal });
-		}
-
 		// Settlement machinery: exactly one settle per dialog, late selector
-		// callbacks ignored, cleanup removes only owned resources.
+		// callbacks ignored, cleanup removes only owned resources. Every setup
+		// failure below runs the same cleanup and propagates the genuine error.
 		let settled = false;
 		let onAbort: (() => void) | null = null;
 		let selector: GuardSelectorLike | undefined;
+		let twin: GuardSelectorLike | undefined;
 		const cleanup = (): void => {
 			if (onAbort) {
 				try { signal.removeEventListener("abort", onAbort); } catch { /* never throws on standard signals */ }
@@ -176,80 +191,192 @@ export function createGuardAskSelect(deps: GuardAskOverlayDeps) {
 			try { removeToggle(); } catch { /* unsubscribe is best effort */ }
 			try { handle?.hide(); } catch { /* owned-handle removal is best effort */ }
 			try { selector?.dispose(); } catch { /* dispose is best effort */ }
+			try { twin?.dispose(); } catch { /* dispose is best effort */ }
 			handle = undefined;
 		};
 		let settleValue: (value: string | undefined) => void = () => {};
 		let settleError: (error: unknown) => void = () => {};
 
 		// Scrolling state for the details window; clamped against the current
-		// terminal height on every render.
+		// terminal height on every layout computation.
 		let detailOffset = 0;
 		let pageLines = 1;
-		let approvalDisabled = false;
+		// Fail closed until a layout computation proves the decision controls fit.
+		let approvalDisabled = true;
 
-		selector = new ExtensionSelectorComponent(title, options, (option) => settleValue(option), () => settleValue(undefined), { tui });
+		// One-entry wrap cache: the title wrap depends only on the width.
+		let wrappedCacheWidth = -1;
+		let wrappedCache: string[] = [];
+		const wrappedTitle = (width: number): string[] => {
+			if (width !== wrappedCacheWidth) {
+				wrappedCache = wrapTextWithAnsi(title.replace(/\t/g, "   "), textContentWidth(width));
+				wrappedCacheWidth = width;
+			}
+			return wrappedCache;
+		};
 
-		const selectorTitle = selector as unknown as { titleText: { setText(text: string): void } };
-
-		const overlay: Component & { dispose(): void } = {
-			render: (width: number): string[] => {
-				const padX = Math.min(1, Math.max(0, Math.floor((width - 1) / 2)));
-				const contentWidth = Math.max(1, width - padX * 2);
-				const maxTitle = terminalRows(tui as TUI) - CHROME_LINES - options.length;
-				if (maxTitle < 1) {
-					// Too short to show the decision controls: approval disabled, only
-					// cancel remains available.
-					approvalDisabled = true;
-					return [theme!.fg("error", truncateToWidth(`guard: terminal too short for this dialog; enlarge the terminal or press esc to cancel`, Math.max(1, width)))];
-				}
-				approvalDisabled = false;
-				const wrapped = wrapTextWithAnsi(title.replace(/\t/g, "   "), contentWidth);
-				let windowLines: string[];
-				if (wrapped.length <= maxTitle) {
-					windowLines = wrapped;
-					pageLines = Math.max(1, wrapped.length);
-				} else if (maxTitle >= 2) {
-					const contentCount = maxTitle - 1;
-					detailOffset = Math.min(Math.max(0, detailOffset), wrapped.length - contentCount);
-					pageLines = contentCount;
-					const above = detailOffset;
-					const below = wrapped.length - detailOffset - contentCount;
-					windowLines = [...wrapped.slice(detailOffset, detailOffset + contentCount), truncateToWidth(theme!.fg("dim", `… ${above} above, ${below} below (PgUp/PgDn to scroll)`), contentWidth)];
-				} else {
-					// One row of title budget: show the header, no room for an indicator.
-					windowLines = [wrapped[0]];
-					pageLines = 1;
-				}
-				selectorTitle.titleText.setText(theme!.fg("accent", theme!.bold(windowLines.join("\n"))));
-				const pad = Math.max(0, Math.floor((width - HINT_LABEL.length) / 2));
-				return [...selector!.render(width), " ".repeat(pad) + theme!.fg("dim", HINT_LABEL)];
-			},
-			handleInput: (data: string): void => {
-				if (approvalDisabled) {
-					// Fail closed: cancel still works, selection and confirm do not.
-					if (getKeybindings().matches(data, "tui.select.cancel")) selector?.handleInput(data);
-					return;
-				}
-				if (matchesKey(data, "pageup")) {
-					detailOffset = Math.max(0, detailOffset - pageLines);
-					return;
-				}
-				if (matchesKey(data, "pagedown")) {
-					detailOffset = Math.max(0, detailOffset + pageLines);
-					return;
-				}
-				selector?.handleInput(data);
-			},
-			dispose: (): void => {
-				selector?.dispose();
-			},
-			invalidate: (): void => {
-				// The title window is recomputed per render; only the selector caches.
-				(selector as { invalidate?: () => void }).invalidate?.();
-			},
+		let tui: TUI | undefined;
+		let theme: GuardAskTheme | undefined;
+		const hintLines = (width: number): string[] => {
+			return wrapTextWithAnsi(HINT_LABEL, Math.max(1, width)).map((line) => {
+				const pad = Math.max(0, Math.floor((width - visibleWidth(line)) / 2));
+				return " ".repeat(pad) + theme!.fg("dim", line);
+			});
 		};
 
 		try {
+			// Borrow the renderer and theme through a uniquely keyed zero-height
+			// widget; remove the bridge immediately, even when acquisition fails, so
+			// no persistent widget entry survives the dialog. A removal failure is a
+			// genuine setup error: the dialog fails instead of mounting with a
+			// possibly retained entry.
+			const key = `guard-dialog-bridge-${++bridgeCounter}`;
+			let acquisitionError: unknown;
+			try {
+				ui.setWidget(key, (borrowedTui, borrowedTheme) => {
+					tui = borrowedTui;
+					theme = borrowedTheme;
+					return { render: () => [] as string[], invalidate: () => {}, dispose: () => {} };
+				});
+			} catch (error) {
+				acquisitionError = error;
+			}
+			let removalError: unknown;
+			try {
+				ui.setWidget(key, undefined);
+			} catch (error) {
+				removalError = error;
+			}
+			if (acquisitionError) throw acquisitionError;
+			if (removalError) throw removalError;
+			if (!tui || !theme || typeof tui.showOverlay !== "function") {
+				// Missing capability: signal-aware native selector. A failed or
+				// cancelled display is never retried.
+				cleanup();
+				return ui.select(title, options, { signal });
+			}
+
+			// The selector keeps the full title and is never mutated; the twin
+			// (one-line title) measures the real rendered controls at each width.
+			selector = new ExtensionSelectorComponent(title, options, (option) => settleValue(option), () => settleValue(undefined), { tui });
+			twin = new ExtensionSelectorComponent("x", options, () => {}, () => {}, { tui });
+
+			/**
+			 * Compute the layout state at the given width from live measurements.
+			 * Shared by render and input handling so eligibility never depends on
+			 * an earlier paint.
+			 */
+			const planLayout = (width: number): { mode: "full" | "degraded" | "fallback"; maxTitle: number; titleLines: number } | "blocked" => {
+				const rows = terminalMetric(tui as TUI, "rows");
+				const hint = hintLines(width);
+				const titleLines = wrappedTitle(width).length;
+				const fullCount = selector!.render(width).length;
+				const twinCount = twin!.render(width).length;
+				if (fullCount - twinCount === titleLines - 1 && fullCount >= titleLines + 2) {
+					// Verified standard shape: [border, spacer, title..., spacer, ...].
+					// Recompose the public render output with the bounded title.
+					const chrome = fullCount - titleLines;
+					const maxTitle = rows - chrome - hint.length;
+					if (maxTitle >= 1) return { mode: "full", maxTitle, titleLines };
+					// No room for even one title line: keep the controls visible
+					// without the details and disable approval.
+					if (chrome + hint.length <= rows) return { mode: "degraded", maxTitle: 0, titleLines };
+					return "blocked";
+				}
+				// Unverifiable shape: render the selector's own output unchanged and
+				// apply the same fit check.
+				if (fullCount + hint.length <= rows) return { mode: "fallback", maxTitle: titleLines, titleLines };
+				return "blocked";
+			};
+
+			const windowLines = (wrapped: string[], maxTitle: number, width: number): { body: string[]; indicator: string | null } => {
+				if (wrapped.length <= maxTitle) {
+					detailOffset = 0;
+					pageLines = Math.max(1, wrapped.length);
+					return { body: wrapped, indicator: null };
+				}
+				// Scrollable: reserve one row for the indicator when there is room;
+				// a one-line window pages through the details without an indicator.
+				const contentCount = maxTitle >= 2 ? maxTitle - 1 : 1;
+				detailOffset = Math.min(Math.max(0, detailOffset), wrapped.length - contentCount);
+				pageLines = contentCount;
+				const body = [...wrapped.slice(detailOffset, detailOffset + contentCount)];
+				const indicator = maxTitle >= 2
+					? truncateToWidth(theme!.fg("dim", `… ${detailOffset} above, ${wrapped.length - detailOffset - contentCount} below (PgUp/PgDn to scroll)`), textContentWidth(width))
+					: null;
+				return { body, indicator };
+			};
+
+			const blockedLines = (width: number, rows: number): string[] => {
+				const message = "guard: terminal too short for this dialog; enlarge the terminal or press esc to cancel";
+				return wrapTextWithAnsi(message, Math.max(1, width))
+					.slice(0, Math.max(1, rows))
+					.map((line) => theme!.fg("error", line));
+			};
+
+			const overlay: Component & { dispose(): void } = {
+				render: (width: number): string[] => {
+					const plan = planLayout(width);
+					const rows = terminalMetric(tui as TUI, "rows");
+					let lines: string[];
+					if (plan === "blocked") {
+						approvalDisabled = true;
+						return blockedLines(width, rows);
+					}
+					const hint = hintLines(width);
+					const fullRendered = selector!.render(width);
+					if (plan.mode === "full") {
+						approvalDisabled = false;
+						const window = windowLines(wrappedTitle(width), plan.maxTitle, width);
+						const windowBlock = [...window.body.map((line) => paddedLine(theme!.fg("accent", theme!.bold(line)), width))];
+						if (window.indicator !== null) windowBlock.push(paddedLine(window.indicator, width));
+						lines = [...fullRendered.slice(0, 2), ...windowBlock, ...fullRendered.slice(2 + plan.titleLines), ...hint];
+					} else if (plan.mode === "degraded") {
+						// Controls fit, details do not: no title window, approval disabled.
+						approvalDisabled = true;
+						lines = [...fullRendered.slice(0, 2), ...fullRendered.slice(2 + plan.titleLines), ...hint];
+					} else {
+						approvalDisabled = false;
+						lines = [...fullRendered, ...hint];
+					}
+					if (lines.length > rows) {
+						// Belt and suspenders: never emit more lines than the terminal has.
+						approvalDisabled = true;
+						return blockedLines(width, rows);
+					}
+					return lines;
+				},
+				handleInput: (data: string): void => {
+					// Recompute eligibility from the live terminal dimensions; never
+					// trust a cached flag from a previous paint.
+					const livePlan = planLayout(terminalMetric(tui as TUI, "columns"));
+					approvalDisabled = livePlan === "blocked" || livePlan.mode === "degraded";
+					if (approvalDisabled) {
+						// Fail closed: cancel still works, selection and confirm do not.
+						if (getKeybindings().matches(data, "tui.select.cancel")) selector?.handleInput(data);
+						return;
+					}
+					if (matchesKey(data, "pageup")) {
+						detailOffset = Math.max(0, detailOffset - pageLines);
+						return;
+					}
+					if (matchesKey(data, "pagedown")) {
+						detailOffset = Math.max(0, detailOffset + pageLines);
+						return;
+					}
+					selector?.handleInput(data);
+				},
+				dispose: (): void => {
+					selector?.dispose();
+					twin?.dispose();
+				},
+				invalidate: (): void => {
+				// The title window is recomputed per render; only the selectors cache.
+					(selector as { invalidate?: () => void }).invalidate?.();
+					(twin as { invalidate?: () => void }).invalidate?.();
+				},
+			};
+
 			handle = tui.showOverlay(overlay, {
 				anchor: "bottom-center",
 				width: "100%",
@@ -257,7 +384,8 @@ export function createGuardAskSelect(deps: GuardAskOverlayDeps) {
 				margin: { left: 0, right: 0, bottom: 0 },
 			});
 		} catch (error) {
-			// A genuine mount error fails the dialog; the display is not retried.
+			// A genuine setup error fails the dialog after removing only owned
+			// resources; the display is not retried.
 			cleanup();
 			throw error;
 		}

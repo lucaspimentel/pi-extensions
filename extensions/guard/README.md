@@ -124,11 +124,21 @@ Registration details:
   public `TUI.showOverlay`, and owns the returned handle (`setHidden` for
   the toggle, `handle.hide()` for removal), so cancelling under a foreign
   overlay leaves the foreign overlay focused and mounted. Long details are
-  bounded to the terminal height with PgUp/PgDn access to the overflow, and
-  a terminal too short to show the decision controls disables approval
-  while keeping Esc. Hosts without the required capabilities fall back to
-  the plain signal-aware selector before anything is mounted; failed or
-  cancelled displays are never retried. Ownership is guard-local: foreign
+  bounded to the terminal height with PgUp/PgDn access to the overflow at
+  any title budget (including a one-line window), and a terminal too short
+  to show the decision controls disables approval with a wrapped warning
+  while keeping Esc; approval eligibility is recomputed from the live
+  terminal dimensions on every input, never from a previous paint. The
+  bounded title uses public API only: a twin selector measures the real
+  rendered controls at each width (wrapped option labels and key hints
+  included) and verifies the recomposition of the selector's public render
+  output; SDK-private fields are never touched. Every setup failure runs
+  one owned-resource cleanup and propagates the genuine error, and
+  bridge-removal capability is verified with a canary removal before the
+  bridge is borrowed, so no widget entry can be retained. Hosts without
+  the required capabilities fall back to the plain signal-aware selector
+  before anything is mounted; failed or cancelled displays are never
+  retried. Ownership is guard-local: foreign
   extensions using the unsafe `ui.custom` path are not fixed by this.
 - An explicit HostBash/Pwsh **ask-rule match** offers allow once or deny
   (saving a rule cannot override the ask).
