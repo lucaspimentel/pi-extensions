@@ -54,8 +54,8 @@
  * before the bridge is borrowed, which filters hosts that refuse every
  * deletion; a host that fails only the populated bridge's deletion still
  * fails the dialog with its genuine error while the owned-resource cleanup
- * retries that deletion best-effort, so a permanently refusing host is the
- * only case where an entry can remain.
+ * retries that deletion best-effort; an entry can only remain if both
+ * deletion attempts fail.
  */
 
 import {
