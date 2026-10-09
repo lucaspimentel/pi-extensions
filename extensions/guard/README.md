@@ -137,8 +137,8 @@ Registration details:
   bridge-removal path is verified with a canary removal before the bridge
   is borrowed, which filters hosts that refuse every deletion; the bridge
   key stays in the cleanup boundary so a post-canary deletion failure is
-  retried best-effort there, and only a host that permanently refuses
-  deletion can retain an entry. Hosts without
+  retried best-effort there; an entry can only remain if both deletion
+  attempts fail. Hosts without
   the required capabilities fall back to the plain signal-aware selector
   before anything is mounted; failed or cancelled displays are never
   retried. Ownership is guard-local: foreign

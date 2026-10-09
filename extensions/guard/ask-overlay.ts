@@ -202,8 +202,8 @@ export function createGuardAskSelect(deps: GuardAskOverlayDeps) {
 			try { selector?.dispose(); } catch { /* dispose is best effort */ }
 			try { twin?.dispose(); } catch { /* dispose is best effort */ }
 			if (bridgeKey !== undefined && !bridgeCleared) {
-				// Bounded, idempotent retry: a host that permanently refuses deletion
-				// keeps the entry, and this cleanup failure must never mask the
+				// Bounded, idempotent retry: an entry can only remain if both deletion
+				// attempts fail, and this cleanup failure must never mask the
 				// original diagnostic.
 				try {
 					ui.setWidget(bridgeKey, undefined);
