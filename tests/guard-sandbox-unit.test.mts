@@ -22,6 +22,7 @@ import {
 } from "../extensions/guard/sandbox/launcher.ts";
 import {
 	detectSandboxMode,
+	findBinary,
 	findFdScanner,
 	resetSandboxDetection,
 } from "../extensions/guard/sandbox/detect.ts";
@@ -231,6 +232,37 @@ if (onLinux) {
 		assert.equal(d.launcherPath, null);
 	});
 }
+
+// ── Binary lookup ─────────────────────────────────────────────────────────────
+
+test("findBinary resolves PATH fallback hits to absolute paths", () => {
+	const dir = makeTempDir("guard-unit-findbin-");
+	const good = path.join(dir, "guard-fake-good");
+	fs.writeFileSync(good, "#!/bin/sh\nexit 0\n");
+	fs.chmodSync(good, 0o755);
+	const bad = path.join(dir, "guard-fake-bad");
+	fs.writeFileSync(bad, "#!/bin/sh\nexit 3\n");
+	fs.chmodSync(bad, 0o755);
+	const savedPath = process.env.PATH;
+	try {
+		process.env.PATH = `${dir}:${savedPath ?? ""}`;
+		// Candidate paths win over PATH and are returned as-is.
+		const viaCandidate = findBinary([good], "guard-fake-good", "--version", "hint");
+		assert.equal(viaCandidate.path, good);
+		// PATH fallback returns an absolute path, never the bare name: spawns
+		// with a sanitized env (no PATH) cannot resolve bare names.
+		const viaPath = findBinary([], "guard-fake-good", "--version", "hint");
+		assert.equal(viaPath.path, good);
+		assert.equal(viaPath.diagnostic, undefined);
+		// A PATH hit whose version probe fails is skipped, yielding the diagnostic.
+		const badHit = findBinary([], "guard-fake-bad", "--version", "hint");
+		assert.equal(badHit.path, null);
+		assert.equal(badHit.diagnostic, "hint");
+	} finally {
+		if (savedPath === undefined) delete process.env.PATH;
+		else process.env.PATH = savedPath;
+	}
+});
 
 // ── NuGet.Config sanitizer ────────────────────────────────────────────────────
 

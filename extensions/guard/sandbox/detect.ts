@@ -62,7 +62,12 @@ export interface BinaryLookup {
 	diagnostic?: string;
 }
 
-function findBinary(
+/**
+ * Locate a binary: absolute candidate paths first, then a PATH walk.
+ * PATH hits resolve to an absolute path: later spawns that sanitize the
+ * environment (no PATH, e.g. the probes below) cannot resolve bare names.
+ */
+export function findBinary(
 	candidates: string[],
 	pathFallback: string,
 	versionArg: string,
@@ -71,9 +76,13 @@ function findBinary(
 	for (const candidate of candidates) {
 		if (existsSync(candidate)) return { path: candidate };
 	}
-	// Fall back to PATH lookup without a shell.
-	const r = spawnSync(pathFallback, [versionArg], { stdio: "ignore", timeout: 5_000 });
-	if (r.status === 0) return { path: pathFallback };
+	for (const entry of (process.env.PATH ?? "").split(":")) {
+		// resolve() also handles empty (cwd, execvp semantics) and relative entries.
+		const full = path.resolve(entry, pathFallback);
+		if (!existsSync(full)) continue;
+		const r = spawnSync(full, [versionArg], { stdio: "ignore", timeout: 5_000 });
+		if (r.status === 0) return { path: full };
+	}
 	return { path: null, diagnostic: installHint };
 }
 
