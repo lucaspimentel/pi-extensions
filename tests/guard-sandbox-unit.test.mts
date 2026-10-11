@@ -504,7 +504,7 @@ test("resolveWorktreeCommonDir reads the gitdir and commondir files", () => {
 // ── Interpreter binds ─────────────────────────────────────────────────────────
 
 test("interpreter binds cover brew roots and non-/usr interpreters", () => {
-	if (fs.existsSync("/home/linuxbrew")) {
+	if (fs.existsSync("/home/linuxbrew/.linuxbrew/bin/node")) {
 		assert.deepEqual(interpreterBinds("/home/linuxbrew/.linuxbrew/bin/node"), [
 			["/home/linuxbrew", "/home/linuxbrew"],
 		]);
