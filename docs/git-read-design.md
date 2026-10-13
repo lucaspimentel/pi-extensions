@@ -1,6 +1,8 @@
 # `git_read` tool: read-only git access for agents
 
-Status: design settled after review rounds. Not implemented.
+Status: design settled; extension, argument validation, and spawn layer
+implemented and shipped. Pending: guard classification (`local-read`) and
+agent rollout.
 
 ## Problem
 
@@ -30,21 +32,46 @@ commands. It is deliberately not tied to any one agent; agents opt in via their
   name like every other entry; the git child process is spawned by the
   extension host itself, so no sandboxed-exec classification is involved.
 
+## Implementation status
+
+- `extensions/git-read/validate.ts`: argument validation and final argv
+  construction (pure, no pi imports). Shipped.
+- `extensions/git-read/spawn.ts`: sanitized environment, worktree gate,
+  bounded exec with cap and timeout. Shipped.
+- `extensions/git-read/index.ts`: tool registration, schema, and error
+  wrapping. Shipped.
+- `tests/git-read-validate.test.mts` and `tests/git-read-spawn.test.mts`,
+  run via `npm run test:git-read`. Shipped.
+- Guard classification in `extensions/guard/policy/classes.ts`. Pending.
+- Agent rollout (reviewer/scout/planner `tools:` lines, subagent README
+  table). Pending.
+
 ## Invocation contract
 
 - Structured argv, no shell: `{ subcommand: "diff" | "log" | "show" |
   "status", args: string[] }`.
 - Spawning is argv-array only, never `sh -c`. cwd = session cwd.
-- Command construction, in order: global options (below), then the
-  subcommand, then validated args. Global options are injected for every
-  subcommand; diff-specific flags are injected only for diff/log/show
-  (`status` does not accept them).
+- Command construction happens in validate.ts during validation: it emits the
+  complete final argv, and spawn.ts consumes it verbatim, appending nothing.
+  The layouts are:
+  - diff/log/show: `[...GLOBAL_OPTIONS, <sub>, ...DIFF_LOG_SHOW_OPTIONS,
+    ...args]`
+  - status: `[...GLOBAL_OPTIONS, "status", "--porcelain"]`
+  `GLOBAL_OPTIONS` (validate.ts) is `--no-pager --no-optional-locks
+  -c core.fsmonitor=false -c core.untrackedCache=false`;
+  `DIFF_LOG_SHOW_OPTIONS` is `--no-ext-diff --no-textconv`, injected
+  immediately after the subcommand for diff/log/show only (`status` does not
+  accept them).
 
 ## Worktree enforcement
 
-- Before any read command, run `git rev-parse --show-toplevel` (with the same
-  sanitized environment) and verify the session cwd is inside the returned
-  toplevel; otherwise return "not inside a git worktree".
+- Before any read command, run `git rev-parse --show-toplevel` as a separate
+  invocation with `GLOBAL_OPTIONS` prepended (same sanitized environment) and
+  verify the session cwd is inside the returned toplevel; otherwise return
+  `git_read: not inside a git worktree`. The comparison is symlink-aware:
+  both paths are resolved and then realpathed when possible, so a symlinked
+  session cwd still matches the toplevel git resolved (`cwdInsideToplevel`
+  in spawn.ts).
 - Rationale: outside a repository, `git diff` can implicitly operate in
   no-index mode on two paths instead of failing; the check closes that.
 - Do not claim reads are "provably inside the worktree": lexical path checks
@@ -64,10 +91,13 @@ dangerous, and git's own rev-vs-path disambiguation then applies).
   (they resolve inside the object database, which is repo-scoped by
   definition).
 - Path tokens: must not start with `-`; reject absolute paths and any `..`
-  path segment; reject backslashes as separators. Glob characters (`*`, `?`)
-  are allowed; pathspec matching is repo-scoped. (`main..next` is rev-valid
-  and path-invalid, so it is accepted under the union rule only as a rev;
-  `../x` is neither and is rejected.)
+  path segment; reject backslashes as separators; reject whitespace and
+  control characters. Glob characters (`*`, `?`) are allowed; pathspec
+  matching is repo-scoped. (`main..next` is rev-valid and path-invalid, so it
+  is accepted under the union rule only as a rev; `../x` is neither and is
+  rejected. Tokens that pass the rev validator but carry path-dangerous
+  constructs: absolute, backslash, `..` segment, are rejected by the union
+  rule, since git would fall back to treating them as pathspecs.)
 
 ## Allowlists
 
@@ -82,7 +112,8 @@ dangerous, and git's own rev-vs-path disambiguation then applies).
   - `show`: `--stat`, `-U<n>` / `--unified=<n>`
   - `status`: none; `--porcelain` is hardcoded, any extra arg rejected.
 - Value-taking flags validate their value as a plain integer; both `-U 5` and
-  `-U5` forms accepted.
+  `-U5` forms accepted. An absent value and a present-but-invalid value
+  produce distinct error messages (the latter names the value it got).
 
 ## Trust model for config, env, and helpers
 
@@ -102,7 +133,10 @@ injected by the tool and never user-suppliable:
   inherited environment before spawn: `GIT_DIR`, `GIT_WORK_TREE`,
   `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
   `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`,
-  `GIT_CONFIG_COUNT`, `GIT_EXTERNAL_DIFF`.
+  `GIT_CONFIG_COUNT`, `GIT_EXTERNAL_DIFF`. These live in `INJECTED_ENV` and
+  `STRIPPED_ENV` in spawn.ts; injected values are assigned after stripping,
+  so they always win over anything inherited. Everything else (PATH, HOME,
+  locale) is inherited untouched.
 - Known residual path: signed-commit verification only runs with
   `--show-signature`, which is not on the allowlist; if a future flag could
   trigger external execution, it does not enter the allowlist without a
@@ -112,45 +146,65 @@ injected by the tool and never user-suppliable:
 
 - `OUTPUT_CAP = 50 KiB`, shared across stdout and stderr combined, counted in
   bytes, matching `PER_TASK_OUTPUT_CAP`
-  (`extensions/subagent/index.ts:42`). `TIMEOUT_MS = 15s`. Named constants.
+  (`extensions/subagent/index.ts:42`). `TIMEOUT_MS = 15s`,
+  `KILL_ESCALATION_MS = 5s`. Named constants.
 - Both streams are drained continuously; retained output is bounded as it
-  arrives (bytes past the cap are discarded, not buffered). The process is
-  never allowed to block on pipe backpressure.
-- On timeout: SIGTERM the child, escalate to SIGKILL, and reap it before
-  returning.
-- Exit 0 -> success output. Nonzero exit (bad rev, not a repo) -> error
-  result with stderr plus any stdout. Timeout and spawn failure -> error.
-  Truncation is not an error: truncated output plus a notice line (bytes
-  shown / bytes total).
+  arrives (bytes past the cap are discarded, not buffered). Each stream's
+  retained slices are tracked separately while their combined total respects
+  `OUTPUT_CAP`. Chunks are decoded once at the end so a multibyte UTF-8
+  character split across chunks survives intact. The child never blocks on
+  pipe backpressure.
+- On timeout: SIGTERM the child, escalate to SIGKILL after
+  `KILL_ESCALATION_MS`, and reap it (close/error) before returning. No
+  process-group kill: under the sanitized environment (no pager, no
+  fsmonitor, no ext-diff/textconv, nulled configs) no descendants are
+  expected, so plain child kill suffices.
+- Exact failure shapes; the result never throws, and `ok` is true only for
+  exit 0 without timeout or spawn error:
+  - spawn failure: `git_read: failed to run git: <message>`
+  - timeout: `git_read: git timed out after 15000 ms`, plus any collected
+    output
+  - nonzero exit: `git_read: git exited with code <N>`, followed by stderr
+    then stdout
+  - truncation (appended to the text, never an error):
+    `[git_read: output truncated, showing <retained> of <total> bytes]`
 
 ## Rollout
 
-- Same change adds `git_read` to the bundled read-only agents' `tools:` lines
-  (`reviewer`/`scout`/`planner`) and the subagent README table. Still opt-in
-  per session, since children only receive registered tools.
+Pending: add `git_read` to the bundled read-only agents' `tools:` lines
+(`reviewer`/`scout`/`planner`) and the subagent README table. Still opt-in
+per session, since children only receive registered tools.
 
 ## Tests
 
-- Valid forms: path-limited diff (`git diff HEAD~1 -- src/`), revision-ranged
-  log (`-p`, `main...origin/main`), `show`, `status --porcelain`.
-- Rejections: non-allowlisted subcommands, unknown flags, flags in `status`,
-  absolute paths, `..` path segments, empty tokens, value-flag non-integer
-  values.
-- Separator handling: `--` splitting; mixed tokens without `--`.
-- Command-specific injection: diff flags absent from `status` argv; global
-  options present for all four.
-- Outside a worktree: tool errors via the toplevel check (no no-index mode).
-- Configured helpers / inherited overrides: fsmonitor, ext-diff, textconv,
-  pager, prompt, and `GIT_DIR`-family env stripping each verified (argv and
-  env assertions; index unchanged after `status`).
-- Bounded streaming: output past the cap discarded live, not buffered;
-  byte-based counting; timeout kills and reaps the child.
+- `tests/git-read-validate.test.mts`: argv construction for all four
+  subcommands, the design's valid forms, value-flag bounds, all rejections,
+  separator/union handling, and error-message contents.
+- `tests/git-read-spawn.test.mts`: worktree gate (including outside-worktree
+  and symlink cases), environment assertions (stripped and injected vars,
+  index unchanged after `status`), caps and truncation, timeout escalation,
+  and the exit-code contract.
+- Run both via `npm run test:git-read`.
+
+## Acceptance criteria (current)
+
+- Read-only agents can run allowlisted `diff`/`log`/`show`/`status` forms,
+  including path-limited and revision-ranged invocations.
+- Non-allowlisted subcommands, unknown flags, and unsafe tokens are rejected
+  with clear errors naming the allowed set, verified by tests.
+- A read-only agent (no `bash`) can complete a "review the last commit" task
+  with no diff text in its prompt.
+- Main-session opt-in works via `--tools git_read` / `defaultTools` without
+  registering it globally.
+- Once guard classification lands, the guard treats `git_read` as
+  `local-read` in every profile.
 
 ## Original handoff notes
 
 The initial brainstorm (allowlist proposal, design sketch, constraints,
 original acceptance criteria) is preserved in git history and was superseded
-by the settled sections above; the constraints and non-goals still apply:
-no write-adjacent commands even if "usually harmless", expand the allowlist
-only on demonstrated need, do not weaken any agent's read-only posture, and
-do not bypass the user's guard/sandbox policies.
+by the settled sections and the acceptance criteria above; the constraints
+and non-goals still apply: no write-adjacent commands even if "usually
+harmless", expand the allowlist only on demonstrated need, do not weaken any
+agent's read-only posture, and do not bypass the user's guard/sandbox
+policies.
