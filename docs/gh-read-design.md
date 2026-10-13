@@ -1,6 +1,7 @@
 # `gh_read` tool: read-only GitHub CLI access for agents
 
-Status: design for review. Nothing implemented yet.
+Status: design settled (grill-me review, 2026-10-13; all branches decided).
+Implementation pending.
 
 ## Problem
 
@@ -31,8 +32,10 @@ the main session. Deliberately not tied to any one agent; agents opt in via
   (`extensions/guard/policy/classes.ts`). Unlike `git_read` (`local-read`),
   this is a network read: every invocation makes an API call to github.com or
   an enterprise host. `remote-read` already exists for `web_search`, the
-  pup_* tools, and the slack reads, so no new class is needed. Verify the
-  guard profiles used by read-only agents permit `remote-read` before rollout.
+  pup_* tools, and the slack reads, so no new class is needed. Settled:
+  no guard core changes are required, because the remote-read cell is
+  `allow` in every profile (`otherRemoteReadCell`,
+  `extensions/guard/policy/profiles.ts:160`).
 
 ## Invocation contract
 
@@ -147,6 +150,9 @@ testing, raise `TIMEOUT_MS` for this tool only and document it here.
 Failure contract mirrors `git_read` exactly, with `gh_read:`/`gh` prefixes:
 never throws; `ok` true only for exit 0 without timeout or spawn error;
 truncation noted inline; exit-code and timeout messages name what happened.
+GitHub API and auth errors (including 403 from the wrong active gh account)
+pass through verbatim; the tool does no error-shape matching and appends no
+hints (settled: passthrough only).
 
 ## GitHub account caveat (documented, not solved)
 
@@ -158,10 +164,17 @@ step (see dd-tools/docs/git-multi-account-setup.md).
 
 ## Rollout (after implementation)
 
-- Guard classification entry, as above.
-- `reviewer`/`scout`/`planner` `tools:` lines and the subagent README table.
-- Still opt-in per session; no `defaultTools` change for the main session
-  unless requested.
+Settled in the grill-me review:
+
+- Guard classification entry, as above (no core changes).
+- All three bundled read-only agents (`reviewer`, `scout`, `planner`) get
+  `gh_read` on their `tools:` lines, matching `git_read`; subagent README
+  table updated.
+- The main session gets `gh_read` via `defaultTools`, and `git_read` joins
+  it there too (it stops being opt-in-only). This supersedes the earlier
+  "no defaultTools change" stance; without it the fewer-guard-prompts
+  motivation is unmet. Whether the entry lands in user-level settings.json
+  or project `.pi/` settings is an implementation-time choice.
 
 ## Tests
 
@@ -177,16 +190,19 @@ step (see dd-tools/docs/git-multi-account-setup.md).
 
 ## Acceptance criteria
 
-- A read-only agent (no `bash`, no network tools) can list a repo's open
-  PRs, view a PR with comments, and view its diff, using only `gh_read`.
+- A read-only agent (no `bash`) with `gh_read` but no other network tools
+  can list a repo's open PRs, view a PR with comments, and view its diff.
 - Non-allowlisted subcommands (including every write verb: `pr create`,
   `pr merge`, `issue close`, `gh api`), unknown flags, and unsafe values are
   rejected with clear errors naming the allowed set, verified by tests.
 - No invocation can open a browser, hang on an interactive prompt, or emit
   un-neutralized terminal escape sequences.
-- The guard classifies `gh_read` as `remote-read` in every profile, and the
-  read-only agents' profiles permit it.
-- Main-session opt-in works via `--tools gh_read` / `defaultTools`.
+- The guard classifies `gh_read` as `remote-read` in every profile; the
+  remote-read cell already allows it everywhere, verified against
+  `extensions/guard/policy/profiles.ts:160`.
+- The main session has `gh_read` and `git_read` via `defaultTools`, and the
+  reviewer/scout/planner agents reach `gh_read` through their `tools:`
+  lines.
 
 ## Non-goals
 
