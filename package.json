@@ -32,7 +32,7 @@
       "./extensions/timestamps",
       "./extensions/git-read"
     ],
-    "prompts": ["./extensions/subagent/prompts/*.md"]
+    "prompts": ["./extensions/subagent/prompts/*.md", "./extensions/update-jira/prompts/*.md"]
   },
   "scripts": {
     "test:timestamps": "node --test tests/timestamps.test.mts",

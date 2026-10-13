@@ -94,6 +94,15 @@ uncertain (timeout, cancellation, malformed or ambiguous response), the
 result is `write_outcome_unknown` and must be verified with a separate read
 before any retry.
 
+### `/jira` prompt template
+
+The package ships a `/jira [KEY]` prompt template (`prompts/jira.md` in this
+extension directory, loaded through the package manifest's `pi.prompts`).
+It expands into a read-only status request fulfilled with `jira_read`:
+exactly Key, Summary, Status, and Assignee lines. With no argument it targets
+the ticket resolved from the current branch. Run `/reload` after adding or
+changing templates.
+
 ### Ticket target
 
 `ticketKey` overrides branch detection (it may name any ticket the user can
