@@ -331,7 +331,7 @@ export default function (pi: ExtensionAPI) {
 						const pr = prCache.get(branch);
 						const prSuffix = pr != null ? `  ${pr.icon} ${pr.number}` : "";
 						const repo = repoCache.get(ctx.cwd ?? ".");
-						const repoPrefix = repo ? `${ICON_REPO}  ${repo}    ` : "";
+						const repoPrefix = repo ? `${ICON_REPO}  ${repo}  ` : "";
 						line2Parts.push(paint("branch", `${repoPrefix}${ICON_BRANCH} ${branch}${prSuffix}`));
 					}
 
