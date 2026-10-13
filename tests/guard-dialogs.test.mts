@@ -18,7 +18,8 @@ import { pathToFileURL } from "node:url";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { DialogGate } from "../extensions/guard/dialogs.ts";
 import { GuardRuntime } from "../extensions/guard/runtime.ts";
-import { projectConfigPath } from "../extensions/guard/policy/config.ts";
+import { homedir } from "node:os";
+import { projectConfigPath, userConfigPath } from "../extensions/guard/policy/config.ts";
 import { detectSandboxMode } from "../extensions/guard/sandbox/detect.ts";
 import guardExtension from "../extensions/guard/index.ts";
 import { drainTempDirs, makeTempDir, tempDirs } from "./guard-test-temp.mts";
@@ -63,6 +64,7 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 		commandHandlers: new Map(),
 		tools,
 		registeredTools: new Map(),
+		steering: [] as Array<{ text: string; deliverAs?: string }>,
 	};
 	const api = {
 		on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
@@ -78,6 +80,7 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 			h.shortcuts.push({ shortcut, handler: options.handler });
 		},
 		registerFlag: () => {},
+		sendUserMessage: (text: string, options?: { deliverAs?: string }) => { h.steering.push({ text, deliverAs: options?.deliverAs }); },
 		getCommands: () => h.commands,
 		getActiveTools: () => h.tools.map((t) => t.name),
 		getAllTools: () => h.tools,
@@ -182,6 +185,68 @@ function installSelector(ctx: Record<string, any>, log?: string[]): SelectorCont
 
 /** Replace the visibility stub with one that records every call and throws
  * for the directions in `fail`, so best-effort handling can be asserted. */
+/** Extend the fake ui with the owned-stage capabilities and a minimal fake
+ * TUI renderer so the real editor/picker stages can mount over a controlled
+ * boundary (same contract as the ask-components tests). */
+function installOwnedStages(ctx: Record<string, any>): { overlays: Array<{ component: any; handle: any }>; pressEnter(): void } {
+	const overlays: Array<{ component: any; handle: any }> = [];
+	const fakeTui = {
+		terminal: { columns: 120, rows: 40 },
+		requestRender() {},
+		showOverlay(component: any) {
+			const handle = {
+				hidden: false, focused: true,
+				isHidden: () => handle.hidden,
+				setHidden: (v: boolean) => { handle.hidden = v; },
+				isFocused: () => handle.focused,
+				hide: () => { handle.focused = false; },
+			};
+			overlays.push({ component, handle });
+			return handle;
+		},
+	};
+	(ctx.ui as Record<string, unknown>).setWidget = (key: string, content: unknown) => {
+		if (content === undefined) return;
+		if (typeof content === "function") {
+			(content as (t: unknown, th: unknown) => unknown)(fakeTui, { fg: (_c: string, s: string) => s, bold: (s: string) => s });
+		}
+	};
+	(ctx.ui as Record<string, unknown>).onTerminalInput = () => () => {};
+	const waitForOverlays = async (count: number): Promise<void> => {
+		for (let i = 0; i < 200 && overlays.length < count; i++) await new Promise((r) => setTimeout(r, 5));
+		if (overlays.length < count) throw new Error(`only ${overlays.length} of ${count} owned stages mounted`);
+	};
+	return {
+		overlays,
+		waitForOverlays,
+		pressEnter: () => {
+			const last = overlays[overlays.length - 1];
+			if (!last) throw new Error("no owned stage is mounted");
+			last.component.handleInput("\r");
+		},
+		pressDown: () => {
+			const last = overlays[overlays.length - 1];
+			if (!last) throw new Error("no owned stage is mounted");
+			last.component.handleInput("\u001b[B");
+		},
+		pressSpace: () => {
+			const last = overlays[overlays.length - 1];
+			if (!last) throw new Error("no owned stage is mounted");
+			last.component.handleInput(" ");
+		},
+		pressEsc: () => {
+			const last = overlays[overlays.length - 1];
+			if (!last) throw new Error("no owned stage is mounted");
+			last.component.handleInput("\u001b");
+		},
+		renderLast(): string {
+			const last = overlays[overlays.length - 1];
+			if (!last) throw new Error("no owned stage is mounted");
+			return last.component.render(120).map((line: string) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+		},
+	};
+}
+
 function failVisibility(ctx: Record<string, any>, calls: string[], fail: { hide?: boolean; restore?: boolean }): void {
 	(ctx.ui as Record<string, unknown>).setWorkingVisible = (visible: boolean) => {
 		calls.push(visible ? "restore" : "hide");
@@ -206,6 +271,7 @@ function harnessCtx(h: Harness, cwd: string): Record<string, any> {
 			notify: (message: string) => h.notifications.push(message),
 			setStatus: (key: string, value: string | undefined) => h.status.set(key, value),
 			select: async () => undefined,
+			input: async () => undefined,
 			theme: { fg: (_role: string, s: string) => s },
 		},
 	};
@@ -723,7 +789,7 @@ test("two approval prompts serialize: the second selector never replaces the fir
 		assert.equal(firstResult.structuredContent.exit_code, 0, "the approved call executes");
 		await selector.waitFor(2);
 		assert.equal(selector.opened.length, 2, "the queued approval opens only after the first settled");
-		selector.answer("Deny");
+		selector.answer("Deny once");
 		await assert.rejects(second, /denied/);
 		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
 		assert.equal(saved.hostBash?.allow?.length ?? 0, 0, "approvals never save rules");
@@ -873,14 +939,25 @@ test("a successful save completes and cancels other pending dialogs instead of i
 		const ctx = harnessCtx(h, cwd);
 		await startSession(h, ctx);
 		const selector = installSelector(ctx);
+		const owned = installOwnedStages(ctx);
 		const tool = h.registeredTools.get("host_bash")!;
 		const saving = tool.execute("id", { command: "echo $GUARD_DIALOGS_UNSET" }, undefined, undefined, ctx);
 		void saving.catch(() => {});
-		await selector.waitFor(1);
+		// With owned stages installed, the action menu itself is an owned overlay;
+		// ctx.ui.select stays unused for the whole interaction.
+		await owned.waitForOverlays(1);
 		const other = tool.execute("id", { command: "echo $GUARD_DIALOGS_UNSET" }, undefined, undefined, ctx);
 		void other.catch(() => {});
 		await tick();
-		selector.answer("Save for project");
+		owned.pressDown(); // highlight "Save allow for project"
+		owned.pressEnter();
+		await owned.waitForOverlays(2);
+		owned.pressEnter(); // submit the prefilled exact-rule bundle unchanged
+		await owned.waitForOverlays(3);
+		const preview = owned.overlays[2].component.render(120).map((line: string) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+		assert.match(preview, /confirm allow save \(project\)/, "the separate preview opened");
+		assert.match(preview, /destination: .*guard\.local\.json/, "the preview names the exact destination");
+		owned.pressEnter(); // Confirm is the first preview action
 		const result = await saving;
 		assert.equal(result.structuredContent.exit_code, 0, "the saving call executes; its own transition did not cancel it");
 		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
@@ -903,7 +980,7 @@ test("allowed executor work proceeds while another call awaits a dialog", async 
 		await selector.waitFor(1);
 		const allowed = await h.registeredTools.get("bash")!.execute("id", { command: "echo ok" }, undefined, undefined, ctx);
 		assert.match(String(allowed.structuredContent.output), /ok/, "allowed work does not wait for the pending dialog");
-		selector.answer("Deny");
+		selector.answer("Deny once");
 		await assert.rejects(pending, /denied/);
 	});
 });
@@ -1183,7 +1260,7 @@ test("a failed visibility toggle around denial saves and executes nothing", asyn
 		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
 		void pending.catch(() => {});
 		await selector.waitFor(1);
-		selector.answer("Deny");
+		selector.answer("Deny once");
 		await assert.rejects(pending, /denied/);
 		assert.deepEqual(calls, ["hide", "restore"], "restoration is still attempted around a denial");
 		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
@@ -1440,5 +1517,152 @@ test("the profile picker renders as the overlay and applies the chosen profile",
 		assert.equal(overlay.hideCalls(), 1, "the owned handle removed the overlay");
 		assert.equal(overlay.bridgeSize(), 0, "no widget bridge entry remains");
 		assert.equal(overlay.handlerCount(), 0, "the raw listener was removed");
+	});
+});
+
+// ── Save/deny/compound wiring (owned stages, eligibility, RPC boundary) ──────
+
+test("an explicit ask rule offers deny saves but never allow saves", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-ask-eligibility-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const owned = installOwnedStages(ctx);
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void pending.catch(() => {});
+		await owned.waitForOverlays(1);
+		const menu = owned.renderLast();
+		assert.match(menu, /Save deny for project/, "explicit ask permits deny saves");
+		assert.match(menu, /Save deny for user/);
+		assert.doesNotMatch(menu, /Save allow for/, "explicit ask never offers allow saves");
+		owned.pressEsc();
+		await assert.rejects(pending, /denied/, "selector cancellation denies");
+		assert.equal(h.steering.length, 0, "selector cancellation skips steering");
+	});
+});
+
+test("a compound allow bundle saves per-step rules and runs the original command unchanged", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-compound-allow-");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const owned = installOwnedStages(ctx);
+		const command = "echo one && touch compound-marker";
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command }, undefined, undefined, ctx);
+		void pending.catch(() => {});
+		await owned.waitForOverlays(1);
+		const menu = owned.renderLast();
+		assert.match(menu, /steps:/, "the reliable breakdown is rendered");
+		assert.match(menu, /1\. echo one -> allow/, "the tier-allowed step is shown");
+		assert.match(menu, /2\. touch compound-marker -> prompt/, "the prompting step is shown");
+		owned.pressDown(); // "Save allow for project"
+		owned.pressEnter();
+		await owned.waitForOverlays(2);
+		owned.pressEnter(); // submit the prefilled bundle unchanged
+		await owned.waitForOverlays(3);
+		const preview = owned.renderLast();
+		assert.match(preview, /each rule permits its matching step independently/, "the independent-grant effect is explicit");
+		owned.pressEnter(); // Confirm
+		const result = await pending;
+		assert.equal(result.structuredContent.exit_code, 0, "the original compound command ran unchanged");
+		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
+		assert.deepEqual(saved.hostBash?.allow, ["HostBash(/^touch compound-marker$/)"], "only the step lacking permission was saved");
+	});
+});
+
+test("a saved deny commits the rule, then delivers steering once", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-save-deny-");
+		const ctx = harnessCtx(h, cwd);
+		const inputCalls: Array<{ signal?: AbortSignal } | undefined> = [];
+		(ctx.ui as Record<string, unknown>).input = async (title: string, _placeholder: unknown, opts?: { signal?: AbortSignal }) => {
+			inputCalls.push(opts);
+			return "use a mirror instead";
+		};
+		await startSession(h, ctx);
+		const owned = installOwnedStages(ctx);
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "curl https://guard-deny.example" }, undefined, undefined, ctx);
+		void pending.catch(() => {});
+		await owned.waitForOverlays(1);
+		for (let i = 0; i < 5; i++) owned.pressDown(); // "Save deny for user"
+		owned.pressEnter();
+		// The step picker opens with nothing preselected, even for one step.
+		await owned.waitForOverlays(2);
+		const picker = owned.renderLast();
+		assert.match(picker, /select the steps to deny/, "the picker opened");
+		assert.match(picker, /\u25cb curl https/, "nothing is preselected");
+		owned.pressSpace(); // select the step
+		owned.pressEnter(); // continue
+		await owned.waitForOverlays(3);
+		const editor = owned.renderLast();
+		assert.match(editor, /HostBash\(\/\^curl https/, "the exact deny rule is prefilled");
+		owned.pressEnter(); // submit unchanged
+		await owned.waitForOverlays(4);
+		assert.match(owned.renderLast(), /confirm deny save \(user\)/, "the separate preview opened");
+		owned.pressEnter(); // Confirm
+		await assert.rejects(pending, /denied/, "the call is denied after the committed save");
+		assert.equal(h.steering.length, 1, "the steering instruction was delivered after the commit");
+		assert.equal(h.steering[0].deliverAs, "steer");
+		assert.equal(h.steering[0].text, "use a mirror instead");
+		assert.ok(inputCalls[0]?.signal, "steering collection is signal-aware");
+		const saved = JSON.parse(fs.readFileSync(userConfigPath(homedir()), "utf8")) as { hostBash?: { deny?: string[] } };
+		assert.deepEqual(saved.hostBash?.deny, ["HostBash(/^curl https:\\/\\/guard-deny\\.example$/)"], "the deny rule was saved to the user scope");
+	});
+});
+
+test("aborting the owner while steering is open cancels the denial interaction and dispatches nothing", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-steer-abort-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const controller = new AbortController();
+		(ctx.ui as Record<string, unknown>).input = async (_title: string, _placeholder: unknown, opts?: { signal?: AbortSignal }) => {
+			controller.abort();
+			return "too late";
+		};
+		const owned = installOwnedStages(ctx);
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, controller.signal, undefined, ctx);
+		void pending.catch(() => {});
+		await owned.waitForOverlays(1);
+		owned.pressDown(); // "Deny once"
+		owned.pressEnter();
+		await assert.rejects(pending, /abort|cancel/, "the aborted owner never falls back to a denial token");
+		assert.equal(h.steering.length, 0, "already-invalid ownership suppresses the steering handoff");
+		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
+		assert.equal(saved.hostBash?.allow?.length ?? 0, 0, "nothing was saved");
+	});
+});
+
+test("RPC keeps once actions and native signal-aware steering without editor requests", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-rpc-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		ctx.mode = "rpc";
+		const inputCalls: Array<{ signal?: AbortSignal } | undefined> = [];
+		(ctx.ui as Record<string, unknown>).input = async (_title: string, _placeholder: unknown, opts?: { signal?: AbortSignal }) => {
+			inputCalls.push(opts);
+			return "use a mirror instead";
+		};
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void pending.catch(() => {});
+		await selector.waitFor(1);
+		selector.answer("Deny once");
+		await assert.rejects(pending, /denied/);
+		assert.equal(h.steering.length, 1, "RPC steering uses the signal-aware native input");
+		assert.equal(h.steering[0].text, "use a mirror instead");
+		assert.ok(inputCalls[0]?.signal, "the native steering input receives the dialog signal");
+		assert.equal((ctx.ui as Record<string, unknown>).setWidget, undefined, "no editor bridge was ever acquired");
+		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
+		assert.equal(saved.hostBash?.allow?.length ?? 0, 0, "RPC defers persistent saves");
 	});
 });

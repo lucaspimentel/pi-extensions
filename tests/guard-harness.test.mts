@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { detectSandboxMode } from "../extensions/guard/sandbox/detect.ts";
 import { projectConfigPath, userConfigPath } from "../extensions/guard/policy/config.ts";
 import guardExtension from "../extensions/guard/index.ts";
@@ -99,9 +100,57 @@ function harnessCtx(h: Harness, cwd: string, selectResult: string | undefined = 
 			setStatus: (key: string, value: string | undefined) => h.status.set(key, value),
 			setWorkingVisible: (_visible: boolean) => {},
 			select: async () => selectResult,
+			input: async () => undefined,
 			theme: { fg: (_role: string, s: string) => s },
 		},
 	};
+}
+
+/** Install the owned-stage capabilities over a controlled fake TUI and drive
+ * mounted stages automatically: scripted DOWN-count answers for selector
+ * menus, Enter to submit editor prefills, Enter to confirm previews, and
+ * space+Enter to continue the deny picker. Mirrors the controlled boundary
+ * used by the dialogs and component suites. */
+function installOwnedAutopilot(ctx: { ui: Record<string, unknown> }, menuDowns: number[]): Array<{ kind: string; text: string }> {
+	const overlays: Array<{ kind: string; text: string }> = [];
+	const fakeTui: any = {
+		terminal: { columns: 120, rows: 40 },
+		requestRender() {},
+		showOverlay(component: any) {
+			const handle = {
+				hidden: false, focused: true,
+				isHidden: () => false, setHidden: () => {},
+				isFocused: () => true, hide: () => {},
+			};
+			setTimeout(() => {
+				let text = "";
+				try {
+					text = component.render(120).map((line: string) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+				} catch { text = ""; }
+				let kind = "selector";
+				if (text.includes("space toggle")) kind = "picker";
+				else if (text.includes("enter submit")) kind = "editor";
+				else if (text.includes("Confirm")) kind = "preview";
+				overlays.push({ kind, text });
+				if (kind === "editor" || kind === "preview") component.handleInput("\r");
+				else if (kind === "picker") { component.handleInput(" "); component.handleInput("\r"); }
+				else {
+					const downs = menuDowns.shift() ?? 0;
+					for (let i = 0; i < downs; i++) component.handleInput("\u001b[B");
+					component.handleInput("\r");
+				}
+			}, 0);
+			return handle;
+		},
+	};
+	ctx.ui.setWidget = (key: string, content: unknown) => {
+		if (content === undefined) return;
+		if (typeof content === "function") {
+			(content as (t: unknown, th: unknown) => unknown)(fakeTui, { fg: (_c: string, s: string) => s, bold: (s: string) => s });
+		}
+	};
+	ctx.ui.onTerminalInput = () => () => {};
+	return overlays;
 }
 
 /** Override HOME for the duration of fn so config reads/writes stay in a temp dir. */
@@ -127,6 +176,10 @@ function test(name: string, fn: () => void | Promise<void>) {
 }
 
 const sandboxMode = detectSandboxMode().mode;
+
+// Owned-stage tests construct the real ExtensionSelectorComponent/Editor,
+// which require an initialized host theme.
+initTheme("dark", false);
 
 test("harness: session_start initializes state, footer, and the profile event", async () => {
 	await withTempHome(async () => {
@@ -486,16 +539,20 @@ test("explicit asks offer once/deny only; fallback saves exact effective rules",
 		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
 		let offered: string[] = [];
-		ctx.ui.select = async (_title?: string, options?: string[]) => { offered = options ?? []; return "Deny"; };
+		ctx.ui.select = async (_title?: string, options?: string[]) => { offered = options ?? []; return "Deny once"; };
 		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx), /denied/);
-		assert.deepEqual(offered, ["Allow once", "Deny"]);
-		ctx.ui.select = async (title?: string, options?: string[]) => {
-			offered = options ?? [];
-			assert.match(title ?? "", /Exact rule: HostBash\(/);
-			return "Save for project";
-		};
+		assert.deepEqual(offered, ["Allow once", "Deny once"], "capability-limited hosts keep once actions only");
+		// With owned stages, the explicit ask still permits deny saves but never
+		// allow saves, and the whole-call exact rule saves through editor+preview.
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2]); // "Save deny for project"
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx), /denied/);
+		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "picker", "editor", "preview"]);
+		assert.doesNotMatch(overlays[0].text, /Save allow for/, "explicit ask never offers allow saves");
+		assert.match(overlays[3].text, /confirm deny save \(project\)/);
+		assert.deepEqual(JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")).hostBash.deny, ["HostBash(/^echo asked$/)"]);
+		const saveOverlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]); // "Save allow for project"
 		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
-		assert.deepEqual(offered, ["Allow once", "Save for project", "Save for user", "Deny"]);
+		assert.equal(saveOverlays[0].kind, "selector");
 		assert.equal(result.structuredContent.exit_code, 0);
 		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8"));
 		assert.deepEqual(saved.hostBash.ask, ["HostBash(echo asked)"]);
@@ -540,25 +597,13 @@ test("accepting a save while sandbox work runs waits for teardown before writing
 		const worker = h.registeredTools.get("python")!;
 		const status = await worker.execute("id", { action: "status" }, undefined, undefined, ctx);
 		const marker = path.join(status.structuredContent.paths.scratchDir, "active");
-		let show!: () => void;
-		let answer!: (choice: string) => void;
-		const shown = new Promise<void>((resolve) => { show = resolve; });
-		ctx.ui.select = async (_title?: string, _options?: string[], opts?: { signal?: AbortSignal }) => {
-			show();
-			if (opts?.signal?.aborted) return undefined;
-			return new Promise<string>((resolve) => {
-				answer = (choice) => resolve(choice);
-				opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
-			});
-		};
-		const saving = h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
-		void saving.catch(() => {});
-		await shown;
+		// A worker is already executing when the save interaction begins, so the
+		// save transition must wait for its teardown before writing config.
 		const executing = worker.execute("id", { code: `import time\nopen(${JSON.stringify(marker)}, 'w').write('ready')\ntime.sleep(2)` }, undefined, undefined, ctx);
 		for (let i = 0; i < 300 && !fs.existsSync(marker); i++) await new Promise((resolve) => setTimeout(resolve, 10));
 		assert.equal(fs.existsSync(marker), true);
-		answer("Save for project");
-		const saved = await saving;
+		installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]); // "Save allow for project"
+		const saved = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
 		await executing;
 		assert.equal(saved.structuredContent.exit_code, 0);
 		assert.equal(fs.existsSync(projectConfigPath(cwd)), true);
@@ -571,10 +616,11 @@ test("project rule saving does not quarantine guard's own newly created config w
 	await withTempHome(async () => {
 		const h = makeHarness();
 		const cwd = makeTempDir("guard-save-idle-worker-");
-		const ctx = harnessCtx(h, cwd, "Save for project");
+		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
 		const worker = h.registeredTools.get("python")!;
 		assert.equal((await worker.execute("id", { code: "1 + 1" }, undefined, undefined, ctx)).structuredContent.status, "ok");
+		installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]); // "Save allow for project"
 		await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
 		assert.equal((await worker.execute("id", { code: "2 + 2" }, undefined, undefined, ctx)).structuredContent.status, "ok");
 		assert.equal(fs.existsSync(projectConfigPath(cwd)), true);
@@ -589,9 +635,9 @@ test("compound suggestions are hidden unless the complete call is authorized", a
 		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
 		let offered: string[] = [];
-		ctx.ui.select = async (_title?: string, options?: string[]) => { offered = options ?? []; return "Deny"; };
+		ctx.ui.select = async (_title?: string, options?: string[]) => { offered = options ?? []; return "Deny once"; };
 		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET; echo $GUARD_SECOND_UNSET" }, undefined, undefined, ctx), /denied/);
-		assert.deepEqual(offered, ["Allow once", "Deny"]);
+		assert.deepEqual(offered, ["Allow once", "Deny once"]);
 		await h.handlers.session_shutdown[0]({}, ctx);
 	});
 });
@@ -667,7 +713,7 @@ test("guard read grants remount without replay, survive tree replacement and res
 		let dialogs = 0;
 		ctx.ui.select = async (_title?: string, options?: string[]) => {
 			dialogs++;
-			assert.deepEqual(options, ["Grant for session", "Save for project", "Save for user", "Deny"]);
+			assert.deepEqual(options, ["Grant for session", "Deny"], "capability-limited hosts keep the session grant and explicit denial only");
 			return "Grant for session";
 		};
 		const code = `open(${JSON.stringify(target)}).read()`;
@@ -701,11 +747,14 @@ test("project/user read grants persist after teardown without quarantine or lega
 	tempDirs.push(external);
 	const target = path.join(external, "data.txt");
 	fs.writeFileSync(target, "allowed");
-	for (const choice of ["Save for project", "Save for user"]) await withTempHome(async () => {
+	for (const [choice, downs] of [["Save for project", 1], ["Save for user", 2]] as const) await withTempHome(async () => {
 		const h = makeHarness();
 		const cwd = makeTempDir("guard-grant-persist-");
-		const ctx = harnessCtx(h, cwd, choice);
+		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
+		// Menu answer, then the root editor submits the suggested root, then the
+		// preview is confirmed.
+		installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [downs]);
 		const result = await h.registeredTools.get("python")!.execute("id", { code: `open(${JSON.stringify(target)}).read()` }, undefined, undefined, ctx);
 		assert.equal(result.structuredContent.status, "permission_needed");
 		assert.equal(result.structuredContent.stateLost, true);
@@ -717,6 +766,7 @@ test("project/user read grants persist after teardown without quarantine or lega
 });
 
 test("registered raw worker is torn down before research profile and acknowledgment", async () => {
+	if (sandboxMode === "degraded") return; // persistent workers are denied in degraded mode
 	await withTempHome(async () => {
 		const h = makeHarness();
 		const cwd = makeTempDir("guard-worker-barrier-");

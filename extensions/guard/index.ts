@@ -3,9 +3,9 @@ import { createBashTool, ExtensionSelectorComponent, type ExtensionAPI, type Ext
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { createGuardAskSelect } from "./ask-overlay.ts";
+import { createGuardAskSelect, supportsOwnedStages } from "./ask-overlay.ts";
 import { homedir } from "node:os";
-import { GuardRuntime, validateReadGrant } from "./runtime.ts";
+import { GuardRuntime, validateReadGrant, validateReadRootSave } from "./runtime.ts";
 import { DialogGate } from "./dialogs.ts";
 import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
 import { FAILURE_STATUSES as NODE_FAILURES } from "./tools/node/session.ts";
@@ -14,12 +14,15 @@ import { createShellRenderCall } from "./tools/shell-render.ts";
 import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
 import { detectSandboxMode } from "./sandbox/detect.ts";
 import { PROTECTED_TOP_LEVEL } from "./sandbox/spec.ts";
-import { loadConfig, loadUserConfigRaw, resolvedClassifierConfig, type ResolvedGuardConfig } from "./policy/config.ts";
-import { decide, resolveDecision, type Decision, type GuardCall, type PolicyState } from "./policy/decision.ts";
+import { loadConfig, loadUserConfigRaw, resolvedClassifierConfig, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
+import { decide, explainHostShellCommand, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
 import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
 import { computeMigration } from "./policy/migrate.ts";
 import { pickClassifierModel, classifyAction } from "./policy/classifier.ts";
 import { addToConfigScope, effectiveAllowSuggestion, readGrantSuggestion } from "./policy/suggest.ts";
+import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, validateShellSave } from "./policy/save.ts";
+import { runExecutionPrompt, runReadGrantPrompt, type PromptFlowIO } from "./prompt-flow.ts";
+import { createGuardEditorStage, createGuardPickerStage } from "./ask-components.ts";
 import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, releaseResearchHold, requestResearchHold, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
 import { constraintFromParse, INHERIT_ENV, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
 import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
@@ -28,6 +31,10 @@ const DEFAULT_CYCLE_SHORTCUT = "ctrl+alt+g";
 
 /** Hideable, bounded dialog overlay for guard's four TUI dialogs (see ask-overlay.ts). */
 const askSelect = createGuardAskSelect({ ExtensionSelectorComponent, matchesKey, isKeyRelease, isKeyRepeat });
+
+/** Owned stage components for the save/deny/compound prompt flows. */
+const editorStage = createGuardEditorStage();
+const pickerStage = createGuardPickerStage();
 
 /** Shape of the step-5 snapshot/contract ack payloads this extension emits. */
 interface SubagentAckBase {
@@ -103,33 +110,57 @@ export default function guard(pi: ExtensionAPI) {
 		try { ctx.ui.notify(message, level); } catch { /* notification does not weaken enforcement */ }
 	}
 	/**
-	 * Open one guard dialog selector with the TUI working spinner hidden for
-	 * its duration. Presentation only: visibility failures never change the
-	 * selector's result or error, and restoration is attempted on every settle
-	 * path. Only TUI mode toggles: RPC and print have no terminal spinner (the
-	 * RPC setter is a no-op), and restoration always passes true, matching the
-	 * legacy extension, because the UI API has no visibility getter. In TUI
-	 * mode the selector renders as the guard-owned hideable overlay
-	 * (ask-overlay.ts); hosts or modes without the required capabilities fall
-	 * back to the plain signal-aware native selector inside the adapter. Also
-	 * emits `herdr:blocked` true/false around the selector so herdr panes show
-	 * blocked status for every dialog kind.
+	 * Open one guard dialog selector. Presentation routing only: TUI hosts
+	 * render the guard-owned hideable overlay (ask-overlay.ts); hosts or modes
+	 * without the required capabilities fall back to the plain signal-aware
+	 * native selector inside the adapter.
 	 */
 	async function gatedSelect(ctx: ExtensionContext, title: string, options: string[], signal: AbortSignal): Promise<string | undefined> {
+		if (ctx.mode !== "tui") return ctx.ui.select(title, options, { signal });
+		return askSelect(ctx.ui, title, options, signal);
+	}
+	/**
+	 * Wrap one admitted guard interaction (every stage of a dialog: selector,
+	 * editor, picker, preview, steering input) so the TUI working spinner is
+	 * hidden once for the complete body and `herdr:blocked` spans the whole
+	 * lease instead of flashing between stages. Visibility failures are
+	 * cosmetic and never change the interaction's result; restoration always
+	 * passes true because the UI API has no visibility getter. RPC and print
+	 * have no terminal spinner (the RPC setter is a no-op) but still emit the
+	 * herdr events, matching the previous per-selector coverage.
+	 */
+	async function admittedDialog<T>(ctx: ExtensionContext, body: () => Promise<T>): Promise<T> {
 		// Report blocked to herdr while a guard dialog awaits user input (the
 		// pane would otherwise show "working"). Ignored outside herdr; released
 		// in the finally below on every settle path.
 		pi.events.emit("herdr:blocked", { active: true, label: "guard: awaiting user input" });
 		try {
-			if (ctx.mode !== "tui") return ctx.ui.select(title, options, { signal });
+			if (ctx.mode !== "tui") return await body();
 			try { ctx.ui.setWorkingVisible(false); } catch { /* cosmetic; the dialog outcome is unaffected */ }
-			return await askSelect(ctx.ui, title, options, signal);
-		} finally {
-			if (ctx.mode === "tui") {
-				try { ctx.ui.setWorkingVisible(true); } catch { /* cosmetic; never masks the selector's result or error */ }
+			try { return await body(); } finally {
+				try { ctx.ui.setWorkingVisible(true); } catch { /* cosmetic; never masks the dialog's result or error */ }
 			}
+		} finally {
 			pi.events.emit("herdr:blocked", { active: false });
 		}
+	}
+	/** True when the host can mount the owned editor/picker stages (full save contract). */
+	function ownedStagesFor(ctx: ExtensionContext): boolean {
+		return ctx.mode === "tui" && supportsOwnedStages(ctx.ui);
+	}
+	/** The prompt-flow IO surface for one dialog body, bound to this context. */
+	function promptIO(ctx: ExtensionContext): PromptFlowIO {
+		const owned = ownedStagesFor(ctx);
+		return {
+			select: (title, options, signal) => gatedSelect(ctx, title, options, signal),
+			editor: owned ? (title, prefill, signal) => editorStage(ctx.ui, signal, { title, prefill }) : undefined,
+			picker: owned ? (title, steps, signal) => pickerStage(ctx.ui, signal, { title, steps }) : undefined,
+			inputText: (title, signal) => ctx.ui.input(title, undefined, { signal }),
+			notify: (message, level) => notify(ctx, message, level),
+		};
+	}
+	function configDestination(ctx: ExtensionContext, scope: "project" | "user"): string {
+		return scope === "project" ? `${ctx.cwd}/.pi/guard.local.json` : `${homedir()}/.pi/agent/guard.json`;
 	}
 	function classifierModel(ctx: ExtensionContext): Model<Api> | undefined {
 		return pickClassifierModel(ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable(), ctx.model?.provider, (m) => ctx.modelRegistry.hasConfiguredAuth(m), config?.classifier, (provider, modelId) => ctx.modelRegistry.find(provider, modelId));
@@ -161,6 +192,28 @@ export default function guard(pi: ExtensionAPI) {
 	function configSignature(cfg: ResolvedGuardConfig): string {
 		const { warnings: _warnings, ...policy } = cfg as ResolvedGuardConfig & { warnings?: string[] };
 		return JSON.stringify(policy);
+	}
+	/** The effective policy state for a freshly loaded config, including session read roots. */
+	function policyWithSessionRoots(ctx: ExtensionContext, cfg: ResolvedGuardConfig): PolicyState {
+		if (!state || !runtime) throw new Error("guard session state not initialized");
+		return toPolicyState(state, { ...cfg, readRoots: [...new Set([...cfg.readRoots, ...sessionReadRoots])] }, ctx.cwd, ctx.hasUI);
+	}
+	/**
+	 * Deliver post-denial steering through the existing SDK handoff. The
+	 * captured owner (call signal, runtime identity, cwd, and the owning commit
+	 * epoch recorded synchronously in beforeCommit) is checked immediately
+	 * before the synchronous dispatch; invalid ownership suppresses dispatch.
+	 * Once handed to pi.sendUserMessage, existing SDK semantics apply: the call
+	 * returns void and input handlers or SDK processing can delay delivery
+	 * beyond a later abort. Guard owns the pre-dispatch checks only; there is
+	 * no post-dispatch cancellation, ownership binding, or rollback.
+	 */
+	function deliverSteering(text: string | undefined, signal: AbortSignal | undefined, rt: GuardRuntime, owningEpoch: number, cwd: string): void {
+		if (!text) return;
+		if (rt !== runtime || rt.teardownFailure) return;
+		if (rt.epoch !== owningEpoch || rt.policy.cwd !== cwd) return;
+		if (signal?.aborted) return;
+		pi.sendUserMessage(text, { deliverAs: "steer" });
 	}
 	async function transition(next: GuardSessionState, cfg: ResolvedGuardConfig, ctx: ExtensionContext, persistence?: { epoch: number; beforeCommit: () => ResolvedGuardConfig }, commandGuard?: { epoch: number; check: () => void }): Promise<void> {
 		if (!runtime) throw new Error("guard session state not initialized");
@@ -295,37 +348,94 @@ export default function guard(pi: ExtensionAPI) {
 		const mapped = mappedCall(name, input).call;
 		// Raw/degraded bash is a host shell for routing and saving, too.
 		const call: GuardCall = mapped.kind === "sandboxed-exec" && name === "bash" ? { kind: "host-shell", shell: "host-bash", command: String(input.command ?? "") } : mapped;
-		const patch = decision.provenance === "explicit-ask" ? null : effectiveAllowSuggestion(call, policy);
-		const options = ["Allow once", ...(patch ? ["Save for project", "Save for user"] : []), "Deny"];
+		const shellCall = call.kind === "host-shell" ? call : null;
+		const explanation = shellCall ? explainHostShellCommand(shellCall, policy) : null;
+		// Persistent saves require the owned editor stages. Capability-limited
+		// hosts keep the once actions; missing capabilities are detected BEFORE
+		// the dialog so save actions are never offered and then fail.
+		const ownedStages = ownedStagesFor(ctx);
+		const allowPlan = shellCall && explanation && ownedStages ? planAllowSave(shellCall, policy, explanation) : null;
+		const denySaveSupported = shellCall !== null && ownedStages;
+		const commandText = shellCall ? shellCall.command : typeof input.code === "string" ? input.code : "";
 		// The gate holds the UI lease only across pre-display validation, the
-		// selector interaction, and post-answer validation. Persistence and
+		// complete interaction, and post-answer validation. Persistence and
 		// execution happen after the lease is released, so the transition this
 		// choice triggers cannot cancel its own dialog.
 		const cwd = rt.policy.cwd;
-		const choice = await dialogs.run({ signal }, async (dialogSignal) => {
+		const outcome = await dialogs.run({ signal }, async (dialogSignal) => {
 			dialogSignal.throwIfAborted();
 			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
-			const answer = await gatedSelect(ctx, `guard: ${name}\n${decision.reason}\n${String(input.command ?? "")}\n${patch ? `Exact rule: ${patch.hostBash?.allow?.join(", ")}\nProject: ${ctx.cwd}/.pi/guard.local.json\nUser: ${homedir()}/.pi/agent/guard.json` : ""}`, options, dialogSignal);
+			const result = await admittedDialog(ctx, () => runExecutionPrompt({
+				io: promptIO(ctx),
+				signal: dialogSignal,
+				toolName: name,
+				command: commandText,
+				decision,
+				explanation,
+				allowPlan,
+				denySaveSupported,
+				shell: shellCall?.shell ?? "host-bash",
+				scopes: ["project", "user"],
+				parseRules: (text) => parseShellRuleLines(text, shellCall?.shell ?? "host-bash"),
+				validateRules: (intent, rules) => shellCall
+					? validateShellSave(shellCall, policy, intent, rules)
+					: { ok: false as const, error: "only host-shell calls support rule saves" },
+				denyRulesFor: (ids) => shellCall && explanation ? planDenyRules(shellCall, explanation, ids) : [],
+				destination: (scope) => configDestination(ctx, scope),
+			}));
 			dialogSignal.throwIfAborted();
 			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
-			return answer;
+			return result;
 		});
 		assertCallActive(signal);
-		if (choice === "Allow once") return epoch;
-		if (patch && (choice === "Save for project" || choice === "Save for user")) {
-			// Recheck the complete hypothetical merge immediately before persistence.
+		if (outcome.kind === "allow-once") return epoch;
+		if (outcome.kind === "deny-once") {
+			deliverSteering(outcome.steering, signal, rt, epoch, cwd);
+			throw new Error("guard: execution denied");
+		}
+		if (outcome.kind === "save-allow") {
+			if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
+			// Re-read current config and revalidate the ACTUAL reviewed patch
+			// (never a regenerated suggestion) against the latest effective policy.
 			const diskConfig = loadConfig(ctx.cwd);
-			const latestPolicy = { ...policyFor(ctx), config: { ...diskConfig, readRoots: [...new Set([...diskConfig.readRoots, ...sessionReadRoots])] } };
-			if (!effectiveAllowSuggestion(call, latestPolicy)) throw new Error("guard: suggested rule no longer authorizes the complete call");
-			const target = { ...diskConfig, hostBash: { ...diskConfig.hostBash, allow: [...new Set([...diskConfig.hostBash.allow, ...patch.hostBash!.allow!])] } };
+			const latestCheck = validateShellSave(shellCall, policyWithSessionRoots(ctx, diskConfig), "allow", outcome.rules);
+			if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the complete call (${latestCheck.error}); nothing saved or executed`);
+			const target = { ...diskConfig, hostBash: { ...diskConfig.hostBash, allow: dedupe([...diskConfig.hostBash.allow, ...outcome.rules]) } };
+			let owningEpoch = epoch;
 			await transition({ ...state! }, target, ctx, { epoch, beforeCommit: () => {
 				assertCallActive(signal);
 				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or executed");
-				addToConfigScope(choice === "Save for project" ? "project" : "user", patch, { cwd: ctx.cwd });
+				const fresh = loadConfig(ctx.cwd);
+				const freshCheck = validateShellSave(shellCall, policyWithSessionRoots(ctx, fresh), "allow", outcome.rules);
+				if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the complete call (${freshCheck.error}); nothing saved`);
+				// Record the owning commit epoch synchronously (no await between the
+				// final checks and the write) for the steering/execution ownership checks.
+				owningEpoch = rt.epoch;
+				addToConfigScope(outcome.scope, { hostBash: { allow: outcome.rules } }, { cwd: ctx.cwd });
 				return loadConfig(ctx.cwd);
 			} });
 			return rt.epoch;
 		}
+		if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
+		// save-deny: the steering was collected inside the flow before the commit.
+		const diskConfig = loadConfig(ctx.cwd);
+		const latestCheck = validateShellSave(shellCall, policyWithSessionRoots(ctx, diskConfig), "deny", outcome.rules);
+		if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer deny the complete call (${latestCheck.error}); nothing saved`);
+		const target = { ...diskConfig, hostBash: { ...diskConfig.hostBash, deny: dedupe([...diskConfig.hostBash.deny, ...outcome.rules]) } };
+		let owningEpoch = epoch;
+		await transition({ ...state! }, target, ctx, { epoch, beforeCommit: () => {
+			assertCallActive(signal);
+			if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or executed");
+			const fresh = loadConfig(ctx.cwd);
+			const freshCheck = validateShellSave(shellCall, policyWithSessionRoots(ctx, fresh), "deny", outcome.rules);
+			if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer deny the complete call (${freshCheck.error}); nothing saved`);
+			owningEpoch = rt.epoch;
+			addToConfigScope(outcome.scope, { hostBash: { deny: outcome.rules } }, { cwd: ctx.cwd });
+			return loadConfig(ctx.cwd);
+		} });
+		// Committed: keep the saved rule; suppress steering if ownership went
+		// invalid between the commit and the handoff.
+		deliverSteering(outcome.steering, signal, rt, owningEpoch, cwd);
 		throw new Error("guard: execution denied");
 	}
 
@@ -393,29 +503,51 @@ export default function guard(pi: ExtensionAPI) {
 		const cwd = rt.policy.cwd;
 		try {
 			rt.assertAvailable();
-			const root = validateReadGrant(readGrantSuggestion(data.permissionPath, ctx.cwd), ctx.cwd);
-			const title = `guard: ${name} requests read-only access to ${root}. Granting discards worker state; code is never replayed.`;
-			// Same narrow lease as approvals: validation, selector, validation.
-			const choice = await dialogs.run({ signal }, async (dialogSignal) => {
+			const suggestedRoot = validateReadGrant(readGrantSuggestion(data.permissionPath, ctx.cwd), ctx.cwd);
+			// Same narrow lease as approvals: validation, the complete interaction,
+			// validation. Session grants stay one-stage; persistent saves open the
+			// root editor and preview through the prompt flow.
+			const outcome = await dialogs.run({ signal }, async (dialogSignal) => {
 				dialogSignal.throwIfAborted();
 				assertDialogCurrent(rt, epoch, ctx, cwd, "Read grant expired; nothing saved or replayed.");
-				const answer = await gatedSelect(ctx, title, ["Grant for session", "Save for project", "Save for user", "Deny"], dialogSignal);
+				const result = await admittedDialog(ctx, () => runReadGrantPrompt({
+					io: promptIO(ctx),
+					signal: dialogSignal,
+					workerName: name,
+					requestPath: String(data.permissionPath),
+					suggestedRoot,
+					scopes: ["project", "user"],
+					parseReadRoot: (text) => parseReadRootInput(text, ctx.cwd),
+					validateRoot: (candidate) => {
+						try { validateReadRootSave(candidate, String(data.permissionPath), ctx.cwd); return { ok: true as const }; }
+						catch (err) { return { ok: false as const, error: err instanceof Error ? err.message : String(err) }; }
+					},
+					destination: (scope) => configDestination(ctx, scope),
+				}));
 				dialogSignal.throwIfAborted();
 				assertDialogCurrent(rt, epoch, ctx, cwd, "Read grant expired; nothing saved or replayed.");
-				return answer;
+				return result;
 			});
 			assertCallActive(signal);
-			if (choice !== "Grant for session" && choice !== "Save for project" && choice !== "Save for user") return data;
+			if (outcome.kind === "no-grant") return { ...data, diagnostic: "No read grant: the request was not approved." };
+			if (outcome.kind === "deny") {
+				deliverSteering(outcome.steering, signal, rt, epoch, cwd);
+				return { ...data, diagnostic: "Read request denied." };
+			}
 			rt.assertAvailable();
-			validateReadGrant(root, ctx.cwd);
+			// Revalidate the ACTUAL edited root (or the suggested root for a session
+			// grant, which has no editor) against the request path before committing.
+			const root = outcome.kind === "save-root" ? validateReadRootSave(outcome.root, String(data.permissionPath), ctx.cwd) : suggestedRoot;
+			rt.assertAvailable();
 			const diskConfig = loadConfig(ctx.cwd);
 			const target = { ...diskConfig, readRoots: [...new Set([...diskConfig.readRoots, root])] };
 			await transition({ ...state! }, target, ctx, { epoch, beforeCommit: () => {
 				assertCallActive(signal);
 				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or replayed");
-				validateReadGrant(root, ctx.cwd);
-				if (choice === "Grant for session") sessionReadRoots = [...new Set([...sessionReadRoots, root])];
-				else addToConfigScope(choice === "Save for project" ? "project" : "user", { readRoots: [root] }, { cwd: ctx.cwd });
+				if (outcome.kind === "save-root") validateReadRootSave(root, String(data.permissionPath), ctx.cwd);
+				else validateReadGrant(root, ctx.cwd);
+				if (outcome.kind === "grant-session") sessionReadRoots = [...new Set([...sessionReadRoots, root])];
+				else addToConfigScope(outcome.scope, { readRoots: [root] }, { cwd: ctx.cwd });
 				return loadConfig(ctx.cwd);
 			} });
 			return { ...data, stateLost: true, stateLostReason: "read roots changed", diagnostic: `Read-only grant added: ${root}. Worker state discarded. Code was not replayed; run it again explicitly.` };
@@ -530,7 +662,7 @@ export default function guard(pi: ExtensionAPI) {
 				dialogSignal.throwIfAborted();
 				if (!rt) throw new Error("guard: profile selection expired after a session/policy change.");
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: profile selection expired after a session/policy change.");
-				const answer = await gatedSelect(ctx, "Guard profile (this session):", [current, ...allowed], dialogSignal);
+				const answer = await admittedDialog(ctx, () => gatedSelect(ctx, "Guard profile (this session):", [current, ...allowed], dialogSignal));
 				dialogSignal.throwIfAborted();
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: profile selection expired after a session/policy change.");
 				return answer;
@@ -566,7 +698,7 @@ export default function guard(pi: ExtensionAPI) {
 				dialogSignal.throwIfAborted();
 				if (!rt) throw new Error("guard: migration expired; nothing was written.");
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: migration expired; nothing was written.");
-				const answer = await gatedSelect(ctx, "Write the migration into guard.json (union, never removes)?", ["Write", "Cancel"], dialogSignal);
+				const answer = await admittedDialog(ctx, () => gatedSelect(ctx, "Write the migration into guard.json (union, never removes)?", ["Write", "Cancel"], dialogSignal));
 				dialogSignal.throwIfAborted();
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: migration expired; nothing was written.");
 				return answer;
