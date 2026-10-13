@@ -284,6 +284,44 @@ test("shell tools never show the extension's own duration", () => {
 	assert.match(resultLine!, /^\s*⟨dim⟩ended \d\d:\d\d:\d\d⟨\/role⟩$/);
 });
 
+test("codemode never shows the extension's own duration", () => {
+	const loaded = loadExtension();
+	const base = makeBaseRenderers();
+	const wrapped = loaded.resolver("codemode", () => base.renderers);
+
+	loaded.handler("message_end")!({ type: "message_end", message: { role: "user", timestamp: Date.now() - 5000 } });
+	loaded.handler("tool_execution_start")!({
+		type: "tool_execution_start",
+		toolCallId: "cm1",
+		toolName: "codemode",
+		args: {},
+	});
+
+	const running = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("cm1"))));
+	assert.ok(running, "no dim line while running");
+	assert.match(running!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  \+\d+s⟨\/role⟩$/);
+	assert.ok(!running!.includes("ran "), "running codemode call line must not show the duration");
+
+	loaded.handler("tool_execution_end")!({
+		type: "tool_execution_end",
+		toolCallId: "cm1",
+		toolName: "codemode",
+		result: {},
+		isError: false,
+		durationMs: 3000,
+	});
+
+	const done = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("cm1"))));
+	assert.ok(done, "no dim line when completed");
+	assert.ok(!done!.includes("ran "), "completed codemode call line must not show the duration");
+
+	const resultLine = tsLineOf(
+		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("cm1"))),
+	);
+	assert.ok(resultLine, "no dim result line");
+	assert.match(resultLine!, /^\s*⟨dim⟩ended \d\d:\d\d:\d\d⟨\/role⟩$/);
+});
+
 // ── Backfill from session history ─────────────────────────────────────────────
 
 interface FakeMessage {

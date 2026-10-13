@@ -17,10 +17,11 @@
  * from the user prompt). While the tool is still running, the call line also
  * shows a live-ticking `ran 2.1s…` (omitted until 100ms have elapsed); once the
  * result arrives the duration moves
- * down to the result line, which shows `ran 2.1s  ended 14:32:07`. Shell tools
- * (bash, powershell) never show the extension's own duration: their renderer
- * already displays Elapsed/Took, so their call line stays start + delta and
- * their result line shows only the completion time.
+ * down to the result line, which shows `ran 2.1s  ended 14:32:07`. Tools whose
+ * renderer displays the duration itself (bash, powershell, codemode) never show
+ * the extension's own duration: those renderers already display Elapsed/Took, so
+ * their call line stays start + delta and their result line shows only the
+ * completion time.
  *
  * Display-only: nothing is written to the session file. Live rows are
  * timestamped from tool_execution_start/tool_execution_end events; rows from
@@ -168,14 +169,14 @@ function ensureState(state: Record<string, unknown>): TimestampsState {
  * Compose the call row's dim line, showing only the segments that are known:
  * start and delta always (when known), plus a live-ticking `ran Xs…` while the
  * tool is still executing (once at least 100ms have elapsed; before that the
- * duration would read as 0.0s). Shell tools never get the ticking duration
- * because their own renderer shows Elapsed while running.
+ * duration would read as 0.0s). Tools whose renderer shows Elapsed while
+ * running never get the ticking duration.
  */
-function callLineText(call: CallTimes, nowMs: number, isShellTool: boolean): string {
+function callLineText(call: CallTimes, nowMs: number, baseShowsDuration: boolean): string {
 	const segments: string[] = [`started ${formatAbsolute(call.start, nowMs)}`];
 	const delta = deltaFor(call.start);
 	if (delta !== undefined) segments.push(formatDelta(delta));
-	if (call.end === undefined && call.live && !isShellTool) {
+	if (call.end === undefined && call.live && !baseShowsDuration) {
 		const elapsed = Math.max(0, nowMs - call.start);
 		if (durationIsDisplayable(elapsed)) segments.push(`ran ${formatDuration(elapsed)}\u2026`);
 	}
@@ -229,7 +230,7 @@ function wrapCall(
 	args: any,
 	theme: Theme,
 	context: RenderContext,
-	isShellTool: boolean,
+	baseShowsDuration: boolean,
 ): Component {
 	const st = ensureState(context.state);
 	const inner = baseRenderCall(args, theme, { ...context, lastComponent: st.baseCall });
@@ -244,7 +245,7 @@ function wrapCall(
 	container.clear();
 	container.addChild(inner);
 	if (call) {
-		line.setText(theme.fg("dim", callLineText(call, Date.now(), isShellTool)));
+		line.setText(theme.fg("dim", callLineText(call, Date.now(), baseShowsDuration)));
 		container.addChild(line);
 	}
 
@@ -258,7 +259,7 @@ function wrapResult(
 	options: ToolRenderResultOptions,
 	theme: Theme,
 	context: RenderContext,
-	isShellTool: boolean,
+	baseShowsDuration: boolean,
 ): Component {
 	const st = ensureState(context.state);
 	const inner = baseRenderResult(result, options, theme, { ...context, lastComponent: st.baseResult });
@@ -273,7 +274,7 @@ function wrapResult(
 	const line = st.resultLine ?? new Text("", 2, 0);
 	st.resultLine = line;
 	const durationMs = call.durationMs ?? Math.max(0, call.end - call.start);
-	line.setText(theme.fg("dim", formatResultLine(durationMs, call.end, Date.now(), !isShellTool)));
+	line.setText(theme.fg("dim", formatResultLine(durationMs, call.end, Date.now(), !baseShowsDuration)));
 
 	// Preferred placement: the very bottom of the result block, after the body
 	// (and after the shell renderer's Took line). When the base result renders
@@ -352,14 +353,14 @@ export default function timestampsExtension(pi: ExtensionAPI): void {
 	rendererApi.registerToolRenderer((toolName, next) => {
 		const base = next();
 		if (!base) return undefined;
-		// Shell renderers display the duration themselves (Elapsed while partial,
+		// These renderers display the duration themselves (Elapsed while partial,
 		// Took on the final result), so the extension suppresses its own `ran`.
-		const isShellTool = toolName === "bash" || toolName === "powershell";
+		const baseShowsDuration = toolName === "bash" || toolName === "powershell" || toolName === "codemode";
 		const renderers: ToolRenderersLike = { ...base };
 		if (base.renderCall) {
 			const baseRenderCall = base.renderCall;
 			renderers.renderCall = (args: any, theme: Theme, context: RenderContext) =>
-				wrapCall(baseRenderCall, args, theme, context, isShellTool);
+				wrapCall(baseRenderCall, args, theme, context, baseShowsDuration);
 		}
 		if (base.renderResult) {
 			const baseRenderResult = base.renderResult;
@@ -368,7 +369,7 @@ export default function timestampsExtension(pi: ExtensionAPI): void {
 				options: ToolRenderResultOptions,
 				theme: Theme,
 				context: RenderContext,
-			) => wrapResult(baseRenderResult, result, options, theme, context, isShellTool);
+			) => wrapResult(baseRenderResult, result, options, theme, context, baseShowsDuration);
 		}
 		return renderers;
 	});
