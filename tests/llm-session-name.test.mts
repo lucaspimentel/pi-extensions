@@ -8,7 +8,7 @@
 //
 // Run: node tests/llm-session-name.test.mts
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +22,7 @@ const {
 	buildRecentTurnsText,
 	extractInitialPrompts,
 	deriveTitleSource,
+	readDiskSessionName,
 	readTurnInterval,
 } = mod;
 
@@ -170,7 +171,7 @@ assert.ok(windowTurns.split("\n").length === 10, "one labeled line per selected 
 const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
 const commands: Record<string, { description: string; handler: (args: string, ctx: any) => Promise<void> }> = {};
 
-function makePi(initialName?: string) {
+function makePi(initialName?: string, sessionFile?: string) {
 	let name = initialName;
 	let setCalls = 0;
 	return {
@@ -186,6 +187,11 @@ function makePi(initialName?: string) {
 		setSessionName(next: string) {
 			setCalls++;
 			name = next;
+			// Mirror real pi: the live session manager persists every name
+			// append synchronously to the session file.
+			if (sessionFile) {
+				appendFileSync(sessionFile, `${JSON.stringify({ type: "session_info", name: next })}\n`);
+			}
 		},
 	};
 }
@@ -194,11 +200,13 @@ function makeCtx(opts: {
 	complete?: (model: any, context: any, options?: any) => Promise<any>;
 	authed?: boolean;
 	entries?: any[];
+	sessionFile?: string;
 } = {}) {
 	const ctx: any = {
 		sessionManager: {
 			getSessionId: () => "s1",
 			getBranch: () => opts.entries ?? [],
+			getSessionFile: () => opts.sessionFile,
 		},
 		model: { provider: "anthropic", id: "claude-x" },
 		modelRegistry: {
@@ -481,6 +489,141 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	await waitFor(() => calls === 1); // settle
 	assert.equal(calls, 1, "a cleared name must block regeneration");
 	assert.equal(pi.name(), "");
+}
+
+// readDiskSessionName: last session_info wins, names are normalized the way
+// SessionManager normalizes them, unreadable files fail open.
+{
+	const dir = mkdtempSync(join(tmpdir(), "llm-session-name-"));
+	const file = join(dir, "session.jsonl");
+	assert.equal(readDiskSessionName(undefined), undefined);
+	assert.equal(readDiskSessionName(join(dir, "missing.jsonl")), undefined);
+	writeFileSync(file, `${JSON.stringify({ type: "session", id: "h" })}\n`);
+	assert.equal(readDiskSessionName(file), undefined, "no session_info entry means no name");
+	appendFileSync(file, `${JSON.stringify({ type: "session_info", name: "first" })}\n`);
+	assert.equal(readDiskSessionName(file), "first");
+	appendFileSync(file, `${JSON.stringify({ type: "message", message: { role: "user" } })}\n`);
+	appendFileSync(file, `${JSON.stringify({ type: "session_info", name: "second  name" })}\n`);
+	assert.equal(readDiskSessionName(file), "second  name", "latest session_info entry wins");
+	writeFileSync(
+		file,
+		`${JSON.stringify({ type: "session_info", name: "multi\nline" })}\n`,
+	);
+	assert.equal(readDiskSessionName(file), "multi line", "newline runs collapse to spaces");
+	writeFileSync(file, `${JSON.stringify({ type: "session_info", name: "" })}\n`);
+	assert.equal(readDiskSessionName(file), undefined, "an empty name clears");
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// 11a. External rename on disk (session-selector style: a different
+// SessionManager appends to the file while the live manager never sees it)
+// locks the session at the next cadence point instead of being overwritten.
+{
+	const dir = mkdtempSync(join(tmpdir(), "llm-session-name-"));
+	const file = join(dir, "session.jsonl");
+	writeFileSync(file, `${JSON.stringify({ type: "session", id: "h" })}\n`);
+	const pi = makePi(undefined, file);
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	let calls = 0;
+	const ctx = makeCtx({
+		complete: async () => {
+			calls++;
+			return textResponse("t");
+		},
+		entries: [msgEntry("user", "recent")],
+		sessionFile: file,
+	});
+	await handlers.turn_end({}, ctx); // turn 1: first title, persisted to disk
+	await waitFor(() => pi.name() === "t");
+	assert.equal(readDiskSessionName(file), "t");
+	// What the session selector's ctrl+r rename does: SessionManager.open()
+	// appends the rename to the file; the live pi never learns about it.
+	appendFileSync(file, `${JSON.stringify({ type: "session_info", name: "selector rename" })}\n`);
+	for (let t = 2; t <= 21; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => calls === 1); // settle turn 1's run
+	assert.equal(calls, 1, "an external disk rename must lock regeneration");
+	assert.equal(pi.name(), "t", "the extension must not write over the external rename");
+	assert.equal(readDiskSessionName(file), "selector rename");
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// 11b. With a disk-backed session and no external rename, cadence
+// regeneration still works: the disk comparison must not false-positive on
+// the extension's own synchronously persisted writes.
+{
+	const dir = mkdtempSync(join(tmpdir(), "llm-session-name-"));
+	const file = join(dir, "session.jsonl");
+	writeFileSync(file, `${JSON.stringify({ type: "session", id: "h" })}\n`);
+	const pi = makePi(undefined, file);
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	let calls = 0;
+	const responses = ["first title", "second title"];
+	const ctx = makeCtx({
+		complete: async () => {
+			calls++;
+			return textResponse(responses[calls - 1]);
+		},
+		entries: [msgEntry("user", "recent")],
+		sessionFile: file,
+	});
+	await handlers.turn_end({}, ctx); // turn 1
+	await waitFor(() => pi.name() === "first title");
+	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx); // turn 11: regen
+	await waitFor(() => calls === 2);
+	assert.equal(pi.name(), "second title");
+	assert.equal(readDiskSessionName(file), "second title");
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// 11c. An external rename that lands on disk DURING the model await is
+// caught by the post-await disk check: the generated title is discarded and
+// the session locks instead of overwriting the rename.
+{
+	const dir = mkdtempSync(join(tmpdir(), "llm-session-name-"));
+	const file = join(dir, "session.jsonl");
+	writeFileSync(file, `${JSON.stringify({ type: "session", id: "h" })}\n`);
+	const pi = makePi(undefined, file);
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	let calls = 0;
+	const ctx = makeCtx({
+		complete: async () => {
+			calls++;
+			// Rename lands on disk mid-await without reaching the live manager.
+			appendFileSync(file, `${JSON.stringify({ type: "session_info", name: "mid-flight rename" })}\n`);
+			return textResponse("late title");
+		},
+		entries: [msgEntry("user", "recent")],
+		sessionFile: file,
+	});
+	await handlers.turn_end({}, ctx); // turn 1
+	await waitFor(() => calls === 1); // settle
+	assert.equal(pi.name(), undefined, "the generated title must be discarded after an external rename");
+	assert.equal(pi.setCallCount(), 0, "the extension must not write over the mid-flight rename");
+	assert.equal(readDiskSessionName(file), "mid-flight rename");
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// 11d. A manual /name during a FAILED first-generation await must not be
+// clobbered by the truncated-prompt fallback: the post-await manual check
+// runs before the fallback.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	const ctx = makeCtx({
+		complete: async () => {
+			pi.setSessionName("manual mid-flight");
+			return { content: [], errorMessage: "boom" }; // model failure
+		},
+		entries: [msgEntry("user", "recent")],
+	});
+	await handlers.turn_end({}, ctx); // turn 1
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(pi.name(), "manual mid-flight", "the fallback must not overwrite a mid-flight /name");
+	assert.equal(pi.setCallCount(), 1, "only the manual write must have happened");
 }
 
 // 12. /name-auto bypasses the manual lock, adopts the new title as

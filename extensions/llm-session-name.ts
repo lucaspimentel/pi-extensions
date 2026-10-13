@@ -37,6 +37,18 @@
  * regeneration that bypasses the lock; the new title is adopted as
  * extension-owned, so periodic regeneration resumes from it.
  *
+ * Renames that bypass the live session manager are also honored. The live
+ * getSessionName() reads an in-memory entry list that is loaded once when
+ * the session opens and never refreshed, so a rename written by another
+ * SessionManager instance (the session selector's ctrl+r rename, /name from
+ * a second pi process on the same session file) stays invisible until the
+ * session is resumed. To catch those, each cadence point also reads the
+ * last session_info entry from the session file on disk: the live manager
+ * persists every append synchronously, so disk and live only diverge when
+ * someone else renamed the session. A divergence locks the session, and is
+ * also checked after every model await so a rename that lands mid-flight is
+ * never overwritten (including by the first-title fallback).
+ *
  * In-flight runs are aborted via a generation counter when the session is
  * replaced (/new, /resume, /fork): see idle-summary/index.ts for the full
  * rationale.
@@ -147,6 +159,51 @@ export const buildRegenerationPrompt = (
 	}
 	lines.push("<recent_conversation>", recentTurns.trim(), "</recent_conversation>");
 	return lines.join("\n");
+};
+
+/**
+ * Read the session name from the session file on disk: the last session_info
+ * entry, normalized the way SessionManager normalizes names (newline runs
+ * collapsed to spaces, trimmed; empty means no name). Returns undefined when
+ * the file is missing, unreadable, or has no session_info entry, so callers
+ * can fail open. Reads the whole file; called only at cadence points (once
+ * per turnInterval turns) and after title model awaits.
+ */
+export const readDiskSessionName = (sessionFile: string | undefined | null): string | undefined => {
+	if (!sessionFile) return undefined;
+	let contents: string;
+	try {
+		contents = readFileSync(sessionFile, "utf8");
+	} catch {
+		return undefined;
+	}
+	const lines = contents.split("\n");
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i].trim();
+		if (!line) continue;
+		let entry: { type?: unknown; name?: unknown };
+		try {
+			entry = JSON.parse(line) as { type?: unknown; name?: unknown };
+		} catch {
+			continue;
+		}
+		if (entry.type !== "session_info" || typeof entry.name !== "string") continue;
+		const name = entry.name.replace(/[\r\n]+/g, " ").trim();
+		return name || undefined;
+	}
+	return undefined;
+};
+
+/**
+ * True when the session file on disk carries a name that differs from the
+ * live session manager's view: an external rename (session selector, another
+ * pi process) that getSessionName() cannot see. A missing or unreadable
+ * session file fails open (no external rename detected).
+ */
+const externallyRenamed = (ctx: ExtensionContext, liveName: string): boolean => {
+	const sessionFile = (ctx.sessionManager as { getSessionFile?: () => string | undefined }).getSessionFile?.();
+	const disk = readDiskSessionName(sessionFile);
+	return disk !== undefined && disk !== liveName;
 };
 
 /**
@@ -322,6 +379,13 @@ export default function (pi: ExtensionAPI) {
 
 		if (!force) {
 			if (manualLock.has(sessionId)) return undefined;
+			// An external rename (session selector, another pi process on the
+			// same session file) never reaches getSessionName(); detect it by
+			// divergence from the file on disk and lock, same as a manual /name.
+			if (externallyRenamed(ctx, current)) {
+				manualLock.add(sessionId);
+				return undefined;
+			}
 			const owned = lastGeneratedTitle.get(sessionId);
 			if (owned !== undefined) {
 				// We authored the name before: a different or cleared name is a
@@ -368,6 +432,20 @@ export default function (pi: ExtensionAPI) {
 		const title = await generateTitle(ctx, prompt);
 		if (generation !== runGeneration) return undefined;
 
+		if (!force) {
+			// A /name during the model await wins: discard the generated title
+			// and lock, unless the name still matches what we own. The disk
+			// comparison also catches external renames that landed on the
+			// session file while the await was in flight. Running this check
+			// before the fallback below keeps a manual rename from being
+			// clobbered by a first-title fallback too.
+			const now = pi.getSessionName() ?? "";
+			if (now !== (lastGeneratedTitle.get(sessionId) ?? "") || externallyRenamed(ctx, now)) {
+				manualLock.add(sessionId);
+				return undefined;
+			}
+		}
+
 		if (!title) {
 			// First-title failure falls back to a truncated prompt so the
 			// session still gets a stable, short name. Regeneration failure
@@ -383,16 +461,6 @@ export default function (pi: ExtensionAPI) {
 			}
 			lastGeneratedTitle.set(sessionId, fallback);
 			return fallback;
-		}
-
-		if (!force) {
-			// A /name during the model await wins: discard the generated title
-			// and lock, unless the name still matches what we own.
-			const now = pi.getSessionName() ?? "";
-			if (now !== (lastGeneratedTitle.get(sessionId) ?? "")) {
-				manualLock.add(sessionId);
-				return undefined;
-			}
 		}
 
 		// No thrash: never fire a redundant session_info_changed (and tab
