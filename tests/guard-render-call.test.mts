@@ -1,9 +1,12 @@
-// Regression tests for the call headers of guard's shell tools (bash, host_bash).
+// Regression tests for the call headers and result rendering of guard's shell tools (bash, host_bash).
 //
 // Loads the REAL guard extension with a fake pi API that captures registered tools, then asserts
 // each shell tool renders a distinct tool-name title line followed by native bash's command
-// presentation, delegated through the SDK's public createBashToolDefinition().renderCall. Results,
-// execution callbacks, and non-rendering fields must stay untouched, so nothing is executed here:
+// presentation, delegated through the SDK's public createBashToolDefinition().renderCall. Results
+// are rendered through the SDK's public createBashToolDefinition().renderResult, which supplies
+// the output preview and the Elapsed/Took duration line (host_bash has no built-in renderer
+// fallback, so without it its results would never show a duration). Execution callbacks and
+// non-rendering fields stay untouched, so nothing is executed here:
 // results are injected directly into a public ToolExecutionComponent instead.
 //
 // The SDK's native renderers use the global theme even when passed a mock, so initTheme("dark",
@@ -88,7 +91,9 @@ function renderLines(tool: any, args: unknown, width: number, overrides: CallCon
 }
 
 // Native reference renderer, obtained the same way the adapter obtains it.
-const nativeRenderCall = createBashToolDefinition(process.cwd(), { exposeSessionEnvironment: false }).renderCall!;
+const nativeDefinition = createBashToolDefinition(process.cwd(), { exposeSessionEnvironment: false });
+const nativeRenderCall = nativeDefinition.renderCall!;
+const nativeRenderResult = nativeDefinition.renderResult!;
 
 function nativeLines(args: unknown, width: number): string[] {
 	const component = nativeRenderCall(args as any, themeStub, makeContext());
@@ -98,16 +103,29 @@ function nativeLines(args: unknown, width: number): string[] {
 const EXAMPLE_COMMAND = "cd /home/lucas/source/lucaspimentel/pi-extensions && npx tsc --noEmit && echo TSC-OK";
 
 // ── Registration shape ───────────────────────────────────────────────────────
-test("both guard shell tools are registered with a call renderer and unchanged non-rendering fields", () => {
+test("both guard shell tools are registered with native call and result renderers and unchanged non-rendering fields", () => {
 	for (const [name, tool] of [["bash", bash], ["host_bash", hostBash]] as const) {
 		assert.ok(tool, `${name} not registered`);
 		assert.equal(tool.name, name);
 		assert.equal(tool.label, name);
 		assert.equal(typeof tool.renderCall, "function", `${name} renderCall`);
-		assert.equal(tool.renderResult, undefined, `${name} must not gain a result renderer`);
+		assert.equal(typeof tool.renderResult, "function", `${name} renderResult`);
 		assert.equal(typeof tool.execute, "function", `${name} execute`);
 		assert.ok(tool.description, `${name} description`);
 		assert.ok(tool.parameters, `${name} parameters`);
+	}
+	// The result renderer must be the native shell renderer, verified behaviorally (separate
+	// createBashToolDefinition() calls create distinct closures, so reference equality cannot work).
+	const result = { content: [{ type: "text", text: "out" }], details: undefined };
+	const context = () => ({
+		args: { command: "x" }, toolCallId: "t", invalidate: () => {}, lastComponent: undefined,
+		state: { startedAt: 1_000 }, cwd: "/tmp", executionStarted: true, argsComplete: true,
+		isPartial: false, expanded: false, showImages: false, isError: false,
+	});
+	for (const tool of [bash, hostBash]) {
+		const lines = (tool.renderResult(result, { expanded: false, isPartial: false }, themeStub, context()).render(120) as string[]).map((line) => stripAnsi(line).trimEnd());
+		const expected = (nativeRenderResult(result, { expanded: false, isPartial: false }, themeStub, context()).render(120) as string[]).map((line) => stripAnsi(line).trimEnd());
+		assert.deepEqual(lines, expected, `${tool.name}: result rendering must be native`);
 	}
 	// The guard-specific description markers must survive untouched.
 	assert.match(bash.description, /Guard sandboxed except in raw profiles/);
@@ -268,6 +286,19 @@ test("ToolExecutionComponent uses the new header instead of the generic fallback
 	assert.ok(text.includes(`$ ${EXAMPLE_COMMAND}`), "native command line present");
 	assert.ok(!text.includes('command="'), "generic fallback must not be used");
 	assert.ok(text.includes("hello") && text.includes("world"), "output preview still rendered");
+});
+
+test("final results show the Took duration line", () => {
+	const ui = { requestRender() {} };
+	for (const tool of [bash, hostBash]) {
+		const component = new ToolExecutionComponent(tool.name, `tc-${tool.name}`, { command: "sleep 5" }, {}, tool, ui, "/tmp/guard-render-call");
+		// Marks execution started so the shared renderer state records the start time; the 1.x
+		// runtime additionally passes the monotonic duration, which then wins over the clock.
+		component.markExecutionStarted();
+		component.updateResult({ content: [{ type: "text", text: "done" }], details: undefined, durationMs: 5200 }, false);
+		const text = (component.render(120) as string[]).map((line) => stripAnsi(line).trimEnd()).join("\n");
+		assert.match(text, /Took \d/, `${tool.name}: Took line present`);
+	}
 });
 
 test("error results keep the header and render the error content", () => {

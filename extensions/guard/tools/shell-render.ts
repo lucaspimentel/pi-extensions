@@ -1,4 +1,11 @@
-/** Call-header rendering for guard's shell tools. Presentation only; execution lives in shell.ts. */
+/**
+ * Header and result rendering for guard's shell tools. Presentation only; execution lives in shell.ts.
+ *
+ * `wrapToolDefinition` drops the native definition's renderers, and guard re-registers the shell
+ * tools under new names, so the call header is rebuilt here and the native result renderer is
+ * reused: without it, tools whose name has no built-in renderer entry (host_bash) fall back to
+ * plain-text output and never show the Elapsed/Took duration line.
+ */
 import { createBashToolDefinition, type Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Text, type Component } from "@earendil-works/pi-tui";
 
@@ -41,10 +48,13 @@ interface ShellCallState {
 	interval: NodeJS.Timeout | undefined;
 }
 
-// Native bash's own call renderer, obtained through the public definition factory so command
-// formatting ($ prompt, timeout suffix, wrapping, missing and invalid argument handling) is
-// delegated rather than copied. The definition is never executed; only renderCall is used.
-const nativeBashRenderCall = createBashToolDefinition(process.cwd(), { exposeSessionEnvironment: false }).renderCall!;
+// Native bash's own renderers, obtained through the public definition factory so command
+// formatting ($ prompt, timeout suffix, wrapping, missing and invalid argument handling) and
+// result presentation (output preview, truncation warnings, Elapsed/Took timer) are delegated
+// rather than copied. The definition is never executed; only the renderers are used.
+const nativeBashDefinition = createBashToolDefinition(process.cwd(), { exposeSessionEnvironment: false });
+const nativeBashRenderCall = nativeBashDefinition.renderCall!;
+export const nativeBashRenderResult = nativeBashDefinition.renderResult!;
 
 /**
  * Build a renderCall for one guard shell tool. The header shows the tool name on its own line,
@@ -55,6 +65,13 @@ const nativeBashRenderCall = createBashToolDefinition(process.cwd(), { exposeSes
 export function createShellRenderCall(toolName: string) {
 	return (args: ShellArgs, theme: Theme, context: ShellRenderContext): Component => {
 		const state = context.state as unknown as ShellCallState;
+		// Mirror the native startToolTimer so the reused native result renderer can show its
+		// Elapsed/Took line: the timer helpers live in render-utils, which the package index
+		// does not export. The native renderCall normally does this; guard replaces it.
+		if (context.executionStarted && state.startedAt === undefined) {
+			state.startedAt = Date.now();
+			state.endedAt = undefined;
+		}
 		const container = state.container ?? new Container();
 		const title = state.title ?? new Text("", 0, 0);
 		title.setText(theme.fg("toolTitle", theme.bold(toolName)));

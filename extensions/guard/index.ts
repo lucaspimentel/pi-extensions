@@ -10,7 +10,7 @@ import { DialogGate } from "./dialogs.ts";
 import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
 import { FAILURE_STATUSES as NODE_FAILURES } from "./tools/node/session.ts";
 import { createGuardShellOperations, SANDBOX_FAILURE_HINT } from "./tools/shell.ts";
-import { createShellRenderCall } from "./tools/shell-render.ts";
+import { createShellRenderCall, nativeBashRenderResult } from "./tools/shell-render.ts";
 import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
 import { detectSandboxMode } from "./sandbox/detect.ts";
 import { PROTECTED_TOP_LEVEL } from "./sandbox/spec.ts";
@@ -471,6 +471,9 @@ export default function guard(pi: ExtensionAPI) {
 		...bash, name, label: name,
 		description: name === "bash" ? `${bash.description} Guard sandboxed except in raw profiles; isolated network and shared real-path scratch.` : `${bash.description} Runs on the host, subject to HostBash rules and guard profile.`,
 		renderCall: createShellRenderCall(name),
+		// The wrapped tool definition carries no renderers; without this, host_bash has no
+		// built-in renderer fallback and its results never show the Elapsed/Took line.
+		renderResult: nativeBashRenderResult,
 		execute: (id, input, signal, onUpdate, ctx) => executeShell(name, id, input, signal, onUpdate, ctx),
 	});
 	for (const name of ["python", "node"] as const) pi.registerTool({

@@ -18,7 +18,7 @@
  * shows a live-ticking `ran 2.1s…` (omitted until 100ms have elapsed); once the
  * result arrives the duration moves
  * down to the result line, which shows `ran 2.1s  ended 14:32:07`. Tools whose
- * renderer displays the duration itself (bash, powershell, codemode) never show
+ * renderer displays the duration itself (bash, host_bash, powershell, codemode) never show
  * the extension's own duration: those renderers already display Elapsed/Took, so
  * their call line stays start + delta and their result line shows only the
  * completion time.
@@ -355,7 +355,7 @@ export default function timestampsExtension(pi: ExtensionAPI): void {
 		if (!base) return undefined;
 		// These renderers display the duration themselves (Elapsed while partial,
 		// Took on the final result), so the extension suppresses its own `ran`.
-		const baseShowsDuration = toolName === "bash" || toolName === "powershell" || toolName === "codemode";
+		const baseShowsDuration = toolName === "bash" || toolName === "host_bash" || toolName === "powershell" || toolName === "codemode";
 		const renderers: ToolRenderersLike = { ...base };
 		if (base.renderCall) {
 			const baseRenderCall = base.renderCall;
