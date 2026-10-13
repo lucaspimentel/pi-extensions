@@ -62,10 +62,19 @@ function stepLines(explanation: HostShellExplanation): string[] {
 	return explanation.steps.map((step) => `${step.occurrenceId + 1}. ${step.display} -> ${step.decision.action} (${step.decision.reason})`);
 }
 
+/** Prefix every line of a command block with a gutter marker so command text stays visually separate from prose. */
+function gutter(text: string): string[] {
+	return text.split("\n").map((line) => `│ ${line}`);
+}
+
 /**
  * One approval prompt containing the original command, the call-level
  * decision, and each reliably parsed step's decision. An unavailable
  * breakdown is explicitly marked; the original execution is unchanged.
+ *
+ * Command text (the failing subcommand and the full command) is rendered as
+ * labeled gutter-marked blocks instead of being inlined into prose, so a
+ * multi-line fragment such as a heredoc never blurs into guard's own output.
  */
 export function executionPromptTitle(input: {
 	toolName: string;
@@ -73,13 +82,28 @@ export function executionPromptTitle(input: {
 	decision: Decision;
 	explanation: HostShellExplanation | null;
 }): string {
-	const lines = [`guard: ${input.toolName}`, input.decision.reason, `command: ${input.command}`];
-	if (input.explanation) {
-		if (input.explanation.breakdown.available && input.explanation.steps.length > 0) {
-			lines.push("", "steps:", ...stepLines(input.explanation));
-			if (input.explanation.rawAskRule) lines.push(`ask rule on the whole command: ${input.explanation.rawAskRule}`);
+	const lines = [`guard: ${input.toolName}`];
+	const explanation = input.explanation;
+	let failingSub: string | undefined;
+	if (explanation?.failingSub) {
+		const prefix = `subcommand '${explanation.failingSub}': `;
+		if (input.decision.reason.startsWith(prefix)) {
+			lines.push(input.decision.reason.slice(prefix.length));
+			failingSub = explanation.failingSub;
 		} else {
-			lines.push(`step breakdown unavailable: ${input.explanation.breakdown.reason ?? "unreliable parsing"}`);
+			lines.push(input.decision.reason);
+		}
+	} else {
+		lines.push(input.decision.reason);
+	}
+	if (failingSub) lines.push("failing step:", ...gutter(failingSub));
+	lines.push("command:", ...gutter(input.command));
+	if (explanation) {
+		if (explanation.breakdown.available && explanation.steps.length > 0) {
+			lines.push("", "steps:", ...stepLines(explanation));
+			if (explanation.rawAskRule) lines.push(`ask rule on the whole command: ${explanation.rawAskRule}`);
+		} else {
+			lines.push(`step breakdown unavailable: ${explanation.breakdown.reason ?? "unreliable parsing"}`);
 			lines.push("the original command is executed unchanged; existing policy applies");
 		}
 	}

@@ -280,6 +280,9 @@ export interface HostShellExplanation {
 	rawAskRule?: string;
 	/** Present when the command could not be split for per-subcommand checks. */
 	splitCause?: string;
+	/** The worst subcommand whose decision the aggregate reason attributes;
+	 *  present only when the reason has the "subcommand '<sub>': ..." form. */
+	failingSub?: string;
 	/** Conservative breakdown availability for presentation/suggestions (policy routing is unaffected). */
 	breakdown: BreakdownReliability;
 }
@@ -397,7 +400,7 @@ function evaluateHostShell(
 		breakdown.find((b) => b.ev.decision.action === "classify") ??
 		breakdown[0];
 	const decision: Decision = { action: worst.ev.decision.action, reason: `subcommand '${worst.sub}': ${worst.ev.decision.reason}`, provenance: breakdown.some((b) => b.ev.decision.provenance === "explicit-ask") ? "explicit-ask" : worst.ev.decision.provenance };
-	return { decision, steps: breakdown.map((b, i) => stepOf(i, b.sub, b.ev)), rawAskRule: rawAsk, breakdown: reliability };
+	return { decision, steps: breakdown.map((b, i) => stepOf(i, b.sub, b.ev)), rawAskRule: rawAsk, failingSub: worst.sub, breakdown: reliability };
 }
 
 /**

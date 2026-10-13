@@ -135,9 +135,31 @@ test("the approval prompt renders the command, decision, and each reliable step"
 	const { io, calls } = makeIO({ select: [undefined] });
 	await runExecutionPrompt(baseExecutionDeps({ io }));
 	const title = calls.select[0].split("\n@@")[0];
-	assert.ok(title.includes("command: echo a && curl https://example.com"));
+	assert.ok(title.includes("command:"), title);
+	assert.ok(title.includes("│ echo a && curl https://example.com"), "the command block is gutter-marked");
 	assert.ok(title.includes("1. echo a -> allow"));
 	assert.ok(title.includes("2. curl https://example.com -> prompt"));
+});
+
+test("a multi-line failing subcommand renders as a labeled gutter block, not inline prose", async () => {
+	const command = "cat > wl-debug.mts <<'EOF'\nconsole.log(1)\nEOF\nrm wl-debug.mts";
+	const real = realDeps(command);
+	const { io, calls } = makeIO({ select: [undefined] });
+	await runExecutionPrompt(baseExecutionDeps({
+		io,
+		command,
+		decision: real.explanation.decision,
+		explanation: real.explanation,
+		allowPlan: null,
+	}));
+	const title = calls.select[0].split("\n@@")[0];
+	assert.ok(title.includes("file redirect requires a redirect-aware allow rule"), "the reason prose is present", title);
+	assert.ok(!title.includes("subcommand '"), "the reason no longer quotes the subcommand inline", title);
+	assert.ok(title.includes("failing step:"), title);
+	assert.ok(title.includes("│ cat > wl-debug.mts <<'EOF'"), title);
+	assert.ok(title.includes("│ console.log(1)"), title);
+	assert.ok(title.includes("│ EOF"), title);
+	assert.ok(title.includes("step breakdown unavailable"), title);
 });
 
 test("an unavailable breakdown is explicitly marked in the prompt", async () => {
