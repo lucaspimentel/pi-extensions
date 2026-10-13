@@ -219,6 +219,73 @@ export function splitTopLevelShell(cmd: string): SplitResult {
 }
 
 /**
+ * Conservative breakdown reliability for presentation and rule suggestions.
+ * Deliberately NOT confidence in the split itself: the policy path may still
+ * evaluate structurally stripped fragments for its aggregate decision. When
+ * `available` is false the UI shows no per-step breakdown and generates no
+ * guessed step rules; existing whole-call policy is retained unchanged.
+ */
+export interface BreakdownReliability {
+	available: boolean;
+	/** Why the breakdown is unavailable, when it is. */
+	reason?: string;
+}
+
+/** Characters that make a step unreliable for exact per-step rules: command
+ * substitution, process substitution, background execution, subshell or
+ * brace grouping, and heredocs. Simple `$VAR` expansion is fine: rules match
+ * the literal command text, so an anchored rule stays exact. */
+function unreliableConstructReason(part: string): string | null {
+	if (/\$\(|`/.test(part)) return "command substitution";
+	if (/\$\{/.test(part)) return "parameter expansion";
+	if (/<\(|>\(/.test(part)) return "process substitution";
+	if (/<</.test(part)) return "heredoc";
+	if (part.replace(/&&/g, "").includes("&")) return "background execution";
+	if (/[(){}]/.test(part)) return "subshell or brace grouping";
+	if (/(^|\s)#/.test(part)) return "inline comment";
+	return null;
+}
+
+/**
+ * Assess whether a command's per-step breakdown is reliable enough to drive
+ * presentation and exact rule suggestions. Conservative by design: Pwsh
+ * (bash-oriented heuristics), ambiguous splits, structural constructs, and
+ * the constructs above are all unavailable. Presentation/suggestion-only:
+ * policy routing and decisions are unchanged.
+ *
+ * `rawParts` are the split fragments before structural stripping; `steps`
+ * are the fragments actually evaluated (after stripStructuralKeywords). A
+ * difference between the two beyond pure `timeout` wrapper stripping means a
+ * structural construct (loop head, conditional keyword) was collapsed and
+ * the evaluated step does not stand for the fragment.
+ */
+export function assessBreakdownReliability(
+	shell: "host-bash" | "pwsh",
+	rawParts: readonly string[],
+	steps: readonly string[],
+): BreakdownReliability {
+	if (shell !== "host-bash") {
+		return { available: false, reason: "Pwsh syntax is not reliably parsed into steps (bash-oriented heuristics)" };
+	}
+	if (steps.length === 0) {
+		return { available: false, reason: "the command has no evaluable steps" };
+	}
+	if (rawParts.length !== steps.length) {
+		return { available: false, reason: "structural constructs could not be attributed to steps" };
+	}
+	for (let i = 0; i < steps.length; i++) {
+		// Timeout wrappers are pure wrappers: stripping them keeps the step
+		// reliable. Any other difference means a structural keyword collapsed.
+		if (stripTimeoutPrefix(rawParts[i]) !== steps[i]) {
+			return { available: false, reason: "structural constructs (loops, conditionals) are not reliably attributed to steps" };
+		}
+		const construct = unreliableConstructReason(steps[i]);
+		if (construct !== null) return { available: false, reason: `the command uses ${construct}` };
+	}
+	return { available: true };
+}
+
+/**
  * Strip trailing redirect clauses that are harmless for permission purposes:
  * redirects to `/dev/null` (any fd, append variants, target optionally
  * quoted) and descriptor-to-descriptor dups (`2>&1`, `>&2`, `1>&-`).

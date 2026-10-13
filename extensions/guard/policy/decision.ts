@@ -48,10 +48,12 @@ import { parseRule, ruleMatches, rulePatternAllowsRedirect, compilePattern } fro
 import { homedir } from "node:os";
 import { normalizeMatchPath, normalizeRootList } from "./paths.ts";
 import {
+	assessBreakdownReliability,
 	splitTopLevelShell,
 	stripStructuralKeywords,
 	stripTimeoutPrefix,
 	stripTrailingHarmlessRedirects,
+	type BreakdownReliability,
 } from "./shellsplit.ts";
 import type { ResolvedGuardConfig } from "./config.ts";
 import { makeIsProtectedPath } from "./protected.ts";
@@ -156,7 +158,7 @@ export function maskArgumentVeto(cmd: string, config: ResolvedGuardConfig): stri
 }
 
 /** Secret-mask check for a read target path (path-level only in step 2). */
-function maskedPathReason(path: string, config: ResolvedGuardConfig): string | null {
+export function maskedReadPathReason(path: string, config: ResolvedGuardConfig): string | null {
 	const base = path.replace(/\\/g, "/").split("/").filter((p) => p.length > 0).pop();
 	if (!base) return null;
 	if (
@@ -244,44 +246,158 @@ function cellAction(cell: "allow" | "prompt" | "deny" | "classify", what: string
 }
 
 /**
+ * One evaluated host-shell step. `subject` is the exact string deny/ask rules
+ * match against and `allowSubject` the exact string a plain allow rule
+ * matches against (redirect-stripped), so suggestions can anchor to the real
+ * evaluator matching subjects rather than merely displayed fragments.
+ */
+export interface HostShellStep {
+	/** Stable identity within one evaluation; duplicate command text keeps distinct IDs. */
+	occurrenceId: number;
+	/** The fragment shown for the step (matches the aggregate reason attribution). */
+	display: string;
+	/** The subject deny/ask rules are matched against (normalized). */
+	subject: string;
+	/** The subject a plain allow rule is matched against (redirect-stripped). */
+	allowSubject: string;
+	/** True when only a redirect-aware allow rule (pattern containing '>') can authorize the step. */
+	requiresRedirectAwareAllow: boolean;
+	decision: Decision;
+}
+
+/**
+ * The full host-shell evaluation: the aggregate decision plus the per-step
+ * projection used by the save/deny/compound prompts. `decision` is exactly
+ * what decideHostShellCommand returns; steps and causes are a projection of
+ * the same single evaluation, never fresh calls on reconstructed fragments.
+ */
+export interface HostShellExplanation {
+	decision: Decision;
+	/** Evaluated steps in evaluation order; empty when nothing was evaluated per-step. */
+	steps: HostShellStep[];
+	/** Raw whole-command rule matches, recorded even when a step re-matched them. */
+	rawDenyRule?: string;
+	rawAskRule?: string;
+	/** Present when the command could not be split for per-subcommand checks. */
+	splitCause?: string;
+	/** Conservative breakdown availability for presentation/suggestions (policy routing is unaffected). */
+	breakdown: BreakdownReliability;
+}
+
+/**
  * Decide one (already split) host shell subcommand, for the
  * default/auto/trusted precedence: deny > ask > tier > redirect-aware allow
- * rules > redirect requirement > cell.
+ * rules > redirect requirement > cell. Returns the decision plus the exact
+ * matching subjects so suggestions can anchor to what the evaluator matched.
  */
-function decideHostShellSub(command: string, policy: PolicyState, shell: "host-bash" | "pwsh"): Decision {
+function evaluateHostShellSub(command: string, policy: PolicyState, shell: "host-bash" | "pwsh"): { decision: Decision; subject: string; allowSubject: string; requiresRedirectAwareAllow: boolean } {
 	const { config, profile } = policy;
 	const cmd = stripTimeoutPrefix(stripLineContinuations(command).trim());
+	const subject = cmd;
+	const requiresRedirectAwareAllow = hasTopLevelFileRedirect(cmd, config.writeRoots, { cwd: config.cwd });
+	// Plain allow rules match the redirect-stripped subject; a step that needs
+	// a redirect-aware rule is matched verbatim (its text contains '>').
+	const allowSubject = requiresRedirectAwareAllow ? cmd : stripTrailingHarmlessRedirects(cmd);
 	// Explicit rules: deny > ask (redirect-agnostic; safety rules win first).
 	const denyRule = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
-	if (denyRule !== undefined) return { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'` };
+	if (denyRule !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'` }, subject, allowSubject, requiresRedirectAwareAllow };
 	const askRule = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
-	if (askRule !== undefined) return { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'`, provenance: "explicit-ask" };
-	if (profile === "yolo") return { action: "allow", reason: "host shell: yolo allows everything else" };
+	if (askRule !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'`, provenance: "explicit-ask" }, subject, allowSubject, requiresRedirectAwareAllow };
+	if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, subject, allowSubject, requiresRedirectAwareAllow };
 	// Tightened read-only tier (host_bash only; host vetoes first).
 	if (shell === "host-bash") {
 		const tier = hostTierAllowReason(cmd, config);
-		if (tier !== null) return { action: "allow", reason: tier };
+		if (tier !== null) return { decision: { action: "allow", reason: tier }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
 	// Redirect handling: a top-level file redirect (outside the writeRoots
 	// exemptions) may only be authorized by a redirect-aware allow rule (one
 	// whose pattern contains ">"). Broad rules and the profile cell never
 	// authorize a write redirect.
-	if (hasTopLevelFileRedirect(cmd, config.writeRoots, { cwd: config.cwd })) {
+	if (requiresRedirectAwareAllow) {
 		for (const raw of config.hostBash.allow) {
 			const rule = parseRule(raw);
 			if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, ruleToolFor(shell), { command: cmd }, config.cwd)) {
-				return { action: "allow", reason: `matched redirect-aware allow rule '${raw}'` };
+				return { decision: { action: "allow", reason: `matched redirect-aware allow rule '${raw}'` }, subject, allowSubject, requiresRedirectAwareAllow };
 			}
 		}
-		return { action: "prompt", reason: "file redirect requires a redirect-aware allow rule (a pattern containing '>')" };
+		return { decision: { action: "prompt", reason: "file redirect requires a redirect-aware allow rule (a pattern containing '>')" }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
 	// Plain allow rules.
 	const allowRule = matchedHostShellRule(config.hostBash.allow, shell, stripTrailingHarmlessRedirects(cmd), config.cwd);
 	if (allowRule !== undefined) {
-		return { action: "allow", reason: `matched ${ruleToolFor(shell)} allow rule '${allowRule}'` };
+		return { decision: { action: "allow", reason: `matched ${ruleToolFor(shell)} allow rule '${allowRule}'` }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
 	// Profile cell.
-	return cellAction(hostShellCell(profile), "host shell");
+	return { decision: cellAction(hostShellCell(profile), "host shell"), subject, allowSubject, requiresRedirectAwareAllow };
+}
+
+/**
+ * The full host-shell evaluation behind decideHostShellCommand: the
+ * aggregate decision plus per-step decisions, exact matching subjects, and
+ * whole-call causes. Pure and deterministic; no classifier calls here (a
+ * per-step "classify" cell stays unresolved and is attributed at the
+ * aggregate level exactly as before).
+ */
+function evaluateHostShell(
+	call: Extract<GuardCall, { kind: "host-shell" }>,
+	policy: PolicyState,
+): HostShellExplanation {
+	const { profile, config } = policy;
+	const shell = call.shell;
+	if (policy.workspaceLocked) return { decision: { action: "deny", reason: "workspace locked: host execution is unavailable until /guard ack" }, steps: [], breakdown: { available: false, reason: "the workspace is locked; host execution is unavailable" } };
+	if (profile === "unrestricted") return { decision: { action: "allow", reason: "host shell: unrestricted profile allows everything" }, steps: [], breakdown: { available: false, reason: "the unrestricted profile allows everything; no breakdown is needed" } };
+	if (profile === "research") return { decision: { action: "deny", reason: "host shell: denied in research (rules are ignored)" }, steps: [], breakdown: { available: false, reason: "research denies host execution regardless of steps" } };
+
+	const cmd = stripLineContinuations(call.command);
+	const rawDeny = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
+	if (rawDeny !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${rawDeny}'` }, steps: [], rawDenyRule: rawDeny, breakdown: { available: false, reason: "a whole-command deny rule matched" } };
+	const rawAsk = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
+
+	const split = splitTopLevelShell(cmd);
+	if (split.kind === "ambiguous") {
+		const ambiguous: BreakdownReliability = { available: false, reason: "the command could not be split unambiguously" };
+		const splitCause = "complex command could not be split for per-subcommand checks";
+		const denyRule = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
+		if (denyRule !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'` }, steps: [], rawDenyRule: denyRule, splitCause, breakdown: ambiguous };
+		if (rawAsk !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" }, steps: [], rawAskRule: rawAsk, splitCause, breakdown: ambiguous };
+		if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, steps: [], splitCause, breakdown: ambiguous };
+		return { decision: { action: "prompt", reason: splitCause }, steps: [], splitCause, breakdown: ambiguous };
+	}
+	const stepOf = (occurrenceId: number, display: string, ev: ReturnType<typeof evaluateHostShellSub>): HostShellStep => ({ occurrenceId, display, subject: ev.subject, allowSubject: ev.allowSubject, requiresRedirectAwareAllow: ev.requiresRedirectAwareAllow, decision: ev.decision });
+	if (split.kind === "single") {
+		const effective = split.effectiveCmd ?? cmd;
+		const ev = evaluateHostShellSub(effective, policy, shell);
+		const decision = ev.decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt" as const, reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" as const } : ev.decision;
+		// Pair the single fragment with its structurally stripped form so pure
+		// timeout wrappers stay reliable while structural keywords do not.
+		const strippedSingle = stripStructuralKeywords(effective);
+		const reliability = assessBreakdownReliability(shell, strippedSingle === null ? [] : [effective], strippedSingle === null ? [] : [strippedSingle]);
+		return { decision, steps: [stepOf(0, effective, ev)], rawAskRule: rawAsk, breakdown: reliability };
+	}
+	const pairs: Array<{ raw: string; stripped: string }> = [];
+	for (const rawSub of split.parts) {
+		const stripped = stripStructuralKeywords(rawSub);
+		if (stripped !== null) pairs.push({ raw: rawSub, stripped });
+	}
+	if (pairs.length === 0) return { decision: { action: "allow", reason: "no commands after structural stripping" }, steps: [], rawAskRule: rawAsk, breakdown: { available: false, reason: "the command is purely structural and has no evaluable steps" } };
+	const parts = pairs.map((p) => p.stripped);
+	const reliability = assessBreakdownReliability(shell, pairs.map((p) => p.raw), parts);
+	if (parts.length === 1) {
+		const ev = evaluateHostShellSub(parts[0], policy, shell);
+		const decision = ev.decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt" as const, reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" as const } : ev.decision;
+		return { decision, steps: [stepOf(0, parts[0], ev)], rawAskRule: rawAsk, breakdown: reliability };
+	}
+	const breakdown = pairs.map((p) => ({ sub: p.stripped, ev: evaluateHostShellSub(p.stripped, policy, shell) }));
+	if (!breakdown.some((b) => b.ev.decision.action === "deny") && rawAsk !== undefined) {
+		return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" }, steps: breakdown.map((b, i) => stepOf(i, b.sub, b.ev)), rawAskRule: rawAsk, breakdown: reliability };
+	}
+	const worst =
+		breakdown.find((b) => b.ev.decision.action === "deny") ??
+		breakdown.find((b) => b.ev.decision.action === "prompt") ??
+		breakdown.find((b) => b.ev.decision.action === "classify") ??
+		breakdown[0];
+	const decision: Decision = { action: worst.ev.decision.action, reason: `subcommand '${worst.sub}': ${worst.ev.decision.reason}`, provenance: breakdown.some((b) => b.ev.decision.provenance === "explicit-ask") ? "explicit-ask" : worst.ev.decision.provenance };
+	return { decision, steps: breakdown.map((b, i) => stepOf(i, b.sub, b.ev)), rawAskRule: rawAsk, breakdown: reliability };
 }
 
 /**
@@ -291,7 +407,7 @@ function decideHostShellSub(command: string, policy: PolicyState, shell: "host-b
  *   research     absolute deny (rules ignored).
  *   yolo         deny rules block, ask rules prompt, everything else allows.
  *   unrestricted allow, rules ignored.
- *   otherwise    decideHostShellSub per subcommand.
+ *   otherwise    evaluateHostShellSub per subcommand.
  * An ambiguous split prompts, but an explicit deny rule on the raw command
  * still denies (deny rules always win).
  */
@@ -299,51 +415,19 @@ export function decideHostShellCommand(
 	call: Extract<GuardCall, { kind: "host-shell" }>,
 	policy: PolicyState,
 ): Decision {
-	const { profile, config } = policy;
-	const shell = call.shell;
-	if (policy.workspaceLocked) return { action: "deny", reason: "workspace locked: host execution is unavailable until /guard ack" };
-	if (profile === "unrestricted") return { action: "allow", reason: "host shell: unrestricted profile allows everything" };
-	if (profile === "research") return { action: "deny", reason: "host shell: denied in research (rules are ignored)" };
+	return evaluateHostShell(call, policy).decision;
+}
 
-	const cmd = stripLineContinuations(call.command);
-	const rawDeny = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
-	if (rawDeny !== undefined) return { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${rawDeny}'` };
-	const rawAsk = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
-
-	const split = splitTopLevelShell(cmd);
-	if (split.kind === "ambiguous") {
-		const denyRule = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
-		if (denyRule !== undefined) return { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'` };
-		if (rawAsk !== undefined) return { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" };
-		if (profile === "yolo") return { action: "allow", reason: "host shell: yolo allows everything else" };
-		return { action: "prompt", reason: "complex command could not be split for per-subcommand checks" };
-	}
-	if (split.kind === "single") {
-		const effective = split.effectiveCmd ?? cmd;
-		const decision = decideHostShellSub(effective, policy, shell);
-		return decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" } : decision;
-	}
-	const parts: string[] = [];
-	for (const rawSub of split.parts) {
-		const stripped = stripStructuralKeywords(rawSub);
-		if (stripped !== null) parts.push(stripped);
-	}
-	if (parts.length === 0) return { action: "allow", reason: "no commands after structural stripping" };
-	if (parts.length === 1) {
-		const decision = decideHostShellSub(parts[0], policy, shell);
-		return decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" } : decision;
-	}
-	const breakdown = parts.map((p) => ({ sub: p, decision: decideHostShellSub(p, policy, shell) }));
-	if (!breakdown.some((b) => b.decision.action === "deny") && rawAsk !== undefined) {
-		return { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" };
-	}
-	const worst =
-		breakdown.find((b) => b.decision.action === "deny") ??
-		breakdown.find((b) => b.decision.action === "prompt") ??
-		breakdown.find((b) => b.decision.action === "classify") ??
-		breakdown[0];
-	// The reason comes from the worst subcommand, attributed to it.
-	return { action: worst.decision.action, reason: `subcommand '${worst.sub}': ${worst.decision.reason}`, provenance: breakdown.some((b) => b.decision.provenance === "explicit-ask") ? "explicit-ask" : worst.decision.provenance };
+/**
+ * The per-step projection of exactly the evaluation decideHostShellCommand
+ * performs: same aggregate decision, plus steps, causes, and breakdown
+ * reliability. Never re-decides reconstructed fragments.
+ */
+export function explainHostShellCommand(
+	call: Extract<GuardCall, { kind: "host-shell" }>,
+	policy: PolicyState,
+): HostShellExplanation {
+	return evaluateHostShell(call, policy);
 }
 
 /**
@@ -371,7 +455,7 @@ export function decideLocalRead(call: Extract<GuardCall, { kind: "local-read" }>
 	// that happens to contain a masked file is allowed. Documented gap; step 3
 	// adds a tool_result filter that drops matches from masked files.
 	if (hasPath) {
-		const masked = maskedPathReason(call.path as string, config);
+		const masked = maskedReadPathReason(call.path as string, config);
 		if (masked !== null) {
 			const cell = maskReadCell(profile);
 			if (cell === "allow") return { action: "allow", reason: `secret-mask path allowed in ${profile}` };
