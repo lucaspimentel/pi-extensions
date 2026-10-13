@@ -1047,6 +1047,74 @@ test("profile picker and migration confirmation each hide and restore the spinne
 	});
 });
 
+test("the profile picker lists Cancel first, marks the current profile, and annotates danger profiles", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-picker-labels-");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		let seenOptions: string[] = [];
+		const baseSelect = (ctx.ui as Record<string, any>).select as (title: string, options: string[], opts?: unknown) => Promise<string | undefined>;
+		(ctx.ui as Record<string, any>).select = (title: string, options: string[], opts?: unknown) => { seenOptions = options; return baseSelect(title, options, opts); };
+		const picker = h.commandHandlers.get("guard")!("profile", ctx);
+		await selector.waitFor(1);
+		assert.deepEqual(seenOptions, [
+			"Cancel",
+			"research",
+			"default (current)",
+			"auto",
+			"trusted",
+			"⚠️ yolo (dangerous: host access)",
+			"⚠️ unrestricted (rules ignored)",
+		], "Cancel first, then ALL_PROFILES order with the (current) suffix and danger annotations");
+		selector.answer("Cancel");
+		await picker;
+		assert.ok(!h.notifications.some((n) => /Profile: /.test(n)), "answering Cancel applies nothing and notifies nothing");
+	});
+});
+
+test("selecting the current profile in the picker re-applies it", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-picker-current-");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		const picker = h.commandHandlers.get("guard")!("profile", ctx);
+		await selector.waitFor(1);
+		selector.answer("default (current)");
+		await picker;
+		assert.ok(h.notifications.some((n) => /Profile: default \(this session only\)/.test(n)), "the current profile was re-applied through the full transition");
+	});
+});
+
+test("applying yolo or unrestricted emits a danger notice; other profiles do not", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-picker-danger-");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		await h.commandHandlers.get("guard")!("profile yolo", ctx);
+		assert.ok(h.notifications.some((n) => /Profile: yolo \(this session only\)/.test(n)), "yolo was applied");
+		assert.ok(h.notifications.includes("guard: yolo disables the sandbox; commands run on the host"), "the yolo danger notice was emitted");
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("profile auto", ctx);
+		assert.ok(h.notifications.some((n) => /Profile: auto/.test(n)), "auto was applied");
+		assert.ok(!h.notifications.some((n) => /disables the sandbox|ignores all rules/.test(n)), "no danger notice for a non-danger profile");
+		h.notifications.length = 0;
+		// The cycle shortcut funnels through applyProfile too: trusted -> yolo.
+		await h.commandHandlers.get("guard")!("profile trusted", ctx);
+		h.notifications.length = 0;
+		await h.shortcuts[0]!.handler(ctx);
+		assert.ok(h.notifications.some((n) => /Profile: yolo \(this session only\)/.test(n)), "the cycle landed on yolo");
+		assert.ok(h.notifications.includes("guard: yolo disables the sandbox; commands run on the host"), "the cycle path emits the yolo danger notice");
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("profile unrestricted", ctx);
+		assert.ok(h.notifications.includes("guard: unrestricted ignores all rules"), "the unrestricted danger notice was emitted");
+	});
+});
+
 test("aborting the execution signal of an open approval restores the spinner", async () => {
 	await withTempHome(async () => {
 		const h = makeHarness();
@@ -1511,6 +1579,7 @@ test("the profile picker renders as the overlay and applies the chosen profile",
 		assert.equal(selector.opened.length, 0, "the picker never opened as a native selector");
 		overlay.down();
 		overlay.down();
+		overlay.down(); // Cancel, research, default (current), then auto
 		overlay.answer();
 		await command;
 		assert.ok(h.notifications.some((n) => /Profile: auto/.test(n)), "the profile chosen inside the overlay applied");

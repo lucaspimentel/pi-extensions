@@ -635,6 +635,8 @@ export default function guard(pi: ExtensionAPI) {
 		try {
 			await transition(next, config, ctx, undefined, commandGuard);
 			notify(ctx, `Profile: ${profile} (this session only)`);
+			const danger = PROFILE_DANGER_NOTICES[profile];
+			if (danger) notify(ctx, danger, "warning");
 		}
 		catch (err) {
 			if (ownership && err === ownership.cancelled) { notify(ctx, ownership.cancelled.message, "warning"); return; }
@@ -645,8 +647,11 @@ export default function guard(pi: ExtensionAPI) {
 		const current = state?.profile ?? "default";
 		if (!ctx.hasUI || !state) { notify(ctx, `Profile (this session): ${current}`); return; }
 		// Step 5: children may only pick their inherited profile or research.
-		const allowed = ALL_PROFILES.filter((p) => p !== current && profileChangeAllowed(state!, p).ok);
+		// The current profile stays in the list, marked "(current)"; picking it
+		// re-applies it exactly like any other selection.
+		const allowed = ALL_PROFILES.filter((p) => profileChangeAllowed(state!, p).ok);
 		if (allowed.length === 0) { notify(ctx, `Profile (this session): ${current} (no other profile is allowed)`); return; }
+		const pickerOptions = profilePickerOptions(current, allowed);
 		const rt = runtime;
 		const epoch = rt?.epoch;
 		const cwd = rt?.policy.cwd;
@@ -662,7 +667,7 @@ export default function guard(pi: ExtensionAPI) {
 				dialogSignal.throwIfAborted();
 				if (!rt) throw new Error("guard: profile selection expired after a session/policy change.");
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: profile selection expired after a session/policy change.");
-				const answer = await admittedDialog(ctx, () => gatedSelect(ctx, "Guard profile (this session):", [current, ...allowed], dialogSignal));
+				const answer = await admittedDialog(ctx, () => gatedSelect(ctx, "Guard profile (this session):", pickerOptions.labels, dialogSignal));
 				dialogSignal.throwIfAborted();
 				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: profile selection expired after a session/policy change.");
 				return answer;
@@ -672,10 +677,33 @@ export default function guard(pi: ExtensionAPI) {
 			return;
 		}
 		if (rt !== runtime || epoch !== runtime?.epoch) { notify(ctx, "guard: profile selection expired after a session/policy change.", "warning"); return; }
-		if (choice && isProfile(choice)) {
+		if (!choice || choice === "Cancel") return;
+		const profile = pickerOptions.byLabel.get(choice);
+		if (profile) {
 			if (ownership.signal?.aborted) { notify(ctx, ownership.cancelled.message, "warning"); return; }
-			await applyProfile(choice, ctx, ownership);
+			await applyProfile(profile, ctx, ownership);
 		}
+	}
+	/** Danger notices emitted at warning level whenever a host-powered profile
+	 *  is applied, regardless of entry path (picker, command, cycle shortcut). */
+	const PROFILE_DANGER_NOTICES: Partial<Record<Profile, string>> = {
+		yolo: "guard: yolo disables the sandbox; commands run on the host",
+		unrestricted: "guard: unrestricted ignores all rules",
+	};
+	/** Picker label for one profile: the danger annotation, then "(current)". */
+	function profilePickerLabel(profile: Profile, current: Profile): string {
+		const base = profile === "yolo" ? "⚠️ yolo (dangerous: host access)"
+			: profile === "unrestricted" ? "⚠️ unrestricted (rules ignored)"
+			: profile;
+		return profile === current ? `${base} (current)` : base;
+	}
+	/** Picker options: "Cancel" first (the selector's cursor always starts at
+	 *  index 0), then the allowed profiles in natural ALL_PROFILES order, plus
+	 *  a label-to-profile map for resolving the chosen label back to a name. */
+	function profilePickerOptions(current: Profile, allowed: readonly Profile[]): { labels: string[]; byLabel: Map<string, Profile> } {
+		const labels = ["Cancel", ...allowed.map((p) => profilePickerLabel(p, current))];
+		const byLabel = new Map<string, Profile>(allowed.map((p) => [profilePickerLabel(p, current), p]));
+		return { labels, byLabel };
 	}
 	async function migrate(ctx: ExtensionCommandContext, dry: boolean): Promise<void> {
 		const report = computeMigration(homedir(), ctx.cwd);

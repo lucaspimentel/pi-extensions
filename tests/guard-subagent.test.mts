@@ -477,11 +477,12 @@ test("profile commands, picker, and reload cannot escape the restriction", async
 			const listCtx = guardCtx(h, cwd);
 			await h.commandHandlers.get("guard")!("list", listCtx);
 			assert.match(h.notifications.join("\n"), /profile \(this session\): auto/);
-			// The picker offers only the inherited profile and research.
+			// The picker offers Cancel, the inherited profile (marked current),
+			// and research; nothing outside the restriction.
 			h.selects.length = 0;
 			h.selectChoice = "research";
 			await h.commandHandlers.get("guard")!("profile", ctx);
-			assert.deepEqual(h.selects[0]?.options, ["auto", "research"]);
+			assert.deepEqual(h.selects[0]?.options, ["Cancel", "research", "auto (current)"]);
 			assert.match(h.notifications.at(-1) ?? "", /Profile: research/);
 		});
 	});
