@@ -81,6 +81,10 @@ const BUILTIN_CLASSES: Readonly<Record<string, ToolClass>> = Object.freeze({
 	// Reads repo data through the allowlisted read-only git spawn
 	// (extensions/git-read/); no path argument, treated as inside the roots.
 	git_read: "local-read",
+	// Reads GitHub state (PRs, issues) through the allowlisted read-only gh
+	// spawn (extensions/gh-read/); a network read on every invocation, so
+	// remote-read, not local-read.
+	gh_read: "remote-read",
 	session_search: "local-read",
 	memory_read: "local-read",
 	memory_search: "local-read",

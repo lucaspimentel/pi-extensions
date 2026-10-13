@@ -1,7 +1,10 @@
 # `gh_read` tool: read-only GitHub CLI access for agents
 
 Status: design settled (grill-me review, 2026-10-13; all branches decided).
-Implementation pending.
+Implemented: extensions/gh-read/ (validate, spawn, index), shared core at
+extensions/shared/bounded-spawn.ts, guard classification, agent rollout, and
+tests. The git-read extraction regression guard held: tests/git-read-*.test.mts
+passed unmodified after the refactor.
 
 ## Problem
 
@@ -134,12 +137,13 @@ without a matching mitigation here.
 
 The mechanics of `git-read/spawn.ts` (argv-array spawn, continuous drain,
 byte-capped retention, UTF-8-safe decode, timeout SIGTERM->SIGKILL, reaping)
-are identical for this tool. Extract that core into
-`extensions/shared/bounded-spawn.ts` and refactor `git-read` to consume it
-without behavior change, verified by the existing
-`tests/git-read-spawn.test.mts` suite (`npm run test:git-read`).
+are identical for this tool. Extracted into
+`extensions/shared/bounded-spawn.ts` (`boundedExec(binary, argv, env, cwd)`),
+with git-read refactored onto it without behavior change, verified by the
+existing `tests/git-read-spawn.test.mts` suite (`npm run test:git-read`).
 `git-read`-specific logic (worktree gate, git env sanitization) stays in
-`extensions/git-read/`.
+`extensions/git-read/`; gh-read imports the sanitized git env from there for
+its rev-parse gate.
 
 Resource limits, with one deviation: `OUTPUT_CAP = 50 KiB` shared across
 stdout+stderr, same as `git_read`; `TIMEOUT_MS = 15s`,

@@ -1,7 +1,7 @@
 ---
 name: scout
 description: Fast codebase recon that returns compressed context for handoff to other agents
-tools: read, ffgrep, fffind, ls, git_read
+tools: read, ffgrep, fffind, ls, git_read, gh_read
 ---
 
 You are a scout. Quickly investigate a codebase and return structured findings that another agent can use without re-reading everything.

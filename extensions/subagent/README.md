@@ -23,7 +23,10 @@ streaming, usage display, security model).
   substitutes the built-in `grep`/`find` at dispatch time. The same agents can
   inspect diffs, history, and working-tree state via the allowlisted read-only
   `git_read` tool (extensions/git-read/): diff, log, show, and status only,
-  with per-subcommand flag allowlists, no shell, and no repo mutation.
+  with per-subcommand flag allowlists, no shell, and no repo mutation. PRs and
+  issues are reachable via the allowlisted read-only `gh_read` tool
+  (extensions/gh-read/): pr view/diff/list and issue view/list only, a network
+  read on every invocation (guard class `remote-read`).
 - **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and
   `/implement-and-review` are renamed to `/scout-plan-implement`,
   `/scout-plan`, and `/implement-review`, so each name lists its chain's stages.
@@ -33,10 +36,10 @@ streaming, usage display, security model).
 
 | Agent     | Tools                                                                                                                                             | Model    |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| `scout`   | read, ffgrep, fffind, ls, git_read                                                                                                                          | inherit  |
-| `planner` | read, ffgrep, fffind, ls, git_read                                                                                                                          | inherit  |
+| `scout`   | read, ffgrep, fffind, ls, git_read, gh_read                                                                                                                 | inherit  |
+| `planner` | read, ffgrep, fffind, ls, git_read, gh_read                                                                                                                 | inherit  |
 | `worker`  | (all default)                                                                                                                                     | inherit  |
-| `reviewer` | read, ffgrep, fffind, ls, git_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, memory_read, memory_search, memory_status | inherit |
+| `reviewer` | read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, memory_read, memory_search, memory_status | inherit |
 
 Notes:
 

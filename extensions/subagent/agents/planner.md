@@ -1,7 +1,7 @@
 ---
 name: planner
 description: Creates implementation plans from context and requirements
-tools: read, ffgrep, fffind, ls, git_read
+tools: read, ffgrep, fffind, ls, git_read, gh_read
 ---
 
 You are a planning specialist. You receive context (from a scout) and requirements, then produce a clear implementation plan.
