@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { ExtensionSelectorComponent, initTheme, InteractiveMode } from "@earendil-works/pi-coding-agent";
+import { ExtensionSelectorComponent, initTheme } from "@earendil-works/pi-coding-agent";
 import {
 	isKeyRelease,
 	isKeyRepeat,
@@ -609,38 +609,61 @@ test("shrinking the terminal re-bounds the window on the next render", async () 
 function makeRealTui(rows = 24, columns = 80) {
 	const terminal = {
 		columns, rows, kittyProtocolActive: false,
-		start() {}, stop() {}, write() {}, moveBy() {}, hideCursor() {}, showCursor() {},
+		// Capture the public Terminal.start input/resize callbacks so tests
+		// dispatch keys exactly the way the terminal loop does, without touching
+		// SDK-private methods.
+		start(onInput: (data: string) => void, onResize: () => void) {
+			terminalInputSink.push(onInput);
+			resizeSink.push(onResize);
+		},
+		stop() {}, write() {}, moveBy() {}, hideCursor() {}, showCursor() {},
 		clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {},
 	};
 	return new TuiMainScreen(terminal as never);
 }
 
-/** A ui whose setWidget routes through the real InteractiveMode host method
- * (production widget lifecycle) and whose onTerminalInput registers through
- * the real TUI input-listener path, so tests dispatch keys exactly the way
- * the terminal loop does. */
+/** Captured public Terminal.start callbacks of the most recent real TUI. */
+const terminalInputSink: Array<(data: string) => void> = [];
+const resizeSink: Array<() => void> = [];
+
+/** A ui whose setWidget implements the extension widget contract structurally
+ * (same dispose/remove/factory lifecycle as the SDK host, over plain maps) and
+ * whose onTerminalInput registers through the real TUI input-listener path, so
+ * tests dispatch keys exactly the way the terminal loop does. Real SDK widget
+ * behavior is verified separately by the offline TUI acceptance run, not by
+ * private method calls here. */
 function makeHostedUI(tuiInstance: TuiMainScreen) {
-	const host = {
-		ui: tuiInstance,
-		extensionWidgetsAbove: new Map<string, unknown>(),
-		extensionWidgetsBelow: new Map<string, unknown>(),
-		renderWidgets() {},
+	const extensionWidgetsAbove = new Map<string, { render(width: number): string[]; dispose?(): void }>();
+	const extensionWidgetsBelow = new Map<string, { render(width: number): string[]; dispose?(): void }>();
+	const removeExisting = (map: typeof extensionWidgetsAbove, key: string): void => {
+		const existing = map.get(key);
+		if (existing?.dispose) existing.dispose();
+		map.delete(key);
 	};
-	const setExtensionWidget = (InteractiveMode.prototype as unknown as { setExtensionWidget: (this: unknown, key: string, content: unknown, options?: unknown) => void }).setExtensionWidget;
 	const inputHandlers: Array<(data: string) => unknown> = [];
 	const ui: Record<string, unknown> = {
 		notify: () => {},
 		select: async () => undefined,
-		setWidget: (key: string, content: unknown, options?: unknown) => setExtensionWidget.call(host, key, content, options),
+		setWidget: (key: string, content: unknown, options?: { placement?: "aboveEditor" | "belowEditor" }) => {
+			removeExisting(extensionWidgetsAbove, key);
+			removeExisting(extensionWidgetsBelow, key);
+			if (content === undefined) return;
+			const component = typeof content === "function"
+				? (content as (t: unknown, theme: unknown) => { render(width: number): string[]; dispose?(): void })(tuiInstance, THEME)
+				: (content as { render(width: number): string[]; dispose?(): void });
+			(options?.placement === "belowEditor" ? extensionWidgetsBelow : extensionWidgetsAbove).set(key, component);
+		},
 		onTerminalInput: (handler: (data: string) => unknown) => {
 			inputHandlers.push(handler);
 			return tuiInstance.addInputListener(handler as never);
 		},
 	};
 	const dispatch = (data: string): void => {
-		(tuiInstance as unknown as { handleTerminalInput(data: string): void }).handleTerminalInput(data);
+		const onInput = terminalInputSink[terminalInputSink.length - 1];
+		if (!onInput) throw new Error("terminal.start was never called; start the TUI before dispatching");
+		onInput(data);
 	};
-	return { ui, host, inputHandlers, dispatch };
+	return { ui, host: { ui: tuiInstance, extensionWidgetsAbove, extensionWidgetsBelow, renderWidgets() {} }, inputHandlers, dispatch };
 }
 
 test("real TUI: a tall dialog keeps the decision controls visible in 24 rows", async () => {
