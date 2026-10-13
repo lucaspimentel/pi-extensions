@@ -107,11 +107,12 @@ Registration details:
   exists; old requests are never retried or replayed. The gate lease covers
   only validation plus the selector interaction, so a successful save, grant,
   or profile choice cannot cancel itself.
-- While an admitted dialog's selector is open in TUI mode, guard hides the
-  working spinner and restores it when the dialog settles (presentation
-  only: visibility failures are ignored and never change the outcome).
-  Queued requests do not affect spinner visibility; only the active
-  selector toggles it.
+- While an admitted dialog awaits input in TUI mode, guard hides the working
+  spinner for the **entire interaction** (every stage: selector, editor,
+  preview, picker, steering input) and restores it when the dialog settles
+  (presentation only: visibility failures are ignored and never change the
+  outcome). The same interval emits `herdr:blocked` (see Events). Queued
+  requests do not affect spinner visibility.
 - In TUI mode each dialog renders as a **hideable overlay**
   (`extensions/guard/ask-overlay.ts`): full-width, anchored to the bottom,
   with a ctrl+] hide/show toggle registered on raw terminal input
@@ -143,19 +144,53 @@ Registration details:
   before anything is mounted; failed or cancelled displays are never
   retried. Ownership is guard-local: foreign
   extensions using the unsafe `ui.custom` path are not fixed by this.
-- An explicit HostBash/Pwsh **ask-rule match** offers allow once or deny
-  (saving a rule cannot override the ask).
-- A fallback prompt offers allow once, save for this project
-  (`.pi/guard.local.json`), save for the user (`~/.pi/agent/guard.json`), or
-  deny. The suggestion is an **exact escaped command**, shown with its
-  destination, and is offered only when the merged patch would authorize the
-  whole call. Existing ask/deny rules are never removed.
+- An explicit HostBash/Pwsh **ask-rule match** offers allow once, deny once
+  (with optional steering), and supported deny saves; saving cannot override
+  the ask and no allow save is offered.
+- Approval prompts show the original command, the aggregate decision, and
+  (for reliable host-bash parsing) each parsed step's decision; unavailable
+  breakdowns are explicitly marked and never become guessed rules.
+- **Persistent saves** (capable TUI hosts only; capability gaps are detected
+  before the dialog and keep once actions): every save opens an editor (one
+  complete rule expression per line, original shell namespace enforced;
+  glob/regex/tool-wide broadening allowed with review) and then a separate
+  **Confirm/Edit/Cancel save** preview showing the final entries, the exact
+  destination file, and the validated effect on the current call (for
+  bundles: each rule permits/blocks its matching step independently,
+  including outside this sequence). Invalid edits preserve the submitted
+  text and loop with an error. Ordinary cancellation or an empty submission
+  saves nothing with the documented fallback: allow-save becomes allow-once,
+  deny-save becomes deny-once (steering still offered), and a read-root save
+  grants nothing. The actual reviewed patch is revalidated against re-read
+  configuration at the final commit barrier; abort, staleness, and setup
+  failures never grant authority. For compound commands the allow bundle
+  covers only the steps lacking effective permission and is offered only
+  when the complete hypothetical merge authorizes the entire original call;
+  deny saves use a checkbox picker of the parsed steps (nothing
+  preselected, duplicates keep distinct identities) and a blank manual
+  editor when parsing is unreliable.
+- **Denial steering:** after an explicit user denial (Deny once or a deny
+  save, including its cancellation) guard collects an optional instruction
+  and hands it to the agent via `sendUserMessage(deliverAs: "steer")`
+  immediately after the ownership check. Initial selector cancellation and
+  automatic policy denial skip steering; empty or cancelled input still
+  denies without steering. Once handed to the SDK, existing SDK semantics
+  apply: input hooks may delay dispatch beyond a later abort, and guard
+  claims no post-dispatch cancellation.
+- In RPC mode persistent saves are deferred: once actions, session read
+  grants, and signal-aware native steering input remain, and no native
+  editor is ever invoked.
+- A fallback prompt (capability-limited hosts) offers allow once or deny
+  once; existing ask/deny rules are never removed.
 - If policy changes while a dialog is open, the approval is stale: nothing
   runs and nothing is saved.
 - Local reads outside cwd/readRoots keep the session/project/user/deny grant
-  shape; grants are validated, mounted read-only, restart workers, report the
-  state loss, and return **without replaying the code**. Legacy
-  pi-tool-permissions grants are not mirrored during coexistence.
+  shape; persistent project/user grants open a single-path root editor and
+  preview (the edited root must cover the requesting path and pass the
+  existing grant/mount restrictions), session grants stay one-stage, grants
+  are validated, mounted read-only, restart workers, report the state loss,
+  and return **without replaying the code**. Legacy pi-tool-permissions
+  grants are not mirrored during coexistence.
 - Non-interactive contexts (print mode, subagent children) deny prompts;
   sandboxed work stays free.
 
@@ -394,11 +429,12 @@ removed.
   every mapped tool call, observe-only.
 - `herdr:blocked`: `{ active: true, label: "guard: awaiting user input" }`
   while a guard dialog (approval, read grant, profile picker, migrate
-  confirm) awaits the user, and `{ active: false }` when it settles.
-  Reported so the herdr pane shows blocked instead of "working"; ignored
-  outside herdr. Emitted from the single dialog choke point, unconditionally
-  (no `HERDR_ENV` check), matching pi-tool-permissions and the herdr
-  ask-user bridge.
+  confirm, including every save/picker/editor/steering stage inside one)
+  awaits the user, and `{ active: false }` when it settles. Reported so the
+  herdr pane shows blocked instead of "working"; ignored outside herdr.
+  Emitted once per admitted interaction from the shared `admittedDialog`
+  wrapper, unconditionally (no `HERDR_ENV` check), matching
+  pi-tool-permissions and the herdr ask-user bridge.
 - `guard:research-request` / `guard:research-release` (in) and
   `guard:research-ack` / `guard:research-release-ack` (out): the plan.ts
   handshake, wired in step 4. `/plan` requests the hold before narrowing
