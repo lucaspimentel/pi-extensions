@@ -12,7 +12,7 @@ import { snapshotProtected, auditProtected, type ProtectedSnapshot } from "./san
 import { filterMountableReadRoots, resolveWorktreeCommonDir } from "./sandbox/bwrap.ts";
 import { isWithin, sensitiveHostPaths } from "./sandbox/host-paths.ts";
 import { DEFAULT_MASK_PATTERNS, DEFAULT_MASK_EXCEPTIONS } from "./sandbox/spec.ts";
-import { normalizeRootList } from "./policy/paths.ts";
+import { normalizeMatchPath, normalizeRootList } from "./policy/paths.ts";
 import { effectiveWorkspaceMode, type PolicyState } from "./policy/decision.ts";
 
 export type WorkerController = Pick<PythonSessionController, "execute" | "reset" | "status" | "dispose">;
@@ -369,5 +369,23 @@ export function validateReadGrant(candidate: string, workspace: string, home = h
 	if (overlaps) throw new Error("Read grant overlaps a hard-excluded credential/runtime path");
 	const result = filterMountableReadRoots([root], workspace, home);
 	if (!result.mountable.includes(root)) throw new Error(result.skipped[0]?.reason ?? "Read grant cannot be mounted");
+	return root;
+}
+
+/**
+ * Validate an EDITED persistent read-root save: the canonicalized root must
+ * pass the existing grant validation and cover the request path that caused
+ * the prompt (an unrelated root is invalid). Returns the canonical root.
+ * Mount/exclusion policy is unchanged; this adds request coverage around
+ * validateReadGrant, not a new scanning subsystem.
+ */
+export function validateReadRootSave(rootInput: string, requestPath: string, workspace: string, home = homedir()): string {
+	const root = validateReadGrant(rootInput, workspace, home);
+	const target = normalizeMatchPath(requestPath, workspace, { home });
+	let resolvedTarget = target;
+	try { resolvedTarget = realpathSync(target); } catch { /* missing targets are contained by spelling */ }
+	if (!isWithin(target, root) && !isWithin(resolvedTarget, root)) {
+		throw new Error(`The edited read root does not cover the requested path (${target})`);
+	}
 	return root;
 }
