@@ -1,8 +1,7 @@
 # `git_read` tool: read-only git access for agents
 
-Status: design settled; extension, argument validation, and spawn layer
-implemented and shipped. Pending: guard classification (`local-read`) and
-agent rollout.
+Status: design settled; extension, argument validation, spawn layer, and
+guard classification implemented and shipped. Pending: agent rollout.
 
 ## Problem
 
@@ -42,7 +41,8 @@ commands. It is deliberately not tied to any one agent; agents opt in via their
   wrapping. Shipped.
 - `tests/git-read-validate.test.mts` and `tests/git-read-spawn.test.mts`,
   run via `npm run test:git-read`. Shipped.
-- Guard classification in `extensions/guard/policy/classes.ts`. Pending.
+- Guard classification: `git_read: "local-read"` in `BUILTIN_CLASSES`
+  (`extensions/guard/policy/classes.ts`). Shipped.
 - Agent rollout (reviewer/scout/planner `tools:` lines, subagent README
   table). Pending.
 
@@ -196,8 +196,7 @@ per session, since children only receive registered tools.
   with no diff text in its prompt.
 - Main-session opt-in works via `--tools git_read` / `defaultTools` without
   registering it globally.
-- Once guard classification lands, the guard treats `git_read` as
-  `local-read` in every profile.
+- The guard treats `git_read` as `local-read` in every profile.
 
 ## Original handoff notes
 

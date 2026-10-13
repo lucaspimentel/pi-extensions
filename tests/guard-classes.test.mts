@@ -63,6 +63,7 @@ test("every built-in tool name maps to its class", () => {
 		["ls", "local-read"],
 		["fffind", "local-read"],
 		["ffgrep", "local-read"],
+		["git_read", "local-read"],
 		["session_search", "local-read"],
 		["memory_read", "local-read"],
 		["memory_search", "local-read"],
@@ -239,7 +240,7 @@ test("isPlanningToolAllowed: built-in exceptions, annotations, and fail-closed u
 		assert.equal(isPlanningToolAllowed(name), false, name);
 	}
 	// 2. Built-in safe classes stay without annotations.
-	for (const name of ["read", "grep", "find", "ls", "fffind", "ffgrep", "session_search", "memory_read", "memory_search", "memory_status", "web_search", "slack_search", "pup_logs_search", "bash", "python", "node", "codemode", "tool_search", "subagent", "ask_user_question"]) {
+	for (const name of ["read", "grep", "find", "ls", "fffind", "ffgrep", "git_read", "session_search", "memory_read", "memory_search", "memory_status", "web_search", "slack_search", "pup_logs_search", "bash", "python", "node", "codemode", "tool_search", "subagent", "ask_user_question"]) {
 		assert.equal(isPlanningToolAllowed(name), true, name);
 	}
 	// Built-in removal ignores even a perfect read-only declaration.

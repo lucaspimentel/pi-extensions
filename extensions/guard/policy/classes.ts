@@ -78,6 +78,9 @@ const BUILTIN_CLASSES: Readonly<Record<string, ToolClass>> = Object.freeze({
 	ls: "local-read",
 	fffind: "local-read",
 	ffgrep: "local-read",
+	// Reads repo data through the allowlisted read-only git spawn
+	// (extensions/git-read/); no path argument, treated as inside the roots.
+	git_read: "local-read",
 	session_search: "local-read",
 	memory_read: "local-read",
 	memory_search: "local-read",

@@ -447,7 +447,7 @@ export function pathInsideWriteRoots(path: string, config: ResolvedGuardConfig):
 	return pathInsideAllowedRoots(path, config.cwd, roots);
 }
 
-/** Decide a local read (read/grep/find/ls/fffind/ffgrep). */
+/** Decide a local read (read/grep/find/ls/fffind/ffgrep/git_read). */
 export function decideLocalRead(call: Extract<GuardCall, { kind: "local-read" }>, policy: PolicyState): Decision {
 	const { profile, config } = policy;
 	const hasPath = call.path !== undefined && call.path.trim() !== "";
