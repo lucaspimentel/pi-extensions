@@ -5,9 +5,9 @@
  * read-only git subcommands (diff, log, show, status) as an argv-array child
  * process, never through a shell.
  *
- * Scaffold (step 1): registration and wiring only. Argument validation
- * (validate.ts) and the bounded spawn layer (spawn.ts) are stubs that return
- * explicit errors; later steps fill them in without touching this file.
+ * Argument validation lives in validate.ts; the bounded, sanitized spawn
+ * layer lives in spawn.ts. This file only registers the tool and forwards
+ * validated output to the spawn layer.
  *
  * Design: docs/git-read-design.md
  */
