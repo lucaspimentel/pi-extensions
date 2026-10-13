@@ -1,7 +1,7 @@
 # `git_read` tool: read-only git access for agents
 
-Status: design settled; extension, argument validation, spawn layer, and
-guard classification implemented and shipped. Pending: agent rollout.
+Status: design settled; extension, argument validation, spawn layer, guard
+classification, and agent rollout implemented and shipped.
 
 ## Problem
 
@@ -44,7 +44,7 @@ commands. It is deliberately not tied to any one agent; agents opt in via their
 - Guard classification: `git_read: "local-read"` in `BUILTIN_CLASSES`
   (`extensions/guard/policy/classes.ts`). Shipped.
 - Agent rollout (reviewer/scout/planner `tools:` lines, subagent README
-  table). Pending.
+  table). Shipped.
 
 ## Invocation contract
 
@@ -171,9 +171,11 @@ injected by the tool and never user-suppliable:
 
 ## Rollout
 
-Pending: add `git_read` to the bundled read-only agents' `tools:` lines
-(`reviewer`/`scout`/`planner`) and the subagent README table. Still opt-in
-per session, since children only receive registered tools.
+Shipped: `git_read` is on the bundled read-only agents' `tools:` lines
+(`reviewer`/`scout`/`planner`) and in the subagent README table. Still
+opt-in per session: children only receive tools the dispatching session
+registered, and `git_read` has no fallback, so sessions whose `defaultTools`
+exclude it leave the agents without it.
 
 ## Tests
 

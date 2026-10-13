@@ -20,7 +20,10 @@ streaming, usage display, security model).
 - **Read-only tooling**: scout, planner, and reviewer use `ffgrep`/`fffind`
   instead of `grep`/`find`, and none of them has `bash`. If `ffgrep`/`fffind`
   are not registered (the `@ff-labs/pi-fff` package is optional), the extension
-  substitutes the built-in `grep`/`find` at dispatch time.
+  substitutes the built-in `grep`/`find` at dispatch time. The same agents can
+  inspect diffs, history, and working-tree state via the allowlisted read-only
+  `git_read` tool (extensions/git-read/): diff, log, show, and status only,
+  with per-subcommand flag allowlists, no shell, and no repo mutation.
 - **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and
   `/implement-and-review` are renamed to `/scout-plan-implement`,
   `/scout-plan`, and `/implement-review`, so each name lists its chain's stages.
@@ -30,10 +33,10 @@ streaming, usage display, security model).
 
 | Agent     | Tools                                                                                                                                             | Model    |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| `scout`   | read, ffgrep, fffind, ls                                                                                                                          | inherit  |
-| `planner` | read, ffgrep, fffind, ls                                                                                                                          | inherit  |
+| `scout`   | read, ffgrep, fffind, ls, git_read                                                                                                                          | inherit  |
+| `planner` | read, ffgrep, fffind, ls, git_read                                                                                                                          | inherit  |
 | `worker`  | (all default)                                                                                                                                     | inherit  |
-| `reviewer` | read, ffgrep, fffind, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, memory_read, memory_search, memory_status | inherit |
+| `reviewer` | read, ffgrep, fffind, ls, git_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, memory_read, memory_search, memory_status | inherit |
 
 Notes:
 
@@ -45,8 +48,12 @@ Notes:
 
   Overrides win over agent frontmatter; unknown agent names and malformed
   entries are warned about and ignored.
-- Reviewer is enforced read-only by tool selection: no bash, so no `git diff`.
-  Name the files (or describe the changes) in the task.
+- Reviewer is enforced read-only by tool selection: no bash, so no builds,
+  tests, or repo mutation. It can review recent commits itself via `git_read`
+  (diff/log/show/status), but only when the dispatching session registered
+  that tool: `resolveAgentTools` silently drops tools the session does not
+  have, and `git_read` has no fallback. Without it, name the files (or
+  describe the changes) in the task.
 - Worker has no `tools:` line and therefore gets the child process's default
   tool set (your `defaultTools` settings apply). Child processes are
   non-interactive, so any guard-owned prompt in a child is denied regardless
