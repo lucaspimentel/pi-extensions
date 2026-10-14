@@ -119,7 +119,6 @@ export function executionPromptTitle(input: {
 	if (explanation) {
 		if (stepsAvailable) {
 			lines.push("", "Breakdown:", ...breakdownRows(explanation, failingSub));
-			if (explanation.rawAskRule) lines.push(`ask rule on the whole command: ${explanation.rawAskRule}`);
 		} else {
 			lines.push("", `Breakdown unavailable: ${explanation.breakdown.reason ?? "unreliable parsing"}`);
 			if (failingSub) lines.push("", "Failing step:", `  ${failingSub}`);
