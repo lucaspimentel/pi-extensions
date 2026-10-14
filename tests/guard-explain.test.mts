@@ -208,6 +208,13 @@ test("breakdown reliability: opaque constructs and Pwsh are unavailable with a r
 		["sleep 5 & echo done", "host-bash", /background/],
 		["echo hi # comment && echo b", "host-bash", /inline comment/],
 		["echo {a,b} && echo b", "host-bash", /brace/],
+		// Backgrounding/grouping that merely coexists with a redirect still
+		// flags. The non-trailing-dup row reports "background execution"
+		// because the leftover `&` trips that check; conservative and
+		// presentation-only.
+		["sleep 5 2>&1 &", "host-bash", /background/],
+		["echo a 2>&1 > out", "host-bash", /background/],
+		["git log @{foo", "host-bash", /brace/],
 		["(echo a) && echo b", "host-bash", /subshell/],
 		["for x in a b; do echo $x; done", "host-bash", /structural/],
 		["if true; then echo yes; fi", "host-bash", /structural/],
@@ -218,6 +225,26 @@ test("breakdown reliability: opaque constructs and Pwsh are unavailable with a r
 		const explained = explainHostShellCommand(shellCall(command, shell), policy);
 		assert.equal(explained.breakdown.available, false, `${shell}: ${command}`);
 		assert.ok(pattern.test(explained.breakdown.reason ?? ""), `${shell}: ${command}: ${explained.breakdown.reason ?? ""}`);
+	}
+});
+
+test("breakdown reliability: trailing descriptor dups and git @{...} refs keep the breakdown available", () => {
+	const policy = makePolicy();
+	const available = [
+		"git rev-parse --abbrev-ref @{upstream} 2>&1",
+		"echo a 2>&1 && echo b",
+		"git status > /dev/null 2>&1",
+		// The required compound regression: the last step carries both a
+		// git @{...} ref and a trailing descriptor dup.
+		"git add . && git commit -m msg && git log -1 --format=%h && git rev-parse --abbrev-ref @{upstream} 2>&1",
+		// A file-target redirect with a trailing dup is also fine: the
+		// dup is stripped for opacity checks and the file redirect stays
+		// in the evaluated step text, so rule matching is unaffected.
+		"git status > out.log 2>&1",
+	];
+	for (const command of available) {
+		const explained = explainHostShellCommand(shellCall(command), policy);
+		assert.ok(explained.breakdown.available, `${command}: ${explained.breakdown.reason ?? ""}`);
 	}
 });
 
@@ -241,6 +268,13 @@ test("assessBreakdownReliability pairs raw fragments with evaluated steps one-to
 	// Length mismatch (a purely structural fragment was dropped).
 	const dropped = assessBreakdownReliability("host-bash", ["for x in a b", "echo $x", "done"], ["echo $x"]);
 	assert.equal(dropped.available, false);
+	// Trailing harmless redirects do not make a step opaque; backgrounding
+	// and git @{...} refs behave as documented.
+	assert.ok(assessBreakdownReliability("host-bash", ["echo a 2>&1"], ["echo a 2>&1"]).available);
+	assert.ok(assessBreakdownReliability("host-bash", ["git rev-parse @{upstream}"], ["git rev-parse @{upstream}"]).available);
+	const background = assessBreakdownReliability("host-bash", ["sleep 5 &"], ["sleep 5 &"]);
+	assert.equal(background.available, false);
+	assert.ok(/background/.test(background.reason ?? ""));
 });
 
 test("early-return profiles and workspace lock record an unavailable breakdown with a reason", () => {

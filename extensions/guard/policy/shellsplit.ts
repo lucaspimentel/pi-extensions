@@ -241,7 +241,9 @@ function unreliableConstructReason(part: string): string | null {
 	if (/<\(|>\(/.test(part)) return "process substitution";
 	if (/<</.test(part)) return "heredoc";
 	if (part.replace(/&&/g, "").includes("&")) return "background execution";
-	if (/[(){}]/.test(part)) return "subshell or brace grouping";
+	// `@{...}` is git revision syntax (e.g. `@{upstream}`), not brace
+	// grouping. An unmatched `@{` is left in place and still flags.
+	if (/[(){}]/.test(part.replace(/@\{[^}]*\}/g, ""))) return "subshell or brace grouping";
 	if (/(^|\s)#/.test(part)) return "inline comment";
 	return null;
 }
@@ -279,7 +281,13 @@ export function assessBreakdownReliability(
 		if (stripTimeoutPrefix(rawParts[i]) !== steps[i]) {
 			return { available: false, reason: "structural constructs (loops, conditionals) are not reliably attributed to steps" };
 		}
-		const construct = unreliableConstructReason(steps[i]);
+		// Trailing harmless redirects (descriptor dups like `2>&1`, /dev/null
+		// targets) do not make a step opaque: the evaluated step text keeps
+		// them, so exact rule matching is unaffected. The strip is for
+		// opacity checks only: a non-trailing dup (e.g. `cmd 2>&1 > out`)
+		// survives it and its `&` still reads as backgrounding, which is
+		// the conservative outcome.
+		const construct = unreliableConstructReason(stripTrailingHarmlessRedirects(steps[i]));
 		if (construct !== null) return { available: false, reason: `the command uses ${construct}` };
 	}
 	return { available: true };
