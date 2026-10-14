@@ -361,8 +361,11 @@ are deferred; step 6 remains unauthorized.**
 ### Compound breakdown and rule suggestions
 
 - Show one prompt containing the original command and each reliably parsed
-  step's decision. The breakdown is an explanation, not an execution plan:
-  execute the original command unchanged, never the fragments separately.
+  step's decision, in the pi-tool-permissions prompt format (header, full
+  command, bracketed icon breakdown rows with a » cursor on the attributed
+  step, trailing "Why:" line). The breakdown is an explanation, not an
+  execution plan: execute the original command unchanged, never the fragments
+  separately.
 - For an allow save, suggest anchored, escaped exact rules only for steps
   lacking effective permission. Do not add redundant rules for already
   allowed steps. Offer a generated bundle only when the complete hypothetical

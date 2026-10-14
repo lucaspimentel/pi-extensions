@@ -135,13 +135,14 @@ test("the approval prompt renders the command, decision, and each reliable step"
 	const { io, calls } = makeIO({ select: [undefined] });
 	await runExecutionPrompt(baseExecutionDeps({ io }));
 	const title = calls.select[0].split("\n@@")[0];
-	assert.ok(title.includes("command:"), title);
-	assert.ok(title.includes("│ echo a && curl https://example.com"), "the command block is gutter-marked");
-	assert.ok(title.includes("1. echo a -> allow"));
-	assert.ok(title.includes("2. curl https://example.com -> prompt"));
+	assert.ok(title.includes("Allow Bash subcommand?"), title);
+	assert.ok(title.includes("Full command:\n  echo a && curl https://example.com"), title);
+	assert.ok(title.includes("   [✓] echo a"), title);
+	assert.ok(title.includes(" » [?] curl https://example.com"), title);
+	assert.ok(title.includes("Why: "), title);
 });
 
-test("a multi-line failing subcommand renders as a labeled gutter block, not inline prose", async () => {
+test("a multi-line failing subcommand with an unavailable breakdown keeps the labeled failing step", async () => {
 	const command = "cat > wl-debug.mts <<'EOF'\nconsole.log(1)\nEOF\nrm wl-debug.mts";
 	const real = realDeps(command);
 	const { io, calls } = makeIO({ select: [undefined] });
@@ -155,11 +156,9 @@ test("a multi-line failing subcommand renders as a labeled gutter block, not inl
 	const title = calls.select[0].split("\n@@")[0];
 	assert.ok(title.includes("file redirect requires a redirect-aware allow rule"), "the reason prose is present", title);
 	assert.ok(!title.includes("subcommand '"), "the reason no longer quotes the subcommand inline", title);
-	assert.ok(title.includes("failing step:"), title);
-	assert.ok(title.includes("│ cat > wl-debug.mts <<'EOF'"), title);
-	assert.ok(title.includes("│ console.log(1)"), title);
-	assert.ok(title.includes("│ EOF"), title);
-	assert.ok(title.includes("step breakdown unavailable"), title);
+	assert.ok(title.includes("Failing step:"), title);
+	assert.ok(title.includes("  cat > wl-debug.mts <<'EOF'"), title);
+	assert.ok(title.includes("Breakdown unavailable:"), title);
 });
 
 test("an unavailable breakdown is explicitly marked in the prompt", async () => {
@@ -173,8 +172,8 @@ test("an unavailable breakdown is explicitly marked in the prompt", async () => 
 		allowPlan: null,
 	}));
 	const title = calls.select[0].split("\n@@")[0];
-	assert.ok(title.includes("step breakdown unavailable"), title);
-	assert.ok(!title.includes("1. "));
+	assert.ok(title.includes("Breakdown unavailable:"), title);
+	assert.ok(!title.includes("Breakdown:\n"), title);
 });
 
 // ── Once outcomes and steering ──────────────────────────────────────────────
@@ -270,9 +269,9 @@ test("the preview always renders the final entries, destination, and effect", as
 	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: [rules.join("\n")] });
 	await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan }));
 	const preview = calls.select[1].split("\n@@")[0];
-	assert.ok(preview.includes("rules to save:"), preview);
+	assert.ok(preview.includes("Rules to save:"), preview);
 	assert.ok(preview.includes(rules[0]));
-	assert.ok(preview.includes("destination: /home/user/proj/.pi/guard.local.json"));
+	assert.ok(preview.includes("Destination: /home/user/proj/.pi/guard.local.json"));
 	assert.ok(preview.includes("each rule permits its matching step independently, including outside this sequence"));
 });
 
@@ -390,8 +389,8 @@ test("read grant: root save confirm, unrelated-root loop, empty submission, and 
 		assert.equal(outcome.kind, "save-root");
 		assert.equal(outcome.root, "/home/user/shared");
 		const preview = calls.select[1].split("\n@@")[0];
-		assert.ok(preview.includes("root: /home/user/shared"));
-		assert.ok(preview.includes("destination: /home/user/proj/.pi/guard.local.json"));
+		assert.ok(preview.includes("Root: /home/user/shared"));
+		assert.ok(preview.includes("Destination: /home/user/proj/.pi/guard.local.json"));
 		assert.ok(preview.includes("discards worker state"));
 	}
 	{

@@ -57,63 +57,82 @@ const ALLOW_EDITOR_CONSEQUENCE = "cancelling or empty submission approves the cu
 const DENY_EDITOR_CONSEQUENCE = "cancelling or empty submission denies the current call once without saving";
 const ROOT_EDITOR_CONSEQUENCE = "cancelling or empty submission grants nothing";
 
-/** Render the step list of an explanation for prompt/preview bodies. */
-function stepLines(explanation: HostShellExplanation): string[] {
-	return explanation.steps.map((step) => `${step.occurrenceId + 1}. ${step.display} -> ${step.decision.action} (${step.decision.reason})`);
+/** Display names for the tools guard prompts for (OwnedExecutors plus pwsh routing). */
+const TOOL_LABELS: Record<string, string> = { bash: "Bash", host_bash: "Bash", pwsh: "Pwsh", python: "Python", node: "Node" };
+
+/** Match pi-tool-permissions' old prompt: full command truncated at 200 chars. */
+function truncateCommand(text: string): string {
+	return text.length > 200 ? `${text.slice(0, 197)}...` : text;
 }
 
-/** Prefix every line of a command block with a gutter marker so command text stays visually separate from prose. */
-function gutter(text: string): string[] {
-	return text.split("\n").map((line) => `│ ${line}`);
+/** Step action icon: allow ✓, deny ✗, ask/classify ? (matches the old breakdown icons). */
+function actionIcon(action: string): string {
+	if (action === "allow") return "✓";
+	if (action === "deny") return "✗";
+	return "?";
 }
 
 /**
- * One approval prompt containing the original command, the call-level
- * decision, and each reliably parsed step's decision. An unavailable
- * breakdown is explicitly marked; the original execution is unchanged.
- *
- * Command text (the failing subcommand and the full command) is rendered as
- * labeled gutter-marked blocks instead of being inlined into prose, so a
- * multi-line fragment such as a heredoc never blurs into guard's own output.
+ * One row per parsed step: two-space gutter, bracketed action icon, step text.
+ * The failing step's rows get a `»` cursor instead of the blank gutter so the
+ * attributed subcommand is visible at a glance (old formatBreakdownLine).
+ */
+function breakdownRows(explanation: HostShellExplanation, failingSub: string | undefined): string[] {
+	return explanation.steps.map((step) => {
+		const gutter = failingSub !== undefined && step.display === failingSub ? " » " : "   ";
+		return `${gutter}[${actionIcon(step.decision.action)}] ${step.display}`;
+	});
+}
+
+/**
+ * One approval prompt in the pi-tool-permissions prompt format: a friendly
+ * header, the full command, the per-step icon breakdown, and a trailing
+ * "Why:" line with the aggregate decision reason. An unavailable breakdown is
+ * explicitly marked (and the attributed failing step labeled); the original
+ * execution is unchanged.
  */
 export function executionPromptTitle(input: {
 	toolName: string;
 	command: string;
 	decision: Decision;
 	explanation: HostShellExplanation | null;
+	shell: "host-bash" | "pwsh";
 }): string {
-	const lines = [`guard: ${input.toolName}`];
 	const explanation = input.explanation;
 	let failingSub: string | undefined;
+	let why = input.decision.reason;
 	if (explanation?.failingSub) {
 		const prefix = `subcommand '${explanation.failingSub}': `;
 		if (input.decision.reason.startsWith(prefix)) {
-			lines.push(input.decision.reason.slice(prefix.length));
+			why = input.decision.reason.slice(prefix.length);
 			failingSub = explanation.failingSub;
-		} else {
-			lines.push(input.decision.reason);
 		}
-	} else {
-		lines.push(input.decision.reason);
 	}
-	if (failingSub) lines.push("failing step:", ...gutter(failingSub));
-	lines.push("command:", ...gutter(input.command));
+	const stepsAvailable = explanation !== null && explanation.breakdown.available && explanation.steps.length > 0;
+	const shellLabel = input.shell === "pwsh" ? "Pwsh" : "Bash";
+	const header = explanation === null
+		? `Allow ${TOOL_LABELS[input.toolName] ?? input.toolName}?`
+		: stepsAvailable && explanation.steps.length > 1 ? `Allow ${shellLabel} subcommand?` : `Allow ${shellLabel}?`;
+
+	const lines: string[] = [header, ""];
+	lines.push(explanation === null ? "Code:" : "Full command:", `  ${truncateCommand(input.command)}`);
 	if (explanation) {
-		if (explanation.breakdown.available && explanation.steps.length > 0) {
-			lines.push("", "steps:", ...stepLines(explanation));
+		if (stepsAvailable) {
+			lines.push("", "Breakdown:", ...breakdownRows(explanation, failingSub));
 			if (explanation.rawAskRule) lines.push(`ask rule on the whole command: ${explanation.rawAskRule}`);
 		} else {
-			lines.push(`step breakdown unavailable: ${explanation.breakdown.reason ?? "unreliable parsing"}`);
-			lines.push("the original command is executed unchanged; existing policy applies");
+			lines.push("", `Breakdown unavailable: ${explanation.breakdown.reason ?? "unreliable parsing"}`);
+			if (failingSub) lines.push("", "Failing step:", `  ${failingSub}`);
 		}
 	}
+	lines.push("", `Why: ${why}`);
 	return lines.join("\n");
 }
 
 /** Collect the optional steering instruction after an explicit denial. */
 export async function collectSteering(io: PromptFlowIO, signal: AbortSignal, contextLine: string): Promise<SteeringText> {
 	const text = await io.inputText(
-		`guard: optional instruction for the agent after this denial (empty or esc skips; the call is denied either way)\n${contextLine}`,
+		`Optional instruction for the agent after this denial (empty or esc skips; the call is denied either way)\n${contextLine}`,
 		signal,
 	);
 	const trimmed = text?.trim();
@@ -225,7 +244,7 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 	if (answer.startsWith("Save allow for ")) {
 		const scope = answer.slice("Save allow for ".length) as ConfigScope;
 		if (!deps.allowPlan) throw new Error("guard: no validated allow plan; save-allow must not be offered");
-		const baseTitle = `guard: edit the allow rules to save (${scope})\ncommand: ${deps.command}\ndecision: ${deps.decision.reason}`;
+		const baseTitle = `Edit the allow rules to save (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;
 		const runEditor = (): Promise<EditorLoopResult> => editorSaveLoop(io, signal, {
 			title: baseTitle,
 			consequence: ALLOW_EDITOR_CONSEQUENCE,
@@ -234,14 +253,14 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 			validate: (rules) => deps.validateRules("allow", rules),
 		});
 		const buildPreview = (rules: string[]): string => [
-			`guard: confirm allow save (${scope})`,
-			"rules to save:",
+			`Confirm allow save (${scope})?`,
+			"Rules to save:",
 			...rules,
-			`destination: ${deps.destination(scope)}`,
-			`effect: ${deps.allowPlan!.kind === "bundle"
+			`Destination: ${deps.destination(scope)}`,
+			`Effect: ${deps.allowPlan!.kind === "bundle"
 				? "each rule permits its matching step independently, including outside this sequence; together they allow the complete current call"
 				: "the rule permits the exact current command"}`,
-			"cancelling here approves the current call once without saving",
+			"Cancelling here approves the current call once without saving",
 		].join("\n");
 		const preview = await previewLoop(io, signal, {
 			previewText: "",
@@ -271,7 +290,7 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 				detail: `${step.decision.action} (${step.decision.reason})`,
 			}));
 			const selected = await io.picker(
-				`guard: select the steps to deny (${scope})\ncommand: ${deps.command}\nmatching a selected step denies the whole call; the rules also deny matching commands outside this sequence`,
+				`Select the steps to deny (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nMatching a selected step denies the whole call; the rules also deny matching commands outside this sequence`,
 				pickerSteps,
 				signal,
 			);
@@ -281,7 +300,7 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 			}
 			prefill = deps.denyRulesFor(selected).join("\n");
 		}
-		const baseTitle = `guard: edit the deny rules to save (${scope})\ncommand: ${deps.command}\ndecision: ${deps.decision.reason}`;
+		const baseTitle = `Edit the deny rules to save (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;
 		const runEditor = (): Promise<EditorLoopResult> => editorSaveLoop(io, signal, {
 			title: baseTitle,
 			consequence: DENY_EDITOR_CONSEQUENCE,
@@ -290,12 +309,12 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 			validate: (rules) => deps.validateRules("deny", rules),
 		});
 		const buildPreview = (rules: string[]): string => [
-			`guard: confirm deny save (${scope})`,
-			"rules to save:",
+			`Confirm deny save (${scope})?`,
+			"Rules to save:",
 			...rules,
-			`destination: ${deps.destination(scope)}`,
-			"effect: each rule denies matching commands independently, including outside this sequence; the current call is denied",
-			"cancelling here denies the current call once without saving",
+			`Destination: ${deps.destination(scope)}`,
+			"Effect: each rule denies matching commands independently, including outside this sequence; the current call is denied",
+			"Cancelling here denies the current call once without saving",
 		].join("\n");
 		const preview = await previewLoop(io, signal, { previewText: "", runEditor, buildPreview });
 		// Ordinary cancellation of a deny save: deny once, steering still offered.
@@ -337,11 +356,15 @@ export async function runReadGrantPrompt(deps: ReadGrantPromptDeps): Promise<Rea
 	const { io, signal } = deps;
 	const editorAvailable = typeof io.editor === "function";
 	const title = [
-		`guard: ${deps.workerName} requests read-only access`,
-		`path: ${deps.requestPath}`,
-		"suggested root:",
-		deps.suggestedRoot,
-		"granting discards worker state; code is never replayed",
+		`${deps.workerName} requests read-only access`,
+		"",
+		"Path:",
+		`  ${deps.requestPath}`,
+		"",
+		"Suggested root:",
+		`  ${deps.suggestedRoot}`,
+		"",
+		"Granting discards worker state; code is never replayed",
 	].join("\n");
 	const options = [
 		"Grant for session",
@@ -357,7 +380,7 @@ export async function runReadGrantPrompt(deps: ReadGrantPromptDeps): Promise<Rea
 	}
 	if (answer.startsWith("Save for ")) {
 		const scope = answer.slice("Save for ".length) as ConfigScope;
-		const baseTitle = `guard: edit the read root to save (${scope})\nrequest path: ${deps.requestPath}\none plain directory path`;
+		const baseTitle = `Edit the read root to save (${scope})\nRequest path: ${deps.requestPath}\nOne plain directory path`;
 		if (!io.editor) throw new Error("guard: the editor stage is unavailable; root saves must not be offered");
 		let current = deps.suggestedRoot;
 		for (;;) {
@@ -377,11 +400,11 @@ export async function runReadGrantPrompt(deps: ReadGrantPromptDeps): Promise<Rea
 				continue;
 			}
 			const previewText = [
-				`guard: confirm read-root save (${scope})`,
-				`root: ${parsed.root}`,
-				`destination: ${deps.destination(scope)}`,
-				"effect: read-only access to everything under this root; applying it discards worker state; code is never replayed",
-				"cancelling here grants nothing",
+				`Confirm read-root save (${scope})?`,
+				`Root: ${parsed.root}`,
+				`Destination: ${deps.destination(scope)}`,
+				"Effect: read-only access to everything under this root; applying it discards worker state; code is never replayed",
+				"Cancelling here grants nothing",
 			].join("\n");
 			const answer2 = await io.select(previewText, ["Confirm", "Edit", "Cancel save"], signal);
 			if (answer2 === "Confirm") return { kind: "save-root", scope, root: parsed.root, previewText };

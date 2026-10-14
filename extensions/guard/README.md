@@ -147,9 +147,15 @@ Registration details:
 - An explicit HostBash/Pwsh **ask-rule match** offers allow once, deny once
   (with optional steering), and supported deny saves; saving cannot override
   the ask and no allow save is offered.
-- Approval prompts show the original command, the aggregate decision, and
-  (for reliable host-bash parsing) each parsed step's decision; unavailable
-  breakdowns are explicitly marked and never become guessed rules.
+- Approval prompts use the pi-tool-permissions prompt format: a friendly
+  header ("Allow Bash?", or "Allow Bash subcommand?" for a multi-step
+  breakdown), the full command (truncated at 200 characters) or the code for
+  non-shell executors, a bracketed icon breakdown of each reliably parsed
+  step's decision (✓ allow, ? ask/classify, ✗ deny, with a » cursor on the
+  attributed failing step), and a trailing "Why:" line with the aggregate
+  decision reason. Unavailable breakdowns are explicitly marked ("Breakdown
+  unavailable: ...", plus a labeled failing step when attributed) and never
+  become guessed rules.
 - **Persistent saves** (capable TUI hosts only; capability gaps are detected
   before the dialog and keep once actions): every save opens an editor (one
   complete rule expression per line, original shell namespace enforced;

@@ -777,7 +777,7 @@ test("two approval prompts serialize: the second selector never replaces the fir
 		const first = tool.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
 		void first.catch(() => {});
 		await selector.waitFor(1);
-		assert.match(selector.opened[0], /guard: host_bash/);
+		assert.match(selector.opened[0], /Allow Bash\?/);
 		const second = tool.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
 		void second.catch(() => {});
 		await tick();
@@ -955,8 +955,8 @@ test("a successful save completes and cancels other pending dialogs instead of i
 		owned.pressEnter(); // submit the prefilled exact-rule bundle unchanged
 		await owned.waitForOverlays(3);
 		const preview = owned.overlays[2].component.render(120).map((line: string) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
-		assert.match(preview, /confirm allow save \(project\)/, "the separate preview opened");
-		assert.match(preview, /destination: .*guard\.local\.json/, "the preview names the exact destination");
+		assert.match(preview, /Confirm allow save \(project\)/, "the separate preview opened");
+		assert.match(preview, /Destination: .*guard\.local\.json/, "the preview names the exact destination");
 		owned.pressEnter(); // Confirm is the first preview action
 		const result = await saving;
 		assert.equal(result.structuredContent.exit_code, 0, "the saving call executes; its own transition did not cancel it");
@@ -1372,7 +1372,7 @@ test("a real worker read grant serializes with approval prompts and never replay
 		const fresh = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
 		void fresh.catch(() => {});
 		await selector.waitFor(2);
-		assert.match(selector.opened[1], /guard: host_bash/, "a fresh approval opens after the grant settled");
+		assert.match(selector.opened[1], /Allow Bash\?/, "a fresh approval opens after the grant settled");
 		selector.answer("Allow once");
 		const approvalResult = await fresh;
 		assert.equal(approvalResult.structuredContent.exit_code, 0);
@@ -1624,9 +1624,9 @@ test("a compound allow bundle saves per-step rules and runs the original command
 		void pending.catch(() => {});
 		await owned.waitForOverlays(1);
 		const menu = owned.renderLast();
-		assert.match(menu, /steps:/, "the reliable breakdown is rendered");
-		assert.match(menu, /1\. echo one -> allow/, "the tier-allowed step is shown");
-		assert.match(menu, /2\. touch compound-marker -> prompt/, "the prompting step is shown");
+		assert.match(menu, /Breakdown:/, "the reliable breakdown is rendered");
+		assert.match(menu, /\[✓\] echo one/, "the tier-allowed step is shown");
+		assert.match(menu, / » \[\?\] touch compound-marker/, "the prompting step is shown");
 		owned.pressDown(); // "Save allow for project"
 		owned.pressEnter();
 		await owned.waitForOverlays(2);
@@ -1662,7 +1662,7 @@ test("a saved deny commits the rule, then delivers steering once", async () => {
 		// The step picker opens with nothing preselected, even for one step.
 		await owned.waitForOverlays(2);
 		const picker = owned.renderLast();
-		assert.match(picker, /select the steps to deny/, "the picker opened");
+		assert.match(picker, /Select the steps to deny/, "the picker opened");
 		assert.match(picker, /\u25cb curl https/, "nothing is preselected");
 		owned.pressSpace(); // select the step
 		owned.pressEnter(); // continue
@@ -1671,7 +1671,7 @@ test("a saved deny commits the rule, then delivers steering once", async () => {
 		assert.match(editor, /HostBash\(\/\^curl https/, "the exact deny rule is prefilled");
 		owned.pressEnter(); // submit unchanged
 		await owned.waitForOverlays(4);
-		assert.match(owned.renderLast(), /confirm deny save \(user\)/, "the separate preview opened");
+		assert.match(owned.renderLast(), /Confirm deny save \(user\)/, "the separate preview opened");
 		owned.pressEnter(); // Confirm
 		await assert.rejects(pending, /denied/, "the call is denied after the committed save");
 		assert.equal(h.steering.length, 1, "the steering instruction was delivered after the commit");

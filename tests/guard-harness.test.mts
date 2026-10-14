@@ -548,7 +548,7 @@ test("explicit asks offer once/deny only; fallback saves exact effective rules",
 		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx), /denied/);
 		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "picker", "editor", "preview"]);
 		assert.doesNotMatch(overlays[0].text, /Save allow for/, "explicit ask never offers allow saves");
-		assert.match(overlays[3].text, /confirm deny save \(project\)/);
+		assert.match(overlays[3].text, /Confirm deny save \(project\)/);
 		assert.deepEqual(JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")).hostBash.deny, ["HostBash(/^echo asked$/)"]);
 		const saveOverlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]); // "Save allow for project"
 		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
