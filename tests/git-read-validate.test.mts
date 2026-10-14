@@ -16,6 +16,7 @@ import {
 	MAX_COUNT_MAX,
 	SUBCOMMANDS,
 	UNIFIED_MAX,
+	normalizeInvocation,
 	validateInvocation,
 	type GitSubcommand,
 } from "../extensions/git-read/validate.ts";
@@ -125,9 +126,67 @@ test("rejections: unknown flags name the subcommand and its allowed list", () =>
 	validateRejects("log", ["--cached"], "unknown flag '--cached' for git log");
 });
 
-test("rejections: status takes no arguments, including --porcelain", () => {
+test("rejections: status accepts only its allowlisted flags", () => {
 	for (const args of [["--porcelain"], ["-s"], ["HEAD"], ["--", "src/"]]) {
-		validateRejects("status", args, "git status takes no arguments");
+		const result = validateInvocation("status", args);
+		assert.equal(result.ok, false);
+		if (!result.ok) {
+			assert.ok(result.reason.includes("git status"), args.join(" "));
+			assert.ok(result.reason.includes("--short"), args.join(" "));
+		}
+	}
+});
+
+test("status allowlisted flags pass through verbatim after hardcoded --porcelain", () => {
+	assert.deepEqual(validateOk("status", ["--short"]), [...GLOBAL_OPTIONS, "status", "--porcelain", "--short"]);
+	assert.deepEqual(validateOk("status", ["--branch"]), [...GLOBAL_OPTIONS, "status", "--porcelain", "--branch"]);
+	assert.deepEqual(validateOk("status", ["--short", "--branch"]), [
+		...GLOBAL_OPTIONS,
+		"status",
+		"--porcelain",
+		"--short",
+		"--branch",
+	]);
+});
+
+test("normalizeInvocation: explicit subcommand passes args through unchanged", () => {
+	const result = normalizeInvocation({ subcommand: "diff", args: ["HEAD~1", "--", "src/"] });
+	assert.ok(result.ok);
+	if (result.ok) {
+		assert.equal(result.subcommand, "diff");
+		assert.deepEqual(result.args, ["HEAD~1", "--", "src/"]);
+	}
+});
+
+test("normalizeInvocation: args[0] promoted when subcommand is omitted", () => {
+	const result = normalizeInvocation({ args: ["status", "--short", "--branch"] });
+	assert.ok(result.ok);
+	if (result.ok) {
+		assert.equal(result.subcommand, "status");
+		assert.deepEqual(result.args, ["--short", "--branch"]);
+	}
+	const bare = normalizeInvocation({ args: ["log"] });
+	assert.ok(bare.ok);
+	if (bare.ok) {
+		assert.equal(bare.subcommand, "log");
+		assert.deepEqual(bare.args, []);
+	}
+});
+
+test("normalizeInvocation: rejects missing subcommand when args[0] is not allowlisted", () => {
+	for (const raw of [{}, { args: [] }, { args: ["push"] }, { args: ["--stat"] }]) {
+		const result = normalizeInvocation(raw);
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.ok(result.reason.includes("missing 'subcommand'"));
+	}
+});
+
+test("normalizeInvocation: rejects explicit unknown subcommand", () => {
+	const result = normalizeInvocation({ subcommand: "push", args: [] });
+	assert.equal(result.ok, false);
+	if (!result.ok) {
+		assert.ok(result.reason.includes("unknown subcommand 'push'"));
+		assert.ok(result.reason.includes("diff, log, show, status"));
 	}
 });
 

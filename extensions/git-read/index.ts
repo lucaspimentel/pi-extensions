@@ -14,17 +14,20 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { validateInvocation, type GitSubcommand } from "./validate.ts";
+import { normalizeInvocation, validateInvocation, type GitSubcommand } from "./validate.ts";
 import { runGit } from "./spawn.ts";
 
 const gitReadParams = Type.Object({
-	subcommand: Type.Union(
-		[Type.Literal("diff"), Type.Literal("log"), Type.Literal("show"), Type.Literal("status")],
-		{ description: "Read-only git subcommand to run." },
+	subcommand: Type.Optional(
+		Type.Union(
+			[Type.Literal("diff"), Type.Literal("log"), Type.Literal("show"), Type.Literal("status")],
+			{ description: "Read-only git subcommand to run. If omitted, args[0] must name the subcommand instead." },
+		),
 	),
 	args: Type.Optional(
 		Type.Array(Type.String(), {
-			description: "Arguments after the subcommand: revs, flags, pathspecs. Validated before spawn.",
+			description:
+				"Arguments after the subcommand: revs, flags, pathspecs. If subcommand is omitted, args[0] must be the subcommand (e.g. ['status', '--branch']). Validated before spawn.",
 		}),
 	),
 });
@@ -43,21 +46,28 @@ export default function gitReadExtension(pi: ExtensionAPI): void {
 		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		promptGuidelines: [
 			"Prefer git_read over asking the user to paste diffs or logs; it runs sandboxed read-only git in the session's cwd.",
-			"Pass revs, flags, and pathspecs in args, e.g. subcommand 'diff' with args ['HEAD~1', '--', 'src/'].",
+			"Always pass the subcommand in its dedicated `subcommand` property (diff, log, show, or status); pass revs, flags, and pathspecs in args, e.g. subcommand 'diff' with args ['HEAD~1', '--', 'src/'].",
 		],
 		parameters: gitReadParams,
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const checked = validateInvocation(params.subcommand, params.args ?? []);
+			const normalized = normalizeInvocation(params);
+			if (!normalized.ok) {
+				return {
+					content: [{ type: "text", text: `git_read: ${normalized.reason}` }],
+					details: { subcommand: (params.subcommand ?? "unknown") as GitSubcommand },
+				};
+			}
+			const checked = validateInvocation(normalized.subcommand, normalized.args);
 			if (!checked.ok) {
 				return {
 					content: [{ type: "text", text: `git_read: ${checked.reason}` }],
-					details: { subcommand: params.subcommand },
+					details: { subcommand: normalized.subcommand },
 				};
 			}
 			const result = await runGit(checked.argv, ctx.cwd);
 			return {
 				content: [{ type: "text", text: result.text }],
-				details: { subcommand: params.subcommand },
+				details: { subcommand: normalized.subcommand },
 			};
 		},
 	});

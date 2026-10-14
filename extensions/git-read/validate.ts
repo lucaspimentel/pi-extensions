@@ -11,7 +11,7 @@
  *
  * Final argv layouts emitted here (step 3's spawn.ts is a pure exec layer):
  *   diff/log/show: [...GLOBAL_OPTIONS, <sub>, ...DIFF_LOG_SHOW_OPTIONS, ...args]
- *   status:        [...GLOBAL_OPTIONS, "status", "--porcelain"]
+ *   status:        [...GLOBAL_OPTIONS, "status", "--porcelain", ...statusFlags]
  */
 
 export const SUBCOMMANDS = ["diff", "log", "show", "status"] as const;
@@ -37,14 +37,14 @@ export const UNIFIED_MAX = 64;
 /** Upper bound for `-n <n>` / `--max-count=<n>` (range 1..MAX_COUNT_MAX). */
 export const MAX_COUNT_MAX = 10000;
 
-/** Hardcoded flag appended to status; status never accepts user args. */
+/** Hardcoded flag appended to status; --porcelain is never user-suppliable. */
 const STATUS_PORCELAIN = "--porcelain";
 
 const BOOLEAN_FLAGS: Record<GitSubcommand, ReadonlySet<string>> = {
 	diff: new Set(["--stat", "--shortstat", "--numstat", "--name-only", "--name-status", "--cached", "--staged"]),
 	log: new Set(["-p", "--oneline", "--stat"]),
 	show: new Set(["--stat"]),
-	status: new Set(),
+	status: new Set(["--short", "--branch"]),
 };
 
 /** Human-readable value-flag forms, listed in unknown-flag rejections. */
@@ -54,6 +54,44 @@ const VALUE_FLAG_FORMS: Record<GitSubcommand, string> = {
 	show: "-U<n>, --unified=<n>",
 	status: "none",
 };
+
+/**
+ * Untyped raw tool input, before schema-level narrowing. `subcommand` is
+ * optional because some models bundle the subcommand into `args` instead of
+ * using the dedicated property.
+ */
+export interface RawInvocation {
+	subcommand?: string;
+	args?: string[];
+}
+
+/**
+ * Normalizes raw tool input into a typed subcommand plus the remaining args.
+ * When `subcommand` is absent, args[0] is promoted if it names an allowlisted
+ * subcommand (the observed fallback pattern: `{args: ["status", "--short"]}`).
+ * Returns a rejection naming the allowed set otherwise; unknown explicit
+ * subcommands are also rejected here, before per-flag validation.
+ */
+export function normalizeInvocation(raw: RawInvocation): { ok: true; subcommand: GitSubcommand; args: string[] } | InvalidInvocation {
+	const args = [...(raw.args ?? [])];
+	let subcommand = raw.subcommand;
+	if (subcommand === undefined || subcommand === "") {
+		const first = args[0];
+		if (first !== undefined && (SUBCOMMANDS as readonly string[]).includes(first)) {
+			subcommand = first;
+			args.shift();
+		} else {
+			return {
+				ok: false,
+				reason: `missing 'subcommand'; pass subcommand ('${SUBCOMMANDS.join("' | '")}') and put revs, flags, and pathspecs in args`,
+			};
+		}
+	}
+	if (!(SUBCOMMANDS as readonly string[]).includes(subcommand)) {
+		return { ok: false, reason: `unknown subcommand '${subcommand}'; allowed: ${SUBCOMMANDS.join(", ")}` };
+	}
+	return { ok: true, subcommand: subcommand as GitSubcommand, args };
+}
 
 function allowedFlagsText(subcommand: GitSubcommand): string {
 	return [...BOOLEAN_FLAGS[subcommand], VALUE_FLAG_FORMS[subcommand]].join(", ");
@@ -141,13 +179,20 @@ export function validateInvocation(
 	}
 
 	if (subcommand === "status") {
-		if (args.length > 0) {
-			return {
-				ok: false,
-				reason: "git status takes no arguments; --porcelain is applied automatically",
-			};
+		// Flags only: status takes no revs or pathspecs here. --porcelain stays
+		// hardcoded and is rejected if supplied (it is never user-suppliable).
+		const flags: string[] = [];
+		for (const token of args) {
+			if (token === undefined) break;
+			if (!BOOLEAN_FLAGS.status.has(token)) {
+				return {
+					ok: false,
+					reason: `unknown argument '${token}' for git status; allowed flags: ${allowedFlagsText("status")}`,
+				};
+			}
+			flags.push(token);
 		}
-		return { ok: true, argv: [...GLOBAL_OPTIONS, "status", STATUS_PORCELAIN] };
+		return { ok: true, argv: [...GLOBAL_OPTIONS, "status", STATUS_PORCELAIN, ...flags] };
 	}
 
 	const validated: string[] = [];

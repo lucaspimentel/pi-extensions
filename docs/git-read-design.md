@@ -50,6 +50,14 @@ commands. It is deliberately not tied to any one agent; agents opt in via their
 
 - Structured argv, no shell: `{ subcommand: "diff" | "log" | "show" |
   "status", args: string[] }`.
+- Tolerant shape fallback: `subcommand` is schema-optional. When it is
+  omitted, `args[0]` is promoted to the subcommand if it names an allowlisted
+  subcommand (observed model failure mode: the entire command bundled into
+  `args`, e.g. `{args: ["status", "--short", "--branch"]}`). A missing
+  subcommand whose args[0] is not allowlisted is rejected with an error naming
+  the expected shape; explicit unknown subcommands are rejected as before.
+  Normalization happens in `normalizeInvocation` (validate.ts) before flag
+  validation, and reuses the existing rejection wording.
 - Spawning is argv-array only, never `sh -c`. cwd = session cwd.
 - Command construction happens in validate.ts during validation: it emits the
   complete final argv, and spawn.ts consumes it verbatim, appending nothing.
@@ -110,7 +118,10 @@ dangerous, and git's own rev-vs-path disambiguation then applies).
   - `log`: `-p`, `--oneline`, `--stat`, `-n <n>` / `--max-count=<n>`
     (n: 1-10000)
   - `show`: `--stat`, `-U<n>` / `--unified=<n>`
-  - `status`: none; `--porcelain` is hardcoded, any extra arg rejected.
+  - `status`: flags `--short`, `--branch` (read-only; they combine safely
+    with the hardcoded `--porcelain`, so branch headers appear in porcelain
+    output); revs and pathspecs are rejected, `--porcelain` itself is never
+    user-suppliable and is rejected when passed.
 - Value-taking flags validate their value as a plain integer; both `-U 5` and
   `-U5` forms accepted. An absent value and a present-but-invalid value
   produce distinct error messages (the latter names the value it got).
