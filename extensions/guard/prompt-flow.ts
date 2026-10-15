@@ -74,13 +74,16 @@ function actionIcon(action: string): string {
 
 /**
  * One row per parsed step: two-space gutter, bracketed action icon, step text.
- * The failing step's rows get a `»` cursor instead of the blank gutter so the
- * attributed subcommand is visible at a glance (old formatBreakdownLine).
+ * Every prompting (ask) step gets a `»` cursor instead of the blank gutter:
+ * these are the steps a save would add rules for. Approval always runs the
+ * complete command, so the cursor highlights steps; it never implies
+ * per-step selection (old formatBreakdownLine).
  */
-function breakdownRows(explanation: HostShellExplanation, failingSub: string | undefined): string[] {
+function breakdownRows(explanation: HostShellExplanation): string[] {
 	return explanation.steps.map((step) => {
-		const gutter = failingSub !== undefined && step.display === failingSub ? " » " : "   ";
-		return `${gutter}[${actionIcon(step.decision.action)}] ${step.display}`;
+		const icon = actionIcon(step.decision.action);
+		const gutter = icon === "?" ? " » " : "   ";
+		return `${gutter}[${icon}] ${step.display}`;
 	});
 }
 
@@ -118,7 +121,7 @@ export function executionPromptTitle(input: {
 	lines.push(explanation === null ? "Code:" : "Full command:", `  ${truncateCommand(input.command)}`);
 	if (explanation) {
 		if (stepsAvailable) {
-			lines.push("", "Breakdown:", ...breakdownRows(explanation, failingSub));
+			lines.push("", "Breakdown:", ...breakdownRows(explanation));
 		} else {
 			lines.push("", `Breakdown unavailable: ${explanation.breakdown.reason ?? "unreliable parsing"}`);
 			if (failingSub) lines.push("", "Failing step:", `  ${failingSub}`);

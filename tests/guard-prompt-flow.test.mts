@@ -142,6 +142,18 @@ test("the approval prompt renders the command, decision, and each reliable step"
 	assert.ok(title.includes("Why: "), title);
 });
 
+test("the breakdown cursor marks every prompting step, not one attributed step", async () => {
+	const command = "curl https://example.com && echo ok && curl https://example.org";
+	const real = realDeps(command);
+	const { io, calls } = makeIO({ select: [undefined] });
+	await runExecutionPrompt(baseExecutionDeps({ io, command, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan }));
+	const title = calls.select[0].split("\n@@")[0];
+	assert.ok(title.includes(" » [?] curl https://example.com"), title);
+	assert.ok(title.includes(" » [?] curl https://example.org"), title);
+	assert.ok(title.includes("   [✓] echo ok"), title);
+	assert.equal((title.match(/» /g) ?? []).length, 2, "only prompting steps carry the cursor");
+});
+
 test("a multi-line failing subcommand with an unavailable breakdown keeps the labeled failing step", async () => {
 	const command = "cat > wl-debug.mts <<'EOF'\nconsole.log(1)\nEOF\nrm wl-debug.mts";
 	const real = realDeps(command);

@@ -362,7 +362,7 @@ are deferred; step 6 remains unauthorized.**
 
 - Show one prompt containing the original command and each reliably parsed
   step's decision, in the pi-tool-permissions prompt format (header, full
-  command, bracketed icon breakdown rows with a » cursor on the attributed
+  command, bracketed icon breakdown rows with a » cursor on each prompting
   step, trailing "Why:" line). The breakdown is an explanation, not an
   execution plan: execute the original command unchanged, never the fragments
   separately.

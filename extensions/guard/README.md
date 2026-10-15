@@ -151,8 +151,8 @@ Registration details:
   header ("Allow Bash?", or "Allow Bash subcommand?" for a multi-step
   breakdown), the full command (truncated at 200 characters) or the code for
   non-shell executors, a bracketed icon breakdown of each reliably parsed
-  step's decision (✓ allow, ? ask/classify, ✗ deny, with a » cursor on the
-  attributed failing step), and a trailing "Why:" line with the aggregate
+  step's decision (✓ allow, ? ask/classify, ✗ deny, with a » cursor on each
+  prompting step), and a trailing "Why:" line with the aggregate
   decision reason. Unavailable breakdowns are explicitly marked ("Breakdown
   unavailable: ...", plus a labeled failing step when attributed) and never
   become guessed rules.
