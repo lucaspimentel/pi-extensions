@@ -87,6 +87,27 @@ test("valid forms from the design", () => {
 	assert.ok(validateOk("status", []).length > 0);
 });
 
+test("diff: dangling range endpoints rejected when combined with another rev or pathspec", () => {
+	// git diff exits 129 for all of these; validation rejects them up front.
+	for (const args of [
+		["--stat", "master...", "HEAD"],
+		["--stat", "HEAD", "master..."],
+		["master..", "HEAD"],
+		["..main", "HEAD"],
+		["HEAD...", "docs/"],
+		["main...", "main..."] ,
+	]) {
+		validateRejects("diff", args, "omitted endpoint");
+	}
+	// A dangling range alone, or followed by the separator and pathspecs, is
+	// valid git (empty side defaults to HEAD).
+	validateOk("diff", ["--stat", "HEAD..."]);
+	validateOk("diff", ["HEAD...", "--", "docs/"]);
+	// git log and show accept a dangling range next to another rev.
+	validateOk("log", ["--oneline", "HEAD...", "HEAD"]);
+	validateOk("show", ["--stat", "HEAD...", "HEAD"]);
+});
+
 test("value flags: -U accepted in attached, separate, and --unified= forms within bounds", () => {
 	for (const args of [["-U5"], ["-U", "5"], ["--unified=5"], ["-U", "0"], ["-U", "64"], ["--unified=0"], ["--unified=64"]]) {
 		validateOk("diff", args);

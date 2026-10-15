@@ -128,6 +128,17 @@ export function isValidPath(token: string): boolean {
 }
 
 /**
+ * True for a range token with an omitted endpoint: `..X`, `...X`, `X..`,
+ * `X...`, and the bare `..` / `...` forms. `A..B` / `A...B` with both
+ * endpoints spelled out are not dangling. `rev:path` tokens whose path part
+ * contains a `..` segment are already rejected by `isSafeUnion`, so a
+ * leading/trailing `..` here always means a range, never a path component.
+ */
+function isDanglingRange(token: string): boolean {
+	return token.startsWith("..") || token.endsWith("..");
+}
+
+/**
  * Safe-union rule for tokens before `--`: a token is accepted if it passes
  * either validator. Tokens that pass the rev validator but carry
  * path-dangerous constructs (absolute, backslash, `..` segment) are rejected:
@@ -197,6 +208,13 @@ export function validateInvocation(
 
 	const validated: string[] = [];
 	let pastSeparator = false;
+	// diff-only guard state: git diff parses its pre-`--` arguments as range
+	// endpoints and cannot accept a dangling range (`main...`, `..main`) next
+	// to another rev or pathspec; it exits with a usage error (code 129). git
+	// log and show accept the same combination, so the guard applies to diff
+	// only.
+	let danglingRange: string | null = null;
+	let revCount = 0;
 
 	for (let i = 0; i < args.length; i++) {
 		const token = args[i];
@@ -223,6 +241,22 @@ export function validateInvocation(
 		} else if (!isSafeUnion(token)) {
 			return { ok: false, reason: `invalid argument '${token}': not a valid rev or pathspec` };
 		}
+
+		if (!pastSeparator && subcommand === "diff") {
+			if ((isDanglingRange(token) || danglingRange !== null) && revCount > 0) {
+				const offender = isDanglingRange(token) ? token : (danglingRange ?? token);
+				return {
+					ok: false,
+					reason:
+						`invalid argument '${offender}': a diff range with an omitted endpoint ` +
+						`(like 'main...' or '..main') cannot be combined with another rev or ` +
+						`pathspec; spell out both endpoints, e.g. 'main...HEAD'`,
+					};
+			}
+			if (isDanglingRange(token)) danglingRange = token;
+			revCount += 1;
+		}
+
 		validated.push(token);
 	}
 

@@ -106,6 +106,15 @@ dangerous, and git's own rev-vs-path disambiguation then applies).
   rejected. Tokens that pass the rev validator but carry path-dangerous
   constructs: absolute, backslash, `..` segment, are rejected by the union
   rule, since git would fall back to treating them as pathspecs.)
+- diff-only dangling-range guard: a range token with an omitted endpoint
+  (`main...`, `main..`, `..main`, bare `..`) is rejected when combined with
+  another rev or pathspec before `--`, because `git diff` parses its
+  pre-`--` arguments as range endpoints and exits with a usage error (code
+  129) for that combination. A dangling range alone, or followed by `--` and
+  pathspecs, is accepted (the empty side defaults to HEAD); `log` and `show`
+  accept the combination, so the guard does not apply to them. Rejections
+  name the offending token and suggest spelling out both endpoints (e.g.
+  `main...HEAD`).
 
 ## Allowlists
 
