@@ -231,20 +231,99 @@ export interface BreakdownReliability {
 	reason?: string;
 }
 
+/**
+ * Blanks the inside of quoted segments (single, double, backtick) so quoted
+ * punctuation is not mistaken for active shell syntax. Mirrors the quote
+ * semantics of splitTopLevelShell exactly: `\` outside single quotes
+ * consumes the next character as an escape pair (with `\<newline>` and
+ * `\<CR><LF>` removed as line continuations), and no escapes exist inside
+ * single quotes. Quote delimiters are kept and quoted content is replaced
+ * with spaces of the same length: keeping the delimiters preserves
+ * adjacency (so `echo "a"#b` does not become a comment false positive), and
+ * blanking rather than keeping the content means an escaped character like
+ * `\#` disappears entirely instead of becoming a whitespace-adjacent `#`.
+ * If quotes are unbalanced at end of input, the original string is returned
+ * unchanged: raw text trips every check, which is the conservative outcome
+ * (unreachable via splitTopLevelShell, which returns ambiguous first, but
+ * defensive here).
+ */
+function stripQuotedSegments(s: string): string {
+	let out = "";
+	let inSingle = false;
+	let inDouble = false;
+	let inBacktick = false;
+	let i = 0;
+
+	while (i < s.length) {
+		const ch = s[i];
+
+		// Backslash escape: skip next char (not inside single quotes).
+		// POSIX: \<newline> outside single quotes is a line continuation:
+		// both characters are removed.
+		if (ch === "\\" && !inSingle) {
+			const next = s[i + 1];
+			if (next === "\n") { i += 2; continue; }
+			if (next === "\r" && s[i + 2] === "\n") { i += 3; continue; }
+			out += "  ";
+			i += 2;
+			continue;
+		}
+
+		// Single-quote toggle (not inside double quotes or backticks)
+		if (ch === "'" && !inDouble && !inBacktick) {
+			inSingle = !inSingle;
+			out += ch;
+			i++;
+			continue;
+		}
+
+		// Double-quote toggle (not inside single quotes or backticks)
+		if (ch === '"' && !inSingle && !inBacktick) {
+			inDouble = !inDouble;
+			out += ch;
+			i++;
+			continue;
+		}
+
+		// Backtick toggle (not inside single or double quotes)
+		if (ch === "`" && !inSingle && !inDouble) {
+			inBacktick = !inBacktick;
+			out += ch;
+			i++;
+			continue;
+		}
+
+		out += inSingle || inDouble || inBacktick ? " " : ch;
+		i++;
+	}
+
+	// Unmatched quote: return the original string unchanged (conservative)
+	if (inSingle || inDouble || inBacktick) return s;
+
+	return out;
+}
+
 /** Characters that make a step unreliable for exact per-step rules: command
  * substitution, process substitution, background execution, subshell or
  * brace grouping, and heredocs. Simple `$VAR` expansion is fine: rules match
  * the literal command text, so an anchored rule stays exact. */
 function unreliableConstructReason(part: string): string | null {
+	// Double-quoted $(...), backticks, and ${...} are still ACTIVE in bash,
+	// so these two checks run on the raw text: single-quoted inert forms
+	// flag too, which is the conservative outcome.
 	if (/\$\(|`/.test(part)) return "command substitution";
 	if (/\$\{/.test(part)) return "parameter expansion";
-	if (/<\(|>\(/.test(part)) return "process substitution";
-	if (/<</.test(part)) return "heredoc";
-	if (part.replace(/&&/g, "").includes("&")) return "background execution";
+	// The remaining constructs are inert inside quotes; blank quoted
+	// segments (mirroring splitTopLevelShell's quote semantics) so quoted
+	// punctuation does not flag.
+	const bare = stripQuotedSegments(part);
+	if (/<\(|>\(/.test(bare)) return "process substitution";
+	if (/<</.test(bare)) return "heredoc";
+	if (bare.replace(/&&/g, "").includes("&")) return "background execution";
 	// `@{...}` is git revision syntax (e.g. `@{upstream}`), not brace
 	// grouping. An unmatched `@{` is left in place and still flags.
-	if (/[(){}]/.test(part.replace(/@\{[^}]*\}/g, ""))) return "subshell or brace grouping";
-	if (/(^|\s)#/.test(part)) return "inline comment";
+	if (/[(){}]/.test(bare.replace(/@\{[^}]*\}/g, ""))) return "subshell or brace grouping";
+	if (/(^|\s)#/.test(bare)) return "inline comment";
 	return null;
 }
 

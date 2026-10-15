@@ -216,6 +216,10 @@ test("breakdown reliability: opaque constructs and Pwsh are unavailable with a r
 		["echo a 2>&1 > out", "host-bash", /background/],
 		["git log @{foo", "host-bash", /brace/],
 		["(echo a) && echo b", "host-bash", /subshell/],
+		// Unquoted constructs must keep flagging after the quote-stripping
+		// fix (these are the true-positive guards for it).
+		["echo { a; } && echo b", "host-bash", /brace/],
+		["git commit -m msg (extra) && echo b", "host-bash", /subshell/],
 		["for x in a b; do echo $x; done", "host-bash", /structural/],
 		["if true; then echo yes; fi", "host-bash", /structural/],
 		["echo 'unmatched && echo b", "host-bash", /unambiguously/],
@@ -241,6 +245,12 @@ test("breakdown reliability: trailing descriptor dups and git @{...} refs keep t
 		// dup is stripped for opacity checks and the file redirect stays
 		// in the evaluated step text, so rule matching is unaffected.
 		"git status > out.log 2>&1",
+		// Punctuation inside quoted text (e.g. commit messages) is inert in
+		// bash and must not make the breakdown unavailable.
+		'git commit -m "message with ([?]) inside quotes"',
+		"git commit -m 'msg with (parens) & {braces}' && git log -1",
+		// A quoted `#` is not an inline comment.
+		'echo "a (#b)" && echo b',
 	];
 	for (const command of available) {
 		const explained = explainHostShellCommand(shellCall(command), policy);
@@ -275,6 +285,17 @@ test("assessBreakdownReliability pairs raw fragments with evaluated steps one-to
 	const background = assessBreakdownReliability("host-bash", ["sleep 5 &"], ["sleep 5 &"]);
 	assert.equal(background.available, false);
 	assert.ok(/background/.test(background.reason ?? ""));
+	// Quoted punctuation is inert: it does not make the step unreliable.
+	assert.ok(assessBreakdownReliability("host-bash", ['git commit -m "msg ([?])"'], ['git commit -m "msg ([?])"']).available);
+	// Unquoted grouping still flags (true-positive guard for the fix).
+	const unquotedSubshell = assessBreakdownReliability("host-bash", ["(echo hi)"], ["(echo hi)"]);
+	assert.equal(unquotedSubshell.available, false);
+	assert.ok(/subshell/.test(unquotedSubshell.reason ?? ""));
+	// Quoted command substitution is still ACTIVE in bash, so it flags on
+	// the raw text by design (conservative direction).
+	const quotedSubstitution = assessBreakdownReliability("host-bash", ['echo "$(x)"'], ['echo "$(x)"']);
+	assert.equal(quotedSubstitution.available, false);
+	assert.ok(/command substitution/.test(quotedSubstitution.reason ?? ""));
 });
 
 test("early-return profiles and workspace lock record an unavailable breakdown with a reason", () => {
