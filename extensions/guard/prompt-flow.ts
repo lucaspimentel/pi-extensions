@@ -87,6 +87,15 @@ function breakdownRows(explanation: HostShellExplanation): string[] {
 	});
 }
 
+/** One-line failing-step display: first line, capped like the full command,
+ *  plus a line-count note when the subcommand spans more lines (commit
+ *  messages, heredocs); the full text stays in the Full command block. */
+function failingStepLine(sub: string): string {
+	const lines = sub.split("\n");
+	const line = truncateCommand(lines[0]);
+	return lines.length > 1 ? `${line} (+${lines.length - 1} more lines)` : line;
+}
+
 /**
  * One approval prompt in the pi-tool-permissions prompt format: a friendly
  * header, the full command, the per-step icon breakdown, and a trailing
@@ -124,7 +133,7 @@ export function executionPromptTitle(input: {
 			lines.push("", "Breakdown:", ...breakdownRows(explanation));
 		} else {
 			lines.push("", `Breakdown unavailable: ${explanation.breakdown.reason ?? "unreliable parsing"}`);
-			if (failingSub) lines.push("", "Failing step:", `  ${failingSub}`);
+			if (failingSub) lines.push("", "Failing step:", `  ${failingStepLine(failingSub)}`);
 		}
 	}
 	lines.push("", `Why: ${why}`);

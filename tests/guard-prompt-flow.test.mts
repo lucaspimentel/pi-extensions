@@ -169,7 +169,8 @@ test("a multi-line failing subcommand with an unavailable breakdown keeps the la
 	assert.ok(title.includes("file redirect requires a redirect-aware allow rule"), "the reason prose is present", title);
 	assert.ok(!title.includes("subcommand '"), "the reason no longer quotes the subcommand inline", title);
 	assert.ok(title.includes("Failing step:"), title);
-	assert.ok(title.includes("  cat > wl-debug.mts <<'EOF'"), title);
+	assert.ok(title.includes("  cat > wl-debug.mts <<'EOF' (+2 more lines)"), title);
+	assert.ok(!title.includes("Failing step:\n  cat > wl-debug.mts <<'EOF'\nconsole.log(1)"), "the failing step renders one line, not the full subcommand", title);
 	assert.ok(title.includes("Breakdown unavailable:"), title);
 });
 
