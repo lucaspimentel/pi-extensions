@@ -48,7 +48,7 @@
     "html-to-text": "^10.0.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-tui": "^0.99.1",
+    "@earendil-works/pi-tui": "^1.1.0",
     "@types/html-to-text": "^9.0.4",
     "@types/node": "^26",
     "typescript": "^6.0.3"
@@ -57,7 +57,7 @@
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "^0.99.1",
     "@earendil-works/pi-coding-agent": "^0.99.1",
-    "@earendil-works/pi-tui": "^0.99.1",
+    "@earendil-works/pi-tui": "^1.1.0",
     "typebox": "*"
   }
 }
