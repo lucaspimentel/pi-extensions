@@ -1,38 +1,40 @@
 /**
- * Guard's six-profile ladder and the per-profile decision cells.
+ * Guard's seven-profile ladder and the per-profile decision cells.
  *
  * Session-only: every session starts at "default", nothing is persisted.
- * The ladder is the ctrl+alt+g cycle order: research -> default -> auto ->
- * trusted -> yolo -> research. "unrestricted" is NEVER in the cycle: it is
- * reachable only with `/guard profile unrestricted`, so one keypress cannot
- * drop the deny rules; cycling from unrestricted goes to research.
+ * The ladder is the ctrl+alt+g cycle order: research -> default ->
+ * allow-edits -> auto -> trusted -> yolo -> research. "unrestricted" is NEVER
+ * in the cycle: it is reachable only with `/guard profile unrestricted`, so
+ * one keypress cannot drop the deny rules; cycling from unrestricted goes to
+ * research.
  *
  * Cell semantics (docs/guard-design.md, Profiles):
  *
- |                          | research | default | auto      | trusted | yolo   | unrestricted |
- | sandbox workspace (step 3)| overlay  | rw      | rw        | rw      | none   | none         |
- | host_bash / pwsh          | deny     | rules->tier->prompt | rules->tier->classify | rules->tier->allow | deny/ask rules, else allow | allow |
- | write/edit (non-protected)| deny     | roots*  | classify  | allow   | allow  | allow        |
- | protected-path write      | deny     | prompt  | prompt    | prompt  | allow  | allow        |
- | local reads               | as default | roots** | as default | as default | allow | allow      |
- | secret-mask read          | deny     | deny    | deny      | deny    | allow  | allow        |
- | web_fetch outside allow   | prompt   | prompt  | classify  | allow   | allow  | allow        |
- | other remote reads        | allow    | allow   | allow     | allow   | allow  | allow        |
- | remote writes             | deny     | prompt  | classify  | allow   | allow  | allow        |
- | sandboxed exec            | allow    | allow   | allow     | allow   | allow  | allow        |
- | meta                      | allow    | allow   | allow     | allow   | allow  | allow        |
+ |                          | research | default | allow-edits | auto      | trusted | yolo   | unrestricted |
+ | sandbox workspace (step 3)| overlay  | rw      | rw          | rw        | rw      | none   | none         |
+ | host_bash / pwsh          | deny     | rules->tier->prompt | as default | rules->tier->classify | rules->tier->allow | deny/ask rules, else allow | allow |
+ | write/edit (non-protected)| deny     | roots*  | roots*      | classify  | allow   | allow  | allow        |
+ | protected-path write      | deny     | prompt  | prompt      | prompt    | prompt  | allow  | allow        |
+ | local reads               | as default | roots** | as default | as default | as default | allow | allow      |
+ | secret-mask read          | deny     | deny    | deny        | deny      | deny    | allow  | allow        |
+ | web_fetch outside allow   | prompt   | prompt  | prompt      | classify  | allow   | allow  | allow        |
+ | other remote reads        | allow    | allow   | allow       | allow     | allow   | allow  | allow        |
+ | remote writes             | deny     | prompt  | prompt      | classify  | allow   | allow  | allow        |
+ | sandboxed exec            | allow    | allow   | allow       | allow     | allow   | allow  | allow        |
+ | meta                      | allow    | allow   | allow       | allow     | allow   | allow  | allow        |
  *
- *   *  allowed inside cwd and configured write roots, prompt outside.
+ *   *  allowed inside cwd and configured write roots, prompt outside
+ *      (default and allow-edits).
  *   ** allowed inside cwd and configured read roots, prompt outside.
  *
  * "classify" cells resolve through the LLM classifier (an injected strategy,
  * see decision.ts). The classifier never runs for any other cell.
  */
 
-export type Profile = "research" | "default" | "auto" | "trusted" | "yolo" | "unrestricted";
+export type Profile = "research" | "default" | "allow-edits" | "auto" | "trusted" | "yolo" | "unrestricted";
 
 /** Cycle order for ctrl+alt+g and the /guard picker; unrestricted is excluded. */
-export const PROFILE_LADDER: readonly Profile[] = ["research", "default", "auto", "trusted", "yolo"];
+export const PROFILE_LADDER: readonly Profile[] = ["research", "default", "allow-edits", "auto", "trusted", "yolo"];
 
 /** Every valid profile: the ladder plus the command-only unrestricted. */
 export const ALL_PROFILES: readonly Profile[] = [...PROFILE_LADDER, "unrestricted"];
@@ -61,6 +63,8 @@ export type WorkspaceModeForProfile = "overlay" | "rw" | "none";
 export function workspaceModeForProfile(profile: Profile): WorkspaceModeForProfile {
 	switch (profile) {
 		case "research": return "overlay";
+		case "allow-edits":
+		case "default": return "rw";
 		case "yolo":
 		case "unrestricted": return "none";
 		default: return "rw";
@@ -78,7 +82,8 @@ export type CellAction = "allow" | "prompt" | "deny" | "classify";
 export function hostShellCell(profile: Profile): CellAction {
 	switch (profile) {
 		case "research": return "deny";
-		case "default": return "prompt";
+		case "default":
+		case "allow-edits": return "prompt";
 		case "auto": return "classify";
 		case "trusted":
 		case "yolo":
@@ -88,12 +93,13 @@ export function hostShellCell(profile: Profile): CellAction {
 
 /**
  * The write/edit cell per profile. "roots" means: allowed inside cwd and the
- * configured write roots, prompt outside (default profile only).
+ * configured write roots, prompt outside (default and allow-edits profiles).
  */
 export function writeEditCell(profile: Profile): CellAction | "roots" {
 	switch (profile) {
 		case "research": return "deny";
-		case "default": return "roots";
+		case "default":
+		case "allow-edits": return "roots";
 		case "auto": return "classify";
 		case "trusted":
 		case "yolo":
@@ -106,6 +112,7 @@ export function protectedPathCell(profile: Profile): CellAction {
 	switch (profile) {
 		case "research": return "deny";
 		case "default":
+		case "allow-edits":
 		case "auto":
 		case "trusted": return "prompt";
 		case "yolo":
@@ -122,6 +129,7 @@ export function localReadCell(profile: Profile): "roots" | "allow" {
 	switch (profile) {
 		case "research":
 		case "default":
+		case "allow-edits":
 		case "auto":
 		case "trusted": return "roots";
 		case "yolo":
@@ -134,6 +142,7 @@ export function maskReadCell(profile: Profile): CellAction {
 	switch (profile) {
 		case "research":
 		case "default":
+		case "allow-edits":
 		case "auto":
 		case "trusted": return "deny";
 		case "yolo":
@@ -148,7 +157,8 @@ export function maskReadCell(profile: Profile): CellAction {
 export function exfilRemoteReadCell(profile: Profile): CellAction {
 	switch (profile) {
 		case "research":
-		case "default": return "prompt";
+		case "default":
+		case "allow-edits": return "prompt";
 		case "auto": return "classify";
 		case "trusted":
 		case "yolo":
@@ -165,7 +175,8 @@ export function otherRemoteReadCell(_profile: Profile): CellAction {
 export function remoteWriteCell(profile: Profile): CellAction {
 	switch (profile) {
 		case "research": return "deny";
-		case "default": return "prompt";
+		case "default":
+		case "allow-edits": return "prompt";
 		case "auto": return "classify";
 		case "trusted":
 		case "yolo":
@@ -195,6 +206,7 @@ export function profileFooterLabel(profile: Profile, classifierModelId: string |
 	switch (profile) {
 		case "research": return "research";
 		case "default": return "";
+		case "allow-edits": return "allow-edits";
 		case "auto": return classifierModelId ? `auto: ${classifierModelId}` : "auto (no classifier)";
 		case "trusted": return "trusted";
 		case "yolo": return "yolo";

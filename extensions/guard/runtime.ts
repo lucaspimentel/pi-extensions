@@ -156,7 +156,13 @@ export class GuardRuntime {
 		this.transitioning++;
 		const lockVersion = this.lockVersion;
 		const changedMounts = this.launchPolicyKey(policy, detection) !== this.launchPolicyKey(this.currentPolicy, this.detection);
-		const tighter = ["research", "default", "auto", "trusted", "yolo", "unrestricted"].indexOf(policy.profile) < ["research", "default", "auto", "trusted", "yolo", "unrestricted"].indexOf(this.currentPolicy.profile);
+		// Strictness ranking mirrors the ladder order: moving up the ladder (or to
+		// unrestricted) is loosening; moving down is tightening and stops active
+		// host execution. allow-edits sits between default and auto: looser than
+		// default (in-root writes allowed), tighter than nothing else in practice
+		// but ranked by ladder position for consistency.
+		const strictness = ["research", "default", "allow-edits", "auto", "trusted", "yolo", "unrestricted"];
+		const tighter = strictness.indexOf(policy.profile) < strictness.indexOf(this.currentPolicy.profile);
 		const hostPolicyChanged = this.hostPolicyKey(policy) !== this.hostPolicyKey(this.currentPolicy);
 		const stopped = options.preempt || changedMounts || ((tighter || hostPolicyChanged) && !this.active?.sandboxed) ? this.stopActive() : Promise.resolve();
 		// Attach now: teardown can reject before the queue becomes available.

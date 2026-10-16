@@ -219,7 +219,7 @@ test("content-only overrides remove stale structured content and never retain op
 });
 
 test("only grep and ffgrep in guarded profiles are filtered", () => {
-	for (const profile of ["research", "default", "auto", "trusted"]) {
+	for (const profile of ["research", "default", "allow-edits", "auto", "trusted"]) {
 		assert.equal(output(".env:1: PRIVATE", {}, policy({ profile })), "1 matches in masked files omitted");
 	}
 	for (const profile of ["yolo", "unrestricted"]) {

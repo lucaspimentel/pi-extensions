@@ -1063,6 +1063,7 @@ test("the profile picker lists Cancel first, marks the current profile, and anno
 			"Cancel",
 			"research",
 			"default (current)",
+			"allow-edits",
 			"auto",
 			"trusted",
 			"⚠️ yolo (dangerous: host access)",
@@ -1753,7 +1754,8 @@ test("the profile picker renders as the overlay and applies the chosen profile",
 		assert.equal(selector.opened.length, 0, "the picker never opened as a native selector");
 		overlay.down();
 		overlay.down();
-		overlay.down(); // Cancel, research, default (current), then auto
+		overlay.down();
+		overlay.down(); // Cancel, research, default (current), allow-edits, then auto
 		overlay.answer();
 		await command;
 		assert.ok(h.notifications.some((n) => /Profile: auto/.test(n)), "the profile chosen inside the overlay applied");

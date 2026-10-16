@@ -68,7 +68,7 @@ const PARITY_COMMANDS = [
 ];
 
 test("aggregate parity: explain().decision equals decideHostShellCommand and decide() for every profile and command shape", () => {
-	for (const profile of ["research", "default", "auto", "trusted", "yolo", "unrestricted"] as const) {
+	for (const profile of ["research", "default", "allow-edits", "auto", "trusted", "yolo", "unrestricted"] as const) {
 		for (const command of PARITY_COMMANDS) {
 			for (const shell of ["host-bash", "pwsh"] as const) {
 				const policy = makePolicy({ profile, workspaceLocked: false });

@@ -132,9 +132,11 @@ test("workspace locks deny every host/raw route and force ro even in unrestricte
 // ── Profile ladder ────────────────────────────────────────────────────────────
 
 test("profile ladder cycles and wraps; unrestricted is excluded", () => {
-	assert.deepEqual(PROFILE_LADDER, ["research", "default", "auto", "trusted", "yolo"]);
-	assert.deepEqual(ALL_PROFILES, ["research", "default", "auto", "trusted", "yolo", "unrestricted"]);
+	assert.deepEqual(PROFILE_LADDER, ["research", "default", "allow-edits", "auto", "trusted", "yolo"]);
+	assert.deepEqual(ALL_PROFILES, ["research", "default", "allow-edits", "auto", "trusted", "yolo", "unrestricted"]);
 	assert.equal(nextProfile("research"), "default");
+	assert.equal(nextProfile("default"), "allow-edits");
+	assert.equal(nextProfile("allow-edits"), "auto");
 	assert.equal(nextProfile("yolo"), "research");
 	assert.equal(nextProfile("unrestricted"), "research", "cycling from unrestricted goes to research");
 });
@@ -154,16 +156,17 @@ function decideRead(profile: Profile, p: string | undefined, overrides: Partial<
 }
 
 test("profile cells match the design table", () => {
-	assert.deepEqual(ALL_PROFILES.map(hostShellCell), ["deny", "prompt", "classify", "allow", "allow", "allow"]);
-	assert.deepEqual(ALL_PROFILES.map(protectedPathCell), ["deny", "prompt", "prompt", "prompt", "allow", "allow"]);
-	assert.deepEqual(ALL_PROFILES.map(exfilRemoteReadCell), ["prompt", "prompt", "classify", "allow", "allow", "allow"]);
-	assert.deepEqual(ALL_PROFILES.map(remoteWriteCell), ["deny", "prompt", "classify", "allow", "allow", "allow"]);
-	assert.deepEqual(ALL_PROFILES.map(workspaceModeForProfile), ["overlay", "rw", "rw", "rw", "none", "none"]);
+	assert.deepEqual(ALL_PROFILES.map(hostShellCell), ["deny", "prompt", "prompt", "classify", "allow", "allow", "allow"]);
+	assert.deepEqual(ALL_PROFILES.map(protectedPathCell), ["deny", "prompt", "prompt", "prompt", "prompt", "allow", "allow"]);
+	assert.deepEqual(ALL_PROFILES.map(exfilRemoteReadCell), ["prompt", "prompt", "prompt", "classify", "allow", "allow", "allow"]);
+	assert.deepEqual(ALL_PROFILES.map(remoteWriteCell), ["deny", "prompt", "prompt", "classify", "allow", "allow", "allow"]);
+	assert.deepEqual(ALL_PROFILES.map(workspaceModeForProfile), ["overlay", "rw", "rw", "rw", "rw", "none", "none"]);
 	assert.deepEqual(
 		ALL_PROFILES.map((p) => writeEditCell(p)),
-		["deny", "roots", "classify", "allow", "allow", "allow"],
+		["deny", "roots", "roots", "classify", "allow", "allow", "allow"],
 	);
 	assert.equal(profileFooterLabel("default", undefined), "");
+	assert.equal(profileFooterLabel("allow-edits", undefined), "allow-edits");
 	assert.equal(profileFooterLabel("auto", "claude-haiku"), "auto: claude-haiku");
 	assert.equal(profileFooterLabel("auto", undefined), "auto (no classifier)");
 	assert.equal(profileFooterLabel("unrestricted", undefined), "unrestricted");
@@ -173,6 +176,7 @@ test("host shell cell for every profile (rules change nothing here)", () => {
 	const expected: Record<Profile, string> = {
 		research: "deny",
 		default: "prompt",
+		"allow-edits": "prompt",
 		auto: "classify",
 		trusted: "allow",
 		yolo: "allow",
@@ -187,6 +191,7 @@ test("write/edit cell for every profile (inside cwd)", () => {
 	const expected: Record<Profile, string> = {
 		research: "deny",
 		default: "allow",
+		"allow-edits": "allow",
 		auto: "classify",
 		trusted: "allow",
 		yolo: "allow",
@@ -195,17 +200,22 @@ test("write/edit cell for every profile (inside cwd)", () => {
 	for (const profile of ALL_PROFILES) {
 		assert.equal(decideWrite(profile, "/home/user/proj/src/a.ts").action, expected[profile], profile);
 	}
-	// default prompts outside cwd/write roots; the other roots cells are the same.
+	// default and allow-edits prompt outside cwd/write roots; the other roots cells are the same.
 	assert.equal(decideWrite("default", "/etc/hosts").action, "prompt");
+	assert.equal(decideWrite("allow-edits", "/etc/hosts").action, "prompt");
 	const withRoot = makePolicy({ profile: "default", config: makeConfig({ writeRoots: ["/tmp/scratch"] }) });
 	assert.equal(decide(withRoot, { kind: "local-write", tool: "write", path: "/tmp/scratch/out.txt" }).action, "allow");
 	assert.equal(decide(withRoot, { kind: "local-write", tool: "write", path: "/tmp/other/out.txt" }).action, "prompt");
+	const allowEditsRoot = makePolicy({ profile: "allow-edits", config: makeConfig({ writeRoots: ["/tmp/scratch"] }) });
+	assert.equal(decide(allowEditsRoot, { kind: "local-write", tool: "write", path: "/tmp/scratch/out.txt" }).action, "allow");
+	assert.equal(decide(allowEditsRoot, { kind: "local-write", tool: "write", path: "/tmp/other/out.txt" }).action, "prompt");
 });
 
 test("protected-path writes follow their own cell in every profile", () => {
 	const expected: Record<Profile, string> = {
 		research: "deny",
 		default: "prompt",
+		"allow-edits": "prompt",
 		auto: "prompt",
 		trusted: "prompt",
 		yolo: "allow",
@@ -226,7 +236,7 @@ test("local reads: allowed in cwd and read roots, prompt outside (except yolo/un
 		assert.equal(decideRead(profile, "/home/user/proj/src/a.ts").action, "allow", `${profile}: inside cwd`);
 		assert.equal(decideRead(profile, undefined).action, "allow", `${profile}: no path means cwd`);
 	}
-	for (const profile of ["research", "default", "auto", "trusted"] as Profile[]) {
+	for (const profile of ["research", "default", "allow-edits", "auto", "trusted"] as Profile[]) {
 		assert.equal(decideRead(profile, "/etc/hosts").action, "prompt", profile);
 		const withRoot = makePolicy({ profile, config: makeConfig({ readRoots: ["/tmp/docs"] }) });
 		assert.equal(decide(withRoot, { kind: "local-read", tool: "read", path: "/tmp/docs/x.md" }).action, "allow", profile);
@@ -259,6 +269,7 @@ test("web_fetch: exfil-capable vs allowlisted, per-profile cells", () => {
 	const expected: Record<Profile, string> = {
 		research: "prompt",
 		default: "prompt",
+		"allow-edits": "prompt",
 		auto: "classify",
 		trusted: "allow",
 		yolo: "allow",
@@ -277,6 +288,7 @@ test("other remote reads are always allowed; remote writes follow their cell; me
 	const writeExpected: Record<Profile, string> = {
 		research: "deny",
 		default: "prompt",
+		"allow-edits": "prompt",
 		auto: "classify",
 		trusted: "allow",
 		yolo: "allow",
@@ -724,12 +736,12 @@ test("cycle order skips unrestricted; cycling from unrestricted goes to research
 	const state = createSessionState({ config: makeConfig(), sandbox: null, cwd: "/w", interactive: true });
 	assert.equal(state.profile, "default");
 	const seq: string[] = [state.profile];
-	for (let i = 0; i < 5; i++) {
+	for (let i = 0; i < 6; i++) {
 		const r = cycleProfile(state);
 		assert.equal(r.ok, true);
 		if (r.ok) seq.push(r.profile);
 	}
-	assert.deepEqual(seq, ["default", "auto", "trusted", "yolo", "research", "default"], "full cycle returns to default without unrestricted");
+	assert.deepEqual(seq, ["default", "allow-edits", "auto", "trusted", "yolo", "research", "default"], "full cycle returns to default without unrestricted");
 	// unrestricted is only reachable via setProfile, and cycling from it goes to research.
 	assert.deepEqual(setProfile(state, "unrestricted"), { ok: true });
 	assert.equal(state.profile, "unrestricted");
@@ -740,7 +752,7 @@ test("cycle order skips unrestricted; cycling from unrestricted goes to research
 test("research hold blocks set and cycle; release restores the pre-hold profile", () => {
 	const state = createSessionState({ config: makeConfig(), sandbox: null, cwd: "/w", interactive: true });
 	const c1 = cycleProfile(state);
-	assert.deepEqual(c1, { ok: true, profile: "auto" });
+	assert.deepEqual(c1, { ok: true, profile: "allow-edits" });
 	assert.deepEqual(requestResearchHold(state, "plan"), { granted: true, reason: "research granted", profile: "research" });
 	assert.equal(state.profile, "research");
 	assert.equal(cycleProfile(state).ok, false);
@@ -751,9 +763,9 @@ test("research hold blocks set and cycle; release restores the pre-hold profile"
 	// A second holder is refused.
 	assert.equal(requestResearchHold(state, "other").granted, false);
 	// Release restores.
-	assert.deepEqual(releaseResearchHold(state, "plan"), { released: true, reason: "research released; previous profile restored", profile: "auto" });
-	assert.equal(state.profile, "auto");
-	assert.deepEqual(releaseResearchHold(state, "plan"), { released: false, reason: "no research hold", profile: "auto" });
+	assert.deepEqual(releaseResearchHold(state, "plan"), { released: true, reason: "research released; previous profile restored", profile: "allow-edits" });
+	assert.equal(state.profile, "allow-edits");
+	assert.deepEqual(releaseResearchHold(state, "plan"), { released: false, reason: "no research hold", profile: "allow-edits" });
 });
 
 test("workspace lock and ack; footer composes profile, sandbox, and lock", () => {

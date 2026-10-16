@@ -1065,7 +1065,7 @@ export default function guard(pi: ExtensionAPI) {
 		},
 	});
 	pi.registerShortcut((loadUserConfigRaw().cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT) as Parameters<ExtensionAPI["registerShortcut"]>[0], {
-		description: "Cycle guard profile (research -> default -> auto -> trusted -> yolo; this session only)",
+		description: "Cycle guard profile (research -> default -> allow-edits -> auto -> trusted -> yolo; this session only)",
 		handler: async (ctx) => {
 			if (!state) return;
 			if (state.researchHolder) { notify(ctx, `Profile changes are blocked while ${state.researchHolder} holds research; the holder must release it first.`, "warning"); return; }
