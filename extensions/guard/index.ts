@@ -1,4 +1,4 @@
-/** Guard owns four executors. All other tool decisions remain observe-only. */
+/** Guard owns four executors and enforces write/edit; other non-owned tool decisions remain observe-only. */
 import { createBashTool, ExtensionSelectorComponent, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type ToolAnnotations, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -1083,11 +1083,11 @@ export default function guard(pi: ExtensionAPI) {
 			const command = args.trim();
 			if (!command || command === "profile") { await pickProfile(ctx); return; }
 			if (command === "help") {
-				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy and shared scratch", "/guard reload            Reload guard.json", "/guard model             Pick the classifier model (saved to user config)", "/guard model clear       Remove the classifier pin (resume auto-select)", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python and node; other tools remain observe-only (grep results are secret-filtered).", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects.", "Subagent children inherit this session's effective profile at each spawn and cannot leave it except for research (guard:subagent-snapshot-request)."].join("\n"));
+				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy and shared scratch", "/guard reload            Reload guard.json", "/guard model             Pick the classifier model (saved to user config)", "/guard model clear       Remove the classifier pin (resume auto-select)", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python, node and write/edit; other non-owned tools remain observe-only (grep results are secret-filtered).", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects.", "Subagent children inherit this session's effective profile at each spawn and cannot leave it except for research (guard:subagent-snapshot-request)."].join("\n"));
 				return;
 			}
 			if (command === "list") { showList(ctx); return; }
-			if (command === "debug on" || command === "debug off") { debugEnabled = command.endsWith("on"); notify(ctx, `guard: debug ${debugEnabled ? "ON" : "OFF"}; owned tools enforce, others observe.`); return; }
+			if (command === "debug on" || command === "debug off") { debugEnabled = command.endsWith("on"); notify(ctx, `guard: debug ${debugEnabled ? "ON" : "OFF"}; owned tools and write/edit enforce, others observe.`); return; }
 			if (command === "migrate" || command === "migrate dry") { await migrate(ctx, command.endsWith("dry")); return; }
 			if (/^model(\s|$)/i.test(command)) {
 				const sub = command.slice(5).trim().toLowerCase();

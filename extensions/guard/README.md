@@ -270,26 +270,34 @@ classification, guard.json, the save/migrate helpers, and the session state.
 
 ### Profiles and the cycle hotkey
 
-Six session-only profiles; every session starts at `default`, nothing is
-persisted:
+Seven session-only profiles; every session starts at `default`, nothing is
+persisted. Write/edit decisions are ENFORCED for non-owned tools (block on
+deny, approval dialog on prompt); everything else except the grep/ffgrep mask
+filter stays observe-only:
 
-| | research | default | auto | trusted | yolo | unrestricted |
-|---|---|---|---|---|---|---|
-| Sandbox workspace (step 3) | overlay (ro unless full mode) | rw | rw | rw | none | none |
-| host_bash / pwsh | deny | rules, then tier, then prompt | rules, then tier, then classify | rules, then tier, then allow | deny/ask rules, else allow | allow |
-| write/edit (non-protected) | deny | cwd + writeRoots, prompt outside | classify | allow | allow | allow |
-| Protected-path write/edit | deny | prompt | prompt | prompt | allow | allow |
-| Local reads | as default | cwd + readRoots, prompt outside | as default | as default | allow | allow |
-| Secret-mask path via read/grep | deny | deny | deny | deny | allow | allow |
-| web_fetch outside webFetchAllow | prompt | prompt | classify | allow | allow | allow |
-| Other remote reads | allow | allow | allow | allow | allow | allow |
-| Remote writes | deny | prompt | classify | allow | allow | allow |
-| Sandboxed exec (bash/python/node) | allow | allow | allow | allow | allow | allow |
-| Meta (codemode, subagent, ...) | allow | allow | allow | allow | allow | allow |
+| | research | default | allow-edits | auto | trusted | yolo | unrestricted |
+|---|---|---|---|---|---|---|---|
+| Sandbox workspace (step 3) | overlay (ro unless full mode) | rw | rw | rw | rw | none | none |
+| host_bash / pwsh | deny | rules, then tier, then prompt | as default | rules, then tier, then classify | rules, then tier, then allow | deny/ask rules, else allow | allow |
+| write/edit (non-protected) | deny | prompt every write (in-root or not) | cwd + writeRoots, prompt outside | roots gate, then classify (out-of-root always prompts) | allow | allow | allow |
+| Protected-path write/edit | deny | prompt | prompt | prompt | prompt | allow | allow |
+| Local reads | as default | cwd + readRoots, prompt outside | as default | as default | as default | allow | allow |
+| Secret-mask path via read/grep | deny | deny | deny | deny | deny | allow | allow |
+| web_fetch outside webFetchAllow | prompt | prompt | prompt | classify | allow | allow | allow |
+| Other remote reads | allow | allow | allow | allow | allow | allow | allow |
+| Remote writes | deny | prompt | prompt | classify | allow | allow | allow |
+| Sandboxed exec (bash/python/node) | allow | allow | allow | allow | allow | allow | allow |
+| Meta (codemode, subagent, ...) | allow | allow | allow | allow | allow | allow | allow |
 
-- **ctrl+alt+g** cycles research -> default -> auto -> trusted -> yolo ->
-  research, no confirmation on entering yolo. `cycleShortcut` in guard.json
-  overrides the key (read at load time).
+- **ctrl+alt+g** cycles research -> default -> allow-edits -> auto ->
+  trusted -> yolo -> research, no confirmation on entering yolo.
+  `cycleShortcut` in guard.json overrides the key (read at load time).
+- **allow-edits** is default plus silent in-root write/edit: its approval
+  dialog (offered on in-root non-protected prompts in `default`) switches the
+  session to the rung and approves the current call; switching back to
+  `default` restores prompting. Children inherit the rung but cannot
+  self-escalate into it. In `auto`, the classifier never rules on out-of-root
+  writes: they always prompt.
 - **unrestricted is never in the cycle**; it is reachable only with
   `/guard profile unrestricted`. Cycling from unrestricted goes to research.
 - While plan holds research (the `guard:research-request` /
@@ -404,7 +412,7 @@ with a warning and never discards the other scope.
 
 | Command | Behavior |
 |---|---|
-| `/guard` | profile picker (all six profiles) |
+| `/guard` | profile picker (all seven profiles) |
 | `/guard help` | usage |
 | `/guard list` | profile, holder, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, webFetchAllow count, host-shell rule counts, read/write roots, toolClasses count, classifier, debug state |
 | `/guard reload` | reload guard.json, refresh sandbox detection, clear the annotation cache |

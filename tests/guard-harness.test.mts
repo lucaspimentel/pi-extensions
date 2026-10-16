@@ -482,7 +482,7 @@ test("harness: /guard list and reload report the effective policy", async () => 
 		// help mentions the observe-only coexistence note.
 		h.notifications.length = 0;
 		await h.commandHandlers.get("guard")!("help", ctx);
-		assert.match(h.notifications.join("\n"), /ENFORCES bash, host_bash, python and node; other tools remain observe-only/);
+		assert.match(h.notifications.join("\n"), /ENFORCES bash, host_bash, python, node and write\/edit; other non-owned tools remain observe-only/);
 		assert.match(h.notifications.join("\n"), /unrestricted is command-only/);
 	});
 });
