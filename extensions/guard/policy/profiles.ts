@@ -13,7 +13,7 @@
  |                          | research | default | allow-edits | auto      | trusted | yolo   | unrestricted |
  | sandbox workspace (step 3)| overlay  | rw      | rw          | rw        | rw      | none   | none         |
  | host_bash / pwsh          | deny     | rules->tier->prompt | as default | rules->tier->classify | rules->tier->allow | deny/ask rules, else allow | allow |
- | write/edit (non-protected)| deny     | roots*  | roots*      | classify  | allow   | allow  | allow        |
+ | write/edit (non-protected)| deny     | prompt*  | roots*      | roots+    | allow   | allow  | allow        |
  | protected-path write      | deny     | prompt  | prompt      | prompt    | prompt  | allow  | allow        |
  | local reads               | as default | roots** | as default | as default | as default | allow | allow      |
  | secret-mask read          | deny     | deny    | deny        | deny      | deny    | allow  | allow        |
@@ -23,8 +23,13 @@
  | sandboxed exec            | allow    | allow   | allow       | allow     | allow   | allow  | allow        |
  | meta                      | allow    | allow   | allow       | allow     | allow   | allow  | allow        |
  *
- *   *  allowed inside cwd and configured write roots, prompt outside
- *      (default and allow-edits).
+ *   *  default prompts every non-protected write/edit (in-root or not); the
+ *      dialog offers the one-time approval and, for in-root targets, the
+ *      switch to allow-edits (docs/guard-design.md, Write/edit enforcement).
+ *   *  allow-edits: allowed inside cwd and configured write roots, prompt
+ *      outside (the rung's purpose).
+ *   +  auto gates the classifier behind write-root containment: out-of-root
+ *      writes always prompt; in-root writes are classified.
  *   ** allowed inside cwd and configured read roots, prompt outside.
  *
  * "classify" cells resolve through the LLM classifier (an injected strategy,
@@ -98,7 +103,7 @@ export function hostShellCell(profile: Profile): CellAction {
 export function writeEditCell(profile: Profile): CellAction | "roots" {
 	switch (profile) {
 		case "research": return "deny";
-		case "default":
+		case "default": return "prompt";
 		case "allow-edits": return "roots";
 		case "auto": return "classify";
 		case "trusted":

@@ -478,6 +478,9 @@ export function decideLocalRead(call: Extract<GuardCall, { kind: "local-read" }>
 export function decideLocalWrite(call: Extract<GuardCall, { kind: "local-write" }>, policy: PolicyState): Decision {
 	const { profile, config } = policy;
 	if (profile === "research") return { action: "deny", reason: "local write: denied in research" };
+	// The workspace lock (step-3 audit findings) blocks every host write
+	// channel, path-carrying or not, until /guard ack.
+	if (policy.workspaceLocked) return { action: "deny", reason: "workspace locked: write/edit is unavailable until /guard ack" };
 	// Local writes without a path (memory_write, scratchpad, ...) are allowed
 	// in every profile except research; pi's tool-call rendering shows them.
 	if (call.path === undefined || call.path.trim() === "") {
@@ -487,10 +490,27 @@ export function decideLocalWrite(call: Extract<GuardCall, { kind: "local-write" 
 		return cellAction(protectedPathCell(profile), `protected path ${call.path}`);
 	}
 	const cell = writeEditCell(profile);
+	if (cell === "prompt") {
+		// default: every non-protected write/edit prompts, in-root or not. The
+		// dialog offers the switch to allow-edits for in-root targets.
+		return {
+			action: "prompt",
+			reason: pathInsideWriteRoots(call.path, config)
+				? "write/edit requires approval in the default profile"
+				: "write outside cwd and every write root",
+		};
+	}
 	if (cell === "roots") {
 		return pathInsideWriteRoots(call.path, config)
 			? { action: "allow", reason: "write inside cwd or a configured write root" }
 			: { action: "prompt", reason: "write outside cwd and every write root" };
+	}
+	if (cell === "classify") {
+		// auto: write-root containment gates the classifier. An out-of-root
+		// write always prompts; the classifier only rules on in-root calls.
+		if (!pathInsideWriteRoots(call.path, config)) {
+			return { action: "prompt", reason: "write outside cwd and every write root" };
+		}
 	}
 	return cellAction(cell, "write/edit");
 }

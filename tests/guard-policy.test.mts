@@ -129,6 +129,20 @@ test("workspace locks deny every host/raw route and force ro even in unrestricte
 	}
 });
 
+test("the workspace lock also blocks write/edit in every profile, path-carrying or not", () => {
+	for (const profile of ALL_PROFILES) {
+		const policy = makePolicy({ profile, workspaceLocked: true });
+		const d = decide(policy, { kind: "local-write", tool: "edit", path: "/home/user/proj/src/a.ts" });
+		assert.equal(d.action, "deny", profile);
+		assert.match(d.reason, /workspace locked|denied in research/);
+		if (profile !== "research") {
+			assert.equal(decide(policy, { kind: "local-write", tool: "memory_write" }).action, "deny", `${profile}: pathless`);
+		}
+	}
+	// Unlocked pathless writes keep their cell outside research.
+	assert.equal(decide(makePolicy({ profile: "allow-edits" }), { kind: "local-write", tool: "memory_write" }).action, "allow");
+});
+
 // ── Profile ladder ────────────────────────────────────────────────────────────
 
 test("profile ladder cycles and wraps; unrestricted is excluded", () => {
@@ -163,7 +177,7 @@ test("profile cells match the design table", () => {
 	assert.deepEqual(ALL_PROFILES.map(workspaceModeForProfile), ["overlay", "rw", "rw", "rw", "rw", "none", "none"]);
 	assert.deepEqual(
 		ALL_PROFILES.map((p) => writeEditCell(p)),
-		["deny", "roots", "roots", "classify", "allow", "allow", "allow"],
+		["deny", "prompt", "roots", "classify", "allow", "allow", "allow"],
 	);
 	assert.equal(profileFooterLabel("default", undefined), "");
 	assert.equal(profileFooterLabel("allow-edits", undefined), "allow-edits");
@@ -190,7 +204,7 @@ test("host shell cell for every profile (rules change nothing here)", () => {
 test("write/edit cell for every profile (inside cwd)", () => {
 	const expected: Record<Profile, string> = {
 		research: "deny",
-		default: "allow",
+		default: "prompt",
 		"allow-edits": "allow",
 		auto: "classify",
 		trusted: "allow",
@@ -200,15 +214,43 @@ test("write/edit cell for every profile (inside cwd)", () => {
 	for (const profile of ALL_PROFILES) {
 		assert.equal(decideWrite(profile, "/home/user/proj/src/a.ts").action, expected[profile], profile);
 	}
-	// default and allow-edits prompt outside cwd/write roots; the other roots cells are the same.
+	// default prompts every non-protected write, in-root or not.
 	assert.equal(decideWrite("default", "/etc/hosts").action, "prompt");
-	assert.equal(decideWrite("allow-edits", "/etc/hosts").action, "prompt");
+	assert.equal(decideWrite("default", "/home/user/proj/src/a.ts").action, "prompt");
 	const withRoot = makePolicy({ profile: "default", config: makeConfig({ writeRoots: ["/tmp/scratch"] }) });
-	assert.equal(decide(withRoot, { kind: "local-write", tool: "write", path: "/tmp/scratch/out.txt" }).action, "allow");
-	assert.equal(decide(withRoot, { kind: "local-write", tool: "write", path: "/tmp/other/out.txt" }).action, "prompt");
+	assert.equal(decide(withRoot, { kind: "local-write", tool: "write", path: "/tmp/scratch/out.txt" }).action, "prompt", "default prompts even inside a write root");
+	// allow-edits: allowed inside cwd and write roots, prompt outside.
+	assert.equal(decideWrite("allow-edits", "/etc/hosts").action, "prompt");
 	const allowEditsRoot = makePolicy({ profile: "allow-edits", config: makeConfig({ writeRoots: ["/tmp/scratch"] }) });
 	assert.equal(decide(allowEditsRoot, { kind: "local-write", tool: "write", path: "/tmp/scratch/out.txt" }).action, "allow");
 	assert.equal(decide(allowEditsRoot, { kind: "local-write", tool: "write", path: "/tmp/other/out.txt" }).action, "prompt");
+});
+
+test("auto gates the write/edit classifier behind write-root containment", async () => {
+	const calls: GuardCall[] = [];
+	const strategy = async (call: GuardCall) => {
+		calls.push(call);
+		return { verdict: "allow" as const, reason: "test verdict" };
+	};
+	const auto = makePolicy({ profile: "auto" });
+	// Out-of-root: prompt without consulting the classifier.
+	const out = await resolveDecision(auto, { kind: "local-write", tool: "edit", path: "/etc/hosts" }, strategy);
+	assert.equal(out.action, "prompt");
+	assert.equal(calls.length, 0, "the classifier must never rule on an out-of-root write");
+	// In-root: the classifier rules as before (verdict matrix unchanged).
+	const inRoot = await resolveDecision(auto, { kind: "local-write", tool: "edit", path: "/home/user/proj/src/a.ts" }, strategy);
+	assert.equal(inRoot.action, "allow");
+	assert.equal(calls.length, 1);
+	const hard = await resolveDecision(auto, { kind: "local-write", tool: "edit", path: "/home/user/proj/src/a.ts" }, async () => ({ verdict: "hard_deny", reason: "no" }));
+	assert.equal(hard.action, "deny");
+	const soft = await resolveDecision(auto, { kind: "local-write", tool: "edit", path: "/home/user/proj/src/a.ts" }, async () => ({ verdict: "soft_deny", reason: "maybe" }));
+	assert.equal(soft.action, "prompt");
+	const nomatch = await resolveDecision(auto, { kind: "local-write", tool: "edit", path: "/home/user/proj/src/a.ts" }, async () => ({ verdict: "no_match", reason: "" }));
+	assert.equal(nomatch.action, "prompt", "no_match fails safe to prompt in auto profile");
+	// A configured write root counts as in-root for the gate.
+	const withRoot = makePolicy({ profile: "auto", config: makeConfig({ writeRoots: ["/tmp/scratch"] }) });
+	await resolveDecision(withRoot, { kind: "local-write", tool: "write", path: "/tmp/scratch/out.txt" }, strategy);
+	assert.ok(calls.length >= 2, "a write inside a configured root is classified");
 });
 
 test("protected-path writes follow their own cell in every profile", () => {
