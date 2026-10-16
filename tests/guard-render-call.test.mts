@@ -133,6 +133,11 @@ test("both guard shell tools are registered with native call and result renderer
 	assert.match(bash.description, /use host_bash for those/);
 	assert.match(hostBash.description, /full network access and host credentials/);
 	assert.match(hostBash.description, /Subject to HostBash rules and guard profile/);
+	// Filesystem-boundary statements.
+	assert.match(bash.description, /configured read roots/);
+	assert.match(bash.description, /are not visible/);
+	assert.match(bash.description, /~\/\.pi/);
+	assert.match(hostBash.description, /host paths outside the sandbox mounts/);
 });
 
 // ── Header layout ────────────────────────────────────────────────────────────

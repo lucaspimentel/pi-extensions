@@ -9,7 +9,8 @@ import { GuardRuntime, validateReadGrant, validateReadRootSave } from "./runtime
 import { DialogGate } from "./dialogs.ts";
 import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
 import { FAILURE_STATUSES as NODE_FAILURES } from "./tools/node/session.ts";
-import { createGuardShellOperations, SANDBOX_FAILURE_HINT, sandboxFailureHint } from "./tools/shell.ts";
+import { createGuardShellOperations, SANDBOX_FAILURE_HINT, SHELL_SANDBOX_FAILURE_HINT, sandboxFailureHint } from "./tools/shell.ts";
+import type { MountEntry } from "./sandbox/bwrap.ts";
 import { createShellRenderCall, nativeBashRenderResult } from "./tools/shell-render.ts";
 import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
 import { detectSandboxMode } from "./sandbox/detect.ts";
@@ -453,14 +454,15 @@ export default function guard(pi: ExtensionAPI) {
 			return decision.action !== "deny";
 		}, async (execution) => {
 			const host = name === "host_bash" || execution.policy.sandboxMode === "degraded" || (!execution.policy.workspaceLocked && (execution.policy.profile === "yolo" || execution.policy.profile === "unrestricted"));
-			const tool = createBashTool(ctx.cwd, { operations: createGuardShellOperations(execution, host), exposeSessionEnvironment: false });
+			let mountedPaths: MountEntry[] | undefined;
+			const tool = createBashTool(ctx.cwd, { operations: createGuardShellOperations(execution, host, (paths) => { mountedPaths = paths; }), exposeSessionEnvironment: false });
 			const run = () => tool.execute(id, input, execution.signal, onUpdate);
 			try {
 				const result = host ? await run() : await rt.sandboxBoundary(run, execution.warnings);
-				if (!host && result.isError) return appendWarnings(result, [sandboxFailureHint(input.command)]);
+				if (!host && result.isError) return appendWarnings(result, [sandboxFailureHint(input.command, mountedPaths)]);
 				return result;
 			} catch (err) {
-				if (!host) throw new Error(`${err instanceof Error ? err.message : String(err)}\n${SANDBOX_FAILURE_HINT}`);
+				if (!host) throw new Error(`${err instanceof Error ? err.message : String(err)}\n${SHELL_SANDBOX_FAILURE_HINT}`);
 				throw err;
 			}
 		}, signal);
@@ -470,8 +472,8 @@ export default function guard(pi: ExtensionAPI) {
 	for (const name of ["bash", "host_bash"] as const) pi.registerTool({
 		...bash, name, label: name,
 		description: name === "bash"
-			? `${bash.description} Guard sandboxed except in raw profiles: no network and no host credentials, so commands that need either (gh, curl, ssh, git push/fetch, package installs) fail here; use host_bash for those. Shared real-path scratch.`
-			: `${bash.description} Runs on the host with full network access and host credentials; use it for network or auth commands (gh, curl, ssh, git push/fetch, package installs). Subject to HostBash rules and guard profile.`,
+			? `${bash.description} Guard sandboxed except in raw profiles: no network and no host credentials, so commands that need either (gh, curl, ssh, git push/fetch, package installs) fail here; use host_bash for those. Only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted: other host paths (for example ~/.pi or other repositories) are not visible, and commands that need them fail; use host_bash for those. Shared real-path scratch.`
+			: `${bash.description} Runs on the host with full network access and host credentials; use it for network or auth commands (gh, curl, ssh, git push/fetch, package installs), and for host paths outside the sandbox mounts (for example ~/.pi or other repositories). Subject to HostBash rules and guard profile.`,
 		renderCall: createShellRenderCall(name),
 		// The wrapped tool definition carries no renderers; without this, host_bash has no
 		// built-in renderer fallback and its results never show the Elapsed/Took line.

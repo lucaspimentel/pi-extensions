@@ -45,8 +45,17 @@ Registration details:
   command is detected as network- or credential-dependent (`gh`, `curl`,
   `git push/fetch`, package installs; advisory first-token match, fail open),
   the hint names the command and directs the model to re-run it with
-  `host_bash` instead of retrying in the sandbox. The `bash` and `host_bash`
-  descriptions state the same routing rule up front.
+  `host_bash` instead of retrying in the sandbox. When the failed command
+  mentions path arguments that are not visible in the effective bwrap mounts
+  (advisory token scan over the parsed mount table, fail open), the hint
+  names them conditionally ("may not be visible"); a mention never blocks
+  execution, opens a dialog, or claims to be the cause. The `bash` and
+  `host_bash` descriptions state the same routing rules up front, including
+  the filesystem boundary. The bash failure hint does not offer a read
+  grant: only the python/node workers can trigger the read-grant dialog
+  (`permission_needed`), so the bash hint points at `host_bash` and the
+  user-managed `readRoots` configuration instead; an explicit
+  model-callable read-access request is planned separately.
 
 ### Execution queue and transitions
 

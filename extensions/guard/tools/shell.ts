@@ -2,8 +2,9 @@
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { join, normalize } from "node:path";
 import { spawnSandboxed } from "../sandbox/run.ts";
+import { isPathVisible, type MountEntry } from "../sandbox/bwrap.ts";
 import { effectiveWorkspaceMode } from "../policy/decision.ts";
 import { normalizeRootList } from "../policy/paths.ts";
 import { splitTopLevelShell, stripTimeoutPrefix } from "../policy/shellsplit.ts";
@@ -22,7 +23,11 @@ function hostBashPath(): string {
 	return "bash";
 }
 
-export function createGuardShellOperations(ctx: ExecutionContext, host: boolean): BashOperations {
+export function createGuardShellOperations(
+	ctx: ExecutionContext,
+	host: boolean,
+	onLaunch?: (mountedPaths: MountEntry[]) => void,
+): BashOperations {
 	return { exec: async (command, cwd, { onData, timeout }) => {
 		await ctx.revalidate();
 		let child: ChildProcess;
@@ -51,6 +56,7 @@ export function createGuardShellOperations(ctx: ExecutionContext, host: boolean)
 			};
 			ctx.assertCurrent();
 			const launched = spawnSandboxed(spec, { detection: ctx.detection });
+			onLaunch?.(launched.effective.mountedPaths);
 			child = launched.child;
 			done = launched.done;
 			child.stdin?.end();
@@ -172,15 +178,106 @@ export function hostBoundCommandReason(cmd: string): string | null {
 export const SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; protected/read-only paths may fail with EROFS and outside paths may not be mounted. Use host_bash if host access is required, or request a read grant. Sandbox launch failures never fall back to host execution.";
 
 /**
+ * The generic failure hint for sandboxed bash only. Unlike
+ * SANDBOX_FAILURE_HINT (python/node, where the worker-initiated read-grant
+ * dialog is real), it does not offer a read grant: sandboxed bash has no way
+ * to trigger one. It states the filesystem boundary and points at host_bash
+ * and the user-managed readRoots configuration instead.
+ */
+export const SHELL_SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted (protected paths are read-only). Use host_bash if host access is required. For persistent sandbox read access, the user can add a directory to readRoots in guard.json (~/.pi/agent/guard.json or the project .pi/guard.local.json). Sandbox launch failures never fall back to host execution.";
+
+/** Characters that make a path token a glob. */
+const GLOB_CHARS = "*?[";
+
+/**
+ * Extract an absolute path candidate from one shell token, or null. Handles
+ * bare absolute paths, ~ expansion, and `--opt=/abs/path` values. Relative
+ * paths, other-user ~name paths, URLs, and redirection fragments (which
+ * tokenize as single tokens like `2>/dev/null`) are ignored: misses fail
+ * open. Glob paths are truncated to the last complete directory component
+ * before the first glob character.
+ */
+function extractPathToken(token: string, home: string): string | null {
+	let candidate: string;
+	const eq = token.indexOf("=");
+	if (eq > 0) {
+		const value = token.slice(eq + 1);
+		if (!/^(\/|~(\/|$))/.test(value)) return null;
+		candidate = value;
+	} else if (/^(\/|~(\/|$))/.test(token)) {
+		candidate = token;
+	} else {
+		return null;
+	}
+	if (candidate === "~") candidate = home;
+	else if (candidate.startsWith("~/")) candidate = join(home, candidate.slice(2));
+	if (candidate.includes("://")) return null;
+	const globIdx = [...candidate].findIndex((ch) => GLOB_CHARS.includes(ch));
+	if (globIdx >= 0) {
+		const slash = candidate.lastIndexOf("/", globIdx);
+		if (slash <= 0) return null;
+		candidate = candidate.slice(0, slash);
+	}
+	return normalize(candidate).replace(/(.)\/+$/, "$1");
+}
+
+/** Most unmounted-path mentions surfaced in one hint. */
+const MAX_PATH_CANDIDATES = 3;
+
+/**
+ * Advisory detection of path arguments that are not visible in the sandbox:
+ * the absolute/~ path tokens of the command that fail the mount table
+ * lexically, or whose host realpath falls outside it (workspace symlinks to
+ * unmounted targets). Purely descriptive; it never blocks or reroutes
+ * execution, a mention does not prove filesystem access, and misses (dynamic
+ * paths, variables, quoting) fail open to the generic hint.
+ */
+export function unmountedPathCandidates(
+	cmd: string,
+	mountedPaths: readonly MountEntry[] | undefined,
+	home: string = homedir(),
+): string[] {
+	if (mountedPaths === undefined || mountedPaths.length === 0) return [];
+	const split = splitTopLevelShell(cmd);
+	const parts = split.kind === "compound" ? split.parts : [split.kind === "single" ? (split.effectiveCmd ?? cmd) : cmd];
+	const found: string[] = [];
+	for (const part of parts) {
+		let tokens = tokenizeSimple(stripTimeoutPrefix(part.trim()));
+		// Skip leading VAR=value assignments and wrapper commands, as hostBoundCommandReason does.
+		while (tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens = tokens.slice(1);
+		while (tokens.length > 0 && WRAPPER_PREFIXES.has(tokens[0].toLowerCase())) tokens = tokens.slice(1);
+		for (const token of tokens) {
+			const candidate = extractPathToken(token, home);
+			if (candidate === null || found.includes(candidate)) continue;
+			let flagged = !isPathVisible(mountedPaths, candidate);
+			if (!flagged) {
+				try {
+					const real = realpathSync(candidate);
+					if (real !== candidate && !isPathVisible(mountedPaths, real)) flagged = true;
+				} catch { /* missing on host: lexical visibility stands */ }
+			}
+			if (flagged) found.push(candidate);
+			if (found.length >= MAX_PATH_CANDIDATES) return found;
+		}
+	}
+	return found;
+}
+
+/**
  * The failure hint for one sandboxed shell result. Host-bound commands get a
  * targeted directive naming the detected command so the model re-runs it with
- * host_bash instead of retrying in the sandbox; everything else keeps the
- * generic hint.
+ * host_bash instead of retrying in the sandbox; commands that mention
+ * unmounted paths get a conditional path hint; everything else keeps the
+ * generic shell hint.
  */
-export function sandboxFailureHint(command: string): string {
+export function sandboxFailureHint(command: string, mountedPaths?: readonly MountEntry[], home?: string): string {
 	const reason = hostBoundCommandReason(command);
 	if (reason !== null) {
 		return `Guard sandbox: '${reason}' needs network access or host credentials and cannot succeed here. Re-run this command with host_bash (not bash); do not retry with bash.`;
 	}
-	return SANDBOX_FAILURE_HINT;
+	const paths = mountedPaths === undefined ? [] : unmountedPathCandidates(command, mountedPaths, home);
+	if (paths.length > 0) {
+		return `Guard sandbox: this command mentions path(s) that may not be visible in the sandbox: ${paths.join(", ")}. If it failed because it needs them, re-run with host_bash (not bash); other causes are possible. ${SHELL_SANDBOX_FAILURE_HINT}`;
+	}
+	return SHELL_SANDBOX_FAILURE_HINT;
 }

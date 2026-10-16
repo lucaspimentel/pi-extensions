@@ -491,3 +491,67 @@ export function buildOuterLauncherArgv(
 		...bwrapArgs,
 	];
 }
+
+/** One visible sandbox location parsed from a bwrap argv. */
+export interface MountEntry {
+	/** Sandbox destination path (1:1 with the host path). */
+	dest: string;
+	kind:
+		| "bind" // --bind / --ro-bind / --ro-bind-try (existing source) / --dev-bind
+		| "tmpfs" // --tmpfs: the directory itself is visible, nothing beneath it
+		| "symlink" // --symlink target dest (merged-/usr links)
+		| "special"; // --proc / --dev
+}
+
+/**
+ * Parse the visible sandbox locations out of a final bwrap argv. Purely
+ * descriptive: this is the same data bwrap acts on, read back so failure
+ * hints can talk about visibility without a second source of truth.
+ * Everything after the bare `--` separator (the target argv) is ignored.
+ */
+export function mountTable(args: readonly string[]): MountEntry[] {
+	const entries: MountEntry[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--") break;
+		if (arg === "--bind" || arg === "--ro-bind" || arg === "--dev-bind") {
+			entries.push({ dest: args[i + 2], kind: "bind" });
+			i += 2;
+		} else if (arg === "--ro-bind-try") {
+			// bwrap silently skips a missing source; mirror that with existsSync
+			// (never throws, and an unreadable source reports as missing).
+			if (existsSync(args[i + 1])) entries.push({ dest: args[i + 2], kind: "bind" });
+			i += 2;
+		} else if (arg === "--tmpfs") {
+			entries.push({ dest: args[i + 1], kind: "tmpfs" });
+			i += 1;
+		} else if (arg === "--symlink") {
+			entries.push({ dest: args[i + 2], kind: "symlink" });
+			i += 2;
+		} else if (arg === "--proc" || arg === "--dev") {
+			entries.push({ dest: args[i + 1], kind: "special" });
+			i += 1;
+		}
+	}
+	return entries;
+}
+
+/**
+ * Whether an absolute sandbox path is visible given the mount table. The
+ * longest destination that is a component-prefix ancestor wins, so later
+ * binds shadowing earlier ones need no special casing. A path beneath a
+ * tmpfs destination is invisible (empty home and /tmp); the tmpfs directory
+ * itself is visible. Component boundaries come from isWithin, never from
+ * raw prefix comparison.
+ */
+export function isPathVisible(mounts: readonly MountEntry[], absPath: string): boolean {
+	const normalized = path.normalize(absPath);
+	let best: MountEntry | undefined;
+	for (const entry of mounts) {
+		if (!isWithin(normalized, entry.dest)) continue;
+		if (best === undefined || entry.dest.length > best.dest.length) best = entry;
+	}
+	if (best === undefined) return false;
+	if (best.kind === "tmpfs" && normalized !== best.dest) return false;
+	return true;
+}

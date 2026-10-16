@@ -38,7 +38,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import { GUARD_LAUNCH_MOUNT, buildEnv, type LaunchSpec, type WorkspaceMode } from "./spec.ts";
-import { buildBwrapArgs, buildOuterLauncherArgv, filterMountableReadRoots, resolveWorktreeCommonDir, type BwrapContext, type OverlaySpec } from "./bwrap.ts";
+import { buildBwrapArgs, buildOuterLauncherArgv, filterMountableReadRoots, mountTable, resolveWorktreeCommonDir, type BwrapContext, type MountEntry, type OverlaySpec } from "./bwrap.ts";
 import { detectSandboxMode, chmodTree, type SandboxDetection } from "./detect.ts";
 import { scanWorkspace } from "./scan.ts";
 import { sanitizeNugetConfig } from "./nuget.ts";
@@ -72,6 +72,8 @@ export interface EffectiveLaunch {
 	nestedProtectedEntries: number;
 	launchId: string;
 	sessionDir: string;
+	/** Visible sandbox locations parsed from the final bwrap argv (see mountTable). */
+	mountedPaths: MountEntry[];
 	/** Mode diagnostics from detection (reduced mode carries the reason). */
 	diagnostics: string[];
 }
@@ -336,6 +338,7 @@ export function spawnSandboxed(spec: LaunchSpec, options: SpawnOptions = {}): Sp
 			nestedProtectedEntries: scan.nestedProtected.length,
 			launchId,
 			sessionDir,
+			mountedPaths: mountTable(bwrapArgs),
 			diagnostics: [...detection.diagnostics],
 		},
 	};
