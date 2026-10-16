@@ -21,20 +21,6 @@ export function formatAbsolute(timestampMs: number, nowMs: number): string {
 }
 
 /**
- * Gap since the previous transcript event: +3s under a minute, +M:SS from one
- * minute to under an hour, +H:MM:SS beyond.
- */
-export function formatDelta(deltaMs: number): string {
-	// Floored so a displayed value never flips to the next unit early.
-	const s = Math.max(0, Math.floor(deltaMs / 1000));
-	if (s < 60) return `+${s}s`;
-	const m = Math.floor(s / 60);
-	if (m < 60) return `+${m}:${pad2(s % 60)}`;
-	const h = Math.floor(m / 60);
-	return `+${h}:${pad2(m % 60)}:${pad2(s % 60)}`;
-}
-
-/**
  * Durations under 100ms would render as "ran 0.0s", which reads as noise;
  * callers omit the duration segment entirely for them.
  */

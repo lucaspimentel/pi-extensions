@@ -5,23 +5,20 @@
  *
  *   ● bash
  *     └ rg -n "registerToolRenderer" docs/
- *     started 14:32:05  +0:03
+ *     started 14:32:05
  *
  *     ⎿ docs/extensions.md:190 ...
  *     ...
  *     ran 2.1s  ended 14:32:07
  *
  * The call line shows the absolute start time (local timezone, MM-DD prefix on
- * entries from previous days) and the delta since the previous transcript event
- * of any kind (user message, tool result; the first call of a turn measures
- * from the user prompt). While the tool is still running, the call line also
- * shows a live-ticking `ran 2.1s…` (omitted until 100ms have elapsed); once the
- * result arrives the duration moves
- * down to the result line, which shows `ran 2.1s  ended 14:32:07`. Tools whose
- * renderer displays the duration itself (bash, host_bash, powershell, codemode) never show
- * the extension's own duration: those renderers already display Elapsed/Took, so
- * their call line stays start + delta and their result line shows only the
- * completion time.
+ * entries from previous days). While the tool is still running, the call line
+ * also shows a live-ticking `ran 2.1s…` (omitted until 100ms have elapsed);
+ * once the result arrives the duration moves down to the result line, which
+ * shows `ran 2.1s  ended 14:32:07`. Tools whose renderer displays the duration
+ * itself (bash, host_bash, powershell, codemode) never show the extension's
+ * own duration: those renderers already display Elapsed/Took, so their call
+ * line stays start-only and their result line shows only the completion time.
  *
  * Display-only: nothing is written to the session file. Live rows are
  * timestamped from tool_execution_start/tool_execution_end events; rows from
@@ -41,7 +38,7 @@ import type {
 	ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Text, type Component } from "@earendil-works/pi-tui";
-import { durationIsDisplayable, formatAbsolute, formatDelta, formatDuration, formatResultLine } from "./format.ts";
+import { durationIsDisplayable, formatAbsolute, formatDuration, formatResultLine } from "./format.ts";
 
 // ── Timestamp state ───────────────────────────────────────────────────────────
 
@@ -54,7 +51,7 @@ interface CallTimes {
 	live: boolean;
 }
 
-/** The minimal message shape the extension reads from session entries and message_end events. */
+/** The minimal message shape the extension reads from session entries. */
 interface AnyMessage {
 	role: string;
 	timestamp?: number;
@@ -64,36 +61,19 @@ interface AnyMessage {
 
 /** Live rows only: a call is running until tool_execution_end arrives. */
 const calls = new Map<string, CallTimes>();
-/**
- * Delta anchors: timestamps of user messages and tool results, in transcript
- * order. Assistant messages are excluded on purpose: their timestamp is the
- * request start, which is nearly identical to the preceding event and would
- * collapse historical deltas to zero (the backfilled call start proxies the
- * assistant timestamp exactly).
- */
-const anchors: number[] = [];
 /** Per-tool-call tick intervals that keep running rows' elapsed values fresh. */
 const tickers = new Map<string, ReturnType<typeof setInterval>>();
 const TICK_INTERVAL_MS = 100;
-
-function deltaFor(startMs: number): number | undefined {
-	for (let i = anchors.length - 1; i >= 0; i--) {
-		const anchor = anchors[i];
-		if (anchor <= startMs) return Math.max(0, startMs - anchor);
-	}
-	return undefined;
-}
 
 function clearTickers(): void {
 	for (const ticker of tickers.values()) clearInterval(ticker);
 	tickers.clear();
 }
 
-/** Rebuild call times and delta anchors from the active session branch. */
+/** Rebuild call times from the active session branch. */
 function rebuildFromBranch(branch: readonly unknown[]): void {
 	clearTickers();
 	calls.clear();
-	anchors.length = 0;
 	for (const entry of branch) {
 		const message = (entry as { message?: AnyMessage } | undefined)?.message;
 		if (!message || typeof message.timestamp !== "number") continue;
@@ -105,7 +85,6 @@ function rebuildFromBranch(branch: readonly unknown[]): void {
 				}
 			}
 		} else if (message.role === "toolResult") {
-			anchors.push(message.timestamp);
 			const call = calls.get(message.toolCallId ?? "");
 			if (call) {
 				call.end = message.timestamp;
@@ -114,8 +93,6 @@ function rebuildFromBranch(branch: readonly unknown[]): void {
 				// start is unknown, so only the ended line renders.
 				calls.set(message.toolCallId ?? "", { start: message.timestamp, end: message.timestamp, live: false });
 			}
-		} else if (message.role === "user") {
-			anchors.push(message.timestamp);
 		}
 	}
 }
@@ -166,16 +143,13 @@ function ensureState(state: Record<string, unknown>): TimestampsState {
 }
 
 /**
- * Compose the call row's dim line, showing only the segments that are known:
- * start and delta always (when known), plus a live-ticking `ran Xs…` while the
- * tool is still executing (once at least 100ms have elapsed; before that the
- * duration would read as 0.0s). Tools whose renderer shows Elapsed while
- * running never get the ticking duration.
+ * Compose the call row's dim line: the start time, plus a live-ticking
+ * `ran Xs…` while the tool is still executing (once at least 100ms have
+ * elapsed; before that the duration would read as 0.0s). Tools whose renderer
+ * shows Elapsed while running never get the ticking duration.
  */
 function callLineText(call: CallTimes, nowMs: number, baseShowsDuration: boolean): string {
 	const segments: string[] = [`started ${formatAbsolute(call.start, nowMs)}`];
-	const delta = deltaFor(call.start);
-	if (delta !== undefined) segments.push(formatDelta(delta));
 	if (call.end === undefined && call.live && !baseShowsDuration) {
 		const elapsed = Math.max(0, nowMs - call.start);
 		if (durationIsDisplayable(elapsed)) segments.push(`ran ${formatDuration(elapsed)}\u2026`);
@@ -304,14 +278,6 @@ export default function timestampsExtension(pi: ExtensionAPI): void {
 	});
 	pi.on("session_shutdown", () => {
 		clearTickers();
-	});
-	pi.on("message_end", (event) => {
-		const message = event.message as AnyMessage;
-		if (!message || typeof message.timestamp !== "number") return;
-		// Assistant messages are not delta anchors; see the anchors comment above.
-		if (message.role === "user" || message.role === "toolResult") {
-			anchors.push(message.timestamp);
-		}
 	});
 	pi.on("tool_execution_start", (event) => {
 		const existing = calls.get(event.toolCallId);

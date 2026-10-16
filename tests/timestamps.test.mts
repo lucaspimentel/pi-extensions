@@ -1,6 +1,6 @@
 // Timestamps extension tests: pure formatting helpers, the registerToolRenderer
-// wrapper (composition, partial data, result line placement), delta anchoring,
-// and history backfill from a fake session branch.
+// wrapper (composition, partial data, result line placement), and history
+// backfill from a fake session branch.
 //
 // Run: node --test tests/timestamps.test.mts
 import { test } from "node:test";
@@ -12,7 +12,6 @@ import { Container, Text } from "@earendil-works/pi-tui";
 import timestampsExtension from "../extensions/timestamps/index.ts";
 import {
 	formatAbsolute,
-	formatDelta,
 	formatDuration,
 	formatResultLine,
 } from "../extensions/timestamps/format.ts";
@@ -110,17 +109,6 @@ test("formatAbsolute prefixes MM-DD on previous days", () => {
 	assert.equal(formatAbsolute(yesterday, today), "10-07 18:52:11");
 });
 
-test("formatDelta switches units at 60s and 1h", () => {
-	assert.equal(formatDelta(3000), "+3s");
-	assert.equal(formatDelta(0), "+0s");
-	assert.equal(formatDelta(59999), "+59s");
-	assert.equal(formatDelta(60000), "+1:00");
-	assert.equal(formatDelta(107000), "+1:47");
-	assert.equal(formatDelta(3599000), "+59:59");
-	assert.equal(formatDelta(3600000), "+1:00:00");
-	assert.equal(formatDelta(3723000), "+1:02:03");
-});
-
 test("formatDuration uses one decimal under 10s and adaptive units above", () => {
 	assert.equal(formatDuration(2100), "2.1s");
 	assert.equal(formatDuration(9950), "9.9s");
@@ -175,25 +163,23 @@ test("call line is omitted entirely when the call id is unknown", () => {
 
 // ── Live capture and rendering ────────────────────────────────────────────────
 
-test("live call renders absolute and delta immediately, running elapsed once 100ms pass", async () => {
+test("live call renders the start immediately, running elapsed once 100ms pass", async () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("read", () => base.renderers);
 
-	const userTs = Date.now() - 3000;
-	loaded.handler("message_end")!({ type: "message_end", message: { role: "user", timestamp: userTs } });
 	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "c1", toolName: "read", args: {} });
 
 	// Right after execution starts the elapsed time is sub-100ms and omitted.
 	const instant = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c1"))));
 	assert.ok(instant, "no dim timestamp line");
-	assert.match(instant!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  \+3s⟨\/role⟩$/);
+	assert.match(instant!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d⟨\/role⟩$/);
 	assert.ok(!instant!.includes("ran "), "sub-100ms elapsed must be omitted");
 
 	await new Promise((resolve) => setTimeout(resolve, 150));
 	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c1"))));
 	assert.ok(tsLine, "no dim timestamp line after 100ms");
-	assert.match(tsLine!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  \+3s  ran \d+\.\ds…⟨\/role⟩$/);
+	assert.match(tsLine!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  ran \d+\.\ds…⟨\/role⟩$/);
 });
 
 test("instant tool shows no duration anywhere", () => {
@@ -227,7 +213,6 @@ test("completed call line drops the ran segment; the duration moves to the resul
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("read", () => base.renderers);
 
-	loaded.handler("message_end")!({ type: "message_end", message: { role: "user", timestamp: Date.now() - 10_000 } });
 	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "c2", toolName: "read", args: {} });
 	loaded.handler("tool_execution_end")!({
 		type: "tool_execution_end",
@@ -240,7 +225,7 @@ test("completed call line drops the ran segment; the duration moves to the resul
 
 	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c2"))));
 	assert.ok(tsLine, "no dim timestamp line");
-	assert.match(tsLine!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  \+\d+s⟨\/role⟩$/);
+	assert.match(tsLine!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d⟨\/role⟩$/);
 	assert.ok(!tsLine!.includes("ran "), "completed call line must not show the duration");
 	assert.ok(!tsLine!.includes("…"), "completed call must not show the running suffix");
 
@@ -256,12 +241,11 @@ test("shell tools never show the extension's own duration", () => {
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("bash", () => base.renderers);
 
-	loaded.handler("message_end")!({ type: "message_end", message: { role: "user", timestamp: Date.now() - 5000 } });
 	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "s1", toolName: "bash", args: {} });
 
 	const running = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("s1"))));
 	assert.ok(running, "no dim line while running");
-	assert.match(running!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  \+\d+s⟨\/role⟩$/);
+	assert.match(running!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d⟨\/role⟩$/);
 	assert.ok(!running!.includes("ran "), "running shell call line must not show the duration");
 
 	loaded.handler("tool_execution_end")!({
@@ -289,7 +273,6 @@ test("codemode never shows the extension's own duration", () => {
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("codemode", () => base.renderers);
 
-	loaded.handler("message_end")!({ type: "message_end", message: { role: "user", timestamp: Date.now() - 5000 } });
 	loaded.handler("tool_execution_start")!({
 		type: "tool_execution_start",
 		toolCallId: "cm1",
@@ -299,7 +282,7 @@ test("codemode never shows the extension's own duration", () => {
 
 	const running = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("cm1"))));
 	assert.ok(running, "no dim line while running");
-	assert.match(running!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  \+\d+s⟨\/role⟩$/);
+	assert.match(running!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d⟨\/role⟩$/);
 	assert.ok(!running!.includes("ran "), "running codemode call line must not show the duration");
 
 	loaded.handler("tool_execution_end")!({
@@ -341,7 +324,7 @@ function atToday(h: number, m: number, s: number): number {
 	return new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s).getTime();
 }
 
-test("backfill approximates start and end and anchors the first delta at the user prompt", () => {
+test("backfill approximates start and end from session history", () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("read", () => base.renderers);
@@ -366,11 +349,11 @@ test("backfill approximates start and end and anchors the first delta at the use
 	);
 
 	// Parallel calls share the assistant timestamp as their start proxy, so both
-	// show the same delta (from the user prompt). The approximate elapsed value
+	// show the same start time. The approximate elapsed value
 	// (end minus the start proxy) appears on the result line, not the call line.
 	const first = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("b1"))));
 	assert.ok(first, "no dim line for b1");
-	assert.match(first!, /^\s*⟨dim⟩started 14:32:05  \+5s⟨\/role⟩$/);
+	assert.match(first!, /^\s*⟨dim⟩started 14:32:05⟨\/role⟩$/);
 
 	const firstResult = tsLineOf(
 		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("b1"))),
@@ -380,7 +363,7 @@ test("backfill approximates start and end and anchors the first delta at the use
 
 	const second = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("b2"))));
 	assert.ok(second, "no dim line for b2");
-	assert.match(second!, /^\s*⟨dim⟩started 14:32:05  \+5s⟨\/role⟩$/);
+	assert.match(second!, /^\s*⟨dim⟩started 14:32:05⟨\/role⟩$/);
 
 	const secondResult = tsLineOf(
 		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("b2"))),
@@ -389,7 +372,7 @@ test("backfill approximates start and end and anchors the first delta at the use
 	assert.match(secondResult!, /^\s*⟨dim⟩ran 55s  ended 14:33:00⟨\/role⟩$/);
 });
 
-test("later backfilled batch anchors its delta at the previous tool result", () => {
+test("later backfilled batch shows its backfilled start time", () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("read", () => base.renderers);
@@ -413,7 +396,7 @@ test("later backfilled batch anchors its delta at the previous tool result", () 
 
 	const second = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("n2"))));
 	assert.ok(second, "no dim line for n2");
-	assert.match(second!, /^\s*⟨dim⟩started 14:32:30  \+21s⟨\/role⟩$/);
+	assert.match(second!, /^\s*⟨dim⟩started 14:32:30⟨\/role⟩$/);
 
 	const secondResult = tsLineOf(
 		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("n2"))),
@@ -443,22 +426,6 @@ test("historical call without an end omits the elapsed segment", () => {
 	assert.ok(tsLine, "no dim timestamp line");
 	assert.ok(tsLine!.includes("started 10-07 10:00:00"), `date-prefixed absolute missing: ${tsLine}`);
 	assert.ok(!/ran /.test(tsLine!), `elapsed must be omitted without an end: ${tsLine}`);
-});
-
-test("message_end events anchor live deltas between calls", () => {
-	const loaded = loadExtension();
-	const base = makeBaseRenderers();
-	const wrapped = loaded.resolver("bash", () => base.renderers);
-
-	const before = Date.now();
-	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "l1", toolName: "bash", args: {} });
-	loaded.handler("tool_execution_end")!({ type: "tool_execution_end", toolCallId: "l1", toolName: "bash", result: {}, isError: false, durationMs: 100 });
-	loaded.handler("message_end")!({ type: "message_end", message: { role: "toolResult", timestamp: before - 2000 } });
-	loaded.handler("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "l2", toolName: "bash", args: {} });
-
-	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("l2"))));
-	assert.ok(tsLine, "no dim line for l2");
-	assert.match(tsLine!, /\+2s/);
 });
 
 // ── Result rendering ──────────────────────────────────────────────────────────
