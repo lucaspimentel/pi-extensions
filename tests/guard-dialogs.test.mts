@@ -1115,6 +1115,180 @@ test("applying yolo or unrestricted emits a danger notice; other profiles do not
 	});
 });
 
+// ── /guard model: classifier pin through the command-dialog gate ──────────
+
+/** Minimal Model stand-in for the picker pool: pickableModels and modelLabel
+ *  use provider/id, rankModels uses cost and api. */
+function fakeModel(provider: string, id: string, cost = 5): any {
+	return { provider, id, api: "openai-completions", cost: { input: cost, output: cost } };
+}
+
+function registryFor(models: any[]): Record<string, any> {
+	return {
+		getAvailable: () => models,
+		hasConfiguredAuth: () => true,
+		find: (provider: string, modelId: string) => models.find((m) => m.provider === provider && m.id === modelId),
+		streamSimple: () => { throw new Error("no model"); },
+	};
+}
+
+function countTransitions(): () => number {
+	let transitions = 0;
+	const restore = wrapTransition((original) => function (this: GuardRuntime, policy, detection, commit, validate, options) {
+		transitions++;
+		return original.call(this, policy, detection, commit, validate, options);
+	});
+	return () => { restore(); return transitions; };
+}
+
+const userGuardJson = (): string => path.join(process.env.HOME!, ".pi", "agent", "guard.json");
+
+test("guard model clear with no pin notifies and neither writes nor transitions", (t) => {
+	return withCleanTempHome(t, async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-model-clear-nopin-");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const stop = countTransitions();
+		const before = snapshotScopes(cwd);
+		await h.commandHandlers.get("guard")!("model clear", ctx);
+		assert.ok(h.notifications.includes("guard: no classifier pin in the user config."), "the no-pin notice was shown");
+		assert.ok(!h.notifications.some((n) => /cleared/.test(n)), "no cleared notice");
+		assert.deepEqual(snapshotScopes(cwd).user, before.user, "the user scope is byte-for-byte unchanged");
+		assert.equal(stop(), 0, "no transition without a pin to clear");
+	});
+});
+
+test("guard model in a headless context reports the pin and usage without writing", (t) => {
+	return withCleanTempHome(t, async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-model-headless-");
+		const ctx = harnessCtx(h, cwd);
+		ctx.hasUI = false;
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		await h.commandHandlers.get("guard")!("model", ctx);
+		assert.ok(h.notifications.some((n) => n.includes("guard: classifier: (auto-select)")), "the current pin is reported");
+		assert.ok(h.notifications.some((n) => n.includes("/guard model clear")), "the usage line is shown");
+		assert.equal(selector.opened.length, 0, "headless never opens the selector");
+		assert.equal(fs.existsSync(userGuardJson()), false, "headless writes nothing");
+	});
+});
+
+test("picking a classifier model writes the pin, reloads, and pre-highlights it on the next pick", (t) => {
+	return withCleanTempHome(t, async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-model-pick-");
+		const ctx = harnessCtx(h, cwd);
+		ctx.modelRegistry = registryFor([fakeModel("prov-a", "cheap", 1), fakeModel("prov-b", "other", 5)]);
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		let seenOptions: string[] = [];
+		const baseSelect = (ctx.ui as Record<string, any>).select as (title: string, options: string[], opts?: unknown) => Promise<string | undefined>;
+		(ctx.ui as Record<string, any>).select = (title: string, options: string[], opts?: unknown) => { seenOptions = options; return baseSelect(title, options, opts); };
+		const pick = h.commandHandlers.get("guard")!("model", ctx);
+		await selector.waitFor(1);
+		assert.equal(selector.opened[0], "Guard classifier model (saved to user config):", "the picker title names the user config");
+		assert.deepEqual(seenOptions, ["prov-a/cheap", "prov-b/other"], "the effective model is first, then the pickable pool");
+		selector.answer("prov-b/other");
+		await pick;
+		const saved = JSON.parse(fs.readFileSync(userGuardJson(), "utf8")) as { classifier?: { provider: string; model: string } };
+		assert.deepEqual(saved.classifier, { provider: "prov-b", model: "other" }, "the pin was written to the user config in the fake home");
+		assert.ok(h.notifications.includes("guard: classifier model set to prov-b/other (user config)."), "the set notice was shown");
+		// The post-write transition reloaded the merged config: the next picker
+		// run pre-highlights the pinned model even though it is not the cheapest.
+		const pick2 = h.commandHandlers.get("guard")!("model", ctx);
+		await selector.waitFor(2);
+		assert.equal(seenOptions[0], "prov-b/other", "the pinned model is pre-highlighted after the reload");
+		selector.answer(undefined);
+		await pick2;
+		assert.equal(selector.maxConcurrent(), 1, "both pickers serialized through the dialog gate");
+	});
+});
+
+test("cancelling the classifier picker writes nothing and does not transition", (t) => {
+	return withCleanTempHome(t, async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-model-cancel-");
+		const ctx = harnessCtx(h, cwd);
+		ctx.modelRegistry = registryFor([fakeModel("prov-a", "cheap", 1)]);
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		const stop = countTransitions();
+		const pick = h.commandHandlers.get("guard")!("model", ctx);
+		await selector.waitFor(1);
+		selector.answer(undefined);
+		await pick;
+		assert.equal(fs.existsSync(userGuardJson()), false, "cancel writes nothing");
+		assert.ok(!h.notifications.some((n) => /classifier model set/.test(n)), "no set notice");
+		assert.equal(stop(), 0, "cancel does not transition");
+	});
+});
+
+/** Writes a project-scope classifier pin into <cwd>/.pi/guard.local.json. */
+function writeProjectPin(cwd: string, provider: string, model: string): void {
+	fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "guard.local.json"), JSON.stringify({ classifier: { provider, model } }, null, 2) + "\n", "utf8");
+}
+
+test("picking a classifier model under an overriding project pin warns that the project pin stays effective", (t) => {
+	return withCleanTempHome(t, async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-model-set-project-pin-");
+		writeProjectPin(cwd, "prov-p", "pinned");
+		const ctx = harnessCtx(h, cwd);
+		ctx.modelRegistry = registryFor([fakeModel("prov-p", "pinned", 1), fakeModel("prov-a", "cheap", 2), fakeModel("prov-b", "other", 5)]);
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		const pick = h.commandHandlers.get("guard")!("model", ctx);
+		await selector.waitFor(1);
+		selector.answer("prov-a/cheap");
+		await pick;
+		const saved = JSON.parse(fs.readFileSync(userGuardJson(), "utf8")) as { classifier?: { provider: string; model: string } };
+		assert.deepEqual(saved.classifier, { provider: "prov-a", model: "cheap" }, "the user pin was still written");
+		const warning = h.notifications.find((n) => n.includes("guard: classifier model set to prov-a/cheap (user config)"));
+		assert.ok(warning, "a set notice was shown");
+		assert.ok(warning!.includes("project pin"), "the notice names the overriding project pin");
+		assert.ok(warning!.includes("prov-p/pinned"), "the notice names the still-effective classifier");
+		assert.ok(!h.notifications.includes("guard: classifier model set to prov-a/cheap (user config)."), "no plain success notice that would be false");
+	});
+});
+
+test("clearing the user pin under a project pin does not claim auto-select resumes", (t) => {
+	return withCleanTempHome(t, async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-model-clear-project-pin-");
+		writeProjectPin(cwd, "prov-p", "pinned");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		fs.mkdirSync(path.dirname(userGuardJson()), { recursive: true });
+		fs.writeFileSync(userGuardJson(), JSON.stringify({ classifier: { provider: "prov-a", model: "cheap" } }, null, 2) + "\n", "utf8");
+		await h.commandHandlers.get("guard")!("model clear", ctx);
+		const notice = h.notifications.find((n) => n.includes("user classifier pin cleared"));
+		assert.ok(notice, "a cleared notice was shown");
+		assert.ok(notice!.includes("project pin"), "the notice names the still-applied project pin");
+		assert.ok(!h.notifications.some((n) => n.includes("resuming auto-select")), "no false auto-select claim");
+	});
+});
+
+test("headless model report shows the effective classifier when a project pin overrides", (t) => {
+	return withCleanTempHome(t, async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-model-headless-project-pin-");
+		writeProjectPin(cwd, "prov-p", "pinned");
+		const ctx = harnessCtx(h, cwd);
+		ctx.hasUI = false;
+		await startSession(h, ctx);
+		fs.mkdirSync(path.dirname(userGuardJson()), { recursive: true });
+		fs.writeFileSync(userGuardJson(), JSON.stringify({ classifier: { provider: "prov-a", model: "cheap" } }, null, 2) + "\n", "utf8");
+		await h.commandHandlers.get("guard")!("model", ctx);
+		const notice = h.notifications.find((n) => n.includes("guard: classifier:"));
+		assert.ok(notice, "the report was shown");
+		assert.ok(notice!.includes("prov-a/cheap"), "the user pin is reported");
+		assert.ok(notice!.includes("effective: prov-p/pinned"), "the effective project pin is reported");
+	});
+});
+
 test("aborting the execution signal of an open approval restores the spinner", async () => {
 	await withTempHome(async () => {
 		const h = makeHarness();

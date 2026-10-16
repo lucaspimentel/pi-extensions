@@ -119,12 +119,55 @@ export function saveUserConfig(cfg: GuardConfig, home: string = homedir()): void
 	writeJson(userConfigPath(home), cfg);
 }
 
+/**
+ * Persist an explicit classifier model pin into the user config, preserving
+ * every sibling key. User scope only: guard's /guard model command has no
+ * project-scope variant (unlike pi-tool-permissions), so there is no scope
+ * argument to get wrong.
+ */
+export function setUserClassifierPin(provider: string, model: string, home: string = homedir()): void {
+	const warnings: string[] = [];
+	const cfg = loadUserConfigRaw(home, warnings);
+	// A corrupt user config parses to an empty object: surface the parse
+	// warning before the write below replaces the raw bytes with the pin.
+	for (const w of warnings) console.warn(`[guard] ${w}`);
+	cfg.classifier = { provider, model };
+	saveUserConfig(cfg, home);
+}
+
+/**
+ * Remove the classifier pin from the user config, leaving every other key in
+ * place. Returns false when there was no pin: nothing is read-modify-written
+ * and the file is left byte-for-byte unchanged.
+ */
+export function clearUserClassifierPin(home: string = homedir()): boolean {
+	const warnings: string[] = [];
+	const cfg = loadUserConfigRaw(home, warnings);
+	for (const w of warnings) console.warn(`[guard] ${w}`);
+	if (!cfg.classifier) return false;
+	delete cfg.classifier;
+	saveUserConfig(cfg, home);
+	return true;
+}
+
 export function loadProjectConfigRaw(cwd: string, warnings: string[] = []): GuardConfig {
 	return readJsonSafe(projectConfigPath(cwd), warnings) ?? {};
 }
 
 export function saveProjectConfig(cwd: string, cfg: GuardConfig): void {
 	writeJson(projectConfigPath(cwd), cfg);
+}
+
+/**
+ * The project-scope classifier pin, coerced exactly like mergeConfig (which
+ * resolves classifier as project-wins over the user pin). Undefined when the
+ * project config has no pin or an invalid one: in both cases the user pin or
+ * auto-select stays effective. Diagnostic helper for the /guard model
+ * notices; parse warnings are not surfaced here (loadConfig already reports
+ * them on the reload that follows any write).
+ */
+export function projectClassifierPin(cwd: string): { provider: string; model: string } | undefined {
+	return coerceClassifierPin(loadProjectConfigRaw(cwd).classifier, []);
 }
 
 /** Load both scopes (raw, unmerged); warnings go to console.warn. */

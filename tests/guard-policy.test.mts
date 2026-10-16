@@ -18,7 +18,10 @@ import {
 	loadConfig,
 	loadUserConfigRaw,
 	saveUserConfig,
+	setUserClassifierPin,
+	clearUserClassifierPin,
 	loadProjectConfigRaw,
+	projectClassifierPin,
 	saveProjectConfig,
 	projectConfigPath,
 	userConfigPath,
@@ -657,6 +660,62 @@ test("config load/save round-trips and corrupt files fail safe per scope", () =>
 	const merged2 = loadConfig(cwd, home);
 	assert.deepEqual(merged2.protectedPaths, ["x"], "valid user scope still merges");
 	assert.deepEqual(merged2.maskExceptions, [], "corrupt project scope yields defaults for its own keys");
+});
+
+test("classifier pin helpers: set preserves siblings and overwrites; clear removes only the pin and no-ops without one", () => {
+	const home = makeTempDir("guard-policy-pin-home-");
+	const userPath = userConfigPath(home);
+	// No pin yet: clear returns false and leaves the file byte-identical.
+	fs.mkdirSync(path.dirname(userPath), { recursive: true });
+	fs.writeFileSync(userPath, JSON.stringify({ protectedPaths: ["x"], hostBash: { allow: ["HostBash(ls *)"] } }, null, 2) + "\n", "utf8");
+	const before = fs.readFileSync(userPath, "utf8");
+	assert.equal(clearUserClassifierPin(home), false, "clear with no pin is a no-op");
+	assert.equal(fs.readFileSync(userPath, "utf8"), before, "a no-op clear does not rewrite the file");
+	// Set writes the pin and preserves sibling keys; round-trips through the loader.
+	setUserClassifierPin("prov-a", "m-1", home);
+	const withPin = loadUserConfigRaw(home);
+	assert.deepEqual(withPin.classifier, { provider: "prov-a", model: "m-1" });
+	assert.deepEqual(withPin.protectedPaths, ["x"], "sibling keys survive the set");
+	assert.deepEqual(withPin.hostBash, { allow: ["HostBash(ls *)"] }, "sibling keys survive the set");
+	// Set overwrites an existing pin.
+	setUserClassifierPin("prov-b", "m-2", home);
+	assert.deepEqual(loadUserConfigRaw(home).classifier, { provider: "prov-b", model: "m-2" });
+	// Clear removes only the classifier key.
+	assert.equal(clearUserClassifierPin(home), true);
+	const cleared = loadUserConfigRaw(home);
+	assert.equal("classifier" in cleared, false, "only the classifier key is removed");
+	assert.deepEqual(cleared.protectedPaths, ["x"]);
+	assert.deepEqual(cleared.hostBash, { allow: ["HostBash(ls *)"] });
+});
+
+test("projectClassifierPin: coerced project pin, undefined when absent or invalid", () => {
+	const cwd = makeTempDir("guard-policy-proj-pin-");
+	assert.equal(projectClassifierPin(cwd), undefined, "no project config means no pin");
+	fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+	const projPath = path.join(cwd, ".pi", "guard.local.json");
+	fs.writeFileSync(projPath, JSON.stringify({ classifier: { provider: "prov-p", model: "pinned" } }), "utf8");
+	assert.deepEqual(projectClassifierPin(cwd), { provider: "prov-p", model: "pinned" });
+	// An invalid shape is ignored exactly like mergeConfig ignores it, so the
+	// user pin (or auto-select) stays effective.
+	fs.writeFileSync(projPath, JSON.stringify({ classifier: "garbage" }), "utf8");
+	assert.equal(projectClassifierPin(cwd), undefined, "invalid project pins are ignored");
+});
+
+test("classifier pin helpers surface the parse warning before overwriting a corrupt user config", () => {
+	const home = makeTempDir("guard-policy-pin-corrupt-home-");
+	const userPath = userConfigPath(home);
+	fs.mkdirSync(path.dirname(userPath), { recursive: true });
+	fs.writeFileSync(userPath, "{ not json", "utf8");
+	const emitted: string[] = [];
+	const originalWarn = console.warn;
+	console.warn = (msg?: unknown) => { emitted.push(String(msg)); };
+	try {
+		setUserClassifierPin("prov-c", "m-3", home);
+	} finally {
+		console.warn = originalWarn;
+	}
+	assert.ok(emitted.some((w) => w.includes("failed to read")), "the parse warning is surfaced before the write");
+	assert.deepEqual(loadUserConfigRaw(home).classifier, { provider: "prov-c", model: "m-3" }, "the pin is still written (documented clobber behavior)");
 });
 
 // ── Session state ─────────────────────────────────────────────────────────────

@@ -16,7 +16,7 @@ import { createShellRenderCall, nativeBashRenderResult } from "./tools/shell-ren
 import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
 import { detectSandboxMode } from "./sandbox/detect.ts";
 import { PROTECTED_TOP_LEVEL } from "./sandbox/spec.ts";
-import { loadConfig, loadUserConfigRaw, resolvedClassifierConfig, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
+import { clearUserClassifierPin, loadConfig, loadUserConfigRaw, projectClassifierPin, resolvedClassifierConfig, setUserClassifierPin, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
 import { decide, explainHostShellCommand, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
 import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
 import { computeMigration } from "./policy/migrate.ts";
@@ -28,6 +28,7 @@ import { createGuardEditorStage, createGuardPickerStage } from "./ask-components
 import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, releaseResearchHold, requestResearchHold, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
 import { constraintFromParse, INHERIT_ENV, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
 import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
+import { modelLabel, pickableModels } from "../shared/model-selection.ts";
 
 const DEFAULT_CYCLE_SHORTCUT = "ctrl+alt+g";
 
@@ -166,6 +167,12 @@ export default function guard(pi: ExtensionAPI) {
 	}
 	function classifierModel(ctx: ExtensionContext): Model<Api> | undefined {
 		return pickClassifierModel(ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable(), ctx.model?.provider, (m) => ctx.modelRegistry.hasConfiguredAuth(m), config?.classifier, (provider, modelId) => ctx.modelRegistry.find(provider, modelId));
+	}
+	/** Recompute the session's classifier label after a config change, then publish: startSession only computes it once, so a /guard reload or a /guard model write would otherwise leave a stale label in the footer. */
+	function refreshClassifierLabel(ctx: ExtensionContext): void {
+		if (!state) return;
+		try { state.classifierLabel = classifierModel(ctx)?.id ?? null; } catch { state.classifierLabel = null; }
+		publish(ctx);
 	}
 	async function classify(call: GuardCall, ctx: ExtensionContext) {
 		const model = classifierModel(ctx);
@@ -796,6 +803,86 @@ export default function guard(pi: ExtensionAPI) {
 			await applyProfile(profile, ctx, ownership);
 		}
 	}
+	/** Post-write step shared by the /guard model set and clear paths: reload
+	 *  the merged config through the same transition as /guard reload (which
+	 *  invalidates open dialogs, clears the classifier cache, and publishes),
+	 *  then refresh the classifier label that only startSession computes.
+	 *  Returns false when nothing was reloaded (no runtime, or the transition
+	 *  threw): callers must then skip their success notices. */
+	async function applyClassifierConfigChange(ctx: ExtensionContext): Promise<boolean> {
+		if (!state || !runtime) { notify(ctx, "guard: no active runtime (an invalid inheritance blocks this session); the user config was written but not reloaded.", "warning"); return false; }
+		try {
+			await transition({ ...state, sandbox: detectSandboxMode() }, loadConfig(ctx.cwd), ctx);
+		} catch (err) {
+			notify(ctx, `guard: classifier config reload failed: ${String(err)}`, "warning");
+			return false;
+		}
+		refreshClassifierLabel(ctx);
+		return true;
+	}
+	/** /guard model: interactively pin the classifier model into the user
+	 *  config (or clear the pin with "model clear"). The picker goes through
+	 *  the same command-dialog gate as pickProfile so it can never collide
+	 *  with a pending approval prompt. */
+	async function pickClassifierPin(ctx: ExtensionContext): Promise<void> {
+		if (!ctx.hasUI) {
+			const pin = loadUserConfigRaw().classifier;
+			const project = projectClassifierPin(ctx.cwd);
+			let status = `guard: classifier: ${pin ? `${pin.provider}/${pin.model}` : "(auto-select)"}`;
+			if (project) status += `\neffective: ${project.provider}/${project.model} (project pin in ${ctx.cwd}/.pi/guard.local.json overrides the user pin)`;
+			notify(ctx, `${status}\n/guard model  Pick the classifier model (saved to user config) | /guard model clear  Remove the user pin`);
+			return;
+		}
+		const pool = ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable();
+		const pickable = pickableModels(pool, (m) => ctx.modelRegistry.hasConfiguredAuth(m));
+		if (pickable.length === 0) { notify(ctx, "guard: no models with configured auth are available; classifier pin unchanged.", "warning"); return; }
+		// The currently effective classifier first so it is pre-highlighted;
+		// dedupe by label (provider/model) against the pickable pool.
+		const current = classifierModel(ctx);
+		const ordered = current ? [current, ...pickable.filter((m) => modelLabel(m) !== modelLabel(current))] : pickable;
+		const labels = ordered.map(modelLabel);
+		const byLabel = new Map(ordered.map((m) => [modelLabel(m), m] as const));
+		const rt = runtime;
+		const epoch = rt?.epoch;
+		const cwd = rt?.policy.cwd;
+		// Capture the owning operation's signal once, before any await: the
+		// SDK's ctx.signal is a live getter that would return undefined or
+		// another operation's signal if reread after the dialog.
+		const ownership: CommandOwnership = { signal: ctx.signal, cancelled: new Error("guard: classifier model selection cancelled; pin unchanged.") };
+		let choice: string | undefined;
+		try {
+			// Command dialogs share the approval gate: a queued or open picker
+			// must not replace or be replaced by a permission prompt.
+			choice = await dialogs.run({ signal: ownership.signal }, async (dialogSignal) => {
+				dialogSignal.throwIfAborted();
+				if (!rt) throw new Error("guard: classifier model selection expired after a session/policy change.");
+				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: classifier model selection expired after a session/policy change.");
+				const answer = await admittedDialog(ctx, () => gatedSelect(ctx, "Guard classifier model (saved to user config):", labels, dialogSignal));
+				dialogSignal.throwIfAborted();
+				assertDialogCurrent(rt, epoch as number, ctx, cwd as string, "guard: classifier model selection expired after a session/policy change.");
+				return answer;
+			});
+		} catch (err) {
+			notify(ctx, /expired/.test(String(err)) ? "guard: classifier model selection expired after a session/policy change." : "guard: classifier model selection cancelled.", "warning");
+			return;
+		}
+		if (rt !== runtime || epoch !== runtime?.epoch) { notify(ctx, "guard: classifier model selection expired after a session/policy change.", "warning"); return; }
+		if (!choice) return; // cancelled: no file write, no transition
+		const model = byLabel.get(choice);
+		if (!model) return;
+		if (ownership.signal?.aborted) { notify(ctx, ownership.cancelled.message, "warning"); return; }
+		setUserClassifierPin(model.provider, model.id);
+		if (!(await applyClassifierConfigChange(ctx))) return;
+		// The classifier merge is project-wins: with a project pin that differs
+		// from the pin just written, the effective classifier is unchanged and
+		// the plain success notice would be false.
+		const project = projectClassifierPin(ctx.cwd);
+		if (project && !(project.provider === model.provider && project.model === model.id)) {
+			notify(ctx, `guard: classifier model set to ${choice} (user config), but a project pin in ${ctx.cwd}/.pi/guard.local.json overrides it: the effective classifier stays ${project.provider}/${project.model}.`, "warning");
+		} else {
+			notify(ctx, `guard: classifier model set to ${choice} (user config).`);
+		}
+	}
 	/** Danger notices emitted at warning level whenever a host-powered profile
 	 *  is applied, regardless of entry path (picker, command, cycle shortcut). */
 	const PROFILE_DANGER_NOTICES: Partial<Record<Profile, string>> = {
@@ -916,22 +1003,43 @@ export default function guard(pi: ExtensionAPI) {
 			const selectable = inheritedProfile
 				? ALL_PROFILES.filter((p) => p === inheritedProfile || p === "research")
 				: ALL_PROFILES;
-			const filtered = ["help", "list", "reload", "profile", ...selectable.map((p) => `profile ${p}`), "migrate", "migrate dry", "ack", "debug on", "debug off"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s }));
+			const filtered = ["help", "list", "reload", "profile", "model", "model clear", ...selectable.map((p) => `profile ${p}`), "migrate", "migrate dry", "ack", "debug on", "debug off"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s }));
 			return filtered.length ? filtered : null;
 		},
 		handler: async (args, ctx) => {
 			const command = args.trim();
 			if (!command || command === "profile") { await pickProfile(ctx); return; }
 			if (command === "help") {
-				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy and shared scratch", "/guard reload            Reload guard.json", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python and node; other tools remain observe-only (grep results are secret-filtered).", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects.", "Subagent children inherit this session's effective profile at each spawn and cannot leave it except for research (guard:subagent-snapshot-request)."].join("\n"));
+				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy and shared scratch", "/guard reload            Reload guard.json", "/guard model             Pick the classifier model (saved to user config)", "/guard model clear       Remove the classifier pin (resume auto-select)", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python and node; other tools remain observe-only (grep results are secret-filtered).", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects.", "Subagent children inherit this session's effective profile at each spawn and cannot leave it except for research (guard:subagent-snapshot-request)."].join("\n"));
 				return;
 			}
 			if (command === "list") { showList(ctx); return; }
 			if (command === "debug on" || command === "debug off") { debugEnabled = command.endsWith("on"); notify(ctx, `guard: debug ${debugEnabled ? "ON" : "OFF"}; owned tools enforce, others observe.`); return; }
 			if (command === "migrate" || command === "migrate dry") { await migrate(ctx, command.endsWith("dry")); return; }
+			if (/^model(\s|$)/i.test(command)) {
+				const sub = command.slice(5).trim().toLowerCase();
+				if (sub && sub !== "clear") {
+					notify(ctx, "guard usage: /guard model  Pick the classifier model (saved to user config) | /guard model clear  Remove the pin (resume auto-select)", "warning");
+					return;
+				}
+				if (sub === "clear") {
+					if (!clearUserClassifierPin()) { notify(ctx, "guard: no classifier pin in the user config."); return; }
+					if (!(await applyClassifierConfigChange(ctx))) return;
+					// A project pin keeps applying after the user pin is gone:
+					// auto-select only resumes when no project pin shadows it.
+					const project = projectClassifierPin(ctx.cwd);
+					notify(ctx, project
+						? `guard: user classifier pin cleared (user config); a project pin in ${ctx.cwd}/.pi/guard.local.json still applies, so auto-select does not resume.`
+						: "guard: classifier pin cleared (user config); resuming auto-select.");
+					return;
+				}
+				await pickClassifierPin(ctx);
+				return;
+			}
 			if (command === "reload") {
 				if (!state || !runtime) { notify(ctx, "guard: no active runtime (an invalid inheritance blocks this session); nothing to reload.", "warning"); return; }
 				await transition({ ...state, sandbox: detectSandboxMode() }, loadConfig(ctx.cwd), ctx);
+				refreshClassifierLabel(ctx);
 				notify(ctx, "guard: config reloaded."); return;
 			}
 			if (command === "ack") {
