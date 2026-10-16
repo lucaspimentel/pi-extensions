@@ -458,30 +458,85 @@ are deferred; step 6 remains unauthorized.**
 ## Profiles
 
 Session-only, never persisted. Every session starts in **default**; subagent
-children start in the inherited profile. Six profiles: research / default /
-auto / trusted / yolo / unrestricted.
+children start in the inherited profile. Seven profiles: research / default /
+allow-edits / auto / trusted / yolo / unrestricted.
 
 - **ctrl+alt+g** (mnemonic: guard; overridable with `cycleShortcut`) cycles
-  research -> default -> auto -> trusted -> yolo, with no confirmation when
-  entering yolo. The design originally named Ctrl+Alt+M, but ctrl+alt+m is
-  indistinguishable from alt+enter in legacy terminal encoding (unreachable
-  in herdr), and pi-tool-permissions owns ctrl+alt+p while both are loaded.
+  research -> default -> allow-edits -> auto -> trusted -> yolo, with no
+  confirmation when entering yolo. The design originally named Ctrl+Alt+M, but
+  ctrl+alt+m is indistinguishable from alt+enter in legacy terminal encoding
+  (unreachable in herdr), and pi-tool-permissions owns ctrl+alt+p while both
+  are loaded.
 - **unrestricted** is reachable only with `/guard profile unrestricted`,
   never through the cycle, so one keypress cannot drop the deny rules.
 - `/guard` opens a picker; `/guard profile <name>` sets a profile directly.
 
-| | research | default | auto | trusted | yolo | unrestricted |
-|---|---|---|---|---|---|---|
-| Sandboxed workspace | throwaway overlay (per call for bash, per worker lifetime for python/node) | bash read-write with protected paths read-only; python/node worker-lifetime overlay | same as default | same as default | **no sandbox** for bash, python, or node | **no sandbox** |
-| host_bash | deny (rules ignored) | prompt unless rule-allowed | classifier | allowed | allowed | allowed |
-| write/edit | deny | allowed in cwd and write roots, prompt outside | classifier | allowed | allowed | allowed |
-| Protected paths | deny | prompt | prompt | prompt | allowed | allowed |
-| Local reads (read/grep/find/ls) | as default | allowed in cwd and read roots, prompt outside | as default | as default | allowed | allowed |
-| Secret-mask files via read/grep | deny | deny | deny | deny | allowed | allowed |
-| Exfil-capable remote reads (web_fetch outside the allowlist) | prompt | prompt | classifier | allowed | allowed | allowed |
-| Other remote reads (web_search, pup, Jira/Slack reads) | allowed | allowed | allowed | allowed | allowed | allowed |
-| Remote writes (Slack posts, MCP writes, pup writes) | deny | prompt | classifier | allowed | allowed | allowed |
-| HostBash deny/ask rules | ignored (cell is deny) | apply | apply | apply | **apply** | **ignored** |
+| | research | default | allow-edits | auto | trusted | yolo | unrestricted |
+|---|---|---|---|---|---|---|---|
+| Sandboxed workspace | throwaway overlay (per call for bash, per worker lifetime for python/node) | bash read-write with protected paths read-only; python/node worker-lifetime overlay | same as default | same as default | same as default | **no sandbox** for bash, python, or node | **no sandbox** |
+| host_bash | deny (rules ignored) | prompt unless rule-allowed | as default | classifier | allowed | allowed | allowed |
+| write/edit | deny | prompt every non-protected write/edit (see below) | allowed in cwd and write roots, prompt outside (the rung's purpose) | roots gate, then classifier (see below) | allowed | allowed | allowed |
+| Protected paths | deny | prompt | prompt | prompt | prompt | allowed | allowed |
+| Local reads (read/grep/find/ls) | as default | allowed in cwd and read roots, prompt outside | as default | as default | as default | allowed | allowed |
+| Secret-mask files via read/grep | deny | deny | deny | deny | deny | allowed | allowed |
+| Exfil-capable remote reads (web_fetch outside the allowlist) | prompt | prompt | prompt | classifier | allowed | allowed | allowed |
+| Other remote reads (web_search, pup, Jira/Slack reads) | allowed | allowed | allowed | allowed | allowed | allowed | allowed |
+| Remote writes (Slack posts, MCP writes, pup writes) | deny | prompt | prompt | classifier | allowed | allowed | allowed |
+| HostBash deny/ask rules | ignored (cell is deny) | apply | apply | apply | apply | **apply** | **ignored** |
+
+Write/edit is ENFORCED for non-owned tools (settled 2026-10-16; previously
+the observe-only hook computed these decisions without acting on them):
+
+### Write/edit enforcement and the allow-edits rung (settled 2026-10-16)
+
+- **Premise.** pi-tool-permissions is retired (disabled in the user's setup);
+  guard is the only permissions extension. Enforcement lands unconditionally:
+  no coexistence mode, no flag, no deferral protocol.
+- **Where enforcement lives.** The existing `tool_call` hook. On `deny` it
+  returns `{ block: true, reason }` (the model sees the refusal); on `prompt`
+  it opens the approval dialog inside the hook. The SDK holds the tool call
+  while the hook awaits (dispatch is sequential per batch, and a `block`
+  short-circuits later extensions' handlers), and the DialogGate serializes
+  dialogs across batches.
+- **default.** Every non-protected write/edit prompts, in-root and
+  out-of-root alike: Allow once / Deny once (explicit denial offers optional
+  steering, matching the executor deny flow) and, on in-root prompts, Switch
+  to allow-edits, which authorizes the current call and lands the session on
+  the rung. Denying or allow-once does not change the mode: the next write
+  prompts again.
+- **allow-edits** (new rung between default and auto; identical to default in
+  every other cell): in-root non-protected write/edit is allowed silently;
+  out-of-root still prompts (Allow once / Deny once + steering, no rung
+  switch); protected paths still prompt. Clearing = switching back to
+  `default` through existing profile machinery. The name follows
+  pi-tool-permissions' "allow edits" mode.
+- **auto.** Write-root containment gates the classifier: outside cwd and
+  `writeRoots`, write/edit always prompts regardless of the classifier
+  verdict; inside the roots the classifier rules as today (allow / soft_deny
+  -> prompt / hard_deny -> block / no_match or failure -> prompt fail-safe).
+  The classifier is never authoritative for an out-of-root write.
+- **Every profile.** The workspace lock (step-3 audit findings, cleared by
+  `/guard ack`) also blocks write/edit while held. Headless contexts and
+  subagent children deny prompts. Dialog cancellation and post-answer
+  staleness (epoch, runtime, cwd, config signature, mirroring `authorize`)
+  deny without running anything. Protected paths keep their existing cells.
+- **Inheritance.** `allow-edits` rides the standard profile inheritance; the
+  versioned `PI_GUARD_INHERIT` contract gets a version bump (new valid
+  profile value; parent and child ship together, so an old child seeing the
+  new value fails closed). The child escape rule is unchanged: a child cannot
+  leave its inherited profile except to `research`, so a `default` child
+  cannot self-escalate into `allow-edits`; only a parent already on the rung
+  passes the capability down. The plan.ts research hold/restore is generic
+  over profiles and covers the new rung unchanged.
+- **Out of scope, recorded.** Write/Edit path-rule grammar and persistent
+  saves (TODO follow-up); enforcement for local reads and remote classes;
+  session-scoped write grants; a `request_write_access` tool;
+  `memory_write`/`scratchpad` (pathless local writes) keep their existing
+  cells. Evidence motivating this step (2026-10-16, real session): on the
+  `default` profile an `edit` outside cwd and every `writeRoots` silently
+  succeeded because only owned executors ever block
+  (`guard/index.ts:301-316`); the README table described decisions that were
+  computed but never acted on.
 
 ### Rule precedence
 
@@ -931,6 +986,7 @@ remain useful.
 | Unmounted-path failure hints (2026-10-16) | Sandboxed bash failures get a conditional path hint: `mountTable` parses the final bwrap argv into visible locations (bind/tmpfs/symlink/special), `EffectiveLaunch.mountedPaths` carries it to `executeShell`, and `unmountedPathCandidates` flags absolute/~ path tokens invisible lexically or by host realpath. Settled constraints: detection is advisory only (echo/printf/grep may mention paths without touching them), it never blocks execution, opens a dialog, or claims the path caused the failure; no pre-flight fail-fast and no classifier reclassification; the bash hint no longer offers a read grant because only the python/node workers can trigger that dialog (`permission_needed`), pointing at host_bash and the user-managed readRoots configuration instead; an explicit model-callable read-access request (reusing the read-grant flow, never replaying commands) is deferred to a separate step and requires verifying that `handleReadGrant`'s transition is reusable by a fifth owned executor. Suites: `tests/guard-shell-hints.test.mts` |
 | request_read_access tool (2026-10-16) | Implemented (PR 2). Helper extraction: `handleReadGrant` is replaced by `requestReadGrant(rt, requesterName, requestPath, ctx, signal, caller)` returning a typed `GrantOutcome` (`granted` with committed root, scope, and `savedTo` destination for persistent saves; `denied` (explicit denial: the helper delivers steering itself and the outcome carries no payload); `refused` with a diagnostic); success is never inferred from absent diagnostics or message text, and both the worker path and the tool MUST go through the helper (dual adoption is mandatory, no drift). The worker call site projects the outcome into the existing response fields (diagnostic/stateLost/stateLostReason) byte-identically; an empty refusal diagnostic is the worker's silent no-UI passthrough, while the tool gets an actionable no-UI diagnostic. The `beforeCommit` order is preserved exactly: assertCallActive -> config-signature race check against the POST-DIALOG diskConfig snapshot -> root revalidation -> sessionReadRoots/addToConfigScope -> loadConfig; the outer try/catch maps epoch/config-race/teardown failures to `refused`. Capability-limited UI (no owned editor stages, computed once BEFORE the dialog) degrades to session grant + deny; a non-grant outcome under it carries the "only a session grant was offerable" note (appended to every refused diagnostic in the helper, including catch-path refusals, and to the denied tool text in execute, since the denied outcome has no diagnostic field). REVISED decision contract (supersedes the groundwork row's "non-allow = refusal"): deny refuses with the cause-specific reason and no dialog; prompt with no UI refuses with an actionable diagnostic (in practice `resolveDecision` collapses non-interactive prompts to deny first, so the branch is defensive); prompt with UI and allow BOTH open the read-grant dialog, which is the consent surface (an allow decision never grants automatically); classifier failures and indeterminate verdicts (`no_match`: "classifier call failed" / "classifier had no verdict" reason markers, matched in execute because `resolveDecision` maps them to prompt) fail closed. The execute flow is ordered: runtime check -> pre-aborted signal -> isAbsolute entry check (no dialog, no decisionFor) -> ONE `decisionFor` self-check -> post-await recheck before any UI (owning signal, `rt !== runtime` plus an epoch recheck against the epoch captured BEFORE the `decisionFor` self-check, mirroring `authorize`'s post-await epoch recheck and `assertDialogCurrent`, plus `rt.assertAvailable()` so a stale captured runtime is rejected, and cwd) -> `requestReadGrant(..., "tool")` -> typed result mapping (success text names root, scope, destination for saves, and the worker-disposal consequence "running interpreter workers were stopped; their state was discarded; previously run code was not replayed"). The tool is NOT in OWNED_EXECUTORS, never routed via `rt.run`/the execution queue, and has no renderCall; it is classified `remote-write` (annotations: readOnlyHint false, destructiveHint false, idempotentHint false, openWorldHint true). Exactly one policy evaluation per call at the execute level; the observe-only `tool_call` hook's own evaluation is deduped by the classifier cache. Hint rewiring: `SHELL_SANDBOX_FAILURE_HINT` and `SANDBOX_FAILURE_HINT` name `request_read_access` instead of the manual readRoots-editing/read-grant sentences (no-fallback tails kept), the bash description gains an append-only tool clause (render-call-pinned phrases untouched), and the shell-hints suite asserts the tool name. Tests: `tests/guard-request-access.test.mts` (harness-level, real closure, bwrap-independent) covers registration shape, non-ownership, relative-path refusal, the decision table through the registered hook + execute, real classifier plumbing (tool name + `{ path }` in the prompt; classifierEnvironment/classifierAllow do not bypass or block; one completion per call via the cache), session/project/user grants with destination and no-replay wording, deny steering via `deliverSteering`/`pi.sendUserMessage({ deliverAs: "steer" })`, cancellation, no-UI, capability-limited UI, mid-dialog abort, concurrency (one gate serializes; the loser sees invalidation), post-decisionFor staleness, and the config-race/epoch scenarios. Two documented test-level divergences from the task spec, verified against the design: (1) an out-of-band write to guard.local.json DURING the open dialog is absorbed by the post-dialog snapshot and the confirmed grant commits (union merge preserves the racer); guard's own writers cannot mutate config mid-dialog because config writes need transitions that invalidate the gate first, so the only mid-dialog writers are out-of-band and the "no commit" expectation for that interval is unimplementable without breaking worker byte-identity; a mid-dialog writer that also advances the epoch (e.g. /guard reload) is caught by the dialog-gate invalidation, and the literal "Read grant expired; nothing saved or replayed" epoch message is defense-in-depth unreachable through wrapper transitions because they invalidate the gate first. (2) a write strictly AFTER the post-dialog snapshot is caught deterministically by the config-signature check by holding the grant transaction behind the teardown of a preempted host bash whose setsid'd grandchild keeps the stdio pipe open for a fixed interval, then writing once inside that window; the assertion is the "config changed while waiting; nothing saved or replayed" refusal with no committed root | 
 | request_read_access groundwork (2026-10-16) | Verification + spec only, no production code. Evidence: `handleReadGrant` (index.ts:502) is a factory closure whose body is worker-independent except for labels and the trigger payload; it chains epoch capture, `validateReadGrant(readGrantSuggestion(path, cwd), cwd)` (runtime.ts:365, suggest.ts:27), the DialogGate (`dialogs.ts`), `runReadGrantPrompt` (prompt-flow.ts, session grant / project+user root saves / deny with steering), the extension-local `transition` wrapper (index.ts:219: synchronous dialog invalidation, then `rt.transition` with `preempt`, `invalidateWorkers`, `expectedEpoch`, and a `beforeCommit` that rechecks the config signature against a post-dialog snapshot before any write, then `addToConfigScope` or sessionRoots), and `deliverSteering` on explicit denial; it runs after `rt.run` returns, so the dialog never holds the execution queue. Verdict: reusable after extracting the shared read-grant body into a helper; PR 2 MUST route both the worker path and the new tool through that helper (no optional adoption). Tool spec: name `request_read_access`, parameters `{ path: string }` (the entry must enforce `path.isAbsolute` itself; `readGrantSuggestion` resolves rather than rejects relative input, and `validateReadGrant` judges only the resolved location); NOT in OWNED_EXECUTORS and not routed through `rt.run`/the execution queue; `readOnlyHint: false` (it mutates authorization state and persistent saves write guard.json) hence planning-ineligible and default-classified `remote-write` (fail closed, `classifyToolCall` unknown-name fallback) unless toolClasses pins otherwise; guard is observe-only for non-executor tools in step 3, so the tool's execute performs one guard-internal `decisionFor` self-check (not a duplicate of any interception); no-UI and capability-limited-UI (no editor: session grant + deny only) return distinct actionable diagnostics; denial delivers steering; cancellation grants nothing; stale epoch and config race fail closed before any write; nothing is ever replayed. Spike: `tests/guard-request-access-spike.test.mts` reproduces the interaction test-locally with an injected full-mode detection and a fake worker (bwrap-independent): 14 tests covering session grant, project save, unrelated-root editor rejection, denial steering, selector cancellation, no-UI, capability-limited UI, mid-dialog abort, stale-epoch commit, config race, worker disposal + active preemption + queued invalidation, gate serialization, and the path contracts. Boundary: this proves the primitives compose without a worker; it does not test the production closure or a registered tool. PR 2 items: the helper extraction with both callers, tool registration + description wording (then update the PR 1 bash hint to point at the tool), the decisionFor self-check wiring, and the entry-side isAbsolute check |
+| Non-owned write/edit enforcement + allow-edits rung (2026-10-16) | Settled by interview after a real-session finding: on `default`, an `edit` outside cwd and every `writeRoots` silently succeeded because the `tool_call` hook is enforce-only for owned executors (`bash`, `host_bash`, `python`, `node`) and observe-only for everything else, so computed `prompt`/`deny` decisions never acted. Premise: pi-tool-permissions is retired (disabled in the user's settings), so no coexistence mode: enforcement lands unconditionally, no flag. Scope: write/edit only (path-carrying local writes); local reads, remote classes, and pathless local writes (`memory_write`/`scratchpad`) stay observe-only. SDK facts pinned first (scout): `emitToolCall` awaits handlers sequentially in registration order and short-circuits on the first `block: true` (runner.js:956-971), a handler may await a dialog and the agent loop holds the call (`agent-loop.js:493-495`), and per-batch preparation is sequential, so dialogs serialize naturally plus the DialogGate across batches. Structure: a SEVENTH profile rung `allow-edits` between `default` and `auto` in the ladder and ctrl+alt+g cycle (supersedes the interviewed "session flag on default" intermediate; the rung makes the state visible and clearable through existing profile machinery and mirrors pi-tool-permissions' "allow edits" mode). default: every non-protected write/edit prompts (in-root and out), Allow once / Deny once (+ steering on explicit denial) and Switch to allow-edits on in-root prompts (authorizes the current call and lands the rung); allow-once/deny never changes the mode. allow-edits: in-root non-protected write/edit allowed silently, out-of-root prompts, protected paths prompt, every other cell identical to default. auto: roots gate BEFORE classify, out-of-root always prompts regardless of verdict, in-root classifier mapping unchanged (allow / soft_deny -> prompt / hard_deny -> block / no_match or failure -> prompt). Every profile: workspace lock also blocks write/edit; headless and subagent-child prompts deny; dialog cancellation and post-answer staleness (epoch, runtime, cwd, config signature, mirroring `authorize`) deny. Inheritance: `allow-edits` rides the standard versioned `PI_GUARD_INHERIT` contract with a version bump (parent and child ship together; old child + new value fails closed); child escape rule unchanged (only `research`), so a `default` child cannot self-escalate into the rung; plan.ts hold/restore is generic. Out of scope, recorded: Write/Edit path-rule grammar and persistent saves (TODO follow-up), reads/remote enforcement, session write grants, a `request_write_access` tool. TODO updated: the non-owned item carries the settled design plus an implementation sub-item, and a save-parity TODO was added |
 
 ## Implementation outline (build alongside, switch over)
 
