@@ -2,7 +2,7 @@
  * gh-read argument validation.
  *
  * Implements the "Invocation contract" and "Allowlists" sections of
- * docs/gh-read-design.md: a five-value flat subcommand union, per-subcommand
+ * docs/gh-read-design.md: a six-value flat subcommand union, per-subcommand
  * flag allowlists, value validators, and final argv construction.
  *
  * This module is pure (no pi imports) so the argv layout can be unit-tested
@@ -15,9 +15,20 @@
  * Final argv layout emitted here (spawn.ts is a pure exec layer):
  *   [<noun>, <verb>, ...validatedArgs]
  * e.g. "pr list" with ["--state", "open"] -> ["pr", "list", "--state", "open"]
+ *
+ * "auth status" is the one exception: validate.ts appends tool-authored
+ * ["--json", "hosts"] tokens after the validated args, bypassing the
+ * validation loop, so user-supplied --json can never reach the child.
  */
 
-export const SUBCOMMANDS = ["pr view", "pr diff", "pr list", "issue view", "issue list"] as const;
+export const SUBCOMMANDS = [
+	"pr view",
+	"pr diff",
+	"pr list",
+	"issue view",
+	"issue list",
+	"auth status",
+] as const;
 
 export type GhSubcommand = (typeof SUBCOMMANDS)[number];
 
@@ -46,11 +57,13 @@ const BOOLEAN_FLAGS: Record<GhSubcommand, ReadonlySet<string>> = {
 	"pr list": new Set(["--draft"]),
 	"issue view": new Set(["--comments", "-c"]),
 	"issue list": new Set([]),
+	"auth status": new Set(["--active", "-a"]),
 };
 
 /**
  * Human-readable value-flag forms, appended to unknown-flag rejections.
- * `-R`/`--repo` is valid for every subcommand.
+ * `-R`/`--repo` is valid for the five repo subcommands; `auth status` rejects
+ * it (no repo context exists there).
  */
 const VALUE_FLAG_FORMS: Record<GhSubcommand, string> = {
 	"pr view": "--json <fields>, --jq <expr>, -R <[HOST/]OWNER/REPO>",
@@ -60,6 +73,7 @@ const VALUE_FLAG_FORMS: Record<GhSubcommand, string> = {
 	"issue view": "--json <fields>, --jq <expr>, -R <[HOST/]OWNER/REPO>",
 	"issue list":
 		"--limit <n>, --state <open|closed|all>, --author <v>, --assignee <v>, --label <v>, --mention <v>, --milestone <v>, --search <q>, --json <fields>, --jq <expr>, -R <[HOST/]OWNER/REPO>",
+	"auth status": "--hostname <host>, --jq <expr>",
 };
 
 /** Positional-argument expectations per subcommand. */
@@ -69,6 +83,7 @@ const POSITIONAL: Record<GhSubcommand, { min: number; max: number; describe: str
 	"pr list": { min: 0, max: 0, describe: "no positional arguments" },
 	"issue view": { min: 1, max: 1, describe: "an issue number" },
 	"issue list": { min: 0, max: 0, describe: "no positional arguments" },
+	"auth status": { min: 0, max: 0, describe: "no positional arguments" },
 };
 
 function allowedFlagsText(subcommand: GhSubcommand): string {
@@ -155,6 +170,10 @@ function checkValueFlag(
 
 /** True when `flag` takes a value on this subcommand. */
 function isValueFlag(subcommand: GhSubcommand, flag: string): boolean {
+	// "auth status" is deliberately scoped out of the universal cases:
+	// --json is tool-authored there and -R/--repo is not allowlisted, so both
+	// must fall through to unknown-flag rejection instead of consuming values.
+	if (subcommand === "auth status") return flag === "--hostname" || flag === "--jq";
 	switch (flag) {
 		case "-R":
 		case "--repo":
@@ -301,5 +320,14 @@ export function validateInvocation(
 		};
 	}
 
-	return { ok: true, argv: [noun, verb, ...validated] };
+	return { ok: true, argv: appendToolAuthoredTokens(subcommand, [noun, verb, ...validated]) };
+}
+
+/**
+ * Appends tool-authored tokens after validation, bypassing the validation
+ * loop so they can never be rejected or influenced by user input.
+ */
+function appendToolAuthoredTokens(subcommand: GhSubcommand, argv: string[]): string[] {
+	if (subcommand === "auth status") return [...argv, "--json", "hosts"];
+	return argv;
 }

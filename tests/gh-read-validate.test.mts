@@ -1,7 +1,8 @@
 // Tests for gh-read argument validation (extensions/gh-read/validate.ts).
-// Pure unit tests: argv construction for all five subcommands, value-flag
+// Pure unit tests: argv construction for all six subcommands, value-flag
 // bounds, the -R regex, --json field shape, --jq and filter token rules,
-// positional rules, and all rejections with error-message contents.
+// positional rules, tool-authored token appending for auth status, and all
+// rejections with error-message contents.
 //
 // Design: docs/gh-read-design.md ("Invocation contract", "Allowlists").
 //
@@ -29,8 +30,15 @@ function validateRejects(subcommand: (typeof SUBCOMMANDS)[number], args: string[
 
 // ── Subcommand union ─────────────────────────────────────────────────────────
 
-test("subcommand union is the settled five", () => {
-	assert.deepEqual([...SUBCOMMANDS], ["pr view", "pr diff", "pr list", "issue view", "issue list"]);
+test("subcommand union is the settled six", () => {
+	assert.deepEqual([...SUBCOMMANDS], [
+		"pr view",
+		"pr diff",
+		"pr list",
+		"issue view",
+		"issue list",
+		"auth status",
+	]);
 });
 
 test("unknown subcommands are rejected, naming the allowed set", () => {
@@ -38,7 +46,7 @@ test("unknown subcommands are rejected, naming the allowed set", () => {
 	assert.equal(checked.ok, false);
 	if (!checked.ok) {
 		assert.ok(checked.reason.includes("unknown subcommand 'pr merge'"));
-		assert.ok(checked.reason.includes("pr view, pr diff, pr list, issue view, issue list"));
+		assert.ok(checked.reason.includes("pr view, pr diff, pr list, issue view, issue list, auth status"));
 	}
 });
 
@@ -216,4 +224,86 @@ test("--web, --template, and --allow-escape-sequences are never accepted", () =>
 
 test("a literal -- is rejected: gh has no separator concept", () => {
 	validateRejects("pr list", ["--"], ["unexpected argument '--'"]);
+});
+
+// ── auth status ───────────────────────────────────────────────────────────────
+
+test("auth status: boolean flags pass through and tool-authored --json hosts is appended last", () => {
+	assert.deepEqual(validateOk("auth status", ["--active"]), ["auth", "status", "--active", "--json", "hosts"]);
+	assert.deepEqual(validateOk("auth status", ["-a"]), ["auth", "status", "-a", "--json", "hosts"]);
+});
+
+test("auth status: bare invocation appends --json hosts", () => {
+	assert.deepEqual(validateOk("auth status", []), ["auth", "status", "--json", "hosts"]);
+});
+
+test("auth status: --hostname and --jq values are validated and kept in input order", () => {
+	assert.deepEqual(validateOk("auth status", ["--hostname", "github.com"]), [
+		"auth",
+		"status",
+		"--hostname",
+		"github.com",
+		"--json",
+		"hosts",
+	]);
+	assert.deepEqual(validateOk("auth status", ["--jq", ".host"]), ["auth", "status", "--jq", ".host", "--json", "hosts"]);
+	assert.deepEqual(validateOk("auth status", ["--jq", ".hosts[0].host"]), [
+		"auth",
+		"status",
+		"--jq",
+		".hosts[0].host",
+		"--json",
+		"hosts",
+	]);
+	assert.deepEqual(validateOk("auth status", ["-a", "--jq", ".hosts | add"]), [
+		"auth",
+		"status",
+		"-a",
+		"--jq",
+		".hosts | add",
+		"--json",
+		"hosts",
+	]);
+});
+
+test("auth status: attached --hostname=value form is accepted", () => {
+	assert.deepEqual(validateOk("auth status", ["--hostname=github.com"]), [
+		"auth",
+		"status",
+		"--hostname",
+		"github.com",
+		"--json",
+		"hosts",
+	]);
+});
+
+test("auth status: tool-authored flags are rejected as user input", () => {
+	validateRejects("auth status", ["--json", "hosts"], ["unknown flag '--json'"]);
+	validateRejects("auth status", ["--show-token"], ["unknown flag '--show-token'"]);
+	validateRejects("auth status", ["--template", "x"], ["unknown flag '--template'"]);
+	validateRejects("auth status", ["-R", "owner/repo"], ["unknown flag '-R'"]);
+	validateRejects("auth status", ["--repo", "owner/repo"], ["unknown flag '--repo'"]);
+	// Attached form of the rejected flag too.
+	validateRejects("auth status", ["--json=hosts"], ["unknown flag '--json=hosts'"]);
+});
+
+test("auth status: takes no positional arguments", () => {
+	validateRejects("auth status", ["github.com"], ["takes no positional arguments"]);
+	validateRejects("auth status", ["--"], ["unexpected argument '--'"]);
+});
+
+test("auth status: --hostname follows the filter-token rule", () => {
+	validateRejects("auth status", ["--hostname"], ["flag --hostname requires a value"]);
+	validateRejects("auth status", ["--hostname", ""], ["non-empty value without leading '-'"]);
+	validateRejects("auth status", ["--hostname", "-x"], ["non-empty value without leading '-'"]);
+	validateRejects("auth status", ["--hostname", "github example"], ["non-empty value without leading '-'"]);
+});
+
+test("auth status: --jq follows the existing jq rule", () => {
+	validateRejects("auth status", ["--jq", ""], ["non-empty jq expression"]);
+	validateRejects("auth status", ["--jq", ".a\u0000b"], ["non-empty jq expression"]);
+});
+
+test("auth status: no attached short form for -a", () => {
+	validateRejects("auth status", ["-afoo"], ["unknown flag '-afoo'"]);
 });

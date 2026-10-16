@@ -25,8 +25,8 @@ streaming, usage display, security model).
   `git_read` tool (extensions/git-read/): diff, log, show, and status only,
   with per-subcommand flag allowlists, no shell, and no repo mutation. PRs and
   issues are reachable via the allowlisted read-only `gh_read` tool
-  (extensions/gh-read/): pr view/diff/list and issue view/list only, a network
-  read on every invocation (guard class `remote-read`).
+  (extensions/gh-read/): pr view/diff/list, issue view/list, and auth status
+  only, a network read on every invocation (guard class `remote-read`).
 - **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and
   `/implement-and-review` are renamed to `/scout-plan-implement`,
   `/scout-plan`, and `/implement-review`, so each name lists its chain's stages.

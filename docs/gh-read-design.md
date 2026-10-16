@@ -43,15 +43,19 @@ the main session. Deliberately not tied to any one agent; agents opt in via
 ## Invocation contract
 
 - Structured argv, no shell: `{ subcommand, args }` where `subcommand` is a
-  literal union of the five two-word commands below (modeled as one string so
+  literal union of the six two-word commands below (modeled as one string so
   the schema stays flat like `git_read`'s):
-  - `pr view`, `pr diff`, `pr list`, `issue view`, `issue list`
+  - `pr view`, `pr diff`, `pr list`, `issue view`, `issue list`, `auth status`
 - Command construction happens in validate.ts during validation: it emits the
   complete final argv `[<noun>, <verb>, ...validatedArgs]`, and spawn.ts
   consumes it verbatim, appending nothing. The command position never
   contains user text, so gh aliases (`pr ls`) and gh extensions
   (`gh <custom-name>`, which execute external binaries) are unreachable by
   construction.
+- `auth status` is the one deviation: validate.ts appends the tool-authored
+  tokens `--json hosts` after the validated args (constructed directly,
+  bypassing the validation loop). The user never supplies `--json`; gh's JSON
+  output gives a stable, greppable payload instead of styled text.
 - No `--` separator logic: unlike git, there is no rev-vs-path ambiguity and
   no pathspec concept. Every token is validated against its flag's rule.
 
@@ -76,10 +80,17 @@ v1 (Go templates are argv-safe but add no capability `--jq` lacks).
   (gh also accepts URLs here; URLs are excluded in v1)
 - `issue list`: same as `pr list` minus `merged` in `--state`, minus
   `--head`/`--base`/`--draft`, plus `--mention <v>`, `--milestone <v>`
-- All five: `-R/--repo [HOST/]OWNER/REPO`, value validated against
-  `^([A-Za-z0-9.-]+/)?[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$`. Cross-repo reads are
-  still reads; the strict regex prevents using the flag to smuggle other
-  argv shapes.
+- The five repo subcommands (not `auth status`): `-R/--repo [HOST/]OWNER/REPO`,
+  value validated
+  against `^([A-Za-z0-9.-]+/)?[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$`. Cross-repo reads
+  are still reads; the strict regex prevents using the flag to smuggle other
+  argv shapes. `-R/--repo` is NOT allowlisted for `auth status` (no repo
+  context exists); there it is rejected as an unknown flag.
+- `auth status` (no positionals): `--active`/`-a` (boolean, active account
+  only), `--hostname <host>` (filter-token rule), `--jq <expr>`. `--json` is
+  tool-authored (appended as `--json hosts`), never user-supplied.
+  `--show-token`/`-t` and `--template` are excluded: the tool never handles
+  or displays tokens (see Non-goals).
 
 Value validation:
 
@@ -87,8 +98,8 @@ Value validation:
   field names, so the tool validates shape, not membership.
 - `<expr>` for `--jq`: non-empty, no control characters. jq runs embedded in
   gh; it cannot execute anything.
-- String filter values (`--author`, `--label`, `--search`, ...): non-empty,
-  not starting with `-`, no whitespace or control characters (same
+- String filter values (`--author`, `--label`, `--search`, `--hostname`, ...):
+  non-empty, not starting with `-`, no whitespace or control characters (same
   CONTROL_RE rule as git_read's tokens).
 - PR/issue number or branch argument: `^[0-9]+$`, or the string-filter token
   rule (branch names contain `/`, which is fine; they go to the API, never
@@ -103,6 +114,12 @@ session cwd is inside it via `cwdInsideToplevel`; otherwise return
 repository from the git remote of the current repo, so the tool is defined
 only inside a worktree. With `-R` the gate is still applied for a single,
 simple contract (no per-argument conditional gating).
+
+One exemption: `auth status` skips the gate entirely (spawn.ts derives the
+exemption from the validated argv, `argv[0] === "auth" && argv[1] ===
+"status"`). It reports login state for gh's known hosts and needs no
+repository context, so it is useful precisely where the other five are not:
+outside any worktree. The other five keep the gate unchanged.
 
 ## Trust model for env and config
 
@@ -166,6 +183,14 @@ and vice versa; the tool inherits whatever `gh auth` state exists and
 surfaces the API error verbatim. Switching accounts remains a manual user
 step (see dd-tools/docs/git-multi-account-setup.md).
 
+Note on `auth status` JSON output: gh's `--json` mode always exits 0 unless
+there is a fatal error (per gh's `statusRun`: "In machine-friendly mode, we
+always exit with no error"), including when logged out or when `--hostname`
+matches nothing. So the common "not logged in" outcome is `ok: true` with an
+empty `{"hosts":{}}` payload, not the nonzero-exit failure contract; the
+exit-1 path only fires on fatal errors. An empty `hosts` payload means not
+logged in.
+
 ## Rollout (after implementation)
 
 Settled in the grill-me review:
@@ -182,13 +207,18 @@ Settled in the grill-me review:
 
 ## Tests
 
-- `tests/gh-read-validate.test.mts`: argv construction for all five
+- `tests/gh-read-validate.test.mts`: argv construction for all six
   subcommands, value-flag bounds (`--limit`, `--state`, `--color`), the
   `-R` regex (accept/reject cases), `--json` field-shape, `--jq` and filter
-  token rules, all rejections with error-message contents.
-- `tests/gh-read-spawn.test.mts`: worktree gate, environment assertions
-  (stripped and injected vars), caps and truncation, timeout escalation,
-  exit-code contract. Reuse the git-read spawn test harness patterns.
+  token rules, `auth status` happy paths with appended `--json hosts`,
+  `auth status` rejections (`--json`/`--show-token`/`--template`/`-R` as
+  unknown flags, positionals, filter-token and jq value rules, no attached
+  `-a` short form), all with error-message contents.
+- `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
+  exemption: no git spawn at all, while `pr list` still gates), environment
+  assertions (stripped and injected vars), caps and truncation, timeout
+  escalation, exit-code contract including `auth status` passthrough.
+  Reuse the git-read spawn test harness patterns.
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 
@@ -216,7 +246,9 @@ Settled in the grill-me review:
 - No `gh api`, `gh search`, `gh release`, `gh run` for v1; expand the
   allowlist only on demonstrated need, one design-review cycle per addition.
 - No URL arguments, no `--template`, no `--web` forms.
-- No token handling, masking, or account switching inside the tool.
+- No token handling, masking, or account switching inside the tool. Keeping
+  `--show-token` off the `auth status` allowlist is what keeps this non-goal
+  true: token values never enter tool output through any allowlisted path.
 - Do not bypass the user's guard/sandbox policies: `remote-read` classification
   means guard profiles still decide, per profile, whether network reads are
   allowed at all.

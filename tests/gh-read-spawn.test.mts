@@ -1,8 +1,10 @@
 // Tests for the gh-read child-process layer (extensions/gh-read/spawn.ts).
 // Unit tests run through the setSpawnOverride seam: no real gh, no network,
-// no filesystem access beyond path resolution. The worktree gate (spawn 0)
-// runs git with git-read's sanitized environment; the read command (spawn 1)
-// runs gh with gh-read's own sanitized environment.
+// no filesystem access beyond path resolution. The worktree gate runs first
+// as spawn 0 (git with git-read's sanitized environment), then the gh command
+// runs as spawn 1 (with gh-read's own sanitized environment). One exemption:
+// for `auth status` the gate is skipped entirely, so spawn 0 is the gh
+// command itself and no git child ever spawns.
 //
 // Design: docs/gh-read-design.md ("Worktree enforcement", "Trust model for
 // env and config", "Resource limits and failure contract").
@@ -64,8 +66,9 @@ type SpawnScript = (spawn: CapturedSpawn, index: number) => void;
 /**
  * Installs a spawn override that records every spawn and defers the script's
  * event emissions via queueMicrotask so boundedExec's data/close handlers
- * attach first. Spawn 0 is the rev-parse worktree gate; spawn 1 is the gh
- * command.
+ * attach first. For gated subcommands, spawn 0 is the rev-parse worktree
+ * gate and spawn 1 is the gh command; for `auth status` the gate is
+ * skipped, so spawn 0 is the gh command itself.
  */
 function harness(script: SpawnScript): CapturedSpawn[] {
 	const spawns: CapturedSpawn[] = [];
@@ -111,7 +114,15 @@ async function untilSpawn(spawns: CapturedSpawn[], count: number): Promise<void>
 }
 
 function prListArgv(...flags: string[]): string[] {
-	const checked = validateInvocation("pr list", flags);
+	return validatedArgv("pr list", flags);
+}
+
+function authStatusArgv(...flags: string[]): string[] {
+	return validatedArgv("auth status", flags);
+}
+
+function validatedArgv(subcommand: "pr list" | "auth status", flags: string[]): string[] {
+	const checked = validateInvocation(subcommand, flags);
 	if (!checked.ok) throw new Error(`unexpected validation failure: ${checked.reason}`);
 	return checked.argv;
 }
@@ -234,6 +245,28 @@ test("gate failure, empty toplevel, and outside-cwd all fail closed with one mes
 	assert.equal(outside.text, "gh_read: not inside a git worktree");
 });
 
+test("auth status skips the worktree gate entirely: no git spawn, gh runs anywhere", async () => {
+	// Index 0 is the gh child itself; if the rev-parse gate ever spawned, the
+	// command/count assertions below would catch it.
+	const spawns = harness((spawn) => {
+		spawn.child.stdout.emit("data", Buffer.from('{"hosts":{}}'));
+		spawn.child.emit("close", 0);
+	});
+	const result = await runGh(authStatusArgv("--hostname", "github.com"), "/repo");
+	assert.equal(result.ok, true);
+	assert.equal(spawns.length, 1, "only the gh child must spawn; the rev-parse gate is skipped");
+	assert.equal(spawns[0]!.command, "gh");
+	assert.deepEqual(spawns[0]!.args, ["auth", "status", "--hostname", "github.com", "--json", "hosts"]);
+	assert.equal(spawns[0]!.options.cwd, "/repo");
+});
+
+test("other subcommands still gate: pr list fails closed outside a worktree", async () => {
+	harness(scriptGateFailure(128));
+	const result = await runGh(prListArgv(), "/repo");
+	assert.equal(result.ok, false);
+	assert.equal(result.text, "gh_read: not inside a git worktree");
+});
+
 // ── Unit: exit codes, API errors passthrough, and text assembly ─────────────
 
 test("exit 0: ok true with decoded stdout", async () => {
@@ -340,4 +373,39 @@ test("spawn failure: error event resolves with a failed-to-run message", async (
 	assert.equal(result.ok, false);
 	assert.ok(result.text.startsWith("gh_read: failed to run gh: "), result.text);
 	assert.ok(result.text.includes("ENOENT"));
+});
+
+// ── Unit: auth status env and failure contract ────────────────────────────────
+
+test("auth status uses the sanitized gh environment (no gate spawn)", async () => {
+	const spawns = harness((spawn) => {
+		spawn.child.stdout.emit("data", Buffer.from('{"hosts":{}}'));
+		spawn.child.emit("close", 0);
+	});
+	await runGh(authStatusArgv(), "/repo");
+	assert.equal(spawns.length, 1);
+	const ghEnv = spawns[0]!.options.env as Record<string, string | undefined>;
+	for (const key of STRIPPED_ENV) assert.equal(ghEnv[key], undefined, `${key} should be stripped`);
+	for (const [key, value] of Object.entries(INJECTED_ENV)) assert.equal(ghEnv[key], value);
+});
+
+test("auth status: nonzero gh exit (not logged in) keeps the gh_read failure contract", async () => {
+	harness((spawn) => {
+		spawn.child.stderr.emit("data", Buffer.from("gh: not logged in to any hosts\n"));
+		spawn.child.emit("close", 1);
+	});
+	const result = await runGh(authStatusArgv(), "/repo");
+	assert.equal(result.ok, false);
+	assert.ok(result.text.startsWith("gh_read: gh exited with code 1\n"), result.text);
+	assert.ok(result.text.includes("not logged in"));
+});
+
+test("auth status: exit 0 passes the --json hosts payload through verbatim", async () => {
+	harness((spawn) => {
+		spawn.child.stdout.emit("data", Buffer.from('{"hosts":{}}'));
+		spawn.child.emit("close", 0);
+	});
+	const result = await runGh(authStatusArgv(), "/repo");
+	assert.equal(result.ok, true);
+	assert.equal(result.text, '{"hosts":{}}');
 });

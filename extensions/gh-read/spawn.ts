@@ -78,7 +78,9 @@ export function buildGhEnv(): Record<string, string | undefined> {
  * Runs the worktree gate. gh infers the repository from the git remote of
  * the current repo, so the tool is defined only inside a worktree; the gate
  * applies to every invocation, even with explicit -R (settled: one simple
- * contract). Uses git-read's sanitized git environment for the rev-parse.
+ * contract). The single exemption is "auth status", which needs no repo and
+ * is skipped by runGh before this function is called. Uses git-read's
+ * sanitized git environment for the rev-parse.
  */
 async function worktreeCheckPassed(cwd: string): Promise<boolean> {
 	const outcome = await boundedExec("git", ["rev-parse", "--show-toplevel"], buildChildEnv(), cwd);
@@ -89,14 +91,27 @@ async function worktreeCheckPassed(cwd: string): Promise<boolean> {
 }
 
 /**
+ * True for the validated "auth status" argv: the only subcommand exempt from
+ * the worktree gate. auth status reports login state for gh's known hosts and
+ * needs no repository context, so it works anywhere (including a bare HOME).
+ */
+function isAuthStatusArgv(argv: readonly string[]): boolean {
+	return argv[0] === "auth" && argv[1] === "status";
+}
+
+/**
  * Runs one validated gh argv in `cwd` under the design's sanitized
  * environment and resource limits. Composes the worktree gate, the bounded
  * exec core, and the failure contract into a result that never throws.
+ * The worktree gate is skipped for "auth status" (see isAuthStatusArgv);
+ * every other subcommand is gated.
  */
 export async function runGh(argv: readonly string[], cwd: string): Promise<GhRunResult> {
-	const gatePassed = await worktreeCheckPassed(cwd);
-	if (!gatePassed) {
-		return { ok: false, text: "gh_read: not inside a git worktree" };
+	if (!isAuthStatusArgv(argv)) {
+		const gatePassed = await worktreeCheckPassed(cwd);
+		if (!gatePassed) {
+			return { ok: false, text: "gh_read: not inside a git worktree" };
+		}
 	}
 
 	const outcome = await boundedExec("gh", argv, buildGhEnv(), cwd);
