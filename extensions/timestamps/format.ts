@@ -46,19 +46,30 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * Dim line under a tool result header: `ran 2.1s  ended 14:32:07` when the
- * duration is known and worth showing, `ended 14:32:07` otherwise (date prefix
- * when not today). Sub-100ms durations are omitted (they would read as 0.0s),
- * and shell tools pass includeDuration=false because the shell renderer
- * already displays the duration (Elapsed/Took).
+ * Dim line under a tool result header. When the tool finished within the same
+ * displayed second it started (the start line already shows that second), the
+ * line shows only the duration: `ran 0.3s`, or `ran <0.1s` for sub-100ms runs;
+ * it is omitted entirely when there is no duration to show (shell tools pass
+ * includeDuration=false because the shell renderer already displays
+ * Elapsed/Took). When the displayed second differs, the line shows
+ * `ran 2.1s  ended 14:32:07` or just `ended 14:32:07`, with the date prefix
+ * when the end is not today. Sub-100ms durations are omitted from the
+ * different-second form (they would read as 0.0s); such durations can never
+ * cross a second boundary, so they only ever appear via the `<0.1s` form.
  */
 export function formatResultLine(
 	durationMs: number | undefined,
-	timestampMs: number,
+	startMs: number,
+	endMs: number,
 	nowMs: number,
 	includeDuration: boolean,
-): string {
-	const ended = `ended ${formatAbsolute(timestampMs, nowMs)}`;
+): string | undefined {
+	const sameSecond = formatAbsolute(startMs, nowMs) === formatAbsolute(endMs, nowMs);
+	if (sameSecond) {
+		if (!includeDuration || durationMs === undefined) return undefined;
+		return durationMs < 100 ? "ran <0.1s" : `ran ${formatDuration(durationMs)}`;
+	}
+	const ended = `ended ${formatAbsolute(endMs, nowMs)}`;
 	if (includeDuration && durationMs !== undefined && durationIsDisplayable(durationMs)) {
 		return `ran ${formatDuration(durationMs)}  ${ended}`;
 	}

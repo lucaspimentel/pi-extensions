@@ -121,16 +121,34 @@ test("formatDuration uses one decimal under 10s and adaptive units above", () =>
 
 test("formatResultLine prefixes the duration only when included, known, and non-zero", () => {
 	const now = new Date(2026, 9, 8, 15, 0, 0).getTime();
+	const start = new Date(2026, 9, 8, 14, 32, 4, 900).getTime();
 	const end = new Date(2026, 9, 8, 14, 32, 7).getTime();
-	assert.equal(formatResultLine(2100, end, now, true), "ran 2.1s  ended 14:32:07");
-	assert.equal(formatResultLine(2100, end, now, false), "ended 14:32:07");
-	assert.equal(formatResultLine(undefined, end, now, true), "ended 14:32:07");
-	assert.equal(formatResultLine(undefined, end, now, false), "ended 14:32:07");
-	// Sub-100ms durations would read as 0.0s, so they are omitted.
-	assert.equal(formatResultLine(0, end, now, true), "ended 14:32:07");
-	assert.equal(formatResultLine(40, end, now, true), "ended 14:32:07");
-	assert.equal(formatResultLine(99, end, now, true), "ended 14:32:07");
-	assert.equal(formatResultLine(100, end, now, true), "ran 0.1s  ended 14:32:07");
+	assert.equal(formatResultLine(2100, start, end, now, true), "ran 2.1s  ended 14:32:07");
+	assert.equal(formatResultLine(2100, start, end, now, false), "ended 14:32:07");
+	assert.equal(formatResultLine(undefined, start, end, now, true), "ended 14:32:07");
+	assert.equal(formatResultLine(undefined, start, end, now, false), "ended 14:32:07");
+	// Sub-100ms durations would read as 0.0s, so they are omitted when the
+	// displayed second differs (they can never cross a second boundary).
+	assert.equal(formatResultLine(0, start, end, now, true), "ended 14:32:07");
+	assert.equal(formatResultLine(40, start, end, now, true), "ended 14:32:07");
+	assert.equal(formatResultLine(99, start, end, now, true), "ended 14:32:07");
+	assert.equal(formatResultLine(100, start, end, now, true), "ran 0.1s  ended 14:32:07");
+});
+
+test("formatResultLine shows only the duration when the second does not change", () => {
+	const now = new Date(2026, 9, 8, 15, 0, 0).getTime();
+	const start = new Date(2026, 9, 8, 14, 32, 5).getTime();
+	const end = new Date(2026, 9, 8, 14, 32, 5, 400).getTime();
+	assert.equal(formatResultLine(400, start, end, now, true), "ran 0.4s");
+	assert.equal(formatResultLine(3000, start, end, now, true), "ran 3.0s");
+	// Sub-100ms durations render as <0.1s instead of being omitted.
+	assert.equal(formatResultLine(0, start, end, now, true), "ran <0.1s");
+	assert.equal(formatResultLine(40, start, end, now, true), "ran <0.1s");
+	assert.equal(formatResultLine(99, start, end, now, true), "ran <0.1s");
+	assert.equal(formatResultLine(undefined, start, end, now, true), undefined);
+	// Shell renderers show their own Took line, so nothing is added.
+	assert.equal(formatResultLine(400, start, end, now, false), undefined);
+	assert.equal(formatResultLine(undefined, start, end, now, false), undefined);
 });
 
 // ── Resolver wiring ───────────────────────────────────────────────────────────
@@ -182,7 +200,7 @@ test("live call renders the start immediately, running elapsed once 100ms pass",
 	assert.match(tsLine!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  ran \d+\.\ds…⟨\/role⟩$/);
 });
 
-test("instant tool shows no duration anywhere", () => {
+test("instant tool's call line omits the running elapsed segment", () => {
 	const loaded = loadExtension();
 	const base = makeBaseRenderers();
 	const wrapped = loaded.resolver("read", () => base.renderers);
@@ -200,12 +218,6 @@ test("instant tool shows no duration anywhere", () => {
 	const callLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("z1"))));
 	assert.ok(callLine, "no dim call line");
 	assert.ok(!callLine!.includes("ran "), `zero-duration call line must omit ran: ${callLine}`);
-
-	const resultLine = tsLineOf(
-		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("z1"))),
-	);
-	assert.ok(resultLine, "no dim result line");
-	assert.match(resultLine!, /^\s*⟨dim⟩ended \d\d:\d\d:\d\d⟨\/role⟩$/);
 });
 
 test("completed call line drops the ran segment; the duration moves to the result line", () => {
@@ -233,7 +245,9 @@ test("completed call line drops the ran segment; the duration moves to the resul
 		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("c2"))),
 	);
 	assert.ok(resultLine, "no dim result line");
-	assert.match(resultLine!, /^\s*⟨dim⟩ran 2\.1s  ended \d\d:\d\d:\d\d⟨\/role⟩$/);
+	// Same-second completions show only the duration; the ended form appears
+	// when the wall-clock second changes (rare in this live-event test).
+	assert.match(resultLine!, /^\s*⟨dim⟩ran 2\.1s(  ended \d\d:\d\d:\d\d)?⟨\/role⟩$/);
 });
 
 test("shell tools never show the extension's own duration", () => {
@@ -260,12 +274,6 @@ test("shell tools never show the extension's own duration", () => {
 	const done = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("s1"))));
 	assert.ok(done, "no dim line when completed");
 	assert.ok(!done!.includes("ran "), "completed shell call line must not show the duration");
-
-	const resultLine = tsLineOf(
-		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("s1"))),
-	);
-	assert.ok(resultLine, "no dim result line");
-	assert.match(resultLine!, /^\s*⟨dim⟩ended \d\d:\d\d:\d\d⟨\/role⟩$/);
 });
 
 test("codemode never shows the extension's own duration", () => {
@@ -297,12 +305,6 @@ test("codemode never shows the extension's own duration", () => {
 	const done = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("cm1"))));
 	assert.ok(done, "no dim line when completed");
 	assert.ok(!done!.includes("ran "), "completed codemode call line must not show the duration");
-
-	const resultLine = tsLineOf(
-		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("cm1"))),
-	);
-	assert.ok(resultLine, "no dim result line");
-	assert.match(resultLine!, /^\s*⟨dim⟩ended \d\d:\d\d:\d\d⟨\/role⟩$/);
 });
 
 // ── Backfill from session history ─────────────────────────────────────────────
@@ -319,9 +321,9 @@ function branchEntry(message: FakeMessage) {
 }
 
 /** Today's wall-clock time, so same-day (time-only) assertions hold on any run date. */
-function atToday(h: number, m: number, s: number): number {
+function atToday(h: number, m: number, s: number, ms = 0): number {
 	const now = new Date();
-	return new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s).getTime();
+	return new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s, ms).getTime();
 }
 
 test("backfill approximates start and end from session history", () => {
@@ -447,7 +449,7 @@ test("result line sits at the bottom of a Container result", () => {
 	assert.ok(endIndex > headerIndex && endIndex > bodyIndex, `ended line misplaced: ${JSON.stringify(lines)}`);
 	const lastContentIndex = lines.reduce((last, line, index) => (line.trim() ? index : last), -1);
 	assert.equal(endIndex, lastContentIndex, `ended line must be the last content line: ${JSON.stringify(lines)}`);
-	assert.match(lines[endIndex]!, /ran 0\.5s  ended \d\d:\d\d:\d\d/);
+	assert.match(lines[endIndex]!, /ran 0\.5s/);
 });
 
 test("partial results do not show an ended line", () => {
@@ -462,6 +464,109 @@ test("partial results do not show an ended line", () => {
 		wrapped.renderResult({ content: [] }, { expanded: false, isPartial: true }, theme, makeContext("p1")),
 	);
 	assert.ok(!lines.some((line) => line.includes("ended")), JSON.stringify(lines));
+});
+
+test("same-second results show only the duration", () => {
+	const loaded = loadExtension();
+	const base = makeBaseRenderers();
+	const read = loaded.resolver("read", () => base.renderers);
+
+	// Same wall-clock second, different millisecond offsets: 400ms duration.
+	const branch = [
+		branchEntry({ role: "assistant", timestamp: atToday(14, 32, 5, 200), content: [{ type: "toolCall", id: "ss1" }] }),
+		branchEntry({ role: "toolResult", timestamp: atToday(14, 32, 5, 600), toolCallId: "ss1" }),
+		branchEntry({ role: "assistant", timestamp: atToday(14, 32, 6, 0), content: [{ type: "toolCall", id: "ss2" }] }),
+		branchEntry({ role: "toolResult", timestamp: atToday(14, 32, 6, 0), toolCallId: "ss2" }),
+	];
+	loaded.handler("session_start")!(
+		{ type: "session_start", reason: "resume" },
+		{ sessionManager: { getBranch: () => branch } },
+	);
+
+	const fast = tsLineOf(renderLines(read.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("ss1"))));
+	assert.ok(fast, "no dim result line for ss1");
+	assert.match(fast!, /^\s*⟨dim⟩ran 0\.4s⟨\/role⟩$/, `same-second result must omit ended: ${fast}`);
+
+	const instant = tsLineOf(renderLines(read.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("ss2"))));
+	assert.ok(instant, "no dim result line for ss2");
+	assert.match(instant!, /^\s*⟨dim⟩ran <0\.1s⟨\/role⟩$/, `sub-100ms same-second result must show <0.1s: ${instant}`);
+});
+
+test("shell tools add no result line when the result lands in the same second", () => {
+	const loaded = loadExtension();
+	const base = makeBaseRenderers();
+	const shell = loaded.resolver("bash", () => base.renderers);
+
+	const branch = [
+		branchEntry({ role: "assistant", timestamp: atToday(14, 32, 5), content: [{ type: "toolCall", id: "sh1" }] }),
+		branchEntry({ role: "toolResult", timestamp: atToday(14, 32, 5, 500), toolCallId: "sh1" }),
+	];
+	loaded.handler("session_start")!(
+		{ type: "session_start", reason: "resume" },
+		{ sessionManager: { getBranch: () => branch } },
+	);
+
+	const lines = renderLines(shell.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("sh1")));
+	assert.ok(!lines.some((line) => line.includes("⟨dim⟩")), `unexpected dim result line: ${JSON.stringify(lines)}`);
+	assert.ok(lines.some((line) => line.includes("result body")), "base result body missing");
+});
+
+test("cross-second results keep the ended form, with a date prefix across days", () => {
+	const loaded = loadExtension();
+	const base = makeBaseRenderers();
+	const read = loaded.resolver("read", () => base.renderers);
+	const shell = loaded.resolver("bash", () => base.renderers);
+
+	const today = new Date();
+	const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1, 23, 59, 58).getTime();
+	const branch = [
+		branchEntry({ role: "assistant", timestamp: atToday(14, 32, 5), content: [{ type: "toolCall", id: "x1" }] }),
+		branchEntry({ role: "toolResult", timestamp: atToday(14, 32, 8), toolCallId: "x1" }),
+		// Midnight rollover: end is today, so it renders without a date prefix,
+		// but start and end still format differently.
+		branchEntry({ role: "assistant", timestamp: yesterday, content: [{ type: "toolCall", id: "x2" }] }),
+		branchEntry({ role: "toolResult", timestamp: atToday(0, 0, 1), toolCallId: "x2" }),
+		// Result on a previous day: the ended time carries the MM-DD prefix.
+		branchEntry({
+			role: "assistant",
+			timestamp: new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1, 10, 0, 0).getTime(),
+			content: [{ type: "toolCall", id: "x4" }],
+		}),
+		branchEntry({
+			role: "toolResult",
+			timestamp: new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1, 10, 0, 5).getTime(),
+			toolCallId: "x4",
+		}),
+	];
+	loaded.handler("session_start")!(
+		{ type: "session_start", reason: "resume" },
+		{ sessionManager: { getBranch: () => branch } },
+	);
+
+	const crossSecond = tsLineOf(renderLines(read.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("x1"))));
+	assert.ok(crossSecond, "no dim result line for x1");
+	assert.match(crossSecond!, /^\s*⟨dim⟩ran 3\.0s  ended 14:32:08⟨\/role⟩$/);
+
+	const crossDay = tsLineOf(renderLines(read.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("x2"))));
+	assert.ok(crossDay, "no dim result line for x2");
+	assert.match(crossDay!, /^\s*⟨dim⟩ran 3\.0s  ended 00:00:01⟨\/role⟩$/, `midnight rollover must keep ended: ${crossDay}`);
+
+	const prefixed = tsLineOf(renderLines(read.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("x4"))));
+	assert.ok(prefixed, "no dim result line for x4");
+	assert.match(prefixed!, /^\s*⟨dim⟩ran 5\.0s  ended \d\d-\d\d 10:00:05⟨\/role⟩$/, `previous-day result must carry a date prefix: ${prefixed}`);
+
+	// Shell renderers keep showing only the completion time across seconds.
+	const shellBranch = [
+		branchEntry({ role: "assistant", timestamp: atToday(14, 32, 5), content: [{ type: "toolCall", id: "x3" }] }),
+		branchEntry({ role: "toolResult", timestamp: atToday(14, 32, 8), toolCallId: "x3" }),
+	];
+	loaded.handler("session_start")!(
+		{ type: "session_start", reason: "resume" },
+		{ sessionManager: { getBranch: () => shellBranch } },
+	);
+	const shellResult = tsLineOf(renderLines(shell.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("x3"))));
+	assert.ok(shellResult, "no dim result line for x3");
+	assert.match(shellResult!, /^\s*⟨dim⟩ended 14:32:08⟨\/role⟩$/);
 });
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────

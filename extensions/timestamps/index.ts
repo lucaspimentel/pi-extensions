@@ -14,11 +14,15 @@
  * The call line shows the absolute start time (local timezone, MM-DD prefix on
  * entries from previous days). While the tool is still running, the call line
  * also shows a live-ticking `ran 2.1s…` (omitted until 100ms have elapsed);
- * once the result arrives the duration moves down to the result line, which
- * shows `ran 2.1s  ended 14:32:07`. Tools whose renderer displays the duration
- * itself (bash, host_bash, powershell, codemode) never show the extension's
- * own duration: those renderers already display Elapsed/Took, so their call
- * line stays start-only and their result line shows only the completion time.
+ * once the result arrives the duration moves down to the result line. When the
+ * tool finishes within the same displayed second it started, the result line
+ * shows only the duration (`ran 0.3s`, or `ran <0.1s` for
+ * sub-100ms runs) instead of repeating the identical timestamp. Tools whose
+ * renderer displays the duration itself (bash, host_bash, powershell,
+ * codemode) never show the extension's own duration: those renderers already
+ * display Elapsed/Took, so their call line stays start-only and their result
+ * line shows only the completion time (or nothing at all when it would repeat
+ * the start second).
  *
  * Display-only: nothing is written to the session file. Live rows are
  * timestamped from tool_execution_start/tool_execution_end events; rows from
@@ -245,10 +249,22 @@ function wrapResult(
 	// Partial/streaming results have no completion time yet.
 	if (!call || call.end === undefined || options.isPartial) return inner;
 
+	const durationMs = call.durationMs ?? Math.max(0, call.end - call.start);
+	const text = formatResultLine(durationMs, call.start, call.end, Date.now(), !baseShowsDuration);
+
+	// Nothing to show: same-second results of shell tools (their renderer's own
+	// Took line already covers the duration). Remove any line left over from a
+	// previous render of this cached result component.
+	if (text === undefined) {
+		if (st.resultLine && inner instanceof Container && inner.children.includes(st.resultLine)) {
+			inner.removeChild(st.resultLine);
+		}
+		return inner;
+	}
+
 	const line = st.resultLine ?? new Text("", 2, 0);
 	st.resultLine = line;
-	const durationMs = call.durationMs ?? Math.max(0, call.end - call.start);
-	line.setText(theme.fg("dim", formatResultLine(durationMs, call.end, Date.now(), !baseShowsDuration)));
+	line.setText(theme.fg("dim", text));
 
 	// Preferred placement: the very bottom of the result block, after the body
 	// (and after the shell renderer's Took line). When the base result renders
