@@ -83,5 +83,6 @@ Each command name lists its stages, so what a command skips is visible:
 - `/scout-plan <task>`: scout → planner. Gathers context and returns a plan; no implementation
 - `/scout-plan-implement <task>`: scout → planner → worker. Gathers context, plans, implements
 - `/implement-review <task>`: worker → reviewer → worker. Implements, reviews, applies feedback; no scouting or planning, for well-specified tasks
+- `/scout-plan-implement-review <task>`: scout → planner → worker → reviewer → worker. Full pipeline: context, plan, implement, review, apply feedback; the review-and-fix loop runs unattended (no human checkpoint between implement and fix)
 
 Each runs as a subagent chain, passing output between steps via `{previous}`.
