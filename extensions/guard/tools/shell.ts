@@ -175,16 +175,15 @@ export function hostBoundCommandReason(cmd: string): string | null {
 	return null;
 }
 
-export const SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; protected/read-only paths may fail with EROFS and outside paths may not be mounted. Use host_bash if host access is required, or request a read grant. Sandbox launch failures never fall back to host execution.";
+export const SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; protected/read-only paths may fail with EROFS and outside paths may not be mounted. Use host_bash if host access is required, or request a grant with the request_read_access tool. Sandbox launch failures never fall back to host execution.";
 
 /**
- * The generic failure hint for sandboxed bash only. Unlike
- * SANDBOX_FAILURE_HINT (python/node, where the worker-initiated read-grant
- * dialog is real), it does not offer a read grant: sandboxed bash has no way
- * to trigger one. It states the filesystem boundary and points at host_bash
- * and the user-managed readRoots configuration instead.
+ * The generic failure hint for sandboxed bash only. It states the filesystem
+ * boundary and points at host_bash, and names the request_read_access tool
+ * for persistent read access (the tool opens the guard read-grant dialog for
+ * an absolute path; sandboxed bash has no way to trigger one itself).
  */
-export const SHELL_SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted (protected paths are read-only). Use host_bash if host access is required. For persistent sandbox read access, the user can add a directory to readRoots in guard.json (~/.pi/agent/guard.json or the project .pi/guard.local.json). Sandbox launch failures never fall back to host execution.";
+export const SHELL_SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted (protected paths are read-only). Use host_bash if host access is required. For persistent sandbox read access, request a grant with the request_read_access tool. Sandbox launch failures never fall back to host execution.";
 
 /** Characters that make a path token a glob. */
 const GLOB_CHARS = "*?[";

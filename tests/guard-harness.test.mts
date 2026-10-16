@@ -495,15 +495,16 @@ test("registered python/node workers declare conservative capability metadata", 
 	}
 });
 
-test("registered tools own all four names and reject calls before session initialization", async () => {
+test("registered tools own all five names and reject calls before session initialization", async () => {
 	const h = makeHarness();
-	assert.deepEqual([...h.registeredTools.keys()].sort(), ["bash", "host_bash", "node", "python"]);
+	assert.deepEqual([...h.registeredTools.keys()].sort(), ["bash", "host_bash", "node", "python", "request_read_access"]);
 	const ctx = harnessCtx(h, makeTempDir("guard-uninitialized-"));
 	for (const name of ["bash", "host_bash", "node", "python"]) {
 		await assert.rejects(h.registeredTools.get(name)!.execute("id", { command: "echo should-not-run", code: "1" }, undefined, undefined, ctx), /not initialized/);
 		const result = await h.handlers.tool_call[0]({ toolName: name, input: {} }, ctx) as { block: boolean };
 		assert.equal(result.block, true);
 	}
+	await assert.rejects(h.registeredTools.get("request_read_access")!.execute("id", { path: "/tmp/x" }, undefined, undefined, ctx), /not initialized/);
 });
 
 test("registered raw bash honors rules and fixed identities; unrestricted alone skips rules", async () => {

@@ -177,12 +177,12 @@ test("sandboxFailureHint: host-bound commands keep the existing targeted directi
 	assert.match(sandboxFailureHint("git push origin main", fakeMounts(), HOME), /'git push'/);
 });
 
-test("sandboxFailureHint: unmounted paths get the conditional hint without grant language", () => {
+test("sandboxFailureHint: unmounted paths get the conditional hint naming the read-access tool", () => {
 	const hint = sandboxFailureHint(`ls ${HOME}/.pi/agent/agents/ 2>/dev/null`, fakeMounts(), HOME);
 	assert.match(hint, new RegExp(`${HOME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\/\\.pi\\/agent\\/agents`));
 	assert.match(hint, /may not be visible/);
 	assert.match(hint, /other causes are possible/);
-	assert.doesNotMatch(hint, /read grant/i);
+	assert.match(hint, /request_read_access/, "the appended shell explanation names the tool");
 	assert.ok(hint.includes(SHELL_SANDBOX_FAILURE_HINT), "the stable shell explanation is appended");
 });
 
@@ -191,11 +191,11 @@ test("sandboxFailureHint: no path mention keeps the generic shell hint", () => {
 	assert.equal(hint, SHELL_SANDBOX_FAILURE_HINT);
 });
 
-test("SHELL_SANDBOX_FAILURE_HINT states the boundary and no grant offer", () => {
+test("SHELL_SANDBOX_FAILURE_HINT states the boundary and points at the read-access tool", () => {
 	assert.match(SHELL_SANDBOX_FAILURE_HINT, /host_bash/);
-	assert.match(SHELL_SANDBOX_FAILURE_HINT, /readRoots/);
-	assert.match(SHELL_SANDBOX_FAILURE_HINT, /guard\.json/);
-	assert.doesNotMatch(SHELL_SANDBOX_FAILURE_HINT, /read grant/i);
+	assert.match(SHELL_SANDBOX_FAILURE_HINT, /request a grant with the request_read_access tool/);
+	assert.match(SHELL_SANDBOX_FAILURE_HINT, /never fall back to host execution/);
+	assert.doesNotMatch(SHELL_SANDBOX_FAILURE_HINT, /readRoots/, "the manual config-editing sentence is replaced by the tool");
 });
 
 test("sandboxFailureHint remains advisory for path-mentioning commands that would succeed", () => {

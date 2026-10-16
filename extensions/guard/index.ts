@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { createGuardAskSelect, supportsOwnedStages } from "./ask-overlay.ts";
 import { homedir } from "node:os";
+import { isAbsolute } from "node:path";
 import { GuardRuntime, validateReadGrant, validateReadRootSave } from "./runtime.ts";
 import { DialogGate } from "./dialogs.ts";
 import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
@@ -472,7 +473,7 @@ export default function guard(pi: ExtensionAPI) {
 	for (const name of ["bash", "host_bash"] as const) pi.registerTool({
 		...bash, name, label: name,
 		description: name === "bash"
-			? `${bash.description} Guard sandboxed except in raw profiles: no network and no host credentials, so commands that need either (gh, curl, ssh, git push/fetch, package installs) fail here; use host_bash for those. Only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted: other host paths (for example ~/.pi or other repositories) are not visible, and commands that need them fail; use host_bash for those. Shared real-path scratch.`
+			? `${bash.description} Guard sandboxed except in raw profiles: no network and no host credentials, so commands that need either (gh, curl, ssh, git push/fetch, package installs) fail here; use host_bash for those. Only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted: other host paths (for example ~/.pi or other repositories) are not visible, and commands that need them fail; use host_bash for those. Shared real-path scratch. For persistent sandbox read access outside the mounts, request a grant with the request_read_access tool.`
 			: `${bash.description} Runs on the host with full network access and host credentials; use it for network or auth commands (gh, curl, ssh, git push/fetch, package installs), and for host paths outside the sandbox mounts (for example ~/.pi or other repositories). Subject to HostBash rules and guard profile.`,
 		renderCall: createShellRenderCall(name),
 		// The wrapped tool definition carries no renderers; without this, host_bash has no
@@ -495,7 +496,14 @@ export default function guard(pi: ExtensionAPI) {
 			const outcome = await rt.run(async (policy) => rt === runtime && rt.epoch === epoch && (await decisionFor(name, input, ctx, policy)).action === "allow", (execution) => rt.worker(name, input, execution), signal);
 			let data = outcome.result as Record<string, any>;
 			if (data.status === "permission_needed" && typeof data.permissionPath === "string") {
-				data = await handleReadGrant(rt, name, data, ctx, signal);
+				const grant = await requestReadGrant(rt, name, String(data.permissionPath), ctx, signal, "worker");
+				// Project the typed outcome into the existing worker response fields
+				// (diagnostic/stateLost/stateLostReason), byte-identical to the former
+				// handleReadGrant payloads. An empty refusal diagnostic is the no-UI
+				// passthrough: no field changes.
+				if (grant.kind === "granted") data = { ...data, stateLost: true, stateLostReason: "read roots changed", diagnostic: `Read-only grant added: ${grant.root}. Worker state discarded. Code was not replayed; run it again explicitly.` };
+				else if (grant.kind === "denied") data = { ...data, diagnostic: "Read request denied." };
+				else if (grant.diagnostic !== "") data = { ...data, diagnostic: grant.diagnostic };
 			}
 			const failed = (name === "python" ? PYTHON_FAILURES : NODE_FAILURES).has(data.status);
 			const text = [data.stdout, data.stderr, data.repr ?? data.value, data.exception ? JSON.stringify(data.exception) : "", data.diagnostic, data.stateLost ? `Interpreter state lost: ${data.stateLostReason ?? "worker stopped"}. Scratch retained.` : "", !data.status ? JSON.stringify(data) : `status: ${data.status}`, failed && rt.policy.profile !== "yolo" && rt.policy.profile !== "unrestricted" ? SANDBOX_FAILURE_HINT : ""].filter(Boolean).join("\n");
@@ -503,14 +511,109 @@ export default function guard(pi: ExtensionAPI) {
 		},
 	});
 
-	async function handleReadGrant(rt: GuardRuntime, name: string, data: Record<string, any>, ctx: ExtensionContext, signal?: AbortSignal): Promise<Record<string, any>> {
-		if (signal?.aborted) return { ...data, diagnostic: "No read grant: call aborted." };
-		if (!ctx.hasUI) return data;
+	// Model-callable read-access request. NOT an owned executor and never
+	// routed through rt.run or the execution queue: execute runs one
+	// guard-internal decisionFor self-check, then opens the same read-grant
+	// dialog the workers use through the shared requestReadGrant helper. The
+	// dialog is the consent surface: an allow decision still opens it (never
+	// an automatic grant), and the dialog discloses the request path,
+	// suggested root, and scope being authorized. readOnlyHint is false
+	// because the tool mutates guard authorization state (persistent saves
+	// write the guard config and applying a grant stops interpreter workers).
+	pi.registerTool({
+		name: "request_read_access",
+		label: "request_read_access",
+		parameters: Type.Object({ path: Type.String({ description: "Absolute path to the file or directory to read" }) }),
+		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+		description: "Opens a guard dialog asking the user for read-only access to an absolute host path outside the sandbox mounts: a session grant or a persistent read root saved to the guard config. Mutates guard authorization state; applying a grant stops running interpreter workers. Requires an interactive session; non-interactive contexts refuse. Never re-runs anything: nothing is executed or replayed here, and no read happens; re-run the read yourself after a grant.",
+		execute: async (_id, input, signal, _onUpdate, ctx) => {
+			const errorResult = (text: string): AgentToolResult<any> => ({ content: [{ type: "text", text }], details: undefined, isError: true });
+			const rt = runtime;
+			if (!rt) throw new Error("guard session state not initialized");
+			if (signal?.aborted) return errorResult("No read grant: call aborted.");
+			const requestPath = typeof input.path === "string" ? input.path : "";
+			// The read-grant primitives resolve rather than reject relative input,
+			// so the entry enforces isAbsolute itself: no dialog, no policy
+			// evaluation, and the request is judged only on the resolved location.
+			if (!isAbsolute(requestPath)) return errorResult("request_read_access requires an absolute path; resolve the path first.");
+			const cwd = rt.policy.cwd;
+			// Captured before the decisionFor self-check: the classifier call can
+			// take seconds, and an epoch advance that keeps the same runtime
+			// instance (for example /guard reload) must invalidate the verdict
+			// before any UI.
+			const epoch = rt.epoch;
+			const decision = await decisionFor("request_read_access", { path: requestPath }, ctx);
+			// Post-await recheck before opening any UI: the owning call signal,
+			// runtime/session freshness (a captured runtime must be the live one,
+			// still at its captured epoch, AND operational; assertAvailable rejects
+			// a disposed runtime), and cwd, mirroring assertDialogCurrent's checks
+			// and authorize's own post-await epoch recheck.
+			if (signal?.aborted) return errorResult("No read grant: call aborted.");
+			if (rt !== runtime || rt.epoch !== epoch || rt.teardownFailure) return errorResult("No read grant: the guard session changed; nothing was approved or saved.");
+			try { rt.assertAvailable(); } catch (err) { return errorResult(`No read grant: ${err instanceof Error ? err.message : String(err)}`); }
+			if (rt.policy.cwd !== cwd || ctx.cwd !== cwd) return errorResult("No read grant: guard cwd changed; awaiting session replacement.");
+			// Decision contract: deny refuses with the cause, no dialog; prompt
+			// with no UI refuses with an actionable diagnostic; prompt with UI and
+			// allow both open the dialog (the consent surface, never an automatic
+			// grant); classifier failures and indeterminate verdicts fail closed.
+			if (decision.action === "deny") return errorResult(`No read grant: guard denied the request (${decision.reason}). No interpreter workers were stopped and no previously run code was replayed.`);
+			if (decision.action === "prompt" && /classifier (call failed|had no verdict)/.test(decision.reason)) return errorResult("No read grant: guard could not classify this request, so it fails closed. Retry later, or have the user add a covering read root to the guard config.");
+			if (decision.action === "prompt" && !ctx.hasUI) return errorResult("No read grant: no interactive UI is available to approve read access. Ask the user in an interactive session, or have the user add a covering read root to the guard config.");
+			const outcome = await requestReadGrant(rt, "request_read_access", requestPath, ctx, signal, "tool");
+			if (outcome.kind === "granted") {
+				const savedTo = outcome.savedTo ? ` Saved to ${outcome.savedTo}.` : "";
+				return { content: [{ type: "text", text: `Read-only grant added for ${outcome.root} (${outcome.scope} scope).${savedTo} Running interpreter workers were stopped; their state was discarded; previously run code was not replayed.` }], details: undefined };
+			}
+			if (outcome.kind === "denied") {
+				// The helper appends the capability note to refused diagnostics;
+				// denied outcomes carry it here because the steering side effect
+				// already ran and the outcome type has no diagnostic field.
+				const note = ownedStagesFor(ctx) ? "" : CAPABILITY_LIMITED_NOTE;
+				return errorResult(`Read request denied.${note} No read grant was made: interpreter workers were not stopped and no previously run code was replayed.`);
+			}
+			return errorResult(outcome.diagnostic);
+		},
+	});
+
+	// Appended by the tool and the shared helper when a non-grant outcome
+	// follows a capability-limited dialog (no owned editor stages).
+	const CAPABILITY_LIMITED_NOTE = " Only a session grant was offerable: this host cannot open the root editor for persistent saves.";
+
+	type GrantOutcome =
+		| { kind: "granted"; scope: "session" | "project" | "user"; root: string; savedTo?: string }
+		| { kind: "denied" }
+		| { kind: "refused"; diagnostic: string };
+
+	/**
+	 * Shared read-grant interaction for the python/node worker path
+	 * (permission_needed) and the request_read_access tool. Mirrors the former
+	 * handleReadGrant body: epoch capture, suggestion validation, the dialog
+	 * gate lease, the prompt flow, then the extension transition wrapper with
+	 * expectedEpoch, preempt, invalidateWorkers, and a beforeCommit that
+	 * rechecks the config signature against the post-dialog snapshot before
+	 * any write. Returns a typed outcome; success is never inferred from
+	 * absent diagnostics or message text. The caller projects the outcome
+	 * into its own response shape. The dialog keeps disclosing the actual
+	 * request path, suggested root, and scope being authorized
+	 * (runReadGrantPrompt); nothing is ever replayed.
+	 */
+	async function requestReadGrant(rt: GuardRuntime, requesterName: string, requestPath: string, ctx: ExtensionContext, signal: AbortSignal | undefined, caller: "worker" | "tool"): Promise<GrantOutcome> {
+		if (signal?.aborted) return { kind: "refused", diagnostic: "No read grant: call aborted." };
+		if (!ctx.hasUI) {
+			// The tool gets an actionable diagnostic; the worker path keeps the
+			// silent passthrough (an empty diagnostic means no field changes).
+			if (caller === "tool") return { kind: "refused", diagnostic: `No read grant: no interactive UI is available to approve read access to ${requestPath}. Ask the user in an interactive session, or have the user add a covering read root to the guard config.` };
+			return { kind: "refused", diagnostic: "" };
+		}
 		const epoch = rt.epoch;
 		const cwd = rt.policy.cwd;
+		// Capability-limited hosts (no owned editor stages) degrade to session
+		// grant and deny; computed once BEFORE the dialog so save actions are
+		// never offered and then failed.
+		const capabilityNote = caller === "tool" && !ownedStagesFor(ctx) ? CAPABILITY_LIMITED_NOTE : "";
 		try {
 			rt.assertAvailable();
-			const suggestedRoot = validateReadGrant(readGrantSuggestion(data.permissionPath, ctx.cwd), ctx.cwd);
+			const suggestedRoot = validateReadGrant(readGrantSuggestion(requestPath, ctx.cwd), ctx.cwd);
 			// Same narrow lease as approvals: validation, the complete interaction,
 			// validation. Session grants stay one-stage; persistent saves open the
 			// root editor and preview through the prompt flow.
@@ -520,13 +623,13 @@ export default function guard(pi: ExtensionAPI) {
 				const result = await admittedDialog(ctx, () => runReadGrantPrompt({
 					io: promptIO(ctx),
 					signal: dialogSignal,
-					workerName: name,
-					requestPath: String(data.permissionPath),
+					workerName: requesterName,
+					requestPath,
 					suggestedRoot,
 					scopes: ["project", "user"],
 					parseReadRoot: (text) => parseReadRootInput(text, ctx.cwd),
 					validateRoot: (candidate) => {
-						try { validateReadRootSave(candidate, String(data.permissionPath), ctx.cwd); return { ok: true as const }; }
+						try { validateReadRootSave(candidate, requestPath, ctx.cwd); return { ok: true as const }; }
 						catch (err) { return { ok: false as const, error: err instanceof Error ? err.message : String(err) }; }
 					},
 					destination: (scope) => configDestination(ctx, scope),
@@ -536,29 +639,31 @@ export default function guard(pi: ExtensionAPI) {
 				return result;
 			});
 			assertCallActive(signal);
-			if (outcome.kind === "no-grant") return { ...data, diagnostic: "No read grant: the request was not approved." };
+			if (outcome.kind === "no-grant") return { kind: "refused", diagnostic: `No read grant: the request was not approved.${capabilityNote}` };
 			if (outcome.kind === "deny") {
 				deliverSteering(outcome.steering, signal, rt, epoch, cwd);
-				return { ...data, diagnostic: "Read request denied." };
+				return { kind: "denied" };
 			}
 			rt.assertAvailable();
 			// Revalidate the ACTUAL edited root (or the suggested root for a session
 			// grant, which has no editor) against the request path before committing.
-			const root = outcome.kind === "save-root" ? validateReadRootSave(outcome.root, String(data.permissionPath), ctx.cwd) : suggestedRoot;
+			const root = outcome.kind === "save-root" ? validateReadRootSave(outcome.root, requestPath, ctx.cwd) : suggestedRoot;
 			rt.assertAvailable();
 			const diskConfig = loadConfig(ctx.cwd);
 			const target = { ...diskConfig, readRoots: [...new Set([...diskConfig.readRoots, root])] };
 			await transition({ ...state! }, target, ctx, { epoch, beforeCommit: () => {
 				assertCallActive(signal);
 				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or replayed");
-				if (outcome.kind === "save-root") validateReadRootSave(root, String(data.permissionPath), ctx.cwd);
+				if (outcome.kind === "save-root") validateReadRootSave(root, requestPath, ctx.cwd);
 				else validateReadGrant(root, ctx.cwd);
 				if (outcome.kind === "grant-session") sessionReadRoots = [...new Set([...sessionReadRoots, root])];
 				else addToConfigScope(outcome.scope, { readRoots: [root] }, { cwd: ctx.cwd });
 				return loadConfig(ctx.cwd);
 			} });
-			return { ...data, stateLost: true, stateLostReason: "read roots changed", diagnostic: `Read-only grant added: ${root}. Worker state discarded. Code was not replayed; run it again explicitly.` };
-		} catch (err) { return { ...data, diagnostic: `Read grant refused: ${String(err)}` }; }
+			return outcome.kind === "grant-session"
+				? { kind: "granted", scope: "session", root }
+				: { kind: "granted", scope: outcome.scope, root, savedTo: configDestination(ctx, outcome.scope) };
+		} catch (err) { return { kind: "refused", diagnostic: `Read grant refused: ${String(err)}${capabilityNote}` }; }
 	}
 
 	// Async bus listeners publish the effective policy only after teardown.

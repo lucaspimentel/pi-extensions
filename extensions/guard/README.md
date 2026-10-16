@@ -27,6 +27,7 @@ transitions; `tools/` holds the tool implementations.
 | `host_bash` | The only sandbox escape: argv-array host exec with `HostBash(...)` rules and the tightened read-only tier. |
 | `python` / `node` | Ports of the old controllers (`tools/python/`, `tools/node/`) onto the shared sandbox: persistent worker, fd-3 JSON protocol, bounded output/timeouts, no code replay. Every sandboxed profile uses a worker-lifetime workspace overlay; reduced mode or a workspace lock degrades to read-only; yolo/unrestricted run the worker raw (full env and filesystem, no launcher, no rlimits). |
 | `pwsh` | Not registered by guard. The standalone `pwsh` extension was removed; pi's built-in `powershell` tool is opt-in (`defaultTools`) and, when enabled, is classified as a host shell on the pwsh tier (`Pwsh(...)` rules, no read-only tier). |
+| `request_read_access` | Model-callable read-access request (registered by `index.ts`, not an owned executor and never routed through the execution queue). Opens the same guard read-grant dialog the python/node workers use, for an absolute host path outside the sandbox mounts: a session grant or a persistent read root saved to the guard config. One guard-internal `decisionFor` self-check runs first (deny refuses with the cause; an allow still opens the dialog, which is the consent surface; classifier failures fail closed), the entry itself rejects relative paths, and non-interactive contexts refuse with an actionable diagnostic. It mutates guard authorization state (persistent saves write guard.json; applying a grant stops interpreter workers) and never re-runs anything: no code is executed or replayed, and the caller must re-run the read itself after a grant. |
 
 Registration details:
 
@@ -51,11 +52,11 @@ Registration details:
   names them conditionally ("may not be visible"); a mention never blocks
   execution, opens a dialog, or claims to be the cause. The `bash` and
   `host_bash` descriptions state the same routing rules up front, including
-  the filesystem boundary. The bash failure hint does not offer a read
-  grant: only the python/node workers can trigger the read-grant dialog
-  (`permission_needed`), so the bash hint points at `host_bash` and the
-  user-managed `readRoots` configuration instead; an explicit
-  model-callable read-access request is planned separately.
+  the filesystem boundary. The bash failure hint points at the
+  `request_read_access` tool for persistent read access: the tool opens the
+  guard read-grant dialog for an absolute path (the worker `permission_needed`
+  path shares the same dialog through the shared `requestReadGrant` helper),
+  so the hint no longer points at manual `readRoots` editing.
 
 ### Execution queue and transitions
 
