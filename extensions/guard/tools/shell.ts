@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { spawnSandboxed } from "../sandbox/run.ts";
 import { effectiveWorkspaceMode } from "../policy/decision.ts";
 import { normalizeRootList } from "../policy/paths.ts";
+import { splitTopLevelShell, stripTimeoutPrefix } from "../policy/shellsplit.ts";
+import { tokenizeSimple } from "../policy/bashtier.ts";
 import { homedir, constants } from "node:os";
 import { RLIMITS_SHELL, type LaunchSpec } from "../sandbox/spec.ts";
 import type { ExecutionContext } from "../runtime.ts";
@@ -119,4 +121,66 @@ export function createGuardShellOperations(ctx: ExecutionContext, host: boolean)
 	} };
 }
 
+/**
+ * Top-level command names that always need network access or host resources
+ * (credentials, daemon sockets) and can never succeed inside the sandbox.
+ */
+const HOST_BOUND_ROOTS = new Set([
+	"gh", "curl", "wget", "ssh", "scp", "sftp", "rsync",
+	"aws", "gcloud", "az", "gsutil", "kubectl", "helm", "terraform",
+	"docker", "podman",
+]);
+
+/** `git` subcommands that contact a remote. */
+const GIT_NETWORK_SUBCOMMANDS = new Set(["push", "pull", "fetch", "clone", "ls-remote"]);
+
+/** Package-manager roots whose install-family subcommands hit the network. */
+const PKG_NETWORK_ROOTS = new Set(["npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "uvx", "cargo", "gem", "composer", "dotnet", "nuget", "go"]);
+
+/** Network-reaching subcommands for the package-manager roots above. */
+const PKG_NETWORK_SUBCOMMANDS = new Set(["install", "add", "ci", "update", "upgrade", "publish", "push", "restore", "download", "get", "mod"]);
+
+/** Leading commands that only wrap the real command (checked case-insensitively). */
+const WRAPPER_PREFIXES = new Set(["sudo", "nohup", "env", "exec", "command", "nice", "stdbuf"]);
+
+/**
+ * Advisory detection of network- or credential-dependent commands: returns the
+ * first matching command's display name, or null when none is detected. Used
+ * only to make the sandboxed-failure hint specific; it never blocks or
+ * reroutes execution, and misses (aliases, functions, unlisted tools) fail
+ * open to the generic hint.
+ */
+export function hostBoundCommandReason(cmd: string): string | null {
+	const split = splitTopLevelShell(cmd);
+	const parts = split.kind === "compound" ? split.parts : [split.kind === "single" ? (split.effectiveCmd ?? cmd) : cmd];
+	for (const part of parts) {
+		let tokens = tokenizeSimple(stripTimeoutPrefix(part.trim()));
+		// Skip leading VAR=value assignments and wrapper commands.
+		while (tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens = tokens.slice(1);
+		while (tokens.length > 0 && WRAPPER_PREFIXES.has(tokens[0].toLowerCase())) tokens = tokens.slice(1);
+		if (tokens.length === 0) continue;
+		const root = tokens[0].toLowerCase();
+		if (HOST_BOUND_ROOTS.has(root)) return root;
+		if (root !== "git" && !PKG_NETWORK_ROOTS.has(root)) continue;
+		const subs = root === "git" ? GIT_NETWORK_SUBCOMMANDS : PKG_NETWORK_SUBCOMMANDS;
+		const sub = tokens.slice(1).map((t) => t.toLowerCase()).find((t) => subs.has(t));
+		if (sub !== undefined) return `${root} ${sub}`;
+	}
+	return null;
+}
+
 export const SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; protected/read-only paths may fail with EROFS and outside paths may not be mounted. Use host_bash if host access is required, or request a read grant. Sandbox launch failures never fall back to host execution.";
+
+/**
+ * The failure hint for one sandboxed shell result. Host-bound commands get a
+ * targeted directive naming the detected command so the model re-runs it with
+ * host_bash instead of retrying in the sandbox; everything else keeps the
+ * generic hint.
+ */
+export function sandboxFailureHint(command: string): string {
+	const reason = hostBoundCommandReason(command);
+	if (reason !== null) {
+		return `Guard sandbox: '${reason}' needs network access or host credentials and cannot succeed here. Re-run this command with host_bash (not bash); do not retry with bash.`;
+	}
+	return SANDBOX_FAILURE_HINT;
+}

@@ -129,7 +129,10 @@ test("both guard shell tools are registered with native call and result renderer
 	}
 	// The guard-specific description markers must survive untouched.
 	assert.match(bash.description, /Guard sandboxed except in raw profiles/);
-	assert.match(hostBash.description, /Runs on the host, subject to HostBash rules and guard profile/);
+	assert.match(bash.description, /no network and no host credentials/);
+	assert.match(bash.description, /use host_bash for those/);
+	assert.match(hostBash.description, /full network access and host credentials/);
+	assert.match(hostBash.description, /Subject to HostBash rules and guard profile/);
 });
 
 // ── Header layout ────────────────────────────────────────────────────────────

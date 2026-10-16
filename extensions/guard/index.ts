@@ -9,7 +9,7 @@ import { GuardRuntime, validateReadGrant, validateReadRootSave } from "./runtime
 import { DialogGate } from "./dialogs.ts";
 import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
 import { FAILURE_STATUSES as NODE_FAILURES } from "./tools/node/session.ts";
-import { createGuardShellOperations, SANDBOX_FAILURE_HINT } from "./tools/shell.ts";
+import { createGuardShellOperations, SANDBOX_FAILURE_HINT, sandboxFailureHint } from "./tools/shell.ts";
 import { createShellRenderCall, nativeBashRenderResult } from "./tools/shell-render.ts";
 import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
 import { detectSandboxMode } from "./sandbox/detect.ts";
@@ -457,7 +457,7 @@ export default function guard(pi: ExtensionAPI) {
 			const run = () => tool.execute(id, input, execution.signal, onUpdate);
 			try {
 				const result = host ? await run() : await rt.sandboxBoundary(run, execution.warnings);
-				if (!host && result.isError) return appendWarnings(result, [SANDBOX_FAILURE_HINT]);
+				if (!host && result.isError) return appendWarnings(result, [sandboxFailureHint(input.command)]);
 				return result;
 			} catch (err) {
 				if (!host) throw new Error(`${err instanceof Error ? err.message : String(err)}\n${SANDBOX_FAILURE_HINT}`);
@@ -469,7 +469,9 @@ export default function guard(pi: ExtensionAPI) {
 	const bash = createBashTool(process.cwd(), { exposeSessionEnvironment: false });
 	for (const name of ["bash", "host_bash"] as const) pi.registerTool({
 		...bash, name, label: name,
-		description: name === "bash" ? `${bash.description} Guard sandboxed except in raw profiles; isolated network and shared real-path scratch.` : `${bash.description} Runs on the host, subject to HostBash rules and guard profile.`,
+		description: name === "bash"
+			? `${bash.description} Guard sandboxed except in raw profiles: no network and no host credentials, so commands that need either (gh, curl, ssh, git push/fetch, package installs) fail here; use host_bash for those. Shared real-path scratch.`
+			: `${bash.description} Runs on the host with full network access and host credentials; use it for network or auth commands (gh, curl, ssh, git push/fetch, package installs). Subject to HostBash rules and guard profile.`,
 		renderCall: createShellRenderCall(name),
 		// The wrapped tool definition carries no renderers; without this, host_bash has no
 		// built-in renderer fallback and its results never show the Elapsed/Took line.

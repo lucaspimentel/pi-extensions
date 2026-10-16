@@ -41,7 +41,12 @@ Registration details:
   (`isOwnedExecutor`); overrides for them are ignored. Every other tool keeps
   the step-2 classification and observe-only behavior.
 - Tool results add failure hints (network unreachable, EROFS on a protected
-  or read-only path, missing mount) pointing at `host_bash`.
+  or read-only path, missing mount) pointing at `host_bash`. When the failed
+  command is detected as network- or credential-dependent (`gh`, `curl`,
+  `git push/fetch`, package installs; advisory first-token match, fail open),
+  the hint names the command and directs the model to re-run it with
+  `host_bash` instead of retrying in the sandbox. The `bash` and `host_bash`
+  descriptions state the same routing rule up front.
 
 ### Execution queue and transitions
 
