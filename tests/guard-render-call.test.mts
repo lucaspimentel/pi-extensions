@@ -128,6 +128,7 @@ test("both guard shell tools are registered with native call and result renderer
 		assert.deepEqual(lines, expected, `${tool.name}: result rendering must be native`);
 	}
 	// The guard-specific description markers must survive untouched.
+	assert.match(bash.description, /^Sandboxed: /);
 	assert.match(bash.description, /Guard sandboxed except in raw profiles/);
 	assert.match(bash.description, /no network and no host credentials/);
 	assert.match(bash.description, /use host_bash for those/);
