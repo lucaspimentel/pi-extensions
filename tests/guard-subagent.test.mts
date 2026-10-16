@@ -346,16 +346,17 @@ test("inheritance contract rejects malformed payloads without defaulting", () =>
 		"[]",
 		"null",
 		"42",
-		'{"version":2,"profile":"auto","nonce":"n"}',
-		'{"version":"1","profile":"auto","nonce":"n"}',
+		'{"version":3,"profile":"auto","nonce":"n"}',
+		'{"version":"2","profile":"auto","nonce":"n"}',
+		'{"version":1,"profile":"auto","nonce":"n"}',
 		'{"profile":"auto","nonce":"n"}',
-		'{"version":1,"nonce":"n"}',
-		'{"version":1,"profile":"bogus","nonce":"n"}',
-		'{"version":1,"profile":"default"}',
-		'{"version":1,"profile":"auto","nonce":""}',
-		'{"version":1,"profile":"auto","nonce":"has space"}',
-		'{"version":1,"profile":"auto","nonce":"' + "a".repeat(129) + '"}',
-		'{"version":1,"profile":"auto","nonce":"n","extra":true}',
+		'{"version":2,"nonce":"n"}',
+		'{"version":2,"profile":"bogus","nonce":"n"}',
+		'{"version":2,"profile":"default"}',
+		'{"version":2,"profile":"auto","nonce":""}',
+		'{"version":2,"profile":"auto","nonce":"has space"}',
+		'{"version":2,"profile":"auto","nonce":"' + "a".repeat(129) + '"}',
+		'{"version":2,"profile":"auto","nonce":"n","extra":true}',
 		"x".repeat(2000),
 	];
 	for (const raw of bad) {
@@ -367,6 +368,17 @@ test("inheritance contract rejects malformed payloads without defaulting", () =>
 	}
 	const okNonce = parseInheritance(serializeInheritance("auto", "a".repeat(128)));
 	assert.equal(okNonce.ok, true, "a 128-character nonce is valid");
+});
+
+test("version 2 carries the allow-edits rung; version 1 payloads fail closed", () => {
+	assert.equal(INHERITANCE_VERSION, 2, "the contract version bump ships with the allow-edits rung");
+	const ok = parseInheritance(serializeInheritance("allow-edits", "nonce-ae"));
+	assert.equal(ok.ok, true);
+	if (ok.ok) assert.deepEqual(ok.contract, { version: 2, profile: "allow-edits", nonce: "nonce-ae" });
+	// An old parent (version 1) paired with a new child fails closed.
+	const v1 = parseInheritance('{"version":1,"profile":"auto","nonce":"n"}');
+	assert.equal(v1.ok, false);
+	assert.match(v1.ok ? "" : v1.reason, /unsupported contract version/);
 });
 
 // ── B. State-level restriction ────────────────────────────────────────────────

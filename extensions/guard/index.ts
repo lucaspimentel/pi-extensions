@@ -27,7 +27,7 @@ import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, 
 import { runExecutionPrompt, runReadGrantPrompt, runWriteEditPrompt, type PromptFlowIO } from "./prompt-flow.ts";
 import { createGuardEditorStage, createGuardPickerStage } from "./ask-components.ts";
 import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, releaseResearchHold, requestResearchHold, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
-import { constraintFromParse, INHERIT_ENV, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
+import { constraintFromParse, INHERIT_ENV, INHERITANCE_VERSION, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
 import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
 import { modelLabel, pickableModels } from "../shared/model-selection.ts";
 
@@ -801,7 +801,7 @@ export default function guard(pi: ExtensionAPI) {
 	pi.events.on("guard:child-contract-request", (data: unknown) => {
 		const request = data as { version?: unknown; nonce?: unknown; profile?: unknown } | null;
 		const refuse = (reason: string) => pi.events.emit("guard:child-contract-ack", { version: 1, ok: false, reason, nonce: ackNonce(request as Record<string, unknown> | null) } satisfies SubagentAckBase & { nonce: string | null });
-		if (!request || request.version !== 1 || ackNonce(request) === null || !isProfile(request.profile)) { refuse("malformed child contract request"); return; }
+		if (!request || request.version !== INHERITANCE_VERSION || ackNonce(request) === null || !isProfile(request.profile)) { refuse("malformed child contract request"); return; }
 		if (!inheritedContract) { refuse("guard has no inherited contract; this is not a guard-dispatched subagent"); return; }
 		if (inheritedContract.nonce !== request.nonce) { refuse("child contract nonce mismatch"); return; }
 		if (inheritedContract.profile !== request.profile) { refuse("child contract profile mismatch"); return; }

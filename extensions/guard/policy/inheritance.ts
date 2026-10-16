@@ -21,8 +21,8 @@ import { isProfile, type Profile } from "./profiles.ts";
 /** The single environment variable carrying the contract. */
 export const INHERIT_ENV = "PI_GUARD_INHERIT";
 
-/** Current contract version; children refuse other versions. */
-export const INHERITANCE_VERSION = 1;
+/** Current contract version; children refuse other versions. Version 2 adds the allow-edits rung to the valid profile set. */
+export const INHERITANCE_VERSION = 2;
 
 /** Bounded size for the serialized payload; anything larger is malformed. */
 const MAX_RAW_LENGTH = 1024;
