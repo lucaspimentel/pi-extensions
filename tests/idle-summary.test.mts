@@ -117,7 +117,9 @@ function makeCtx(overrides: Partial<any> = {}): any {
 		modelRegistry: {
 			getAvailable: () => pool,
 			hasConfiguredAuth: () => true,
-			complete: async () => completePromise,
+			// streamSimple(candidate, { messages }).result() is the call shape the
+			// extension uses (since bcf1d8f); all candidates await the same deferred.
+			streamSimple: () => ({ result: async () => completePromise }),
 		},
 		ui: {
 			notify: (message: string, type?: string) => {
