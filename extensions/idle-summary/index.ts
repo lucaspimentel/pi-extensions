@@ -4,10 +4,10 @@
  * After the agent has been idle for ~3 minutes (configurable via
  * `timeoutMinutes` in the config file), generates a session summary
  * and displays it inline in the chat history (no modal — no dismiss required).
- * Use the `/summary` command to trigger it immediately; doing so suppresses the
- * pending idle timer for the current idle period. `/summary model` opens a
- * picker for the model used to generate summaries; the flat `/summary-model`
- * still works as a deprecated alias during the migration window.
+ * Use the `/idle-summary` command to trigger it immediately; doing so
+ * suppresses the pending idle timer for the current idle period.
+ * `/idle-summary model` opens a picker for the model used to generate
+ * summaries.
  *
  * Model selection: prefers the cheapest/fastest model from the same provider as
  * the currently selected model, then falls back through the remaining scoped (or
@@ -90,7 +90,7 @@ const writeConfiguredModel = (ref: string): void => {
 
 // Build the candidate pool from the session's scoped models, or all available
 // models when no scoping is configured (scopedModels is empty in that case).
-// Resolution order: an explicit user override (from `/summary model`), then
+// Resolution order: an explicit user override (from `/idle-summary model`), then
 // the pure `selectModel` heuristic (cheapest model from the currently
 // selected model's provider first, then the rest by ascending cost). Each
 // candidate must have configured auth.
@@ -101,7 +101,7 @@ const summaryPool = (
 		? ctx.scopedModels.map((s) => s.model)
 		: ctx.modelRegistry.getAvailable();
 
-// Ordered models to try for a summary run: the explicit `/summary model`
+// Ordered models to try for a summary run: the explicit `/idle-summary model`
 // override first (authoritative), then the remaining ranked, authed models,
 // skipping unpriced models in the fallback ordering.
 const summaryCandidates = (ctx: ExtensionContext): Model<Api>[] =>
@@ -277,8 +277,8 @@ export default function (pi: ExtensionAPI) {
 		// replacement (/new, /resume, /fork) happened during that await, session_shutdown
 		// fired and bumped `generation` before the runner was invalidated. This summary
 		// belongs to a now-dead session, so bail silently before touching the stale
-		// ctx/pi (which would throw and, on the /summary command path, propagate as a
-		// "command:summary" error after the reload/replacement finishes).
+		// ctx/pi (which would throw and, on the /idle-summary command path, propagate as a
+		// "command:idle-summary" error after the reload/replacement finishes).
 		if (generation !== runGeneration) return;
 
 		if (!summary || !usedModel) {
@@ -337,13 +337,12 @@ export default function (pi: ExtensionAPI) {
 		armIdleTimer(ctx);
 	});
 
-	// Shared model picker for `/summary model` and the deprecated
-	// `/summary-model` alias. Opens a picker; the choice is persisted to the
+	// Shared model picker for `/idle-summary model`. Opens a picker; the choice is persisted to the
 	// global agent dir and preferred on every future summary.
 	async function pickSummaryModel(ctx: ExtensionContext): Promise<void> {
 		if (!ctx.hasUI) {
 			ctx.ui.notify(
-				"/summary model needs an interactive UI; run it in the TUI.",
+				"/idle-summary model needs an interactive UI; run it in the TUI.",
 				"warning",
 			);
 			return;
@@ -374,10 +373,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// Trigger a summary immediately, and suppress the pending idle timer.
-	// `/summary model` opens the model picker instead, leaving the idle timer
-	// armed, exactly like the old flat /summary-model behavior.
-	pi.registerCommand("summary", {
-		description: "Generate a session summary now; /summary model picks the summary model",
+	// `/idle-summary model` opens the model picker instead, leaving the idle
+	// timer armed.
+	pi.registerCommand("idle-summary", {
+		description: "Generate a session summary now; /idle-summary model picks the summary model",
 		getArgumentCompletions: (prefix: string) => {
 			const items = [
 				{ value: "model", label: "model", description: "Choose the model used to generate session summaries" },
@@ -392,14 +391,6 @@ export default function (pi: ExtensionAPI) {
 			}
 			clearIdleTimer();
 			await generateAndShowSummary(ctx);
-		},
-	});
-
-	// Deprecated alias for the old flat name, kept during the migration window.
-	pi.registerCommand("summary-model", {
-		description: "(Deprecated: use /summary model) Choose the model used to generate session summaries",
-		handler: async (_args, ctx) => {
-			await pickSummaryModel(ctx);
 		},
 	});
 

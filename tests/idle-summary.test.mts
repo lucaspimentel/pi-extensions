@@ -1,6 +1,6 @@
 // Regression test for the stale-ctx leak in the idle-summary extension.
 //
-// Drives the REAL default export with a mock `pi`/`ctx`. The /summary command
+// Drives the REAL default export with a mock `pi`/`ctx`. The /idle-summary command
 // handler awaits generateAndShowSummary(ctx) with no .catch, so if a
 // /reload or session replacement invalidates the ctx during the model
 // complete() await, any post-await ctx/pi touch throws the stale-ctx error
@@ -45,8 +45,9 @@ const pi: any = {
 
 idleSummary(pi);
 
-assert.ok(commands.summary, "/summary command should be registered");
-assert.ok(commands["summary-model"], "deprecated /summary-model alias should be registered");
+assert.ok(commands["idle-summary"], "/idle-summary command should be registered");
+assert.ok(!commands.summary, "old /summary command name must be removed");
+assert.ok(!commands["summary-model"], "deprecated /summary-model alias must be removed");
 assert.ok(handlers.session_start, "session_start handler should be registered");
 assert.ok(handlers.session_shutdown, "session_shutdown handler should be registered");
 
@@ -124,7 +125,7 @@ function makeCtx(overrides: Partial<any> = {}): any {
 				notifyCalls.push({ message, type });
 			},
 			// Cancelled picker: proves the model path was taken without ever
-			// writing the (real, global) summary-model config.
+			// writing the (real, global) summary model config.
 			select: async (_title: string, _items: string[], _opts: any) => {
 				selectCalls++;
 				return undefined;
@@ -146,7 +147,7 @@ function resetScenario() {
 }
 
 async function runSummary() {
-	await commands.summary.handler("", makeCtx());
+	await commands["idle-summary"].handler("", makeCtx());
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -223,7 +224,7 @@ async function main() {
 	assert.equal(notifyCalls.length, 0, "happy path should not notify");
 
 	// 2. Shutdown during a SUCCESSFUL summary: must bail silently, no stale throw.
-	//    (Previously: pi.sendMessage would throw stale-ctx and propagate from /summary.)
+	//    (Previously: pi.sendMessage would throw stale-ctx and propagate from /idle-summary.)
 	resetScenario();
 	const p2 = runSummary();
 	// Mid-await: session_shutdown fires (before runner invalidation), then ctx goes stale.
@@ -250,7 +251,7 @@ async function main() {
 	//    opposed to /reload. Real ordering (agent-session-runtime.js):
 	//      teardownCurrent(): emit session_shutdown -> session.dispose() (ctx goes stale)
 	//      createRuntime():   emit session_start for the NEW session
-	//      ...later: the OLD in-flight /summary's model await finally resolves.
+	//      ...later: the OLD in-flight /idle-summary's model await finally resolves.
 	//    Because pi's resource loader caches the loaded extension set, session
 	//    replacement reuses the SAME closure (unlike /reload, which clears the
 	//    cache and gets a fresh one). A boolean `shutdown` reset by session_start
@@ -267,39 +268,34 @@ async function main() {
 	assert.equal(sendMessageCalls.length, 0, "session replacement must suppress sendMessage");
 	assert.equal(notifyCalls.length, 0, "session replacement must bail before ctx.hasUI/notify");
 
-	// 5. /summary model routes to the model picker, not summary generation.
+	// 5. /idle-summary model routes to the model picker, not summary generation.
 	resetScenario();
-	await commands.summary.handler("model", makeCtx());
-	assert.equal(selectCalls, 1, "/summary model should open the model picker");
-	assert.equal(sendMessageCalls.length, 0, "/summary model should not generate a summary");
+	await commands["idle-summary"].handler("model", makeCtx());
+	assert.equal(selectCalls, 1, "/idle-summary model should open the model picker");
+	assert.equal(sendMessageCalls.length, 0, "/idle-summary model should not generate a summary");
 	assert.equal(notifyCalls.length, 0, "cancelled picker should notify nothing");
 
-	// 5b. The deprecated /summary-model alias routes to the same picker.
-	await commands["summary-model"].handler("", makeCtx());
-	assert.equal(selectCalls, 2, "deprecated /summary-model should open the same picker");
-	assert.equal(sendMessageCalls.length, 0);
-
 	// 5c. Root argument completion offers the `model` subcommand.
-	const modelCompletions = commands.summary.getArgumentCompletions("");
+	const modelCompletions = commands["idle-summary"].getArgumentCompletions("");
 	assert.ok(modelCompletions, "expected completion for empty prefix");
 	assert.deepEqual(
 		modelCompletions.map((i: any) => i.value),
 		["model"],
 	);
-	assert.equal(commands.summary.getArgumentCompletions("mo")?.[0]?.value, "model");
-	assert.equal(commands.summary.getArgumentCompletions("zzz"), null);
+	assert.equal(commands["idle-summary"].getArgumentCompletions("mo")?.[0]?.value, "model");
+	assert.equal(commands["idle-summary"].getArgumentCompletions("zzz"), null);
 
 	// 5d. Non-interactive ctx: the picker path warns instead of generating.
 	resetScenario();
 	const headlessCtx = makeCtx({ hasUI: false });
-	await commands.summary.handler("model", headlessCtx);
+	await commands["idle-summary"].handler("model", headlessCtx);
 	assert.equal(selectCalls, 0, "no picker without a UI");
 	assert.match(notifyCalls[notifyCalls.length - 1]?.message ?? "", /needs an interactive UI/);
 	assert.equal(notifyCalls[notifyCalls.length - 1]?.type, "warning");
 	assert.equal(sendMessageCalls.length, 0);
 
 	console.log("  ✓ idle-summary stale-ctx regression: 4 scenarios passed");
-	console.log("  ✓ idle-summary /summary model dispatch: 4 checks passed");
+	console.log("  ✓ idle-summary /idle-summary model dispatch: 3 checks passed");
 }
 
 main().catch((err) => {
