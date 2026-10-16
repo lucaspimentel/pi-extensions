@@ -5,11 +5,11 @@
  *
  *   ● bash
  *     └ rg -n "registerToolRenderer" docs/
- *     started 14:32:05
+ *     started 2:32:05 PM
  *
  *     ⎿ docs/extensions.md:190 ...
  *     ...
- *     ran 2.1s  ended 14:32:07
+ *     ran 2.1s  ended 2:32:07 PM
  *
  * The call line shows the absolute start time (local timezone, MM-DD prefix on
  * entries from previous days). While the tool is still running, the call line

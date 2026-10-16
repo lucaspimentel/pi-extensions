@@ -96,17 +96,19 @@ function tsLineOf(lines: string[]): string | undefined {
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
 
-test("formatAbsolute renders local HH:MM:SS on the same day", () => {
+test("formatAbsolute renders local h:MM:SS AM/PM on the same day", () => {
 	// Built from local date parts so the assertion holds in any timezone.
 	const at = (day: number, h: number, m: number, s: number) => new Date(2026, 9, day, h, m, s).getTime();
-	assert.equal(formatAbsolute(at(8, 14, 32, 5), at(8, 23, 0, 0)), "14:32:05");
-	assert.equal(formatAbsolute(at(8, 0, 0, 0), at(8, 12, 0, 0)), "00:00:00");
+	assert.equal(formatAbsolute(at(8, 14, 32, 5), at(8, 23, 0, 0)), "2:32:05 PM");
+	assert.equal(formatAbsolute(at(8, 0, 0, 0), at(8, 12, 0, 0)), "12:00:00 AM");
+	assert.equal(formatAbsolute(at(8, 12, 0, 0), at(8, 13, 0, 0)), "12:00:00 PM");
+	assert.equal(formatAbsolute(at(8, 9, 5, 3), at(8, 12, 0, 0)), "9:05:03 AM");
 });
 
 test("formatAbsolute prefixes MM-DD on previous days", () => {
 	const yesterday = new Date(2026, 9, 7, 18, 52, 11).getTime();
 	const today = new Date(2026, 9, 8, 9, 0, 0).getTime();
-	assert.equal(formatAbsolute(yesterday, today), "10-07 18:52:11");
+	assert.equal(formatAbsolute(yesterday, today), "10-07 6:52:11 PM");
 });
 
 test("formatDuration uses one decimal under 10s and adaptive units above", () => {
@@ -123,16 +125,16 @@ test("formatResultLine prefixes the duration only when included, known, and non-
 	const now = new Date(2026, 9, 8, 15, 0, 0).getTime();
 	const start = new Date(2026, 9, 8, 14, 32, 4, 900).getTime();
 	const end = new Date(2026, 9, 8, 14, 32, 7).getTime();
-	assert.equal(formatResultLine(2100, start, end, now, true), "ran 2.1s  ended 14:32:07");
-	assert.equal(formatResultLine(2100, start, end, now, false), "ended 14:32:07");
-	assert.equal(formatResultLine(undefined, start, end, now, true), "ended 14:32:07");
-	assert.equal(formatResultLine(undefined, start, end, now, false), "ended 14:32:07");
+	assert.equal(formatResultLine(2100, start, end, now, true), "ran 2.1s  ended 2:32:07 PM");
+	assert.equal(formatResultLine(2100, start, end, now, false), "ended 2:32:07 PM");
+	assert.equal(formatResultLine(undefined, start, end, now, true), "ended 2:32:07 PM");
+	assert.equal(formatResultLine(undefined, start, end, now, false), "ended 2:32:07 PM");
 	// Sub-100ms durations would read as 0.0s, so they are omitted when the
 	// displayed second differs (they can never cross a second boundary).
-	assert.equal(formatResultLine(0, start, end, now, true), "ended 14:32:07");
-	assert.equal(formatResultLine(40, start, end, now, true), "ended 14:32:07");
-	assert.equal(formatResultLine(99, start, end, now, true), "ended 14:32:07");
-	assert.equal(formatResultLine(100, start, end, now, true), "ran 0.1s  ended 14:32:07");
+	assert.equal(formatResultLine(0, start, end, now, true), "ended 2:32:07 PM");
+	assert.equal(formatResultLine(40, start, end, now, true), "ended 2:32:07 PM");
+	assert.equal(formatResultLine(99, start, end, now, true), "ended 2:32:07 PM");
+	assert.equal(formatResultLine(100, start, end, now, true), "ran 0.1s  ended 2:32:07 PM");
 });
 
 test("formatResultLine shows only the duration when the second does not change", () => {
@@ -191,13 +193,13 @@ test("live call renders the start immediately, running elapsed once 100ms pass",
 	// Right after execution starts the elapsed time is sub-100ms and omitted.
 	const instant = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c1"))));
 	assert.ok(instant, "no dim timestamp line");
-	assert.match(instant!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d⟨\/role⟩$/);
+	assert.match(instant!, /^\s*⟨dim⟩started \d{1,2}:\d\d:\d\d [AP]M⟨\/role⟩$/);
 	assert.ok(!instant!.includes("ran "), "sub-100ms elapsed must be omitted");
 
 	await new Promise((resolve) => setTimeout(resolve, 150));
 	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c1"))));
 	assert.ok(tsLine, "no dim timestamp line after 100ms");
-	assert.match(tsLine!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d  ran \d+\.\ds…⟨\/role⟩$/);
+	assert.match(tsLine!, /^\s*⟨dim⟩started \d{1,2}:\d\d:\d\d [AP]M  ran \d+\.\ds…⟨\/role⟩$/);
 });
 
 test("instant tool's call line omits the running elapsed segment", () => {
@@ -237,7 +239,7 @@ test("completed call line drops the ran segment; the duration moves to the resul
 
 	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("c2"))));
 	assert.ok(tsLine, "no dim timestamp line");
-	assert.match(tsLine!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d⟨\/role⟩$/);
+	assert.match(tsLine!, /^\s*⟨dim⟩started \d{1,2}:\d\d:\d\d [AP]M⟨\/role⟩$/);
 	assert.ok(!tsLine!.includes("ran "), "completed call line must not show the duration");
 	assert.ok(!tsLine!.includes("…"), "completed call must not show the running suffix");
 
@@ -247,7 +249,7 @@ test("completed call line drops the ran segment; the duration moves to the resul
 	assert.ok(resultLine, "no dim result line");
 	// Same-second completions show only the duration; the ended form appears
 	// when the wall-clock second changes (rare in this live-event test).
-	assert.match(resultLine!, /^\s*⟨dim⟩ran 2\.1s(  ended \d\d:\d\d:\d\d)?⟨\/role⟩$/);
+	assert.match(resultLine!, /^\s*⟨dim⟩ran 2\.1s(  ended \d{1,2}:\d\d:\d\d [AP]M)?⟨\/role⟩$/);
 });
 
 test("shell tools never show the extension's own duration", () => {
@@ -259,7 +261,7 @@ test("shell tools never show the extension's own duration", () => {
 
 	const running = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("s1"))));
 	assert.ok(running, "no dim line while running");
-	assert.match(running!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d⟨\/role⟩$/);
+	assert.match(running!, /^\s*⟨dim⟩started \d{1,2}:\d\d:\d\d [AP]M⟨\/role⟩$/);
 	assert.ok(!running!.includes("ran "), "running shell call line must not show the duration");
 
 	loaded.handler("tool_execution_end")!({
@@ -290,7 +292,7 @@ test("codemode never shows the extension's own duration", () => {
 
 	const running = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("cm1"))));
 	assert.ok(running, "no dim line while running");
-	assert.match(running!, /^\s*⟨dim⟩started \d\d:\d\d:\d\d⟨\/role⟩$/);
+	assert.match(running!, /^\s*⟨dim⟩started \d{1,2}:\d\d:\d\d [AP]M⟨\/role⟩$/);
 	assert.ok(!running!.includes("ran "), "running codemode call line must not show the duration");
 
 	loaded.handler("tool_execution_end")!({
@@ -355,23 +357,23 @@ test("backfill approximates start and end from session history", () => {
 	// (end minus the start proxy) appears on the result line, not the call line.
 	const first = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("b1"))));
 	assert.ok(first, "no dim line for b1");
-	assert.match(first!, /^\s*⟨dim⟩started 14:32:05⟨\/role⟩$/);
+	assert.match(first!, /^\s*⟨dim⟩started 2:32:05 PM⟨\/role⟩$/);
 
 	const firstResult = tsLineOf(
 		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("b1"))),
 	);
 	assert.ok(firstResult, "no dim result line for b1");
-	assert.match(firstResult!, /^\s*⟨dim⟩ran 4\.0s  ended 14:32:09⟨\/role⟩$/);
+	assert.match(firstResult!, /^\s*⟨dim⟩ran 4\.0s  ended 2:32:09 PM⟨\/role⟩$/);
 
 	const second = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("b2"))));
 	assert.ok(second, "no dim line for b2");
-	assert.match(second!, /^\s*⟨dim⟩started 14:32:05⟨\/role⟩$/);
+	assert.match(second!, /^\s*⟨dim⟩started 2:32:05 PM⟨\/role⟩$/);
 
 	const secondResult = tsLineOf(
 		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("b2"))),
 	);
 	assert.ok(secondResult, "no dim result line for b2");
-	assert.match(secondResult!, /^\s*⟨dim⟩ran 55s  ended 14:33:00⟨\/role⟩$/);
+	assert.match(secondResult!, /^\s*⟨dim⟩ran 55s  ended 2:33:00 PM⟨\/role⟩$/);
 });
 
 test("later backfilled batch shows its backfilled start time", () => {
@@ -398,13 +400,13 @@ test("later backfilled batch shows its backfilled start time", () => {
 
 	const second = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("n2"))));
 	assert.ok(second, "no dim line for n2");
-	assert.match(second!, /^\s*⟨dim⟩started 14:32:30⟨\/role⟩$/);
+	assert.match(second!, /^\s*⟨dim⟩started 2:32:30 PM⟨\/role⟩$/);
 
 	const secondResult = tsLineOf(
 		renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("n2"))),
 	);
 	assert.ok(secondResult, "no dim result line for n2");
-	assert.match(secondResult!, /^\s*⟨dim⟩ran 10s  ended 14:32:40⟨\/role⟩$/);
+	assert.match(secondResult!, /^\s*⟨dim⟩ran 10s  ended 2:32:40 PM⟨\/role⟩$/);
 });
 
 test("historical call without an end omits the elapsed segment", () => {
@@ -426,7 +428,7 @@ test("historical call without an end omits the elapsed segment", () => {
 
 	const tsLine = tsLineOf(renderLines(wrapped.renderCall({}, theme, makeContext("h1"))));
 	assert.ok(tsLine, "no dim timestamp line");
-	assert.ok(tsLine!.includes("started 10-07 10:00:00"), `date-prefixed absolute missing: ${tsLine}`);
+	assert.ok(tsLine!.includes("started 10-07 10:00:00 AM"), `date-prefixed absolute missing: ${tsLine}`);
 	assert.ok(!/ran /.test(tsLine!), `elapsed must be omitted without an end: ${tsLine}`);
 });
 
@@ -545,15 +547,15 @@ test("cross-second results keep the ended form, with a date prefix across days",
 
 	const crossSecond = tsLineOf(renderLines(read.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("x1"))));
 	assert.ok(crossSecond, "no dim result line for x1");
-	assert.match(crossSecond!, /^\s*⟨dim⟩ran 3\.0s  ended 14:32:08⟨\/role⟩$/);
+	assert.match(crossSecond!, /^\s*⟨dim⟩ran 3\.0s  ended 2:32:08 PM⟨\/role⟩$/);
 
 	const crossDay = tsLineOf(renderLines(read.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("x2"))));
 	assert.ok(crossDay, "no dim result line for x2");
-	assert.match(crossDay!, /^\s*⟨dim⟩ran 3\.0s  ended 00:00:01⟨\/role⟩$/, `midnight rollover must keep ended: ${crossDay}`);
+	assert.match(crossDay!, /^\s*⟨dim⟩ran 3\.0s  ended 12:00:01 AM⟨\/role⟩$/, `midnight rollover must keep ended: ${crossDay}`);
 
 	const prefixed = tsLineOf(renderLines(read.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("x4"))));
 	assert.ok(prefixed, "no dim result line for x4");
-	assert.match(prefixed!, /^\s*⟨dim⟩ran 5\.0s  ended \d\d-\d\d 10:00:05⟨\/role⟩$/, `previous-day result must carry a date prefix: ${prefixed}`);
+	assert.match(prefixed!, /^\s*⟨dim⟩ran 5\.0s  ended \d\d-\d\d 10:00:05 AM⟨\/role⟩$/, `previous-day result must carry a date prefix: ${prefixed}`);
 
 	// Shell renderers keep showing only the completion time across seconds.
 	const shellBranch = [
@@ -566,7 +568,7 @@ test("cross-second results keep the ended form, with a date prefix across days",
 	);
 	const shellResult = tsLineOf(renderLines(shell.renderResult({ content: [] }, { expanded: false, isPartial: false }, theme, makeContext("x3"))));
 	assert.ok(shellResult, "no dim result line for x3");
-	assert.match(shellResult!, /^\s*⟨dim⟩ended 14:32:08⟨\/role⟩$/);
+	assert.match(shellResult!, /^\s*⟨dim⟩ended 2:32:08 PM⟨\/role⟩$/);
 });
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────

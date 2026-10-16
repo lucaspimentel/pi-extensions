@@ -5,12 +5,16 @@ function pad2(n: number): string {
 }
 
 /**
- * Wall-clock time of an event: HH:MM:SS in the local timezone, prefixed with
- * MM-DD when the timestamp falls on a different local date than `nowMs`.
+ * Wall-clock time of an event: h:MM:SS with an AM/PM suffix in the local
+ * timezone (midnight is 12:xx:xx AM, noon is 12:xx:xx PM), prefixed with MM-DD
+ * when the timestamp falls on a different local date than `nowMs`.
  */
 export function formatAbsolute(timestampMs: number, nowMs: number): string {
 	const d = new Date(timestampMs);
-	const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+	const hours = d.getHours();
+	const h12 = hours % 12 === 0 ? 12 : hours % 12;
+	const meridiem = hours < 12 ? "AM" : "PM";
+	const time = `${h12}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ${meridiem}`;
 	const now = new Date(nowMs);
 	const sameDay =
 		d.getFullYear() === now.getFullYear() &&
