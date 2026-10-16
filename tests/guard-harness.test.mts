@@ -31,6 +31,7 @@ interface Harness {
 	commandHandlers: Map<string, (args: string, ctx: unknown) => Promise<void>>;
 	tools: Array<{ name: string; annotations?: Record<string, boolean> }>;
 	registeredTools: Map<string, { execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined> }>;
+	steering: Array<{ text: string; deliverAs?: string }>;
 }
 
 const harnesses: Harness[] = [];
@@ -47,6 +48,7 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 		commandHandlers: new Map(),
 		tools,
 		registeredTools: new Map(),
+		steering: [],
 	};
 	const api = {
 		on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
@@ -62,6 +64,7 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 			h.shortcuts.push({ shortcut, handler: options.handler });
 		},
 		registerFlag: () => {},
+		sendUserMessage: (text: string, options?: { deliverAs?: string }) => { h.steering.push({ text, deliverAs: options?.deliverAs }); },
 		getCommands: () => h.commands,
 		getActiveTools: () => h.tools.map((t) => t.name),
 		getAllTools: () => h.tools,
@@ -82,7 +85,7 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 	return h;
 }
 
-function harnessCtx(h: Harness, cwd: string, selectResult: string | undefined = undefined) {
+function harnessCtx(h: Harness, cwd: string, selectResult: string | undefined = undefined, inputResult: string | undefined = undefined) {
 	return {
 		cwd,
 		hasUI: true,
@@ -100,7 +103,7 @@ function harnessCtx(h: Harness, cwd: string, selectResult: string | undefined = 
 			setStatus: (key: string, value: string | undefined) => h.status.set(key, value),
 			setWorkingVisible: (_visible: boolean) => {},
 			select: async () => selectResult,
-			input: async () => undefined,
+			input: async () => inputResult,
 			theme: { fg: (_role: string, s: string) => s },
 		},
 	};
@@ -239,11 +242,13 @@ test("harness: tool_call observer records decisions and never blocks", async () 
 		assert.equal(denyPayload.class, "host-shell");
 		assert.equal(h.emitted.filter(([c]) => c === "guard:decision").length, 1);
 
-		// A protected-path write is observed as a prompt decision (never enforced).
+		// A protected-path write is ENFORCED now: the decision is prompt, and the
+		// dialog (scripted select: undefined) denies without steering.
 		await observers[0]({ toolName: "write", input: { path: path.join(cwd, "AGENTS.md"), content: "x" } }, ctx);
-		const writeDecision = h.emitted.filter(([c]) => c === "guard:decision").at(-1)?.[1] as { action: string; class: string };
+		const writeDecision = h.emitted.filter(([c]) => c === "guard:decision").at(-1)?.[1] as { action: string; class: string; enforcement: boolean };
 		assert.equal(writeDecision.action, "prompt");
 		assert.equal(writeDecision.class, "local-write");
+		assert.equal(writeDecision.enforcement, true, "write/edit emits the enforcement flag");
 
 		// Local reads inside cwd are observed as allow.
 		await observers[0]({ toolName: "read", input: { path: path.join(cwd, "src.ts") } }, ctx);
@@ -828,6 +833,101 @@ test("research publishes effective profile before ack; initial requests fail", a
 		assert.equal((h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { profile: string }).profile, "default");
 		await h.handlers.session_shutdown[0]({}, ctx);
 		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+// ── Enforced write/edit (settled 2026-10-16 design) ─────────────────────────
+
+test("enforced write/edit: allow once runs, deny once blocks with steering, esc blocks", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-harness-enforce-");
+		const observers = h.handlers["tool_call"] ?? [];
+		// Allow once on an in-root default write.
+		const allowCtx = harnessCtx(h, cwd, "Allow once");
+		for (const handler of h.handlers["session_start"] ?? []) await handler({}, allowCtx);
+		const result = await observers[0]({ toolName: "edit", input: { path: path.join(cwd, "a.ts") } }, allowCtx);
+		assert.equal(result, undefined, "allow once lets the call run");
+		// Deny once with a steering instruction.
+		const denyCtx = harnessCtx(h, cwd, "Deny once", "write the test first instead");
+		const denied = await observers[0]({ toolName: "edit", input: { path: path.join(cwd, "a.ts") } }, denyCtx);
+		assert.deepEqual(denied, { block: true, reason: "guard: write/edit denied" });
+		assert.deepEqual(h.steering, [{ text: "write the test first instead", deliverAs: "steer" }]);
+		// esc (selector cancellation): non-explicit deny, no steering.
+		const escCtx = harnessCtx(h, cwd);
+		const esc = await observers[0]({ toolName: "edit", input: { path: path.join(cwd, "a.ts") } }, escCtx);
+		assert.deepEqual(esc, { block: true, reason: "guard: write/edit denied" });
+		assert.equal(h.steering.length, 1, "selector cancellation skips steering");
+	});
+});
+
+test("enforced write/edit: the switch lands allow-edits and later in-root writes run silently", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-harness-switch-");
+		const observers = h.handlers["tool_call"] ?? [];
+		const switchCtx = harnessCtx(h, cwd, "Switch to allow-edits");
+		for (const handler of h.handlers["session_start"] ?? []) await handler({}, switchCtx);
+		const result = await observers[0]({ toolName: "write", input: { path: path.join(cwd, "a.ts"), content: "x" } }, switchCtx);
+		assert.equal(result, undefined, "the switch authorizes the current call");
+		assert.ok(h.notifications.some((n) => /Profile: allow-edits/.test(n)), "the rung transition is announced");
+		// A later in-root write runs with no dialog: the scripted select would
+		// return "Switch to allow-edits" again, which in allow-edits would never
+		// be consulted; an out-of-root write still prompts.
+		const silentCtx = harnessCtx(h, cwd);
+		const second = await observers[0]({ toolName: "write", input: { path: path.join(cwd, "b.ts"), content: "y" } }, silentCtx);
+		assert.equal(second, undefined, "in-root writes run without a dialog on the rung");
+		const outOfRoot = await observers[0]({ toolName: "write", input: { path: "/etc/hosts" } }, silentCtx);
+		assert.deepEqual(outOfRoot, { block: true, reason: "guard: write/edit denied" }, "out-of-root writes still prompt (scripted undefined = deny)");
+	});
+});
+
+test("enforced write/edit: out-of-root and protected prompts never offer the switch; headless denies", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-harness-noswitch-");
+		const observers = h.handlers["tool_call"] ?? [];
+		const ctx = harnessCtx(h, cwd);
+		for (const handler of h.handlers["session_start"] ?? []) await handler({}, ctx);
+		// Record the selector options through a wrapper around ui.select.
+		const seen: string[][] = [];
+		(ctx.ui as Record<string, unknown>).select = async (_title: string, options: string[]) => {
+			seen.push(options);
+			return undefined;
+		};
+		const outOfRoot = await observers[0]({ toolName: "edit", input: { path: "/etc/hosts" } }, ctx);
+		assert.deepEqual(outOfRoot, { block: true, reason: "guard: write/edit denied" });
+		assert.ok(seen[0].includes("Deny once"));
+		assert.ok(!seen[0].includes("Switch to allow-edits"), "out-of-root prompts never offer the switch");
+		const protectedWrite = await observers[0]({ toolName: "edit", input: { path: path.join(cwd, "AGENTS.md") } }, ctx);
+		assert.deepEqual(protectedWrite, { block: true, reason: "guard: write/edit denied" });
+		assert.ok(!seen[1].includes("Switch to allow-edits"), "protected-path prompts never offer the switch");
+		// Headless contexts deny without a dialog: resolveDecision collapses
+		// non-interactive prompts to deny before enforcement sees them.
+		const headless = { ...ctx, hasUI: false, mode: "rpc" };
+		const headlessResult = await observers[0]({ toolName: "edit", input: { path: path.join(cwd, "a.ts") } }, headless);
+		assert.equal(headlessResult?.block, true);
+		assert.match((headlessResult as { reason: string }).reason, /non-interactive prompt collapses to deny/);
+		assert.equal(seen.length, 2, "headless denial opens no dialog");
+	});
+});
+
+test("enforced write/edit: research denies without a dialog; a default child cannot self-escalate", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-harness-research-");
+		const observers = h.handlers["tool_call"] ?? [];
+		const ctx = harnessCtx(h, cwd);
+		for (const handler of h.handlers["session_start"] ?? []) await handler({}, ctx);
+		await h.commandHandlers.get("guard")!("profile research", ctx);
+		const seen: string[][] = [];
+		(ctx.ui as Record<string, unknown>).select = async (_title: string, options: string[]) => {
+			seen.push(options);
+			return undefined;
+		};
+		const result = await observers[0]({ toolName: "edit", input: { path: path.join(cwd, "a.ts") } }, ctx);
+		assert.deepEqual(result, { block: true, reason: "guard: local write: denied in research" });
+		assert.equal(seen.length, 0, "research denies with no dialog");
 	});
 });
 

@@ -17,13 +17,14 @@ import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
 import { detectSandboxMode } from "./sandbox/detect.ts";
 import { PROTECTED_TOP_LEVEL } from "./sandbox/spec.ts";
 import { clearUserClassifierPin, loadConfig, loadUserConfigRaw, projectClassifierPin, resolvedClassifierConfig, setUserClassifierPin, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
-import { decide, explainHostShellCommand, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
+import { decide, explainHostShellCommand, pathInsideWriteRoots, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
+import { makeIsProtectedPath } from "./policy/protected.ts";
 import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
 import { computeMigration } from "./policy/migrate.ts";
 import { pickClassifierModel, classifyAction } from "./policy/classifier.ts";
 import { addToConfigScope, effectiveAllowSuggestion, readGrantSuggestion } from "./policy/suggest.ts";
 import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, validateShellSave } from "./policy/save.ts";
-import { runExecutionPrompt, runReadGrantPrompt, type PromptFlowIO } from "./prompt-flow.ts";
+import { runExecutionPrompt, runReadGrantPrompt, runWriteEditPrompt, type PromptFlowIO } from "./prompt-flow.ts";
 import { createGuardEditorStage, createGuardPickerStage } from "./ask-components.ts";
 import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, releaseResearchHold, requestResearchHold, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
 import { constraintFromParse, INHERIT_ENV, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
@@ -300,17 +301,25 @@ export default function guard(pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const owned = isOwnedExecutor(event.toolName);
+		// Write/edit on non-owned tools is enforced (settled 2026-10-16 design):
+		// block on deny, approval dialog on prompt. Everything else stays
+		// observe-only. Captured outside the try so failures fail closed.
+		const enforceWriteEdit = !owned && (event.toolName.toLowerCase() === "write" || event.toolName.toLowerCase() === "edit");
 		try {
 			const input = (event.input ?? {}) as Record<string, unknown>;
 			const policy = policyFor(ctx);
 			const mapped = mappedCall(event.toolName, input);
 			// No classifier or dialog here for owned tools: execute is authoritative.
 			const decision = owned ? decide({ ...policy, interactive: ctx.hasUI }, mapped.call) : await decisionFor(event.toolName, input, ctx, policy);
-			pi.events.emit("guard:decision", { toolName: event.toolName, class: mapped.cls, call: mapped.call, ...decision, enforcement: owned });
-			if (debugEnabled) notify(ctx, `[guard ${owned ? "enforce" : "observe"}] ${event.toolName}: ${decision.action} (${decision.reason})`);
+			// Pathless local writes (memory_write, scratchpad, ...) stay observe-only.
+			const enforced = enforceWriteEdit && mapped.call.kind === "local-write" && mapped.call.path !== undefined;
+			pi.events.emit("guard:decision", { toolName: event.toolName, class: mapped.cls, call: mapped.call, ...decision, enforcement: owned || enforced });
+			if (debugEnabled) notify(ctx, `[guard ${owned || enforced ? "enforce" : "observe"}] ${event.toolName}: ${decision.action} (${decision.reason})`);
 			if (owned && (decision.action === "deny" || runtime?.teardownFailure)) return { block: true, reason: runtime?.teardownFailure ?? decision.reason };
+			if (enforced && runtime) return await enforceLocalWrite(runtime, event.toolName, input, ctx, decision);
 		} catch (err) {
 			if (owned) return { block: true, reason: `guard: authorization failed closed: ${String(err)}` };
+			if (enforceWriteEdit) return { block: true, reason: `guard: write/edit authorization failed closed: ${String(err)}` };
 			// Observation errors never block unrelated tools.
 		}
 	});
@@ -322,6 +331,70 @@ export default function guard(pi: ExtensionAPI) {
 
 	function assertCallActive(signal?: AbortSignal): void {
 		if (signal?.aborted) throw new Error("guard: call aborted; nothing saved or executed");
+	}
+	/**
+	 * Enforce one write/edit decision for a non-owned tool (settled 2026-10-16
+	 * design): deny blocks with the reason, allow runs, prompt opens the
+	 * approval dialog inside the tool_call hook. The SDK holds the tool call
+	 * while this awaits; per-batch preparation is sequential and the DialogGate
+	 * serializes across batches. In-root non-protected targets in the default
+	 * profile additionally offer the switch to the allow-edits rung, applied
+	 * AFTER the dialog lease releases: the profile transition invalidates open
+	 * dialogs synchronously, so applying it inside the lease would cancel its
+	 * own dialog. Post-answer staleness (runtime identity, epoch, cwd) denies,
+	 * mirroring authorize. Subagent children run with -p (print mode), so the
+	 * ctx.hasUI check covers the child contract: prompts deny.
+	 */
+	async function enforceLocalWrite(rt: GuardRuntime, toolName: string, input: Record<string, unknown>, ctx: ExtensionContext, decision: Decision): Promise<{ block: true; reason: string } | undefined> {
+		rt.assertAvailable();
+		const epoch = rt.epoch;
+		const cwd = rt.policy.cwd;
+		if (decision.action === "deny") return { block: true, reason: `guard: ${decision.reason}` };
+		if (decision.action === "allow") return undefined;
+		if (!ctx.hasUI) return { block: true, reason: "guard: headless write/edit prompts deny" };
+		const mapped = mappedCall(toolName, input);
+		if (mapped.call.kind !== "local-write" || mapped.call.path === undefined) return undefined;
+		const policy = policyFor(ctx);
+		const offerSwitch = state?.profile === "default"
+			&& pathInsideWriteRoots(mapped.call.path, policy.config)
+			&& !makeIsProtectedPath(policy.config)(mapped.call.path);
+		const outcome = await dialogs.run({}, async (dialogSignal) => {
+			dialogSignal.throwIfAborted();
+			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
+			const result = await admittedDialog(ctx, () => runWriteEditPrompt({
+				io: promptIO(ctx),
+				signal: dialogSignal,
+				toolName,
+				path: mapped.call.kind === "local-write" ? mapped.call.path! : "",
+				decision,
+				offerSwitch,
+			}));
+			dialogSignal.throwIfAborted();
+			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
+			return result;
+		});
+		// The lease has been released: the switch transition below can no longer
+		// cancel its own dialog.
+		if (outcome.kind === "allow-once") return undefined;
+		if (outcome.kind === "deny-once") {
+			deliverSteering(outcome.steering, undefined, rt, epoch, cwd);
+			return { block: true, reason: "guard: write/edit denied" };
+		}
+		// switch-to-allow-edits: land the rung through the same transition path
+		// as the profile commands (research holds and inherited restrictions are
+		// honored), then approve the current call. A refused or failed transition
+		// denies the call.
+		if (rt !== runtime || epoch !== rt.epoch || !state || !config || rt.teardownFailure) throw new Error("guard: approval expired after a policy change");
+		const next = { ...state };
+		const applied = setProfile(next, "allow-edits");
+		if (!applied.ok) return { block: true, reason: `guard: ${applied.notice}` };
+		try {
+			await transition(next, config, ctx);
+			notify(ctx, "Profile: allow-edits (this session only)");
+			return undefined;
+		} catch (err) {
+			return { block: true, reason: `guard: profile transition failed; write/edit denied: ${String(err)}` };
+		}
 	}
 	/**
 	 * Ownership of one interactive command operation (profile picker, migrate
