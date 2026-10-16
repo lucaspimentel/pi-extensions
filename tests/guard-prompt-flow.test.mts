@@ -13,6 +13,8 @@ import {
 	executionPromptTitle,
 	runExecutionPrompt,
 	runReadGrantPrompt,
+	runWriteEditPrompt,
+	writeEditPromptTitle,
 	type ExecutionFlowOutcome,
 	type PromptFlowIO,
 	type ReadFlowOutcome,
@@ -440,4 +442,76 @@ test("validation helpers never call the classifier and stay deterministic", () =
 	const twice = validateShellSave(real.call, real.policy, "allow", real.allowPlan!.rules);
 	assert.deepEqual(once, twice);
 	assert.ok(once.ok);
+});
+
+// ── Write/edit approval flow ──────────────────────────────────────────────────
+
+function writeEditDeps(overrides: Partial<Parameters<typeof runWriteEditPrompt>[0]> = {}) {
+	return {
+		io: makeIO().io,
+		signal: signal(),
+		toolName: "edit",
+		path: "/home/user/proj/src/a.ts",
+		decision: { action: "prompt" as const, reason: "write/edit requires approval in the default profile" },
+		offerSwitch: false,
+		...overrides,
+	};
+}
+
+test("write/edit flow: allow once, deny once with steering, esc denies non-explicitly", async () => {
+	{
+		const { io, calls } = makeIO({ select: ["Allow once"] });
+		const outcome = await runWriteEditPrompt(writeEditDeps({ io }));
+		assert.deepEqual(outcome, { kind: "allow-once" });
+		assert.equal(calls.input.length, 0, "allow never collects steering");
+	}
+	{
+		const { io, calls } = makeIO({ select: ["Deny once"], input: ["try the test-first approach instead"] });
+		const outcome = await runWriteEditPrompt(writeEditDeps({ io }));
+		assert.deepEqual(outcome, { kind: "deny-once", explicit: true, steering: "try the test-first approach instead" });
+		assert.equal(calls.input.length, 1, "explicit denial collects steering");
+	}
+	{
+		// Empty steering input is dropped; the call is denied either way.
+		const { io } = makeIO({ select: ["Deny once"], input: ["   "] });
+		const outcome = await runWriteEditPrompt(writeEditDeps({ io }));
+		assert.deepEqual(outcome, { kind: "deny-once", explicit: true, steering: undefined });
+	}
+	{
+		// esc / selector cancellation: non-explicit deny, no steering.
+		const { io, calls } = makeIO({ select: [undefined] });
+		const outcome = await runWriteEditPrompt(writeEditDeps({ io }));
+		assert.deepEqual(outcome, { kind: "deny-once", explicit: false, steering: undefined });
+		assert.equal(calls.input.length, 0, "selector cancellation skips steering");
+	}
+});
+
+test("write/edit flow: the switch option appears only when offered and returns the switch outcome", async () => {
+	{
+		const { io, calls } = makeIO({ select: ["Switch to allow-edits"] });
+		const outcome = await runWriteEditPrompt(writeEditDeps({ io, offerSwitch: true }));
+		assert.deepEqual(outcome, { kind: "switch-to-allow-edits" });
+		assert.match(calls.select[0], /Switch to allow-edits/, "the option is in the selector when offered");
+	}
+	{
+		const { io, calls } = makeIO({ select: ["Allow once"] });
+		await runWriteEditPrompt(writeEditDeps({ io, offerSwitch: false }));
+		assert.doesNotMatch(calls.select[0], /Switch to allow-edits/, "out-of-root and protected targets never see the switch");
+	}
+	{
+		// A switch option in the script without the flag is an unexpected answer.
+		const { io } = makeIO({ select: ["Switch to allow-edits"] });
+		await assert.rejects(runWriteEditPrompt(writeEditDeps({ io, offerSwitch: false })), /unexpected write\/edit approval answer/);
+	}
+});
+
+test("write/edit flow: the title names the tool, the path, and the reason", async () => {
+	const title = writeEditPromptTitle({
+		toolName: "write",
+		path: "/home/user/proj/src/new.ts",
+		decision: { action: "prompt", reason: "write outside cwd and every write root" },
+	});
+	assert.match(title, /Allow Write\?/);
+	assert.match(title, /\/home\/user\/proj\/src\/new\.ts/);
+	assert.match(title, /write outside cwd and every write root/);
 });

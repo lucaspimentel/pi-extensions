@@ -425,3 +425,57 @@ export async function runReadGrantPrompt(deps: ReadGrantPromptDeps): Promise<Rea
 	}
 	throw new Error(`guard: unexpected read-grant answer: ${answer}`);
 }
+
+/** Outcome of the write/edit approval flow. The caller performs the steering handoff and the profile transition. */
+export type WriteEditFlowOutcome =
+	| { kind: "allow-once" }
+	| { kind: "deny-once"; explicit: boolean; steering: SteeringText }
+	| { kind: "switch-to-allow-edits" };
+
+/** Title for the write/edit approval dialog. */
+export function writeEditPromptTitle(input: { toolName: string; path: string; decision: Decision }): string {
+	const label = input.toolName.toLowerCase() === "edit" ? "Edit" : "Write";
+	return [
+		`Allow ${label}?`,
+		"",
+		"Path:",
+		`  ${input.path}`,
+		"",
+		`Why: ${input.decision.reason}`,
+	].join("\n");
+}
+
+/** Dependencies of runWriteEditPrompt beyond the IO surface. */
+export interface WriteEditPromptDeps {
+	io: PromptFlowIO;
+	signal: AbortSignal;
+	toolName: string;
+	path: string;
+	decision: Decision;
+	/** Offer the Switch to allow-edits action: in-root, non-protected targets only. */
+	offerSwitch: boolean;
+}
+
+/**
+ * Run the write/edit approval flow: flat once actions plus, for in-root
+ * non-protected targets, the switch to the allow-edits rung. Returns a typed
+ * outcome; the caller performs the steering handoff and the profile
+ * transition, and revalidates staleness before acting on either.
+ */
+export async function runWriteEditPrompt(deps: WriteEditPromptDeps): Promise<WriteEditFlowOutcome> {
+	const { io, signal } = deps;
+	const title = writeEditPromptTitle(deps);
+	const options = ["Allow once", "Deny once", ...(deps.offerSwitch ? ["Switch to allow-edits"] : [])];
+	const answer = await io.select(title, options, signal);
+	// Initial selector cancellation denies without steering.
+	if (answer === undefined) return { kind: "deny-once", explicit: false, steering: undefined };
+	if (answer === "Allow once") return { kind: "allow-once" };
+	if (answer === "Switch to allow-edits") {
+		if (!deps.offerSwitch) throw new Error(`guard: unexpected write/edit approval answer: ${answer}`);
+		return { kind: "switch-to-allow-edits" };
+	}
+	if (answer === "Deny once") {
+		return { kind: "deny-once", explicit: true, steering: await collectSteering(io, signal, `denied: ${deps.toolName} ${deps.path}`) };
+	}
+	throw new Error(`guard: unexpected write/edit approval answer: ${answer}`);
+}
