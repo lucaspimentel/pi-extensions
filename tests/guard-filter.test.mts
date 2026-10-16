@@ -70,6 +70,36 @@ test("known complete truncation and status notices are retained, not arbitrary s
 	assert.equal(output(".env\n 1: PRIVATE\n\nsrc/a.ts\n 2: public\n\n[Results truncated]", { toolName: "ffgrep" }), "src/a.ts\n 2: public\n\n[Results truncated]\n1 matches in masked files omitted");
 });
 
+test("ffgrep fuzzy-fallback and cursor notices pass through verbatim", () => {
+	const fuzzy = "[0 exact matches. Maybe you meant this?]";
+	assert.equal(output(`${fuzzy}\nfile.ts\n 1: public`, { toolName: "ffgrep" }), `${fuzzy}\nfile.ts\n 1: public`);
+	assert.equal(output(`file.ts\n 1: public\n\n[Continue with cursor="abc123"]`, { toolName: "ffgrep" }), `file.ts\n 1: public\n\n[Continue with cursor="abc123"]`);
+	const regex = "[Invalid regex: Invalid capture group name, used literal match]";
+	assert.equal(output(`file.ts\n 1: public\n\n${regex}`, { toolName: "ffgrep" }), `file.ts\n 1: public\n\n${regex}`);
+	const joined = `[Invalid regex: Invalid capture group name, used literal match. Continue with cursor="abc"]`;
+	assert.equal(output(`file.ts\n 1: public\n\n${joined}`, { toolName: "ffgrep" }), `file.ts\n 1: public\n\n${joined}`);
+});
+
+test("ffgrep notices coexist with masking of hidden blocks", () => {
+	assert.equal(output(`.env\n 1: PRIVATE\n\nfile.ts\n 2: public\n\n[Continue with cursor="abc"]`, { toolName: "ffgrep" }), `file.ts\n 2: public\n\n[Continue with cursor="abc"]\n1 matches in masked files omitted`);
+	assert.equal(output(`[0 exact matches. Maybe you meant this?]\n.env\n 1: PRIVATE\n\nfile.ts\n 2: public`, { toolName: "ffgrep" }), `[0 exact matches. Maybe you meant this?]\nfile.ts\n 2: public\n1 matches in masked files omitted`);
+	assert.equal(output(`[0 exact matches. Maybe you meant this?]\nfile.ts\n 1: public\n\n.env\n 2: PRIVATE`, { toolName: "ffgrep" }), `[0 exact matches. Maybe you meant this?]\nfile.ts\n 1: public\n1 matches in masked files omitted`);
+});
+
+test("ffgrep leading notices", () => {
+	const fuzzy = "[0 exact matches. Maybe you meant this?]";
+	const regex = "[Invalid regex: bad group, used literal match]";
+	const cursor = '[Continue with cursor="x"]';
+	const ff = { toolName: "ffgrep" };
+	assert.equal(output(`${fuzzy}\n${regex}\nfile.ts\n 1: public`, ff), `${fuzzy}\n${regex}\nfile.ts\n 1: public`);
+	assert.equal(output(`${fuzzy}\nfile.ts\n 1: public\n\n${cursor}`, ff), `${fuzzy}\nfile.ts\n 1: public\n\n${cursor}`);
+	assert.equal(output(`${fuzzy}\n.env\n 1: PRIVATE`, ff), `${fuzzy}\n1 matches in masked files omitted`);
+});
+
+test("ffgrep content after a trailing notice still fails closed", () => {
+	assert.deepEqual(filtered(`file.ts\n 1: public\n\n[Continue with cursor="x"]\nfile2.ts\n 1: PRIVATE`, { toolName: "ffgrep" }), suppression);
+});
+
 const suppression = {
 	content: [{ type: "text", text: "Search result suppressed by guard: unable to safely filter masked files." }],
 	details: { guard: { suppressed: true } },
@@ -85,6 +115,20 @@ test("malformed, ambiguous, orphaned and partially truncated text fails closed",
 		["ffgrep", ".env\nPRIVATE"], ["ffgrep", " 1: PRIVATE"], ["ffgrep", ".env"],
 		["ffgrep", "file.ts\n 0: PRIVATE"], ["ffgrep", "file.ts\n 1- PRIVATE"],
 		["ffgrep", "file.ts\n 1: public\nPRIVATE"], ["ffgrep", "file.ts\n 1: public\n 2:"],
+		["ffgrep", "file.ts\n 1: public\n\n[Some unknown notice]"],
+		// Notice between a file header and its first match row.
+		["ffgrep", 'file.ts\n[Continue with cursor="x"]\n 1: public'],
+		["ffgrep", '.env\n[Continue with cursor="x"]\n 1: PRIVATE'],
+		["ffgrep", "file.ts\n[0 exact matches. Maybe you meant this?]\n 1: public"],
+		["grep", "a.ts-1- ctx\n[Results truncated]\na.ts:2: m"],
+		// Grep never gets leading notices.
+		["grep", "[1 matches limit reached. Use limit=1 for more, or refine pattern]\na.ts:1: m"],
+		// Notice-only, unknown or mixed leading notices.
+		["ffgrep", "[0 exact matches. Maybe you meant this?]"],
+		["ffgrep", "[Some unknown notice]\nfile.ts\n 1: public"],
+		["ffgrep", "[Invalid regex: x, used literal match. Bogus]\nfile.ts\n 1: public"],
+		// Regex messages containing a sentence break are not recognized.
+		["ffgrep", "file.ts\n 1: public\n\n[Invalid regex: a. b, used literal match]"],
 	];
 	for (const [toolName, text] of cases) assert.deepEqual(filtered(text, { toolName }), suppression, `${toolName}: ${text}`);
 });

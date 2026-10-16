@@ -98,7 +98,12 @@ const NO_MATCH = new Set(["No matches found", "No matches found."]);
 
 function safeNotice(row: string, tool: string): boolean {
 	if (tool === "ffgrep") {
-		return /^\[(?:Results truncated|Showing first [1-9]\d* matches|Match limit reached)\]$/.test(row);
+		if (/^\[(?:Results truncated|Showing first [1-9]\d* matches|Match limit reached)\]$/.test(row)) return true;
+		if (row === "[0 exact matches. Maybe you meant this?]") return true;
+		if (!row.startsWith("[") || !row.endsWith("]")) return false;
+		return row.slice(1, -1).split(". ").every((notice) =>
+			/^Invalid regex: .+, used literal match$/.test(notice)
+			|| /^Continue with cursor="[^"]+"$/.test(notice));
 	}
 	if (!row.startsWith("[") || !row.endsWith("]")) return false;
 	return row.slice(1, -1).split(/\. (?=\d|Some lines)/).every((notice) =>
@@ -117,11 +122,14 @@ function parseText(text: string, tool: string, masked: (file: string) => boolean
 	let omitted = 0;
 	let block: { file: string; rows: string[]; matches: number; hidden: boolean } | undefined;
 	let sawMatch = false;
+	let sawContent = false;
+	const leading: string[] = [];
 	let ended = false;
 	const flush = (): void => {
 		if (!block) return;
 		if (!block.matches) invalid();
 		sawMatch = true;
+		sawContent = true;
 		if (block.hidden) omitted += block.matches;
 		else {
 			if (tool === "ffgrep" && kept.length) kept.push("");
@@ -132,9 +140,14 @@ function parseText(text: string, tool: string, masked: (file: string) => boolean
 	for (const row of rows) {
 		if (!row) continue;
 		if (safeNotice(row, tool)) {
-			flush();
-			ended = true;
-			notices.push(row);
+			if (tool !== "ffgrep" || sawContent || block) {
+				flush();
+				ended = true;
+				notices.push(row);
+			} else {
+				// Leading ffgrep notice: pi-fff prints it before the first file header.
+				leading.push(row);
+			}
 			continue;
 		}
 		if (ended) invalid();
@@ -153,13 +166,19 @@ function parseText(text: string, tool: string, masked: (file: string) => boolean
 				block = { file: record.file, rows: [], matches: 0, hidden: masked(record.file) };
 			}
 			block.rows.push(row);
-			if (record.match) block.matches++;
+			if (record.match) {
+				block.matches++;
+				sawContent = true;
+			}
 		} else {
 			const record = /^[ \t]+([1-9]\d*)([:-]) (.*)$/.exec(row);
 			if (record) {
 				if (!block || !Number.isSafeInteger(Number(record[1]))) invalid();
 				block.rows.push(row);
-				if (record[2] === ":") block.matches++;
+				if (record[2] === ":") {
+					block.matches++;
+					sawContent = true;
+				}
 			} else {
 				flush();
 				if (!validPath(row)) invalid();
@@ -173,7 +192,8 @@ function parseText(text: string, tool: string, masked: (file: string) => boolean
 		if (kept.length) kept.push("");
 		kept.push(...notices);
 	}
-	return { text: kept.join("\n"), omitted };
+	// Leading notices sit at the very top with no blank line, matching pi-fff output.
+	return { text: [...leading, ...kept].join("\n"), omitted };
 }
 
 function object(value: unknown): Record<string, unknown> {
