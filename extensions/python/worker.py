@@ -157,8 +157,17 @@ def format_exception(exc):
     message = str(exc)
     if len(message) > MAX_MESSAGE_CHARS:
         message = message[:MAX_MESSAGE_CHARS] + "...[truncated]"
-    parts = traceback.format_exception(type(exc), exc, exc.__traceback__)
-    tb, tb_truncated = bounded("".join(parts), 16384)
+    try:
+        parts = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    except BaseException:
+        # Formatting must never raise through execute_code: the traceback
+        # module can lazily import helpers at format time (e.g. Python 3.15's
+        # colorizer), and those reads hit the read-audit hook, raising
+        # SandboxReadDenied from inside the reporting path itself. Fall back to
+        # the exception type and message without a traceback.
+        tb, tb_truncated = "traceback unavailable: formatting raised inside the sandbox", False
+    else:
+        tb, tb_truncated = bounded("".join(parts), 16384)
     return {
         "type": etype,
         "message": message,
