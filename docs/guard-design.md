@@ -333,8 +333,13 @@ Holes, verified 2026-10-02:
 
 **Status: implemented 2026-10-13 on the confirmed contract below (the
 implementation decisions and remaining limits are recorded in the decision
-log entry "Save/deny/compound prompt implementation"). RPC persistent saves
-are deferred; step 6 remains unauthorized.**
+log entry "Save/deny/compound prompt implementation"). REVISED 2026-10-19,
+user-confirmed: per-step allow saves (step picker, per-step validation,
+post-commit re-prompt loop, save notifications) are designed and confirmed
+but NOT implemented; until that lands, the implemented allow-save behavior
+remains the 2026-10-13 whole-call/bundle contract. See the decision log
+entry "Per-step allow saves (2026-10-19)". RPC persistent saves are
+deferred; step 6 remains unauthorized.**
 
 ### Scope and action menu
 
@@ -366,16 +371,45 @@ are deferred; step 6 remains unauthorized.**
   step, trailing "Why:" line). The breakdown is an explanation, not an
   execution plan: execute the original command unchanged, never the fragments
   separately.
-- For an allow save, suggest anchored, escaped exact rules only for steps
-  lacking effective permission. Do not add redundant rules for already
-  allowed steps. Offer a generated bundle only when the complete hypothetical
-  merge authorizes the entire original call; existing ask/deny rules are not
-  removed or bypassed.
-- Edit and save that bundle as one logical scope update, with no deliberate
-  partial installation of its rules. This is not a new guarantee of
-  crash-safe filesystem writes. The user explicitly accepts that the saved
-  rules grant each matching step independently, including outside this
-  particular sequence; they are not an exact-sequence-only permission.
+- For an allow save with a reliable breakdown, "Save allow for project" or
+  "Save allow for user" first opens a checkbox picker over the breakdown
+  steps (the same component the deny save uses) whenever more than one
+  prompting step exists. All steps are listed with their action and reason;
+  prompting steps (including an unresolved per-step classify cell) are
+  selectable and start preselected, so confirming unchanged reproduces the
+  old whole-compound bundle; already-allowed steps are unselectable context.
+  Escaping the picker or confirming zero selections returns to the action
+  menu with nothing granted and nothing executed. A single prompting step
+  skips the picker and opens the editor directly.
+- Confirming the picker opens the rule editor prefilled with anchored,
+  escaped exact allow rules for the selected steps only, anchored to each
+  step's evaluator matching subject; a redirect-requiring step's prefill is
+  its verbatim subject, whose pattern necessarily contains ">". No redundant
+  rules are generated for already allowed steps. No whole-call exact rule is
+  offered when the breakdown is reliable: selecting every prompting step
+  covers everything an exact whole-command rule would authorize, and more,
+  because the step rules also authorize other combinations. Explicit ask
+  provenance still prohibits allow-saving entirely, so no picker or editor
+  is offered in that case.
+- Partial installation is deliberate and supported. This is not a new
+  guarantee of crash-safe filesystem writes. The user explicitly accepts
+  that the saved rules grant each matching step independently, including
+  outside this particular sequence; they are not an exact-sequence-only
+  permission.
+- After a partial allow save commits (some prompting steps remain
+  unselected), guard re-decides the original call with the fresh policy. If
+  it still prompts, a fresh approval dialog opens with the breakdown
+  recomputed against the saved rules and the full action menu again,
+  further saves included. The loop has no iteration cap: every iteration
+  requires an explicit commit, and escaping any approval selector denies
+  without saving (initial-selector cancellation semantics unchanged). When
+  the merged policy already allows the complete call, the save commits and
+  the call executes without a further prompt. Owner, epoch, runtime, cwd,
+  and config signature staleness checks apply to every iteration unchanged.
+- After any rule-save commit, show one info notification naming the scope,
+  the destination path, the number of rules saved, and, for a partial allow
+  save, how many steps still prompt. This covers the previously silent deny
+  saves for symmetry.
 - For a compound deny save, first show a multi-select of reliably parsed
   steps and their decisions, with nothing preselected. Require at least one
   selection to continue. Prefill exact deny rules for the selected commands,
@@ -384,8 +418,10 @@ are deferred; step 6 remains unauthorized.**
 - If parsing is unreliable, show the original command and mark the breakdown
   unavailable. Retain existing whole-call policy, rather than tightening it
   or presenting guessed fragments as reliable. Generate no guessed allow
-  bundle. A deny-save action opens a blank rule editor; manually entered
-  rules must be validated against the current whole call before saving.
+  bundle; allow saves keep the existing whole-call exact suggestion path
+  (no picker, no per-step fragments). A deny-save action opens a blank rule
+  editor; manually entered rules must be validated against the current whole
+  call before saving.
 
 ### Editor, validation, and preview
 
@@ -396,23 +432,33 @@ are deferred; step 6 remains unauthorized.**
   chosen action, not editable configuration fields.
 - Deliberate broadening to the existing glob, regex, or tool-wide grammar is
   permitted with explicit review. A malformed expression, wrong shell, or
-  hypothetical merge that fails to allow/deny the entire current call as
-  intended is a validation error. Preserve the entered text, explain the
-  problem, and return to editing; do not save or execute while invalid.
+  a merge that fails validation is a validation error. Preserve the entered
+  text, explain the problem, and return to editing; do not save or execute
+  while invalid.
+- Allow-save validation is per-step when the breakdown is reliable: with the
+  edited rules merged, every selected step must resolve to allow, the
+  aggregate decision must not be deny, and no existing ask or deny rule may
+  be bypassed. Broadening that also allows unselected steps, or the entire
+  call, is accepted. Deny saves, read-root saves, and allow saves on an
+  unreliable breakdown keep the whole-call contract: the merge must
+  allow/deny the entire current call as intended.
 - A persistent read-root editor contains one plain path. The edited root
   must cover the path that caused the request and pass existing root,
   protected-path, and secret restrictions. Unrelated roots are invalid.
   Grants remain read-only, discard worker state when applied, and never
   replay the code that requested access.
 - After valid submission, always show a separate preview, including unchanged
-  text: final rules/path, destination, and effect on the current call. For
-  bundles, make the independent grants explicit. Provide **Confirm**,
+  text: final rules/path, destination, and effect on the current call. Make
+  the independent grants explicit, and for a partial allow save state that
+  the call still prompts for the unselected steps and a fresh approval
+  dialog follows the commit. Provide **Confirm**,
   **Edit**, and **Cancel save**. Edit returns to the editor without mutation.
 
 ### Cancellation and denial steering
 
 | Ordinary editor/preview cancellation or empty submission | Outcome |
 |---|---|
+| Allow-save step picker (esc, or confirmed with zero selections) | Return to the action menu; nothing granted or executed |
 | Allow-rule save | Save nothing; allow the current call once |
 | Deny-rule save | Save nothing; deny the current call once |
 | Persistent read-root save | Save nothing; grant no access |
@@ -989,6 +1035,7 @@ remain useful.
 | request_read_access tool (2026-10-16) | Implemented (PR 2). Helper extraction: `handleReadGrant` is replaced by `requestReadGrant(rt, requesterName, requestPath, ctx, signal, caller)` returning a typed `GrantOutcome` (`granted` with committed root, scope, and `savedTo` destination for persistent saves; `denied` (explicit denial: the helper delivers steering itself and the outcome carries no payload); `refused` with a diagnostic); success is never inferred from absent diagnostics or message text, and both the worker path and the tool MUST go through the helper (dual adoption is mandatory, no drift). The worker call site projects the outcome into the existing response fields (diagnostic/stateLost/stateLostReason) byte-identically; an empty refusal diagnostic is the worker's silent no-UI passthrough, while the tool gets an actionable no-UI diagnostic. The `beforeCommit` order is preserved exactly: assertCallActive -> config-signature race check against the POST-DIALOG diskConfig snapshot -> root revalidation -> sessionReadRoots/addToConfigScope -> loadConfig; the outer try/catch maps epoch/config-race/teardown failures to `refused`. Capability-limited UI (no owned editor stages, computed once BEFORE the dialog) degrades to session grant + deny; a non-grant outcome under it carries the "only a session grant was offerable" note (appended to every refused diagnostic in the helper, including catch-path refusals, and to the denied tool text in execute, since the denied outcome has no diagnostic field). REVISED decision contract (supersedes the groundwork row's "non-allow = refusal"): deny refuses with the cause-specific reason and no dialog; prompt with no UI refuses with an actionable diagnostic (in practice `resolveDecision` collapses non-interactive prompts to deny first, so the branch is defensive); prompt with UI and allow BOTH open the read-grant dialog, which is the consent surface (an allow decision never grants automatically); classifier failures and indeterminate verdicts (`no_match`: "classifier call failed" / "classifier had no verdict" reason markers, matched in execute because `resolveDecision` maps them to prompt) fail closed. The execute flow is ordered: runtime check -> pre-aborted signal -> isAbsolute entry check (no dialog, no decisionFor) -> ONE `decisionFor` self-check -> post-await recheck before any UI (owning signal, `rt !== runtime` plus an epoch recheck against the epoch captured BEFORE the `decisionFor` self-check, mirroring `authorize`'s post-await epoch recheck and `assertDialogCurrent`, plus `rt.assertAvailable()` so a stale captured runtime is rejected, and cwd) -> `requestReadGrant(..., "tool")` -> typed result mapping (success text names root, scope, destination for saves, and the worker-disposal consequence "running interpreter workers were stopped; their state was discarded; previously run code was not replayed"). The tool is NOT in OWNED_EXECUTORS, never routed via `rt.run`/the execution queue, and has no renderCall; it is classified `remote-write` (annotations: readOnlyHint false, destructiveHint false, idempotentHint false, openWorldHint true). Exactly one policy evaluation per call at the execute level; the observe-only `tool_call` hook's own evaluation is deduped by the classifier cache. Hint rewiring: `SHELL_SANDBOX_FAILURE_HINT` and `SANDBOX_FAILURE_HINT` name `request_read_access` instead of the manual readRoots-editing/read-grant sentences (no-fallback tails kept), the bash description gains an append-only tool clause (render-call-pinned phrases untouched), and the shell-hints suite asserts the tool name. Tests: `tests/guard-request-access.test.mts` (harness-level, real closure, bwrap-independent) covers registration shape, non-ownership, relative-path refusal, the decision table through the registered hook + execute, real classifier plumbing (tool name + `{ path }` in the prompt; classifierEnvironment/classifierAllow do not bypass or block; one completion per call via the cache), session/project/user grants with destination and no-replay wording, deny steering via `deliverSteering`/`pi.sendUserMessage({ deliverAs: "steer" })`, cancellation, no-UI, capability-limited UI, mid-dialog abort, concurrency (one gate serializes; the loser sees invalidation), post-decisionFor staleness, and the config-race/epoch scenarios. Two documented test-level divergences from the task spec, verified against the design: (1) an out-of-band write to guard.local.json DURING the open dialog is absorbed by the post-dialog snapshot and the confirmed grant commits (union merge preserves the racer); guard's own writers cannot mutate config mid-dialog because config writes need transitions that invalidate the gate first, so the only mid-dialog writers are out-of-band and the "no commit" expectation for that interval is unimplementable without breaking worker byte-identity; a mid-dialog writer that also advances the epoch (e.g. /guard reload) is caught by the dialog-gate invalidation, and the literal "Read grant expired; nothing saved or replayed" epoch message is defense-in-depth unreachable through wrapper transitions because they invalidate the gate first. (2) a write strictly AFTER the post-dialog snapshot is caught deterministically by the config-signature check by holding the grant transaction behind the teardown of a preempted host bash whose setsid'd grandchild keeps the stdio pipe open for a fixed interval, then writing once inside that window; the assertion is the "config changed while waiting; nothing saved or replayed" refusal with no committed root | 
 | request_read_access groundwork (2026-10-16) | Verification + spec only, no production code. Evidence: `handleReadGrant` (index.ts:502) is a factory closure whose body is worker-independent except for labels and the trigger payload; it chains epoch capture, `validateReadGrant(readGrantSuggestion(path, cwd), cwd)` (runtime.ts:365, suggest.ts:27), the DialogGate (`dialogs.ts`), `runReadGrantPrompt` (prompt-flow.ts, session grant / project+user root saves / deny with steering), the extension-local `transition` wrapper (index.ts:219: synchronous dialog invalidation, then `rt.transition` with `preempt`, `invalidateWorkers`, `expectedEpoch`, and a `beforeCommit` that rechecks the config signature against a post-dialog snapshot before any write, then `addToConfigScope` or sessionRoots), and `deliverSteering` on explicit denial; it runs after `rt.run` returns, so the dialog never holds the execution queue. Verdict: reusable after extracting the shared read-grant body into a helper; PR 2 MUST route both the worker path and the new tool through that helper (no optional adoption). Tool spec: name `request_read_access`, parameters `{ path: string }` (the entry must enforce `path.isAbsolute` itself; `readGrantSuggestion` resolves rather than rejects relative input, and `validateReadGrant` judges only the resolved location); NOT in OWNED_EXECUTORS and not routed through `rt.run`/the execution queue; `readOnlyHint: false` (it mutates authorization state and persistent saves write guard.json) hence planning-ineligible and default-classified `remote-write` (fail closed, `classifyToolCall` unknown-name fallback) unless toolClasses pins otherwise; guard is observe-only for non-executor tools in step 3, so the tool's execute performs one guard-internal `decisionFor` self-check (not a duplicate of any interception); no-UI and capability-limited-UI (no editor: session grant + deny only) return distinct actionable diagnostics; denial delivers steering; cancellation grants nothing; stale epoch and config race fail closed before any write; nothing is ever replayed. Spike: `tests/guard-request-access-spike.test.mts` reproduces the interaction test-locally with an injected full-mode detection and a fake worker (bwrap-independent): 14 tests covering session grant, project save, unrelated-root editor rejection, denial steering, selector cancellation, no-UI, capability-limited UI, mid-dialog abort, stale-epoch commit, config race, worker disposal + active preemption + queued invalidation, gate serialization, and the path contracts. Boundary: this proves the primitives compose without a worker; it does not test the production closure or a registered tool. PR 2 items: the helper extraction with both callers, tool registration + description wording (then update the PR 1 bash hint to point at the tool), the decisionFor self-check wiring, and the entry-side isAbsolute check |
 | Non-owned write/edit enforcement + allow-edits rung (2026-10-16) | Settled by interview after a real-session finding: on `default`, an `edit` outside cwd and every `writeRoots` silently succeeded because the `tool_call` hook is enforce-only for owned executors (`bash`, `host_bash`, `python`, `node`) and observe-only for everything else, so computed `prompt`/`deny` decisions never acted. Premise: pi-tool-permissions is retired (disabled in the user's settings), so no coexistence mode: enforcement lands unconditionally, no flag. Scope: write/edit only (path-carrying local writes); local reads, remote classes, and pathless local writes (`memory_write`/`scratchpad`) stay observe-only. SDK facts pinned first (scout): `emitToolCall` awaits handlers sequentially in registration order and short-circuits on the first `block: true` (runner.js:956-971), a handler may await a dialog and the agent loop holds the call (`agent-loop.js:493-495`), and per-batch preparation is sequential, so dialogs serialize naturally plus the DialogGate across batches. Structure: a SEVENTH profile rung `allow-edits` between `default` and `auto` in the ladder and ctrl+alt+g cycle (supersedes the interviewed "session flag on default" intermediate; the rung makes the state visible and clearable through existing profile machinery and mirrors pi-tool-permissions' "allow edits" mode). default: every non-protected write/edit prompts (in-root and out), Allow once / Deny once (+ steering on explicit denial) and Switch to allow-edits on in-root prompts (authorizes the current call and lands the rung); allow-once/deny never changes the mode. allow-edits: in-root non-protected write/edit allowed silently, out-of-root prompts, protected paths prompt, every other cell identical to default. auto: roots gate BEFORE classify, out-of-root always prompts regardless of verdict, in-root classifier mapping unchanged (allow / soft_deny -> prompt / hard_deny -> block / no_match or failure -> prompt). Every profile: workspace lock also blocks write/edit; headless and subagent-child prompts deny; dialog cancellation and post-answer staleness (epoch, runtime, cwd, config signature, mirroring `authorize`) deny. Inheritance: `allow-edits` rides the standard versioned `PI_GUARD_INHERIT` contract with a version bump (parent and child ship together; old child + new value fails closed); child escape rule unchanged (only `research`), so a `default` child cannot self-escalate into the rung; plan.ts hold/restore is generic. Out of scope, recorded: Write/Edit path-rule grammar and persistent saves (TODO follow-up), reads/remote enforcement, session write grants, a `request_write_access` tool. TODO updated: the non-owned item carries the settled design plus an implementation sub-item, and a save-parity TODO was added |
+| Per-step allow saves (2026-10-19) | User-confirmed design only, NOT implemented: revises the 2026-10-13 allow-save contract (motivated by comparing against pi-tool-permissions' per-subcommand save loop). Scope: per-step allow saves, per-step validation, the post-commit re-prompt loop, and save notifications. Explicitly out of scope, settled during the interview: an "allow remaining steps once" action (redundant, Allow once already approves every prompting step exactly once in guard's single-gate model), glob-variant editor prefill (exact rules only), session-scoped step allows, /guard rules management, and deny-picker changes. Reliable breakdown: "Save allow for project/user" opens the checkbox picker (the deny picker component) over all breakdown steps whenever more than one prompting step exists; prompting and unresolved-classify steps are selectable and start PRESELECTED (deselect to narrow; confirming unchanged reproduces the old bundle); allowed steps are unselectable context; esc or confirming zero selections returns to the action menu with nothing granted or executed; a single prompting step skips the picker. Confirming prefills the editor with anchored exact rules for the selected steps only (each step's evaluator matching subject; a redirect-requiring step's prefill is its verbatim subject, whose pattern necessarily contains ">"), and the whole-call exact rule is no longer offered when the breakdown is reliable (full selection strictly covers it); unreliable breakdowns keep the existing whole-call path with no picker. Per-step validation contract (replaces whole-call validateShellSave at all three index.ts checkpoints): after the hypothetical merge, every selected step must resolve allow, the aggregate must not be deny, and no existing ask/deny rule is bypassed; deliberate broadening that allows unselected steps or the entire call is accepted, and when the merge allows the complete call the save commits and the call executes without a further prompt. Explicit-ask provenance still prohibits allow-saving entirely. Commit machinery unchanged (staleness barrier, one-scope additive write, epoch checks). After a partial save commits, guard re-decides the original call: still prompting opens a fresh approval dialog with the breakdown recomputed against the saved rules and the full action menu again, saves included; the loop has no cap (each iteration requires an explicit commit; escaping any approval selector denies without saving; initial-selector cancellation unchanged). The cancellation table gains the picker row; editor/preview cancellation keeps its documented allow-once fallback. After any rule-save commit (allow and the previously silent deny saves), one info notification: scope, destination path, rule count, and for partial saves the number of steps still prompting. The 2026-10-13 whole-call/bundle contract remains the implemented behavior until this lands |
 
 ## Implementation outline (build alongside, switch over)
 
