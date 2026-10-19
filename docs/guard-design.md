@@ -689,9 +689,11 @@ For every profile except yolo and unrestricted:
   root) is connectable from all three tools. TIOCSTI is covered by bwrap
   `--new-session`.
 - **Resource limits** (set by the launcher, replacing the `prlimit` binary):
-  - python/node keep today's limits: RLIMIT_AS 512 MiB (python) / 2 GiB
-    (node), RLIMIT_FSIZE 16 MiB, RLIMIT_NOFILE 128, no core dumps.
-  - bash: no core dumps only. RLIMIT_AS breaks .NET and V8 startup (they
+  - python/node share today's node limits: RLIMIT_AS 2 GiB, RLIMIT_FSIZE
+    16 MiB, RLIMIT_NOFILE 128, no core dumps. The 2 GiB address space is the
+    minimum verified for Go subprocesses (gh dies with "failed to reserve
+    page summary memory" below ~2 GiB) and covers V8's large reservations.
+  - bash: no core dumps only. RLIMIT_AS breaks .NET, V8, and Go startup (they
     reserve large virtual address ranges), so there are no address-space,
     file-size, or descriptor caps; timeouts remain the main runaway guard.
 - **NuGet audit:** `NuGetAudit=false` is set in every sandbox environment

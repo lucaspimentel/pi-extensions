@@ -706,11 +706,11 @@ if (supported) {
 
 	// ── Rlimits ──────────────────────────────────────────────────────────────
 
-	test("RLIMITS_PYTHON blocks a >512 MiB allocation", async () => {
+	test("RLIMITS_PYTHON blocks a >2 GiB allocation", async () => {
 		const ws = makeWorkspace();
 		const r = await runInSandbox({
 			workspace: ws,
-			target: ["/usr/bin/python3", "-c", "b = bytearray(600 * 1024 * 1024); print('allocated')"],
+			target: ["/usr/bin/python3", "-c", "b = bytearray(2200 * 1024 * 1024); print('allocated')"],
 			rlimits: RLIMITS_PYTHON,
 		});
 		assert.notEqual(r.code, 0, "the oversized allocation must fail");
@@ -721,9 +721,9 @@ if (supported) {
 		const ws = makeWorkspace();
 		const shell = await bash(ws, "ulimit -v", { rlimits: RLIMITS_SHELL });
 		assert.equal(shell.code, 0, shell.err);
-		assert.match(shell.out, /unlimited/, "RLIMITS_SHELL must not cap the address space (.NET and V8 need large ranges)");
+		assert.match(shell.out, /unlimited/, "RLIMITS_SHELL must not cap the address space (.NET, V8, and Go need large ranges)");
 		const py = await bash(ws, "ulimit -v", { rlimits: RLIMITS_PYTHON });
-		assert.match(py.out, /524288/, "RLIMITS_PYTHON caps the address space at 512 MiB");
+		assert.match(py.out, /2097152/, "RLIMITS_PYTHON caps the address space at 2 GiB");
 	});
 
 	test("degraded mode refuses to spawn", async () => {

@@ -553,10 +553,10 @@ The compiled launcher installs the policy inside the sandbox (default allow,
 - New user namespaces are prevented by bwrap `--disable-userns` (with
   `--unshare-user`), **not** by seccomp. `unshare -U ...` fails inside the
   sandbox.
-- rlimits are set by the same launcher (`RLIMITS_PYTHON`: AS 512 MiB, FSIZE
-  16 MiB, NOFILE 128, CORE 0; `RLIMITS_NODE`: AS 2 GiB plus the rest;
-  `RLIMITS_SHELL`: CORE 0 only, because RLIMIT_AS breaks .NET and V8
-  startup).
+- rlimits are set by the same launcher (`RLIMITS_PYTHON`: AS 2 GiB, FSIZE
+  16 MiB, NOFILE 128, CORE 0; `RLIMITS_NODE`: the same values;
+  `RLIMITS_SHELL`: CORE 0 only, because RLIMIT_AS breaks .NET, V8, and Go
+  startup: gh cannot start below ~2 GiB of address space).
 
 ### Protected-path audit and quarantine
 

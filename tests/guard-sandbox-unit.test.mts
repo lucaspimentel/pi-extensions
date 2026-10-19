@@ -779,7 +779,7 @@ test("outer launcher argv carries overlays then -- then bwrap", () => {
 // ── Rlimit constants ──────────────────────────────────────────────────────────
 
 test("rlimit constant sets match the design", () => {
-	assert.deepEqual(RLIMITS_PYTHON, { as: 512 * 1024 * 1024, fsize: 16 * 1024 * 1024, nofile: 128, core: 0 });
+	assert.deepEqual(RLIMITS_PYTHON, { as: 2 * 1024 * 1024 * 1024, fsize: 16 * 1024 * 1024, nofile: 128, core: 0 });
 	assert.deepEqual(RLIMITS_SHELL, { core: 0 });
 });
 

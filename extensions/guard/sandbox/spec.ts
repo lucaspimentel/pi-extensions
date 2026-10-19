@@ -27,11 +27,15 @@ export interface RlimitSet {
 }
 
 /**
- * python: address space 512 MiB, file size 16 MiB, 128 descriptors, no core.
- * Note RLIMIT_AS values are bytes of address space, not RSS.
+ * python: address space 2 GiB, file size 16 MiB, 128 descriptors, no core.
+ * Note RLIMIT_AS values are bytes of address space, not RSS. 2 GiB is the
+ * minimum verified for Go subprocesses (gh needs ~2 GiB of virtual address
+ * space for its page-summary structures and dies with "failed to reserve
+ * page summary memory" below that); it matches the node limit for the same
+ * reason V8 gets it.
  */
 export const RLIMITS_PYTHON: RlimitSet = {
-	as: 512 * 1024 * 1024,
+	as: 2 * 1024 * 1024 * 1024,
 	fsize: 16 * 1024 * 1024,
 	nofile: 128,
 	core: 0,
@@ -39,6 +43,8 @@ export const RLIMITS_PYTHON: RlimitSet = {
 
 /**
  * node: V8 reserves large virtual ranges, so it gets 2 GiB of address space.
+ * Python shares the value: Go subprocesses (gh, kubectl, terraform) fail to
+ * start below ~2 GiB.
  */
 export const RLIMITS_NODE: RlimitSet = {
 	as: 2 * 1024 * 1024 * 1024,
@@ -48,8 +54,8 @@ export const RLIMITS_NODE: RlimitSet = {
 };
 
 /**
- * bash/shell targets: no core dumps only. RLIMIT_AS breaks .NET and V8
- * startup (both reserve large virtual address ranges), so there are no
+ * bash/shell targets: no core dumps only. RLIMIT_AS breaks .NET, V8, and Go
+ * startup (all reserve large virtual address ranges), so there are no
  * address-space, file-size, or descriptor caps; timeouts remain the main
  * runaway guard for shell targets.
  */
