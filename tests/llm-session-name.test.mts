@@ -872,9 +872,14 @@ const binDir = join(tmp, "bin");
 mkdirSync(binDir, { recursive: true });
 const logFile = join(tmp, "calls.log");
 rmSync(logFile, { force: true });
+// Logs every invocation and answers `herdr tab get` with a single-pane tab
+// (pane_count 1), which is required for the tab-label branch to run.
 writeFileSync(
 	join(binDir, "herdr"),
-	`#!/bin/sh\necho "$@" >> ${JSON.stringify(logFile)}\n`,
+	`#!/bin/sh
+echo "$@" >> ${JSON.stringify(logFile)}
+if [ "$1 $2" = "tab get" ]; then echo '{"result":{"tab":{"pane_count":1}}}'; fi
+`,
 	{ mode: 0o755 },
 );
 
@@ -893,49 +898,63 @@ function makeTabPi() {
 
 const prevEnv = process.env.HERDR_ENV;
 const prevTab = process.env.HERDR_TAB_ID;
+const prevPane = process.env.HERDR_PANE_ID;
 const prevPath = process.env.PATH;
 
 try {
 	// Gating: outside herdr, no handlers are registered.
 	delete process.env.HERDR_ENV;
 	delete process.env.HERDR_TAB_ID;
+	delete process.env.HERDR_PANE_ID;
 	assert.equal(tabMod.default(makeTabPi() as any), undefined);
 	assert.ok(!tabHandlers.session_info_changed, "must be a no-op outside herdr");
 
 	// Enabled: handlers registered; renames go through the fake herdr.
 	process.env.HERDR_ENV = "1";
 	process.env.HERDR_TAB_ID = "w1:t9";
+	process.env.HERDR_PANE_ID = "p1";
 	process.env.PATH = `${binDir}:${process.env.PATH}`;
 	assert.equal(tabMod.default(makeTabPi() as any), undefined);
 	assert.ok(tabHandlers.session_info_changed && tabHandlers.session_start);
 
-	const waitForLog = async (lines: number) => {
+	const readLog = () => {
+		const content = readFileSync(logFile, "utf8").trim();
+		return content ? content.split("\n") : [];
+	};
+	const waitForLog = async (pred: (lines: string[]) => boolean, desc: string) => {
 		for (let i = 0; i < 100; i++) {
-			const content = (await import("node:fs")).readFileSync(logFile, "utf8").trim();
-			if (content && content.split("\n").length >= lines) return content.split("\n");
+			const lines = readLog();
+			if (pred(lines)) return lines;
 			await new Promise((r) => setTimeout(r, 20));
 		}
-		throw new Error(`timed out waiting for ${lines} herdr calls`);
+		throw new Error(`timed out waiting for: ${desc}`);
 	};
 
+	// A named session renames the pane and the single-pane tab.
 	await tabHandlers.session_info_changed({ name: "  my   title " }, {});
-	const lines = await waitForLog(1);
-	const PREFIX = "tab rename w1:t9 ";
-	assert.ok(lines[0].startsWith(PREFIX), `unexpected call: ${lines[0]}`);
-	assert.equal(lines[0].slice(PREFIX.length), "my title");
+	const lines = await waitForLog(
+		(ls) => ls.includes("tab rename w1:t9 my title"),
+		"tab rename to 'my title'",
+	);
+	assert.ok(lines.includes("pane rename p1 my title"), `unexpected log: ${lines.join(" | ")}`);
 
-	// Cleared name must not rename.
+	// Cleared/empty names reset both labels: the pane is cleared and the tab
+	// gets the placeholder label. One reset per event.
 	await tabHandlers.session_info_changed({ name: undefined }, {});
 	await tabHandlers.session_info_changed({ name: "" }, {});
-	await new Promise((r) => setTimeout(r, 100));
-	const after = (await import("node:fs")).readFileSync(logFile, "utf8").trim().split("\n");
-	assert.equal(after.length, 1, "cleared/empty names must not rename the tab");
+	const resets = await waitForLog(
+		(ls) => ls.filter((l) => l === "tab rename w1:t9 pi").length === 2,
+		"two tab resets to the placeholder",
+	);
+	assert.equal(
+		resets.filter((l) => l === "pane rename p1 --clear").length,
+		2,
+		"pane labels cleared twice",
+	);
 
 	// A second rename queues after the first; last label wins server-side.
 	await tabHandlers.session_info_changed({ name: "renamed again" }, {});
-	const all = await waitForLog(2);
-	assert.ok(all[1].startsWith(PREFIX), `unexpected call: ${all[1]}`);
-	assert.equal(all[1].slice(PREFIX.length), "renamed again");
+	await waitForLog((ls) => ls.includes("tab rename w1:t9 renamed again"), "second rename");
 
 	// ── Subagent child sessions (pi-subagents) must never rename the tab ──────
 
@@ -948,12 +967,10 @@ try {
 	assert.equal(isSubagentSession("fix#12", undefined), false, "too short for the id pattern");
 	assert.equal(isSubagentSession("", undefined), false);
 
-	// Log has 2 lines so far; counts below are absolute.
+	// Log has grown; counts below are absolute from this point.
 	const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-	const logLines = async () => {
-		const content = (await import("node:fs")).readFileSync(logFile, "utf8").trim();
-		return content ? content.split("\n") : [];
-	};
+	const logLines = readLog;
+	let seen = logLines().length;
 
 	const subHandlers: Record<string, (event: any, ctx: any) => unknown> = {};
 	tabMod.default({
@@ -974,18 +991,22 @@ try {
 	await subHandlers.session_info_changed({ name: "general#123455AB" }, emptyHeaderCtx);
 	await subHandlers.session_start({}, stampedCtx);
 	await sleep(150);
-	assert.equal((await logLines()).length, 2, "subagent sessions must not rename the tab");
+	assert.equal(logLines().length, seen, "subagent sessions must not rename anything");
 
 	// A normal name through a subagent-free context still renames: the guard
 	// only skips what it positively identifies as a subagent.
 	await subHandlers.session_info_changed({ name: "my title" }, emptyHeaderCtx);
-	const lines3 = await waitForLog(3);
-	assert.equal(lines3[2].slice(PREFIX.length), "my title");
+	const lines3 = await waitForLog((ls) => ls.length >= seen + 3, "parent rename after subagent");
+	assert.equal(lines3[seen], "pane rename p1 my title");
+	assert.equal(lines3[seen + 1], "tab get w1:t9");
+	assert.equal(lines3[seen + 2], "tab rename w1:t9 my title");
+	seen += 3;
 
 	// Fail-open: a ctx without a usable header must not block the parent.
 	await subHandlers.session_info_changed({ name: "renamed third" }, {});
-	const lines4 = await waitForLog(4);
-	assert.equal(lines4[3].slice(PREFIX.length), "renamed third");
+	const lines4 = await waitForLog((ls) => ls.length >= seen + 3, "fail-open rename");
+	assert.equal(lines4[seen + 2], "tab rename w1:t9 renamed third");
+	seen += 3;
 
 	// Fail-open on session_start too: no ctx at all, normal name from getSessionName.
 	const mainHandlers: Record<string, (event: any, ctx: any) => unknown> = {};
@@ -996,11 +1017,12 @@ try {
 		getSessionName: () => "fresh session",
 	} as any);
 	await mainHandlers.session_start({}, undefined);
-	const lines5 = await waitForLog(5);
-	assert.equal(lines5[4].slice(PREFIX.length), "fresh session");
+	const lines5 = await waitForLog((ls) => ls.length >= seen + 3, "session_start rename");
+	assert.equal(lines5[seen + 2], "tab rename w1:t9 fresh session");
 } finally {
 	process.env.HERDR_ENV = prevEnv;
 	process.env.HERDR_TAB_ID = prevTab;
+	process.env.HERDR_PANE_ID = prevPane;
 	process.env.PATH = prevPath;
 	rmSync(tmp, { recursive: true, force: true });
 }

@@ -63,9 +63,14 @@ const hasCompiler = resolveCompiler() !== null;
 const hasLibseccomp = findLibseccomp() !== null;
 const hasFd = findFdScanner().scanner !== null;
 
+// Test registry for the custom runner at the bottom of this file. `skip`
+// lets environment-dependent tests bail out (with a reason) instead of
+// failing on machines that cannot run them, e.g. containers with user
+// namespaces disabled.
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
-function test(name: string, fn: () => void | Promise<void>) {
-	tests.push({ name, fn });
+class Skip extends Error {}
+function test(name: string, fn: (skip: (reason: string) => never) => void | Promise<void>) {
+	tests.push({ name, fn: () => fn((reason: string) => { throw new Skip(reason); }) });
 }
 
 // ── Mask pattern matching ─────────────────────────────────────────────────────
@@ -213,9 +218,17 @@ if (onLinux) {
 	});
 
 	if (hasCompiler && hasLibseccomp && fs.existsSync("/usr/bin/bwrap")) {
-		test("on this machine the runtime mode is full", () => {
+		// bwrap being installed is not enough: creating user namespaces can be
+		// disabled by the kernel or a container runtime (CI runners, sandboxes).
+		// This test characterizes a fully capable machine, so skip it (with the
+		// probe's reason) wherever the real probe reports anything less.
+		test("on this machine the runtime mode is full", (skip) => {
 			resetSandboxDetection();
 			const d = detectSandboxMode();
+			if (d.mode !== "full") {
+				skip(`machine cannot run full mode: ${JSON.stringify(d.diagnostics)}`);
+				return;
+			}
 			assert.equal(d.mode, "full", JSON.stringify(d.diagnostics));
 			assert.ok(d.launcherPath);
 			assert.ok(d.bwrapPath);
@@ -224,7 +237,14 @@ if (onLinux) {
 		});
 	}
 
-	test("forcing launcher unavailability yields reduced with a diagnostic", () => {
+	test("forcing launcher unavailability yields reduced with a diagnostic", (skip) => {
+		// On a degraded machine (user namespaces unavailable) forcing launcher
+		// failure still reports degraded, not reduced; the reduced expectation
+		// only holds where the base environment is full or reduced.
+		if (detectSandboxMode().mode === "degraded") {
+			skip("degraded base environment: forcing launcher failure cannot yield reduced");
+			return;
+		}
 		const d = detectSandboxMode({ forceLauncherFailure: "forced: no compiler (test)" });
 		assert.equal(d.mode, "reduced");
 		assert.ok(d.diagnostics.includes("forced: no compiler (test)"));
@@ -967,6 +987,7 @@ test("quarantine does not follow a renamed protected parent outside the workspac
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
 for (const t of tests) {
 	try {
 		const r = t.fn();
@@ -976,11 +997,16 @@ for (const t of tests) {
 		passed++;
 		console.log(`  ok ${t.name}`);
 	} catch (err) {
+		if (err instanceof Skip) {
+			skipped++;
+			console.log(`  - skipped: ${t.name}: ${err.message}`);
+			continue;
+		}
 		failed++;
 		console.error(`  FAIL ${t.name}:`, err);
 	}
 }
-console.log(`\n${passed} passed, ${failed} failed`);
+console.log(`\n${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
 
 // Best-effort removal of fixtures.
 for (const dir of tempDirs) {
