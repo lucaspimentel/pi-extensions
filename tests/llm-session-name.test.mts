@@ -250,7 +250,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	mod.default(pi as any);
 	assert.ok(handlers.before_agent_start && handlers.turn_end && handlers.session_start);
 
-	await handlers.before_agent_start({ prompt: "refactor  the\nauth module" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "refactor  the\nauth module" }, makeCtx());
 	const completeCalls: any[] = [];
 	const ctx = makeCtx({
 		complete: async (model, context) => {
@@ -274,7 +274,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "w".repeat(80) }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "w".repeat(80) }, makeCtx());
 	const ctx = makeCtx({
 		complete: async () => {
 			throw new Error("no auth");
@@ -289,7 +289,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "rate limited prompt" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "rate limited prompt" }, makeCtx());
 	const ctx = makeCtx({
 		complete: async () => ({ content: [], errorMessage: "429 rate limit" }),
 	});
@@ -302,7 +302,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi("manual name");
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "some prompt" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "some prompt" }, makeCtx());
 	let completeCalls = 0;
 	const ctx = makeCtx({
 		complete: async () => {
@@ -319,7 +319,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "some other prompt" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "some other prompt" }, makeCtx());
 	const ctx = makeCtx({
 		complete: async () => {
 			pi.setSessionName("manual mid-flight");
@@ -336,7 +336,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "unauthed prompt" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "unauthed prompt" }, makeCtx());
 	const ctx = makeCtx({ authed: false, complete: async () => textResponse("never") });
 	await handlers.turn_end({}, ctx);
 	await waitFor(() => pi.name() === "unauthed prompt");
@@ -349,7 +349,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	const pi = makePi();
 	mod.default(pi as any);
 	const skillPrompt = '<skill name="update-changelog" location="/home/lucas/.pi/agent/skills/update-changelog/SKILL.md">\nskill body\n</skill>';
-	await handlers.before_agent_start({ prompt: skillPrompt }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: skillPrompt }, makeCtx());
 	const completeCalls: any[] = [];
 	const ctx = makeCtx({
 		complete: async (model: any, context: any) => {
@@ -370,7 +370,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	await handlers.session_start({ reason: "new" }, makeCtx());
 	const pi2 = makePi();
 	mod.default(pi2 as any);
-	await handlers.before_agent_start({ prompt: skillPrompt }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: skillPrompt }, makeCtx());
 	await handlers.turn_end({}, makeCtx({ authed: false }));
 	await waitFor(() => pi2.name() === "Invoked /update-changelog skill");
 	assert.equal(pi2.name(), "Invoked /update-changelog skill");
@@ -383,7 +383,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	let sessionId = "a";
 	const ctxFor = (id: string) => ({ sessionManager: { getSessionId: () => id }, ...makeCtx({ complete: async () => textResponse("title") }) });
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "first session prompt" }, ctxFor("a"));
+	await handlers.before_agent_start({ messageType: "user", prompt: "first session prompt" }, ctxFor("a"));
 	await handlers.turn_end({}, ctxFor("a"));
 	await waitFor(() => pi.name() === "title");
 	assert.equal(pi.name(), "title");
@@ -398,7 +398,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 			complete: async () => textResponse("second title"),
 		},
 	};
-	await handlers.before_agent_start({ prompt: "second session prompt" }, customCtx);
+	await handlers.before_agent_start({ messageType: "user", prompt: "second session prompt" }, customCtx);
 	await handlers.turn_end({}, customCtx);
 	await waitFor(() => pi.name() === "second title");
 	assert.equal(pi.name(), "second title");
@@ -410,7 +410,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "initial prompt" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "initial prompt" }, makeCtx());
 	const completeCalls: any[] = [];
 	const responses = ["first title", "second title"];
 	const ctx = makeCtx({
@@ -451,7 +451,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "p" }, makeCtx());
 	let calls = 0;
 	const ctx = makeCtx({
 		complete: async () => {
@@ -473,7 +473,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "p" }, makeCtx());
 	let calls = 0;
 	const ctx = makeCtx({
 		complete: async () => {
@@ -524,7 +524,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	writeFileSync(file, `${JSON.stringify({ type: "session", id: "h" })}\n`);
 	const pi = makePi(undefined, file);
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "p" }, makeCtx());
 	let calls = 0;
 	const ctx = makeCtx({
 		complete: async () => {
@@ -557,7 +557,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	writeFileSync(file, `${JSON.stringify({ type: "session", id: "h" })}\n`);
 	const pi = makePi(undefined, file);
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "p" }, makeCtx());
 	let calls = 0;
 	const responses = ["first title", "second title"];
 	const ctx = makeCtx({
@@ -586,7 +586,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	writeFileSync(file, `${JSON.stringify({ type: "session", id: "h" })}\n`);
 	const pi = makePi(undefined, file);
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "p" }, makeCtx());
 	let calls = 0;
 	const ctx = makeCtx({
 		complete: async () => {
@@ -612,7 +612,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "p" }, makeCtx());
 	const ctx = makeCtx({
 		complete: async () => {
 			pi.setSessionName("manual mid-flight");
@@ -631,7 +631,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "p" }, makeCtx());
 	let calls = 0;
 	const ctx = makeCtx({
 		complete: async () => {
@@ -666,7 +666,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "p" }, makeCtx());
 	let calls = 0;
 	const ctx = makeCtx({
 		complete: async () => {
@@ -693,7 +693,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "p" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "p" }, makeCtx());
 	let calls = 0;
 	const ctx = makeCtx({
 		complete: async () => {
@@ -733,7 +733,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 		process.env.PI_CODING_AGENT_DIR = dir;
 		const pi = makePi();
 		mod.default(pi as any);
-		await handlers.before_agent_start({ prompt: "interval prompt" }, makeCtx());
+		await handlers.before_agent_start({ messageType: "user", prompt: "interval prompt" }, makeCtx());
 		let calls = 0;
 		const ctx = makeCtx({
 			complete: async () => {
@@ -764,7 +764,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "post-resume prompt" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "post-resume prompt" }, makeCtx());
 	const completeCalls: any[] = [];
 	const responses = ["t1", "t2", "t3"];
 	const complete = async (_model: any, context: any) => {
@@ -811,7 +811,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 {
 	const pi = makePi();
 	mod.default(pi as any);
-	await handlers.before_agent_start({ prompt: "overlap prompt" }, makeCtx());
+	await handlers.before_agent_start({ messageType: "user", prompt: "overlap prompt" }, makeCtx());
 	const completeCalls: any[] = [];
 	let release!: () => void;
 	const gate = new Promise<void>((r) => { release = r; });
@@ -849,7 +849,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	let unhandled = 0;
 	function onUnhandled() { unhandled++; }
 	try {
-		await handlers.before_agent_start({ prompt: "rejecting prompt" }, makeCtx());
+		await handlers.before_agent_start({ messageType: "user", prompt: "rejecting prompt" }, makeCtx());
 		const ctx = makeCtx({
 			complete: async () => {
 				throw new Error("network gone");

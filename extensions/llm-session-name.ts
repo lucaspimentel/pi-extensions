@@ -482,7 +482,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event, ctx) => {
 		// Store the derived title source, not the raw prompt: a skill
 		// invocation would otherwise become the title (or fallback) verbatim.
-		const source = deriveTitleSource(event.prompt ?? "");
+		// Custom-message runs (pi.sendMessage while idle) carry `message`, not `prompt`.
+		const source = deriveTitleSource(event.messageType === "user" ? event.prompt : "");
 		if (!source) return;
 		const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral";
 		if (!firstPromptBySession.has(sessionId)) {
