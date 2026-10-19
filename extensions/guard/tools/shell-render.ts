@@ -32,6 +32,10 @@ interface ShellRenderContext {
 	expanded: boolean;
 	showImages: boolean;
 	isError: boolean;
+	/** Horizontal padding configured by the outputPad setting. Renderers with `renderShell: "self"` apply it themselves. */
+	outputPad: number;
+	/** Milliseconds the tool's execution took, from the final result; `undefined` while it runs. */
+	durationMs: number | undefined;
 }
 
 /**
