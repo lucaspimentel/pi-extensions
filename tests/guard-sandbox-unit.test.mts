@@ -61,7 +61,10 @@ function makeTempDir(prefix: string): string {
 const onLinux = process.platform === "linux";
 const hasCompiler = resolveCompiler() !== null;
 const hasLibseccomp = findLibseccomp() !== null;
-const hasFd = findFdScanner().scanner !== null;
+// Only gate on a real fd scanner: findFallback lookup returns scanner
+// "find" when fd is absent, and the fd-argv tests below would then execute
+// GNU find with fd flags like --hidden.
+const hasFd = findFdScanner().scanner === "fd";
 
 // Test registry for the custom runner at the bottom of this file. `skip`
 // lets environment-dependent tests bail out (with a reason) instead of
