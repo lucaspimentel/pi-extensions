@@ -729,8 +729,13 @@ test("a config write after the post-dialog snapshot fails closed at the signatur
 		// on disk; the commit re-read happens only after the grandchild exits.
 		await new Promise((resolve) => setTimeout(resolve, 150));
 		addToConfigScope("project", { readRoots: [racer] }, { cwd });
+		const raceStarted = Date.now();
 		const result = await pending;
-		assert.equal(result.isError, true);
+		assert.equal(
+			result.isError,
+			true,
+			`race orchestration: elapsed=${Date.now() - raceStarted}ms result=${resultText(result)}`,
+		);
 		assert.match(resultText(result), /config changed while waiting; nothing saved or replayed/);
 		const saved = JSON.parse(readFileSync(projectConfigPath(cwd), "utf8")) as { readRoots?: string[] };
 		assert.ok(saved.readRoots?.includes(racer), "the racing write survives");
