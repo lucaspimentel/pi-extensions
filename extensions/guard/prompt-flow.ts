@@ -27,7 +27,7 @@ export interface PromptFlowIO {
 	/** Owned editor stage; omitted when the host lacks the capabilities. */
 	editor?(title: string, prefill: string, signal: AbortSignal): Promise<string | undefined>;
 	/** Owned checkbox picker stage; omitted when the host lacks the capabilities. */
-	picker?(title: string, steps: readonly GuardPickerStep[], signal: AbortSignal): Promise<number[] | undefined>;
+	picker?(title: string, steps: readonly GuardPickerStep[], signal: AbortSignal, options?: { preselectedOccurrenceIds?: readonly number[]; requireSelection?: boolean }): Promise<number[] | undefined>;
 	/** Signal-aware native text input (steering; capability-limited fallback). */
 	inputText(title: string, signal: AbortSignal): Promise<string | undefined>;
 	notify(message: string, level?: "info" | "warning"): void;
@@ -38,7 +38,7 @@ export type SteeringText = string | undefined;
 export type ExecutionFlowOutcome =
 	| { kind: "allow-once" }
 	| { kind: "deny-once"; explicit: boolean; steering: SteeringText }
-	| { kind: "save-allow"; scope: ConfigScope; planKind: "whole-call" | "bundle"; rules: string[]; patch: SuggestedPatch; previewText: string }
+	| { kind: "save-allow"; scope: ConfigScope; planKind: "whole-call" | "per-step"; rules: string[]; selectedOccurrenceIds: readonly number[]; patch: SuggestedPatch; previewText: string }
 	| { kind: "save-deny"; scope: ConfigScope; rules: string[]; patch: SuggestedPatch; steering: SteeringText; previewText: string };
 
 export type ReadFlowOutcome =
@@ -226,122 +226,180 @@ export interface ExecutionPromptDeps {
 	scopes: readonly ConfigScope[];
 	parseRules(text: string): { ok: true; rules: string[] } | { ok: false; error: string };
 	validateRules(intent: "allow" | "deny", rules: string[]): { ok: true } | { ok: false; error: string };
+	/** Per-step allow-save validation over the selected occurrence IDs. */
+	validateAllowSave(rules: string[], selectedOccurrenceIds: readonly number[]): { ok: true } | { ok: false; error: string };
 	denyRulesFor(selectedOccurrenceIds: readonly number[]): string[];
 	destination: DestinationFor;
 }
 
 /**
- * Run the execution-approval flow: flat actions, optional save editors with
- * separate previews, and post-denial steering. Returns a typed outcome; the
- * caller performs all persistence and the steering handoff.
+ * Run the execution-approval flow: flat actions, the per-step allow picker
+ * with preselection, optional save editors with separate previews, and
+ * post-denial steering. Returns a typed outcome; the caller performs all
+ * persistence and the steering handoff. The outer loop exists so the allow
+ * step picker can return to the action menu: escaping the picker or
+ * confirming zero selections grants nothing, executes nothing, and reopens
+ * the menu.
  */
 export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<ExecutionFlowOutcome> {
 	const { io, signal } = deps;
 	const editorAvailable = typeof io.editor === "function";
 	const title = executionPromptTitle(deps);
-	const options = [
-		"Allow once",
-		...(deps.allowPlan && editorAvailable ? deps.scopes.map((scope) => `Save allow for ${scope}`) : []),
-		"Deny once",
-		...(deps.denySaveSupported && editorAvailable ? deps.scopes.map((scope) => `Save deny for ${scope}`) : []),
-	];
-	const answer = await io.select(title, options, signal);
-	// Initial selector cancellation denies without saving or steering.
-	if (answer === undefined) return { kind: "deny-once", explicit: false, steering: undefined };
-	if (answer === "Allow once") return { kind: "allow-once" };
-	if (answer === "Deny once") {
-		return { kind: "deny-once", explicit: true, steering: await collectSteering(io, signal, `denied: ${deps.command || deps.toolName}`) };
-	}
-	if (answer.startsWith("Save allow for ")) {
-		const scope = answer.slice("Save allow for ".length) as ConfigScope;
-		if (!deps.allowPlan) throw new Error("guard: no validated allow plan; save-allow must not be offered");
-		const baseTitle = `Edit the allow rules to save (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;
-		const runEditor = (): Promise<EditorLoopResult> => editorSaveLoop(io, signal, {
-			title: baseTitle,
-			consequence: ALLOW_EDITOR_CONSEQUENCE,
-			prefill: deps.allowPlan!.rules.join("\n"),
-			parse: deps.parseRules,
-			validate: (rules) => deps.validateRules("allow", rules),
-		});
-		const buildPreview = (rules: string[]): string => [
-			`Confirm allow save (${scope})?`,
-			"Rules to save:",
-			...rules,
-			`Destination: ${deps.destination(scope)}`,
-			`Effect: ${deps.allowPlan!.kind === "bundle"
-				? "each rule permits its matching step independently, including outside this sequence; together they allow the complete current call"
-				: "the rule permits the exact current command"}`,
-			"Cancelling here approves the current call once without saving",
-		].join("\n");
-		const preview = await previewLoop(io, signal, {
-			previewText: "",
-			runEditor,
-			buildPreview,
-		});
-		// Ordinary editor/preview cancellation saves nothing and approves once.
-		if (preview.kind === "cancelled") return { kind: "allow-once" };
-		return {
-			kind: "save-allow",
-			scope,
-			planKind: deps.allowPlan.kind,
-			rules: preview.rules,
-			patch: { hostBash: { allow: preview.rules } },
-			previewText: preview.previewText,
-		};
-	}
-	if (answer.startsWith("Save deny for ")) {
-		const scope = answer.slice("Save deny for ".length) as ConfigScope;
-		// Reliable compound breakdown: a multi-select with nothing preselected.
-		// Unreliable parsing: a blank manual editor.
-		let prefill = "";
-		if (deps.explanation?.breakdown.available && deps.explanation.steps.length > 0 && io.picker) {
-			const pickerSteps: GuardPickerStep[] = deps.explanation.steps.map((step) => ({
-				occurrenceId: step.occurrenceId,
-				label: step.display,
-				detail: `${step.decision.action} (${step.decision.reason})`,
-			}));
-			const selected = await io.picker(
-				`Select the steps to deny (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nMatching a selected step denies the whole call; the rules also deny matching commands outside this sequence`,
-				pickerSteps,
-				signal,
-			);
-			// Picker cancellation: an ordinary save cancellation (deny once, steering still offered).
-			if (selected === undefined) {
-				return { kind: "deny-once", explicit: true, steering: await collectSteering(io, signal, `denied: ${deps.command || deps.toolName}`) };
-			}
-			prefill = deps.denyRulesFor(selected).join("\n");
-		}
-		const baseTitle = `Edit the deny rules to save (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;
-		const runEditor = (): Promise<EditorLoopResult> => editorSaveLoop(io, signal, {
-			title: baseTitle,
-			consequence: DENY_EDITOR_CONSEQUENCE,
-			prefill,
-			parse: deps.parseRules,
-			validate: (rules) => deps.validateRules("deny", rules),
-		});
-		const buildPreview = (rules: string[]): string => [
-			`Confirm deny save (${scope})?`,
-			"Rules to save:",
-			...rules,
-			`Destination: ${deps.destination(scope)}`,
-			"Effect: each rule denies matching commands independently, including outside this sequence; the current call is denied",
-			"Cancelling here denies the current call once without saving",
-		].join("\n");
-		const preview = await previewLoop(io, signal, { previewText: "", runEditor, buildPreview });
-		// Ordinary cancellation of a deny save: deny once, steering still offered.
-		if (preview.kind === "cancelled") {
+	for (;;) {
+		const options = [
+			"Allow once",
+			...(deps.allowPlan && editorAvailable ? deps.scopes.map((scope) => `Save allow for ${scope}`) : []),
+			"Deny once",
+			...(deps.denySaveSupported && editorAvailable ? deps.scopes.map((scope) => `Save deny for ${scope}`) : []),
+		];
+		const answer = await io.select(title, options, signal);
+		// Initial selector cancellation denies without saving or steering.
+		if (answer === undefined) return { kind: "deny-once", explicit: false, steering: undefined };
+		if (answer === "Allow once") return { kind: "allow-once" };
+		if (answer === "Deny once") {
 			return { kind: "deny-once", explicit: true, steering: await collectSteering(io, signal, `denied: ${deps.command || deps.toolName}`) };
 		}
-		return {
-			kind: "save-deny",
-			scope,
-			rules: preview.rules,
-			patch: { hostBash: { deny: preview.rules } },
-			steering: await collectSteering(io, signal, `denied: ${deps.command || deps.toolName}`),
-			previewText: preview.previewText,
-		};
+		if (answer.startsWith("Save allow for ")) {
+			const scope = answer.slice("Save allow for ".length) as ConfigScope;
+			if (!deps.allowPlan) throw new Error("guard: no validated allow plan; save-allow must not be offered");
+			const plan = deps.allowPlan;
+			const prompting = (deps.explanation?.steps ?? []).filter((step) => step.decision.action !== "allow");
+			// Per-step plans offer step selection (the deny picker component) when
+			// more than one prompting step exists and the picker stage is
+			// available; a single prompting step skips the picker, and a missing
+			// picker stage degrades to the editor with every prompting step
+			// preselected. Whole-call plans (unreliable breakdown) never offer
+			// selection.
+			let selected: readonly number[] = [];
+			if (plan.kind === "per-step") {
+				if (io.picker && prompting.length > 1) {
+					const pickerSteps: GuardPickerStep[] = (deps.explanation?.steps ?? []).map((step) => ({
+						occurrenceId: step.occurrenceId,
+						label: step.display,
+						detail: `${step.decision.action} (${step.decision.reason})`,
+						selectable: step.decision.action !== "allow",
+					}));
+					const picked = await io.picker(
+						`Select the steps to allow (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nEach selected step gets an exact allow rule that also authorizes matching commands outside this sequence; deselect steps to narrow the save`,
+						pickerSteps,
+						signal,
+						{ preselectedOccurrenceIds: prompting.map((step) => step.occurrenceId), requireSelection: false },
+					);
+					// Picker esc or a confirmed empty selection returns to the action
+					// menu: nothing granted, nothing executed, no abandoned editor text.
+					if (picked === undefined) continue;
+					const selectable = new Set(prompting.map((step) => step.occurrenceId));
+					// Selection hygiene: keep only selectable prompting rows.
+					const filtered = [...new Set(picked)].filter((id) => selectable.has(id));
+					if (filtered.length === 0) continue;
+					selected = filtered;
+				} else {
+					selected = prompting.map((step) => step.occurrenceId);
+				}
+			}
+			const prefill = plan.kind === "per-step"
+				? plan.perStep.filter((entry) => selected.includes(entry.occurrenceId)).map((entry) => entry.rule).join("\n")
+				: plan.rules.join("\n");
+			const baseTitle = `Edit the allow rules to save (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;
+			const runEditor = (): Promise<EditorLoopResult> => editorSaveLoop(io, signal, {
+				title: baseTitle,
+				consequence: ALLOW_EDITOR_CONSEQUENCE,
+				prefill,
+				parse: deps.parseRules,
+				validate: plan.kind === "per-step"
+					? (rules) => deps.validateAllowSave(rules, selected)
+					: (rules) => deps.validateRules("allow", rules),
+			});
+			const coversPrompting = plan.kind === "per-step" && prompting.length > 0
+				&& prompting.every((step) => selected.includes(step.occurrenceId));
+			const buildPreview = (rules: string[]): string => {
+				const lines = [
+					`Confirm allow save (${scope})?`,
+					"Rules to save:",
+					...rules,
+					`Destination: ${deps.destination(scope)}`,
+				];
+				if (plan.kind === "per-step") {
+					lines.push("Effect: each rule permits its matching step independently, including outside this sequence; together they allow the selected steps");
+					if (coversPrompting) lines.push("The call executes without a further prompt after this save");
+					else lines.push("The call still prompts for the unselected steps; a fresh approval dialog follows the commit");
+				} else {
+					lines.push("Effect: the rule permits the exact current command");
+				}
+				lines.push("Cancelling here approves the current call once without saving");
+				return lines.join("\n");
+			};
+			const preview = await previewLoop(io, signal, {
+				previewText: "",
+				runEditor,
+				buildPreview,
+			});
+			// Ordinary editor/preview cancellation saves nothing and approves once.
+			if (preview.kind === "cancelled") return { kind: "allow-once" };
+			return {
+				kind: "save-allow",
+				scope,
+				planKind: plan.kind,
+				rules: preview.rules,
+				selectedOccurrenceIds: plan.kind === "per-step" ? selected : [],
+				patch: { hostBash: { allow: preview.rules } },
+				previewText: preview.previewText,
+			};
+		}
+		if (answer.startsWith("Save deny for ")) {
+			const scope = answer.slice("Save deny for ".length) as ConfigScope;
+			// Reliable compound breakdown: a multi-select with nothing preselected.
+			// Unreliable parsing: a blank manual editor.
+			let prefill = "";
+			if (deps.explanation?.breakdown.available && deps.explanation.steps.length > 0 && io.picker) {
+				const pickerSteps: GuardPickerStep[] = deps.explanation.steps.map((step) => ({
+					occurrenceId: step.occurrenceId,
+					label: step.display,
+					detail: `${step.decision.action} (${step.decision.reason})`,
+				}));
+				const selected = await io.picker(
+					`Select the steps to deny (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nMatching a selected step denies the whole call; the rules also deny matching commands outside this sequence`,
+					pickerSteps,
+					signal,
+				);
+				// Picker cancellation: an ordinary save cancellation (deny once, steering still offered).
+				if (selected === undefined) {
+					return { kind: "deny-once", explicit: true, steering: await collectSteering(io, signal, `denied: ${deps.command || deps.toolName}`) };
+				}
+				prefill = deps.denyRulesFor(selected).join("\n");
+			}
+			const baseTitle = `Edit the deny rules to save (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;
+			const runEditor = (): Promise<EditorLoopResult> => editorSaveLoop(io, signal, {
+				title: baseTitle,
+				consequence: DENY_EDITOR_CONSEQUENCE,
+				prefill,
+				parse: deps.parseRules,
+				validate: (rules) => deps.validateRules("deny", rules),
+			});
+			const buildPreview = (rules: string[]): string => [
+				`Confirm deny save (${scope})?`,
+				"Rules to save:",
+				...rules,
+				`Destination: ${deps.destination(scope)}`,
+				"Effect: each rule denies matching commands independently, including outside this sequence; the current call is denied",
+				"Cancelling here denies the current call once without saving",
+			].join("\n");
+			const preview = await previewLoop(io, signal, { previewText: "", runEditor, buildPreview });
+			// Ordinary cancellation of a deny save: deny once, steering still offered.
+			if (preview.kind === "cancelled") {
+				return { kind: "deny-once", explicit: true, steering: await collectSteering(io, signal, `denied: ${deps.command || deps.toolName}`) };
+			}
+			return {
+				kind: "save-deny",
+				scope,
+				rules: preview.rules,
+				patch: { hostBash: { deny: preview.rules } },
+				steering: await collectSteering(io, signal, `denied: ${deps.command || deps.toolName}`),
+				previewText: preview.previewText,
+			};
+		}
+		throw new Error(`guard: unexpected approval answer: ${answer}`);
 	}
-	throw new Error(`guard: unexpected approval answer: ${answer}`);
 }
 
 /** Dependencies of runReadGrantPrompt beyond the IO surface. */

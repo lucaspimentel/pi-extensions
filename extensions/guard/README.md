@@ -176,20 +176,25 @@ Registration details:
   complete rule expression per line, original shell namespace enforced;
   glob/regex/tool-wide broadening allowed with review) and then a separate
   **Confirm/Edit/Cancel save** preview showing the final entries, the exact
-  destination file, and the validated effect on the current call (for
-  bundles: each rule permits/blocks its matching step independently,
+  destination file, and the validated effect on the current call (for rule
+  saves: each rule permits/blocks its matching command independently,
   including outside this sequence). Invalid edits preserve the submitted
   text and loop with an error. Ordinary cancellation or an empty submission
   saves nothing with the documented fallback: allow-save becomes allow-once,
   deny-save becomes deny-once (steering still offered), and a read-root save
   grants nothing. The actual reviewed patch is revalidated against re-read
   configuration at the final commit barrier; abort, staleness, and setup
-  failures never grant authority. For compound commands the allow bundle
-  covers only the steps lacking effective permission and is offered only
-  when the complete hypothetical merge authorizes the entire original call;
-  deny saves use a checkbox picker of the parsed steps (nothing
-  preselected, duplicates keep distinct identities) and a blank manual
-  editor when parsing is unreliable.
+  failures never grant authority. For compound commands a reliable
+  breakdown opens a per-step allow picker (prompting steps preselected and
+  selectable, allowed steps unselectable context; esc or confirming zero
+  selections returns to the action menu) and prefills exact rules for the
+  selected steps only; per-step validation requires every selected step to
+  resolve allow, and a partial save opens a fresh approval dialog after the
+  commit. Unreliable breakdowns keep the whole-call exact suggestion path.
+  Every rule-save commit (allow and deny) emits one info notification
+  naming the scope, destination, and rule count. Deny saves use a checkbox
+  picker of the parsed steps (nothing preselected, duplicates keep distinct
+  identities) and a blank manual editor when parsing is unreliable.
 - **Denial steering:** after an explicit user denial (Deny once or a deny
   save, including its cancellation) guard collects an optional instruction
   and hands it to the agent via `sendUserMessage(deliverAs: "steer")`

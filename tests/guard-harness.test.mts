@@ -113,9 +113,12 @@ function harnessCtx(h: Harness, cwd: string, selectResult: string | undefined = 
  * mounted stages automatically: scripted DOWN-count answers for selector
  * menus, Enter to submit editor prefills, Enter to confirm previews, and
  * space+Enter to continue the deny picker. Mirrors the controlled boundary
- * used by the dialogs and component suites. */
-function installOwnedAutopilot(ctx: { ui: Record<string, unknown> }, menuDowns: number[]): Array<{ kind: string; text: string }> {
+ * used by the dialogs and component suites. Optional per-stage actions
+ * override the automatic answer for the re-prompt loop tests (picker esc,
+ * editor cancellation, a paused second selector). */
+function installOwnedAutopilot(ctx: { ui: Record<string, unknown> }, menuDowns: number[], actions: { picker?: (component: any) => void; editor?: (component: any) => void; selector?: (component: any, index: number) => void } = {}): Array<{ kind: string; text: string }> {
 	const overlays: Array<{ kind: string; text: string }> = [];
+	let selectorIndex = 0;
 	const fakeTui: any = {
 		terminal: { columns: 120, rows: 40 },
 		requestRender() {},
@@ -135,13 +138,13 @@ function installOwnedAutopilot(ctx: { ui: Record<string, unknown> }, menuDowns: 
 				else if (text.includes("enter submit")) kind = "editor";
 				else if (text.includes("Confirm")) kind = "preview";
 				overlays.push({ kind, text });
-				if (kind === "editor" || kind === "preview") component.handleInput("\r");
-				else if (kind === "picker") { component.handleInput(" "); component.handleInput("\r"); }
-				else {
-					const downs = menuDowns.shift() ?? 0;
-					for (let i = 0; i < downs; i++) component.handleInput("\u001b[B");
-					component.handleInput("\r");
-				}
+				if (kind === "editor" || kind === "preview") (actions.editor && kind === "editor" ? actions.editor : (c: any) => c.handleInput("\r"))(component);
+				else if (kind === "picker") (actions.picker ?? ((c: any) => { c.handleInput(" "); c.handleInput("\r"); }))(component);
+				else (actions.selector ?? ((c: any, i: number) => {
+					const downs = menuDowns[i] ?? 0;
+					for (let d = 0; d < downs; d++) c.handleInput("\u001b[B");
+					c.handleInput("\r");
+				}))(component, selectorIndex++);
 			}, 0);
 			return handle;
 		},
@@ -928,6 +931,181 @@ test("enforced write/edit: research denies without a dialog; a default child can
 		const result = await observers[0]({ toolName: "edit", input: { path: path.join(cwd, "a.ts") } }, ctx);
 		assert.deepEqual(result, { block: true, reason: "guard: local write: denied in research" });
 		assert.equal(seen.length, 0, "research denies with no dialog");
+	});
+});
+
+// ── Per-step allow saves: re-prompt loop, notifications, cancellation ────────
+
+const COMPOUND = "echo $GUARD_HARNESS_UNSET && echo $GUARD_SECOND_UNSET";
+const savedRules = (cwd: string): string[] => {
+	const cfg = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[]; deny?: string[] } };
+	return cfg.hostBash?.allow ?? [];
+};
+
+test("per-step allow save: partial commit re-prompts with the saved step allowed, then Allow once completes", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-perstep-partial-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		// Default picker action toggles the highlighted (preselected) first step
+		// off, so only the second prompting step is saved.
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1, 0]);
+		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, undefined, undefined, ctx);
+		assert.equal(result.structuredContent.exit_code, 0, "the compound command executed after the second dialog");
+		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "picker", "editor", "preview", "selector"], "a fresh approval dialog followed the partial save");
+		assert.match(overlays[1].text, /Select the steps to allow \(project\)/, "the picker opened over the breakdown steps");
+		assert.match(overlays[1].text, /◉ echo \$GUARD_HARNESS_UNSET/, "prompting steps start preselected");
+		const saved = savedRules(cwd);
+		assert.deepEqual(saved, ["HostBash(/^echo \\$GUARD_SECOND_UNSET$/)"], "exactly the selected step's rule was saved");
+		// The fresh dialog recomputes the breakdown: the saved step is allowed context.
+		assert.ok(overlays[4].text.includes("[✓] echo $GUARD_SECOND_UNSET"), "the saved step now shows as allowed", overlays[4].text);
+		assert.ok(overlays[4].text.includes("» [?] echo $GUARD_HARNESS_UNSET"), "the unselected step still prompts");
+		const saveNotices = h.notifications.filter((n) => /saved \d+ allow rule/.test(n));
+		assert.equal(saveNotices.length, 1, "exactly one save notification");
+		assert.match(saveNotices[0], /saved 1 allow rule\(s\) for project \(/);
+		assert.match(saveNotices[0], /guard\.local\.json/);
+		assert.match(saveNotices[0], /; 1 step\(s\) still prompt/);
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("per-step allow save: full coverage commits once, executes, and omits the still-prompt clause", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-perstep-full-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]); // "Save allow for project"
+		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
+		assert.equal(result.structuredContent.exit_code, 0, "the call executed without a further prompt");
+		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "editor", "preview"], "a single prompting step skips the picker and no second dialog opens");
+		assert.deepEqual(savedRules(cwd), ["HostBash(/^echo \\$GUARD_HARNESS_UNSET$/)"]);
+		const saveNotices = h.notifications.filter((n) => /saved \d+ allow rule/.test(n));
+		assert.equal(saveNotices.length, 1);
+		assert.doesNotMatch(saveNotices[0], /still prompt/);
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("per-step allow save: picker esc returns to the menu; Allow once then executes and saves nothing", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-perstep-picker-esc-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1, 0], { picker: (c) => c.handleInput("\x1b") });
+		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, undefined, undefined, ctx);
+		assert.equal(result.structuredContent.exit_code, 0, "Allow once executed after returning to the menu");
+		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "picker", "selector"], "the menu was reopened after the picker esc");
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false, "nothing was written");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("per-step allow save: editor cancellation mid-loop allows once and saves nothing", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-perstep-editor-esc-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1], { editor: (c) => c.handleInput("\x1b") });
+		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, undefined, undefined, ctx);
+		assert.equal(result.structuredContent.exit_code, 0, "the documented allow-once fallback still applies");
+		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "picker", "editor"]);
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false, "nothing was saved");
+		assert.equal(h.notifications.some((n) => /saved \d+/.test(n)), false, "no save notification");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("per-step allow save: cancellation after the commit keeps the rule but never executes", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-perstep-abort-after-commit-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const abort = new AbortController();
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1], {
+			// Answer the first menu, then abort during the fresh dialog's selector:
+			// the saved rule persists, but the call never executes and no
+			// authorization is carried across.
+			selector: (component, index) => {
+				if (index === 0) {
+					component.handleInput("\u001b[B");
+					component.handleInput("\r");
+					return;
+				}
+				abort.abort();
+			},
+		});
+		await assert.rejects(
+			h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, abort.signal, undefined, ctx),
+			/abort|cancel|expired/,
+		);
+		assert.ok(overlays.length >= 5, "the fresh dialog opened before the cancellation");
+		assert.deepEqual(savedRules(cwd), ["HostBash(/^echo \\$GUARD_SECOND_UNSET$/)"], "the committed rule persists");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("per-step allow save: an external policy change between iterations expires the fresh dialog", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-perstep-external-change-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		let secondSelector = false;
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1], {
+			selector: (component, index) => {
+				if (index === 0) {
+					component.handleInput("\u001b[B");
+					component.handleInput("\r");
+					return;
+				}
+				secondSelector = true;
+				// Out-of-band policy change while the fresh dialog is open.
+				void h.commandHandlers.get("guard")!("profile research", ctx);
+			},
+		});
+		await assert.rejects(
+			h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, undefined, undefined, ctx),
+			/expired|research/,
+		);
+		assert.equal(secondSelector, true, "the fresh dialog opened before the external change");
+		assert.deepEqual(savedRules(cwd), ["HostBash(/^echo \\$GUARD_SECOND_UNSET$/)"], "the first save persists");
+		assert.equal(overlays.filter((o) => o.kind === "preview").length, 1, "no further save was committed");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("initial selector esc denies without saving or executing; deny saves now announce themselves", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-perstep-deny-notify-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		{
+			const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [], { selector: (c) => c.handleInput("\x1b") });
+			await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, undefined, undefined, ctx), /denied/);
+			assert.deepEqual(overlays.map((o) => o.kind), ["selector"], "esc on the first selector denies immediately");
+			assert.equal(fs.existsSync(projectConfigPath(cwd)), false, "nothing was saved");
+			assert.equal(h.notifications.some((n) => /saved \d+/.test(n)), false);
+		}
+		h.notifications.length = 0;
+		{
+			// Deny save: menu downs 4 to "Save deny for project", default picker
+			// and editor/preview actions, no steering input.
+			installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [4]);
+			await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx), /denied/);
+			const denyNotices = h.notifications.filter((n) => /saved \d+ deny rule/.test(n));
+			assert.equal(denyNotices.length, 1, "the previously silent deny save now announces itself");
+			assert.match(denyNotices[0], /saved 1 deny rule\(s\) for project \(/);
+			assert.doesNotMatch(denyNotices[0], /still prompt/);
+			const cfg = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { deny?: string[] } };
+			assert.deepEqual(cfg.hostBash?.deny, ["HostBash(/^echo \\$GUARD_HARNESS_UNSET$/)"]);
+		}
+		await h.handlers.session_shutdown[0]({}, ctx);
 	});
 });
 

@@ -23,7 +23,7 @@ import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
 import { computeMigration } from "./policy/migrate.ts";
 import { pickClassifierModel, classifyAction } from "./policy/classifier.ts";
 import { addToConfigScope, effectiveAllowSuggestion, readGrantSuggestion } from "./policy/suggest.ts";
-import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, validateShellSave } from "./policy/save.ts";
+import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, validateShellAllowSave, validateShellSave } from "./policy/save.ts";
 import { runExecutionPrompt, runReadGrantPrompt, runWriteEditPrompt, type PromptFlowIO } from "./prompt-flow.ts";
 import { createGuardEditorStage, createGuardPickerStage } from "./ask-components.ts";
 import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, releaseResearchHold, requestResearchHold, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
@@ -158,13 +158,30 @@ export default function guard(pi: ExtensionAPI) {
 		return {
 			select: (title, options, signal) => gatedSelect(ctx, title, options, signal),
 			editor: owned ? (title, prefill, signal) => editorStage(ctx.ui, signal, { title, prefill }) : undefined,
-			picker: owned ? (title, steps, signal) => pickerStage(ctx.ui, signal, { title, steps }) : undefined,
+			picker: owned ? (title, steps, signal, options) => pickerStage(ctx.ui, signal, { title, steps, preselectedOccurrenceIds: options?.preselectedOccurrenceIds, requireSelection: options?.requireSelection }) : undefined,
 			inputText: (title, signal) => ctx.ui.input(title, undefined, { signal }),
 			notify: (message, level) => notify(ctx, message, level),
 		};
 	}
 	function configDestination(ctx: ExtensionContext, scope: "project" | "user"): string {
 		return scope === "project" ? `${ctx.cwd}/.pi/guard.local.json` : `${homedir()}/.pi/agent/guard.json`;
+	}
+	/**
+	 * One info notification after any rule-save commit: scope, destination
+	 * path, and rule count; a partial allow save adds the number of steps that
+	 * still prompt (omitted when the merged policy already allows the complete
+	 * call). Best effort only: a notification failure never fails the commit
+	 * and never grants or withholds authorization.
+	 */
+	function announceSave(ctx: ExtensionContext, scope: "project" | "user", intent: "allow" | "deny", count: number, freshExplanation?: HostShellExplanation): void {
+		let message = `guard: saved ${count} ${intent} rule(s) for ${scope} (${configDestination(ctx, scope)})`;
+		if (intent === "allow" && freshExplanation && freshExplanation.decision.action !== "allow") {
+			const still = freshExplanation.breakdown.available
+				? freshExplanation.steps.filter((step) => step.decision.action === "prompt" || step.decision.action === "classify").length
+				: 0;
+			message += `; ${still} step(s) still prompt`;
+		}
+		notify(ctx, message);
 	}
 	function classifierModel(ctx: ExtensionContext): Model<Api> | undefined {
 		return pickClassifierModel(ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable(), ctx.model?.provider, (m) => ctx.modelRegistry.hasConfiguredAuth(m), config?.classifier, (provider, modelId) => ctx.modelRegistry.find(provider, modelId));
@@ -414,18 +431,28 @@ export default function guard(pi: ExtensionAPI) {
 	function assertOwnerLive(ownership: CommandOwnership): void {
 		if (ownership.signal?.aborted) throw ownership.cancelled;
 	}
-	/** Return an epoch-bound once token. Never hold the runtime queue in a dialog. */
+	/**
+	 * Return an epoch-bound once token. Never hold the runtime queue in a dialog.
+	 * Per-step allow saves make this a loop: each iteration is a FRESH
+	 * authorization attempt (epoch re-captured from the current runtime,
+	 * staleness checks re-run, gate lease reacquired, breakdown and plans
+	 * regenerated), so a partial save that leaves the call prompting opens a
+	 * full approval dialog again. Nothing is carried between iterations: old
+	 * occurrence IDs are never adopted. Cancellation or staleness after a
+	 * commit keeps the saved rules but never authorizes execution.
+	 */
 	async function authorize(rt: GuardRuntime, name: OwnedExecutor, input: Record<string, unknown>, ctx: ExtensionContext, signal?: AbortSignal): Promise<number> {
-		rt.assertAvailable();
-		assertCallActive(signal);
-		const epoch = rt.epoch;
-		const decision = await decisionFor(name, input, ctx);
-		assertCallActive(signal);
-		rt.assertAvailable();
-		if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw new Error("guard: approval expired after a policy change");
-		if (decision.action === "deny") throw new Error(`guard: ${decision.reason}`);
-		if (decision.action === "allow") return epoch;
-		if (!ctx.hasUI) throw new Error("guard: headless prompts deny");
+		for (;;) {
+			rt.assertAvailable();
+			assertCallActive(signal);
+			const epoch = rt.epoch;
+			const decision = await decisionFor(name, input, ctx);
+			assertCallActive(signal);
+			rt.assertAvailable();
+			if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw new Error("guard: approval expired after a policy change");
+			if (decision.action === "deny") throw new Error(`guard: ${decision.reason}`);
+			if (decision.action === "allow") return epoch;
+			if (!ctx.hasUI) throw new Error("guard: headless prompts deny");
 		const policy = policyFor(ctx);
 		const mapped = mappedCall(name, input).call;
 		// Raw/degraded bash is a host shell for routing and saving, too.
@@ -462,6 +489,12 @@ export default function guard(pi: ExtensionAPI) {
 				validateRules: (intent, rules) => shellCall
 					? validateShellSave(shellCall, policy, intent, rules)
 					: { ok: false as const, error: "only host-shell calls support rule saves" },
+				// Per-step allow saves validate every selected step against the
+				// merged policy; whole-call allow saves and deny saves keep
+				// validateShellSave. All three checkpoints use the same validators.
+				validateAllowSave: (rules, ids) => shellCall
+					? validateShellAllowSave(shellCall, policy, rules, ids)
+					: { ok: false as const, error: "only host-shell calls support rule saves" },
 				denyRulesFor: (ids) => shellCall && explanation ? planDenyRules(shellCall, explanation, ids) : [],
 				destination: (scope) => configDestination(ctx, scope),
 			}));
@@ -477,26 +510,54 @@ export default function guard(pi: ExtensionAPI) {
 		}
 		if (outcome.kind === "save-allow") {
 			if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
+			// Validator by plan kind: per-step allows a partial selection (every
+			// selected step must resolve allow); whole-call keeps the complete-call
+			// contract. Applied at all three checkpoints (in-dialog validation runs
+			// through the dep above; latest/fresh recheck eligibility here).
+			const validateReviewed = (candidate: PolicyState) => outcome.planKind === "per-step"
+				? validateShellAllowSave(shellCall, candidate, outcome.rules, outcome.selectedOccurrenceIds)
+				: validateShellSave(shellCall, candidate, "allow", outcome.rules);
 			// Re-read current config and revalidate the ACTUAL reviewed patch
 			// (never a regenerated suggestion) against the latest effective policy.
 			const diskConfig = loadConfig(ctx.cwd);
-			const latestCheck = validateShellSave(shellCall, policyWithSessionRoots(ctx, diskConfig), "allow", outcome.rules);
-			if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the complete call (${latestCheck.error}); nothing saved or executed`);
+			const latestCheck = validateReviewed(policyWithSessionRoots(ctx, diskConfig));
+			if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the selected steps (${latestCheck.error}); nothing saved or executed`);
 			const target = { ...diskConfig, hostBash: { ...diskConfig.hostBash, allow: dedupe([...diskConfig.hostBash.allow, ...outcome.rules]) } };
 			let owningEpoch = epoch;
 			await transition({ ...state! }, target, ctx, { epoch, beforeCommit: () => {
 				assertCallActive(signal);
 				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or executed");
 				const fresh = loadConfig(ctx.cwd);
-				const freshCheck = validateShellSave(shellCall, policyWithSessionRoots(ctx, fresh), "allow", outcome.rules);
-				if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the complete call (${freshCheck.error}); nothing saved`);
+				const freshCheck = validateReviewed(policyWithSessionRoots(ctx, fresh));
+				if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the selected steps (${freshCheck.error}); nothing saved`);
 				// Record the owning commit epoch synchronously (no await between the
 				// final checks and the write) for the steering/execution ownership checks.
 				owningEpoch = rt.epoch;
 				addToConfigScope(outcome.scope, { hostBash: { allow: outcome.rules } }, { cwd: ctx.cwd });
 				return loadConfig(ctx.cwd);
 			} });
-			return rt.epoch;
+			// Committed: announce the save, then re-decide the ORIGINAL call (never
+			// an extracted remainder) against the post-commit policy. A partial
+			// save still prompting continues the loop with a fresh breakdown; a
+			// full save executes without a further prompt.
+			const freshPolicy = policyFor(ctx);
+			const freshExplanation = explainHostShellCommand(shellCall, freshPolicy);
+			announceSave(ctx, outcome.scope, "allow", outcome.rules.length, freshExplanation);
+			// The saved rules persist through any failure below, but execution never
+			// proceeds on a stale owner: recheck the owner captured at commit.
+			assertCallActive(signal);
+			if (rt !== runtime || rt.teardownFailure || rt.epoch !== owningEpoch || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
+				throw new Error("guard: approval expired after a policy change");
+			}
+			rt.assertAvailable();
+			const freshDecision = await decisionFor(name, input, ctx, freshPolicy);
+			assertCallActive(signal);
+			if (rt !== runtime || rt.teardownFailure || rt.epoch !== owningEpoch || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
+				throw new Error("guard: approval expired after a policy change");
+			}
+			if (freshDecision.action === "allow") return rt.epoch;
+			if (freshDecision.action === "deny") throw new Error(`guard: ${freshDecision.reason}`);
+			continue;
 		}
 		if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
 		// save-deny: the steering was collected inside the flow before the commit.
@@ -515,10 +576,12 @@ export default function guard(pi: ExtensionAPI) {
 			addToConfigScope(outcome.scope, { hostBash: { deny: outcome.rules } }, { cwd: ctx.cwd });
 			return loadConfig(ctx.cwd);
 		} });
+		announceSave(ctx, outcome.scope, "deny", outcome.rules.length);
 		// Committed: keep the saved rule; suppress steering if ownership went
 		// invalid between the commit and the handoff.
 		deliverSteering(outcome.steering, signal, rt, owningEpoch, cwd);
 		throw new Error("guard: execution denied");
+	}
 	}
 
 	function appendWarnings(result: AgentToolResult<any>, warnings: string[]): AgentToolResult<any> {

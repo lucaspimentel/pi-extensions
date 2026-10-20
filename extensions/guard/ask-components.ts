@@ -1,7 +1,8 @@
 /**
  * Guard-owned stage components for the save/deny/compound prompt flows:
  * a text editor stage (rule editing, read-root editing, optional steering)
- * and a checkbox picker stage (compound deny selection). Both run on the
+ * and a checkbox picker stage (compound deny selection and per-step allow
+ * step selection, with preselection and unselectable context rows). Both run on the
  * shared owned-stage runner (ask-overlay.ts), so every stage keeps ctrl+]
  * hide/show, the dialog-signal contract, idempotent cleanup, and the exact
  * owned-handle removal semantics of the guard selector.
@@ -57,7 +58,7 @@ function editorThemeFrom(theme: GuardAskTheme): EditorTheme {
 export interface GuardEditorStageOptions {
 	/** Full dialog title (may be multi-line; wrapped into the top budget). */
 	title: string;
-	/** Initial text (e.g. the exact suggestion bundle or the suggested root). */
+	/** Initial text (e.g. the exact suggestion rules or the suggested root). */
 	prefill?: string;
 	/** Hint line under the editor. */
 	hint?: string;
@@ -135,13 +136,15 @@ export function createGuardEditorStage(): GuardEditorStage {
 	};
 }
 
-/** One selectable step in the deny picker. */
+/** One row in the checkbox picker (deny saves and per-step allow saves). */
 export interface GuardPickerStep {
 	occurrenceId: number;
 	/** The step's display text (full text is kept reachable in the detail window). */
 	label: string;
 	/** The step's decision summary (shown as the list description). */
 	detail: string;
+	/** False marks an unselectable context row (space does nothing); default true. */
+	selectable?: boolean;
 }
 
 export interface GuardPickerStageOptions {
@@ -149,28 +152,42 @@ export interface GuardPickerStageOptions {
 	steps: readonly GuardPickerStep[];
 	/** Hint line; defaults to the toggle/continue/cancel help. */
 	hint?: string;
+	/** Occurrence IDs that start checked; ignored for missing or unselectable steps. */
+	preselectedOccurrenceIds?: readonly number[];
+	/** False lets Enter continue with zero selections; default true (deny behavior). */
+	requireSelection?: boolean;
 }
 
 export type GuardPickerStage = (ui: GuardAskUI, signal: AbortSignal, options: GuardPickerStageOptions) => Promise<number[] | undefined>;
 
 /**
- * Create the checkbox picker stage factory for compound deny saves. Nothing
- * is preselected; space toggles the highlighted step, enter continues with
- * at least one selected occurrence ID, and Esc cancels the save. Duplicate
- * command text keeps distinct identities (selections are occurrence IDs).
- * The full highlighted step text is reachable in a detail window when the
- * list itself fits the terminal; when the list overflows, list scrolling
- * takes priority and the detail window shows one line.
+ * Create the checkbox picker stage factory for compound deny saves and
+ * per-step allow saves. Deny behavior (the default): nothing is preselected,
+ * space toggles the highlighted step, enter continues with at least one
+ * selected occurrence ID, and Esc cancels the save. Per-step allow saves
+ * pass preselectedOccurrenceIds (the prompting steps), mark already-allowed
+ * rows unselectable (space never checks them and preselection ignores them),
+ * and set requireSelection false so confirming the preselection continues
+ * even with zero deselections. Duplicate command text keeps distinct
+ * identities (selections are occurrence IDs). The full highlighted step text
+ * is reachable in a detail window when the list itself fits the terminal;
+ * when the list overflows, list scrolling takes priority and the detail
+ * window shows one line.
  */
 export function createGuardPickerStage(): GuardPickerStage {
 	return function guardPickerStage(ui: GuardAskUI, signal: AbortSignal, options: GuardPickerStageOptions): Promise<number[] | undefined> {
 		if (options.steps.length === 0) {
 			return Promise.reject(new Error("guard: the deny picker requires at least one step"));
 		}
-		const hint = options.hint ?? "space toggle \u00b7 enter continue (select at least one) \u00b7 esc cancel save";
+		const requireSelection = options.requireSelection !== false;
+		const selectableIds = new Set(options.steps.filter((step) => step.selectable !== false).map((step) => step.occurrenceId));
+		const hint = options.hint
+			?? (requireSelection
+				? "space toggle \u00b7 enter continue (select at least one) \u00b7 esc cancel save"
+				: "space toggle \u00b7 enter continue \u00b7 esc back to the action menu");
 		return runOwnedStage<number[] | undefined>(ui, signal, (ctx) => {
 			const { tui, theme } = ctx;
-			const checked = new Set<number>();
+			const checked = new Set<number>([...(options.preselectedOccurrenceIds ?? [])].filter((id) => selectableIds.has(id)));
 			let highlightIndex = 0;
 			// Mutable item objects: SelectList keeps the array by reference, so
 			// toggling mutates the label in place and invalidates.
@@ -216,7 +233,7 @@ export function createGuardPickerStage(): GuardPickerStage {
 				const instance = new SelectList(items, Math.max(1, maxVisible), selectListTheme);
 				instance.setSelectedIndex(highlightIndex);
 				instance.onSelect = (item) => {
-					if (checked.size === 0) return; // continue requires at least one selection
+					if (requireSelection && checked.size === 0) return; // continue requires at least one selection
 					ctx.settle([...checked].map(Number));
 				};
 				instance.onCancel = () => ctx.settle(undefined);
@@ -285,10 +302,12 @@ export function createGuardPickerStage(): GuardPickerStage {
 						return;
 					}
 					// Kitty releases must not toggle; space toggles the highlighted step.
+					// Unselectable context rows never toggle.
 					if (!isKeyRelease(data) && !isKeyRepeat(data) && matchesKey(data, "space")) {
 						const step = options.steps[highlightIndex];
-						if (step && checked.has(step.occurrenceId)) checked.delete(step.occurrenceId);
-						else if (step) checked.add(step.occurrenceId);
+						if (!step || step.selectable === false) return;
+						if (checked.has(step.occurrenceId)) checked.delete(step.occurrenceId);
+						else checked.add(step.occurrenceId);
 						return;
 					}
 					if (matchesKey(data, "pageUp")) {

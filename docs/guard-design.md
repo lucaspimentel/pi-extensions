@@ -333,13 +333,14 @@ Holes, verified 2026-10-02:
 
 **Status: implemented 2026-10-13 on the confirmed contract below (the
 implementation decisions and remaining limits are recorded in the decision
-log entry "Save/deny/compound prompt implementation"). REVISED 2026-10-19,
-user-confirmed: per-step allow saves (step picker, per-step validation,
-post-commit re-prompt loop, save notifications) are designed and confirmed
-but NOT implemented; until that lands, the implemented allow-save behavior
-remains the 2026-10-13 whole-call/bundle contract. See the decision log
-entry "Per-step allow saves (2026-10-19)". RPC persistent saves are
-deferred; step 6 remains unauthorized.**
+log entry "Save/deny/compound prompt implementation"); REVISED 2026-10-19,
+user-confirmed, and the revision IMPLEMENTED 2026-10-20: per-step allow
+saves (step picker with preselection, per-step validation, post-commit
+re-prompt loop, save notifications) replace the 2026-10-13
+whole-call/bundle allow-save contract whenever the breakdown is reliable;
+unreliable breakdowns keep the whole-call exact suggestion. See the
+decision log entry "Per-step allow saves (2026-10-19)". RPC persistent
+saves are deferred; step 6 remains unauthorized.**
 
 ### Scope and action menu
 

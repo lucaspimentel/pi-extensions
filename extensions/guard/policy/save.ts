@@ -5,11 +5,13 @@
  * runtime/queue access. Parsing and validation operate on the exact
  * evaluation subjects from decision.ts so suggestions anchor to what the
  * evaluator matched, and edited patches are validated as complete
- * hypothetical merges against the whole original call.
+ * hypothetical merges against the whole original call. Allow saves use
+ * per-step validation when the breakdown is reliable; the whole-call exact
+ * suggestion survives only for unreliable breakdowns.
  */
 
 import type { GuardCall, HostShellExplanation, PolicyState } from "./decision.ts";
-import { decide } from "./decision.ts";
+import { decide, explainHostShellCommand } from "./decision.ts";
 import type { SuggestedPatch } from "./suggest.ts";
 import { effectiveAllowSuggestion } from "./suggest.ts";
 import { normalizeMatchPath } from "./paths.ts";
@@ -118,20 +120,65 @@ export function validateShellSave(
 	return { ok: false, error: `the edited rules would not deny the complete call (${decision.reason})` };
 }
 
-/** An allow-save plan: either the provably effective whole-call exact rule or a per-step bundle. */
-export interface AllowSavePlan {
-	kind: "whole-call" | "bundle";
-	rules: string[];
-	patch: SuggestedPatch;
+/**
+ * Validate a per-step allow save: with the edited rules merged, every
+ * selected step must resolve to allow and the aggregate decision must not be
+ * deny. Existing ask/deny rules cannot be bypassed: evaluateHostShellSub
+ * checks deny, then ask, before the allow rules in the merged evaluation, so
+ * a selected step resolving to allow proves no per-step ask or deny rule
+ * matches it, and a whole-command ask rule surfaces as an aggregate
+ * explicit-ask decision that blocks allow-saving upstream. Deliberate
+ * broadening that also allows unselected steps, or the entire call, is
+ * accepted. Fails closed on unreachable-invalid inputs: empty, duplicate, or
+ * unknown selections and an unavailable merged breakdown are rejections,
+ * never approvals.
+ */
+export function validateShellAllowSave(
+	call: Extract<GuardCall, { kind: "host-shell" }>,
+	policy: PolicyState,
+	rules: readonly string[],
+	selectedOccurrenceIds: readonly number[],
+): ValidationResult {
+	if (selectedOccurrenceIds.length === 0) return { ok: false, error: "no steps selected; select at least one step to allow" };
+	if (new Set(selectedOccurrenceIds).size !== selectedOccurrenceIds.length) {
+		return { ok: false, error: "duplicate step selections; the edited rules changed the step breakdown" };
+	}
+	const merged = explainHostShellCommand(call, policyWithSlot(policy, "allow", rules));
+	if (!merged.breakdown.available || merged.steps.length === 0) {
+		return { ok: false, error: "the merged policy could not split the command; per-step validation is unavailable" };
+	}
+	if (merged.decision.action === "deny") {
+		return { ok: false, error: `the edited rules would leave the call denied (${merged.decision.reason})` };
+	}
+	const byId = new Map(merged.steps.map((step) => [step.occurrenceId, step]));
+	for (const id of selectedOccurrenceIds) {
+		const step = byId.get(id);
+		if (!step) return { ok: false, error: "the edited rules changed the step breakdown; reselect the steps to allow" };
+		if (step.decision.action !== "allow") {
+			return { ok: false, error: `step '${step.display}' is not allowed by the edited rules (${step.decision.reason})` };
+		}
+	}
+	return { ok: true };
 }
 
 /**
+ * An allow-save plan: either the provably effective whole-call exact rule
+ * (kept ONLY for unreliable breakdowns) or a per-step mapping from prompting
+ * step occurrence IDs to their exact allow rules (reliable breakdowns).
+ */
+export type AllowSavePlan =
+	| { kind: "whole-call"; rules: string[]; patch: SuggestedPatch }
+	| { kind: "per-step"; perStep: ReadonlyArray<{ occurrenceId: number; rule: string }> };
+
+/**
  * Plan the allow-save offer for a prompt. Explicit ask prohibitions apply.
- * Preference order: the existing exact whole-call suggestion when it
- * provably authorizes the entire call; otherwise a per-step bundle for a
- * reliable breakdown (rules only for steps lacking effective permission,
- * anchored to each evaluator allow subject). When neither provably works,
- * no allow-save is offered and no guessed rules are generated.
+ * A reliable breakdown plans per-step rules for every step lacking effective
+ * permission (anchored to each evaluator allow subject; a redirect-requiring
+ * step's verbatim subject makes its pattern redirect-aware); the whole-call
+ * exact suggestion is retired on this path, and a per-step validation failure
+ * plans nothing rather than falling back to a guessed whole-call rule. An
+ * unavailable breakdown keeps the existing whole-call exact suggestion when
+ * it provably authorizes the entire call, and plans nothing otherwise.
  */
 export function planAllowSave(
 	call: Extract<GuardCall, { kind: "host-shell" }>,
@@ -139,16 +186,18 @@ export function planAllowSave(
 	explanation: HostShellExplanation,
 ): AllowSavePlan | null {
 	if (explanation.decision.provenance === "explicit-ask") return null;
-	const whole = effectiveAllowSuggestion(call, policy);
-	if (whole?.hostBash?.allow?.length) return { kind: "whole-call", rules: whole.hostBash.allow, patch: whole };
-	if (!explanation.breakdown.available) return null;
-	const rules = dedupe(explanation.steps
+	if (!explanation.breakdown.available) {
+		const whole = effectiveAllowSuggestion(call, policy);
+		if (whole?.hostBash?.allow?.length) return { kind: "whole-call", rules: whole.hostBash.allow, patch: whole };
+		return null;
+	}
+	const perStep = explanation.steps
 		.filter((step) => step.decision.action !== "allow")
-		.map((step) => exactAllowRule(call.shell, step.allowSubject)));
-	if (rules.length === 0) return null;
-	const validation = validateShellSave(call, policy, "allow", rules);
+		.map((step) => ({ occurrenceId: step.occurrenceId, rule: exactAllowRule(call.shell, step.allowSubject) }));
+	if (perStep.length === 0) return null;
+	const validation = validateShellAllowSave(call, policy, perStep.map((entry) => entry.rule), perStep.map((entry) => entry.occurrenceId));
 	if (!validation.ok) return null;
-	return { kind: "bundle", rules, patch: { hostBash: { allow: rules } } };
+	return { kind: "per-step", perStep };
 }
 
 /**

@@ -246,6 +246,59 @@ test("both stages fail closed on a host without owned-stage capabilities", async
 	await assert.rejects(pickerStage(ui, controller.signal, { title: "t", steps }), /capabilities/);
 });
 
+test("picker: preselection renders checked and never checks an unselectable row", async () => {
+	const host = makeFakeHost();
+	const rows: GuardPickerStep[] = [
+		{ occurrenceId: 0, label: "echo a", detail: "allow (read-only tier)", selectable: false },
+		{ occurrenceId: 1, label: "curl https://example.com", detail: "prompt (host shell cell)" },
+	];
+	const promise = pickerStage(host.ui as never, new AbortController().signal, { title: "t", steps: rows, preselectedOccurrenceIds: [0, 1, 9] });
+	const rendered = strip(host.overlays[0].component.render(80)).join("\n");
+	assert.ok(rendered.includes("\u25cb echo a"), "the unselectable row is never preselected");
+	assert.ok(rendered.includes("\u25c9 curl https://example.com"), "the prompting row starts checked");
+	host.overlays[0].component.handleInput(ENTER);
+	assert.deepEqual(await promise, [1], "missing IDs (9) are ignored");
+});
+
+test("picker: space on an unselectable row is a no-op", async () => {
+	const host = makeFakeHost();
+	const rows: GuardPickerStep[] = [
+		{ occurrenceId: 0, label: "echo a", detail: "allow (read-only tier)", selectable: false },
+		{ occurrenceId: 1, label: "curl https://example.com", detail: "prompt (host shell cell)" },
+	];
+	const promise = pickerStage(host.ui as never, new AbortController().signal, { title: "t", steps: rows, preselectedOccurrenceIds: [1] });
+	const overlay = host.overlays[0].component;
+	overlay.render(80);
+	overlay.handleInput(SPACE); // highlighted row 0 is unselectable: no toggle
+	const rendered = strip(overlay.render(80)).join("\n");
+	assert.ok(!rendered.includes("\u25c9 echo a"), "the unselectable row stays unchecked");
+	overlay.handleInput(ENTER);
+	assert.deepEqual(await promise, [1], "the preselected prompting row survives the no-op toggle");
+});
+
+test("picker: requireSelection false settles an empty selection on enter; default ignores it", async () => {
+	{
+		const host = makeFakeHost();
+		const promise = pickerStage(host.ui as never, new AbortController().signal, { title: "t", steps, requireSelection: false });
+		const overlay = host.overlays[0].component;
+		overlay.render(80);
+		overlay.handleInput(ENTER);
+		assert.deepEqual(await promise, [], "the allow picker may confirm zero selections");
+	}
+	{
+		const host = makeFakeHost();
+		const promise = pickerStage(host.ui as never, new AbortController().signal, { title: "t", steps });
+		const overlay = host.overlays[0].component;
+		overlay.render(80);
+		overlay.handleInput(ENTER);
+		assert.equal(host.overlays.length, 1, "the deny default still requires a selection");
+		overlay.handleInput(ESC);
+		assert.equal(await promise, undefined);
+	}
+});
+
 test("space key matching sanity for the picker toggle", () => {
 	assert.ok(matchesKey(SPACE, "space"));
 });
+
+// ── Runner ──────────────────────────────────────────────────────────────────────────

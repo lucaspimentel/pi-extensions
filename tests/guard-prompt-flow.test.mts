@@ -22,7 +22,7 @@ import {
 import type { AllowSavePlan } from "../extensions/guard/policy/save.ts";
 import { mergeConfig, type GuardConfig } from "../extensions/guard/policy/config.ts";
 import { decide, explainHostShellCommand, type PolicyState } from "../extensions/guard/policy/decision.ts";
-import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, validateShellSave } from "../extensions/guard/policy/save.ts";
+import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, validateShellAllowSave, validateShellSave } from "../extensions/guard/policy/save.ts";
 
 function makeConfig(overrides: Partial<GuardConfig> = {}, cwd = "/home/user/proj"): ReturnType<typeof mergeConfig> {
 	return mergeConfig(overrides, {}, cwd);
@@ -44,8 +44,8 @@ function makeIO(script: { select?: (string | undefined)[]; editor?: (string | un
 			calls.editor.push(`${title}\n@@prefill:${prefill}`);
 			return script.editor?.shift();
 		},
-		picker: async (title, steps) => {
-			calls.picker.push(`${title}\n@@${steps.map((s) => s.label).join("|")}`);
+		picker: async (title, steps, _signal, options) => {
+			calls.picker.push(`${title}\n@@${steps.map((s) => s.label).join("|")}\n@@options:${options ? JSON.stringify(options) : "none"}\n@@selectable:${steps.map((s) => s.selectable === false ? "no" : "yes").join("|")}`);
 			return script.picker?.shift();
 		},
 		inputText: async (title) => {
@@ -84,8 +84,15 @@ function realDeps(command = "echo a && curl https://example.com", configOverride
 	};
 }
 
+/** The editor-facing rules of an allow plan (either kind). */
+function planRules(plan: AllowSavePlan): string[] {
+	return plan.kind === "whole-call" ? plan.rules : plan.perStep.map((entry) => entry.rule);
+}
+
 function baseExecutionDeps(overrides: Partial<Parameters<typeof runExecutionPrompt>[0]> = {}): Parameters<typeof runExecutionPrompt>[0] {
-	const real = realDeps();
+	// Validators bind to the overridden command so per-step and whole-call
+	// validation matches the explanation under test.
+	const real = realDeps(overrides.command ?? "echo a && curl https://example.com");
 	return {
 		io: makeIO().io,
 		signal: signal(),
@@ -99,6 +106,7 @@ function baseExecutionDeps(overrides: Partial<Parameters<typeof runExecutionProm
 		scopes: ["project", "user"],
 		parseRules: (text) => parseShellRuleLines(text, "host-bash"),
 		validateRules: (intent, rules) => validateShellSave(real.call, real.policy, intent, rules),
+		validateAllowSave: (rules, ids) => validateShellAllowSave(real.call, real.policy, rules, ids),
 		denyRulesFor: (ids) => planDenyRules(real.call, real.explanation, ids),
 		destination: (scope) => scope === "project" ? "/home/user/proj/.pi/guard.local.json" : "~/.pi/agent/guard.json",
 		...overrides,
@@ -109,7 +117,7 @@ function baseExecutionDeps(overrides: Partial<Parameters<typeof runExecutionProm
 
 test("a capable TUI offers the flat action menu with eligible saves", async () => {
 	const { io, calls } = makeIO({ select: [undefined] });
-	await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: { kind: "bundle", rules: ["HostBash(/^curl https:\\/\\/example\\.com$/)"], patch: { hostBash: { allow: ["HostBash(/^curl https:\\/\\/example\\.com$/)"] } } } }));
+	await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: { kind: "per-step", perStep: [{ occurrenceId: 1, rule: "HostBash(/^curl https:\\/\\/example\\.com$/)" }] } }));
 	const [title, options] = calls.select[0].split("\n@@");
 	assert.ok(options.includes("Allow once"));
 	assert.ok(options.includes("Save allow for project"));
@@ -121,7 +129,7 @@ test("a capable TUI offers the flat action menu with eligible saves", async () =
 
 test("a host without owned stages offers once actions only", async () => {
 	const { io, calls } = ioWithoutStages({ select: [undefined] });
-	await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: { kind: "bundle", rules: ["HostBash(x)"], patch: { hostBash: { allow: ["HostBash(x)"] } } } }));
+	await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: { kind: "whole-call", rules: ["HostBash(x)"], patch: { hostBash: { allow: ["HostBash(x)"] } } } }));
 	const options = calls.select[0].split("\n@@")[1];
 	assert.deepEqual(options.split("|"), ["Allow once", "Deny once"]);
 });
@@ -227,7 +235,7 @@ test("save allow: editor with the bundle prefill, preview, confirm", async () =>
 
 test("save allow: confirm returns the reviewed patch for the chosen scope", async () => {
 	const real = realDeps();
-	const rules = real.allowPlan!.rules;
+	const rules = planRules(real.allowPlan!);
 	const { io } = makeIO({ select: ["Save allow for user", "Confirm"], editor: [rules.join("\n")] });
 	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan }));
 	assert.equal(outcome.kind, "save-allow");
@@ -245,7 +253,7 @@ test("save allow: an empty editor submission approves once without saving", asyn
 
 test("save allow: invalid edits preserve text and loop without saving", async () => {
 	const real = realDeps();
-	const good = real.allowPlan!.rules.join("\n");
+	const good = planRules(real.allowPlan!).join("\n");
 	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: ["HostBash(broken", good] });
 	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan }));
 	assert.equal(outcome.kind, "save-allow");
@@ -256,16 +264,16 @@ test("save allow: invalid edits preserve text and loop without saving", async ()
 
 test("save allow: an ineffective edit (partial bundle) loops with the validation error", async () => {
 	const real = realDeps();
-	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: ["HostBash(/^echo a$/)", real.allowPlan!.rules.join("\n")] });
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: ["HostBash(/^echo a$/)", planRules(real.allowPlan!).join("\n")] });
 	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan }));
 	assert.equal(outcome.kind, "save-allow");
 	assert.equal(calls.notify.length, 1);
-	assert.match(calls.notify[0], /would not allow the complete call/);
+	assert.match(calls.notify[0], /is not allowed by the edited rules/);
 });
 
 test("save allow: preview cancel saves nothing and approves once; Edit returns to the editor", async () => {
 	const real = realDeps();
-	const rules = real.allowPlan!.rules;
+	const rules = planRules(real.allowPlan!);
 	{
 		const { io } = makeIO({ select: ["Save allow for project", "Cancel save"], editor: [rules.join("\n")] });
 		assert.deepEqual(await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan })), { kind: "allow-once" });
@@ -280,7 +288,7 @@ test("save allow: preview cancel saves nothing and approves once; Edit returns t
 
 test("the preview always renders the final entries, destination, and effect", async () => {
 	const real = realDeps();
-	const rules = real.allowPlan!.rules;
+	const rules = planRules(real.allowPlan!);
 	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: [rules.join("\n")] });
 	await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan }));
 	const preview = calls.select[1].split("\n@@")[0];
@@ -288,6 +296,106 @@ test("the preview always renders the final entries, destination, and effect", as
 	assert.ok(preview.includes(rules[0]));
 	assert.ok(preview.includes("Destination: /home/user/proj/.pi/guard.local.json"));
 	assert.ok(preview.includes("each rule permits its matching step independently, including outside this sequence"));
+});
+
+// ── Per-step allow picker flow ───────────────────────────────────────────────
+
+const compoundCommand = "curl https://example.com && echo ok && curl https://example.org";
+
+test("per-step plan with multiple prompting steps opens the picker with prompting steps preselected and allowed steps unselectable", async () => {
+	const real = realDeps(compoundCommand);
+	assert.ok(real.allowPlan && real.allowPlan.kind === "per-step");
+	const rules = planRules(real.allowPlan);
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], picker: [[0, 1, 2]], editor: [rules.join("\n")] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: compoundCommand, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan }));
+	assert.equal(outcome.kind, "save-allow");
+	assert.ok(outcome.kind === "save-allow");
+	assert.equal(outcome.planKind, "per-step");
+	assert.deepEqual(outcome.selectedOccurrenceIds, [0, 2], "the allowed context row is filtered from the confirmed selection");
+	assert.deepEqual(outcome.rules, rules);
+	const [pickerTitle, labels, options, selectable] = calls.picker[0].split("\n@@");
+	assert.match(pickerTitle, /Select the steps to allow \(project\)/);
+	assert.match(pickerTitle, /curl https:\/\/example\.com && echo ok/);
+	assert.deepEqual(labels.replace("labels:", "").split("|"), ["curl https://example.com", "echo ok", "curl https://example.org"]);
+	const parsed = JSON.parse(options.replace("options:", ""));
+	assert.deepEqual(parsed, { preselectedOccurrenceIds: [0, 2], requireSelection: false });
+	assert.deepEqual(selectable.replace("selectable:", "").split("|"), ["yes", "no", "yes"], "the tier-allowed step is unselectable context");
+	// The editor prefill carries only the prompting steps' exact rules.
+	assert.ok(calls.editor[0].includes("@@prefill:HostBash(/^curl https:"), calls.editor[0]);
+	assert.ok(!calls.editor[0].includes("echo ok$)"), "no rule is prefilled for the already-allowed step");
+});
+
+test("picker esc returns to the action menu with nothing granted or edited", async () => {
+	const real = realDeps(compoundCommand);
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Allow once"], picker: [undefined] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: compoundCommand, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan }));
+	assert.deepEqual(outcome, { kind: "allow-once" });
+	assert.equal(calls.select.length, 2, "the action menu was consumed twice");
+	assert.equal(calls.editor.length, 0, "no editor was opened");
+	assert.equal(calls.input.length, 0, "no steering was collected");
+});
+
+test("picker confirmed with zero selections returns to the action menu", async () => {
+	const real = realDeps(compoundCommand);
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Deny once"], picker: [[]], input: [undefined] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: compoundCommand, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan }));
+	assert.deepEqual(outcome, { kind: "deny-once", explicit: true, steering: undefined });
+	assert.equal(calls.select.length, 2, "the action menu was consumed twice");
+	assert.equal(calls.editor.length, 0, "no editor was opened");
+});
+
+test("a picker result containing only unselectable rows is narrowed to nothing and returns to the menu", async () => {
+	const real = realDeps(compoundCommand);
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Allow once"], picker: [[1]] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: compoundCommand, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan }));
+	assert.deepEqual(outcome, { kind: "allow-once" }, "selection hygiene drops unselectable rows; empty falls through to the menu");
+	assert.equal(calls.select.length, 2, "the action menu was consumed twice");
+	assert.equal(calls.editor.length, 0, "no editor was opened");
+});
+
+test("a single prompting step skips the picker and validates the single selection", async () => {
+	const real = realDeps();
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: [planRules(real.allowPlan!).join("\n")] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan }));
+	assert.ok(outcome.kind === "save-allow");
+	assert.equal(calls.picker.length, 0, "no picker for a single prompting step");
+	assert.deepEqual(outcome.selectedOccurrenceIds, [1]);
+	assert.equal(outcome.planKind, "per-step");
+});
+
+test("the per-step preview discloses partial saves and full coverage distinctly", async () => {
+	const real = realDeps(compoundCommand);
+	const rules = planRules(real.allowPlan!);
+	// Partial selection: only the first prompting step.
+	{
+		const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], picker: [[0]], editor: [rules[0]] });
+		await runExecutionPrompt(baseExecutionDeps({ io, command: compoundCommand, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan }));
+		const preview = calls.select[1].split("\n@@")[0];
+		assert.match(preview, /still prompts for the unselected steps/);
+		assert.match(preview, /fresh approval dialog follows the commit/);
+	}
+	// Full selection: every prompting step.
+	{
+		const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], picker: [[0, 2]], editor: [rules.join("\n")] });
+		await runExecutionPrompt(baseExecutionDeps({ io, command: compoundCommand, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan }));
+		const preview = calls.select[1].split("\n@@")[0];
+		assert.match(preview, /executes without a further prompt/);
+		assert.doesNotMatch(preview, /still prompts/);
+	}
+});
+
+test("a whole-call plan (unreliable breakdown) never opens the picker and keeps the exact-rule editor", async () => {
+	const real = realDeps("echo $(compute)");
+	assert.ok(real.allowPlan && real.allowPlan.kind === "whole-call");
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: [real.allowPlan.rules.join("\n")] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: real.call.command, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan }));
+	assert.ok(outcome.kind === "save-allow");
+	assert.equal(outcome.planKind, "whole-call");
+	assert.deepEqual(outcome.selectedOccurrenceIds, []);
+	assert.equal(calls.picker.length, 0, "no picker on the whole-call path");
+	assert.match(calls.editor[0], /@@prefill:HostBash\(\/\^echo/);
+	const preview = calls.select[1].split("\n@@")[0];
+	assert.match(preview, /Effect: the rule permits the exact current command/);
 });
 
 // ── Deny save flow ──────────────────────────────────────────────────────────
@@ -438,8 +546,9 @@ test("collectSteering trims and drops empty instructions", async () => {
 test("validation helpers never call the classifier and stay deterministic", () => {
 	const real = realDeps();
 	// Running validation twice produces the identical result.
-	const once = validateShellSave(real.call, real.policy, "allow", real.allowPlan!.rules);
-	const twice = validateShellSave(real.call, real.policy, "allow", real.allowPlan!.rules);
+	const rules = planRules(real.allowPlan!);
+	const once = validateShellAllowSave(real.call, real.policy, rules, [1]);
+	const twice = validateShellAllowSave(real.call, real.policy, rules, [1]);
 	assert.deepEqual(once, twice);
 	assert.ok(once.ok);
 });
