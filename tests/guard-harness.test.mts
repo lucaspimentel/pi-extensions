@@ -112,40 +112,46 @@ function harnessCtx(h: Harness, cwd: string, selectResult: string | undefined = 
 /** Install the owned-stage capabilities over a controlled fake TUI and drive
  * mounted stages automatically: scripted DOWN-count answers for selector
  * menus, Enter to submit editor prefills, Enter to confirm previews, and
- * space+Enter to continue the deny picker. Mirrors the controlled boundary
- * used by the dialogs and component suites. Optional per-stage actions
- * override the automatic answer for the re-prompt loop tests (picker esc,
- * editor cancellation, a paused second selector). */
+ * space+Enter to continue the deny picker. Mirrors the controlled boundary of
+ * a real pi TUI host: `ui.custom` mounts stages INLINE (guard's default
+ * presentation) and the setWidget/showOverlay bridge covers the stacking
+ * fallback. Optional per-stage actions override the automatic answer for the
+ * re-prompt loop tests (picker esc, editor cancellation, a paused second
+ * selector). */
 function installOwnedAutopilot(ctx: { ui: Record<string, unknown> }, menuDowns: number[], actions: { picker?: (component: any) => void; editor?: (component: any) => void; selector?: (component: any, index: number) => void } = {}): Array<{ kind: string; text: string }> {
 	const overlays: Array<{ kind: string; text: string }> = [];
 	let selectorIndex = 0;
+	const drive = (component: any): void => {
+		setTimeout(() => {
+			let text = "";
+			try {
+				text = component.render(120).map((line: string) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+			} catch { text = ""; }
+			let kind = "selector";
+			if (text.includes("space toggle")) kind = "picker";
+			else if (text.includes("enter submit")) kind = "editor";
+			else if (text.includes("Confirm")) kind = "preview";
+			overlays.push({ kind, text });
+			if (kind === "editor" || kind === "preview") (actions.editor && kind === "editor" ? actions.editor : (c: any) => c.handleInput("\r"))(component);
+			else if (kind === "picker") (actions.picker ?? ((c: any) => { c.handleInput(" "); c.handleInput("\r"); }))(component);
+			else (actions.selector ?? ((c: any, i: number) => {
+				const downs = menuDowns[i] ?? 0;
+				for (let d = 0; d < downs; d++) c.handleInput("\u001b[B");
+				c.handleInput("\r");
+			}))(component, selectorIndex++);
+		}, 0);
+	};
 	const fakeTui: any = {
 		terminal: { columns: 120, rows: 40 },
 		requestRender() {},
+		hasOverlay: () => false,
 		showOverlay(component: any) {
 			const handle = {
 				hidden: false, focused: true,
 				isHidden: () => false, setHidden: () => {},
 				isFocused: () => true, hide: () => {},
 			};
-			setTimeout(() => {
-				let text = "";
-				try {
-					text = component.render(120).map((line: string) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
-				} catch { text = ""; }
-				let kind = "selector";
-				if (text.includes("space toggle")) kind = "picker";
-				else if (text.includes("enter submit")) kind = "editor";
-				else if (text.includes("Confirm")) kind = "preview";
-				overlays.push({ kind, text });
-				if (kind === "editor" || kind === "preview") (actions.editor && kind === "editor" ? actions.editor : (c: any) => c.handleInput("\r"))(component);
-				else if (kind === "picker") (actions.picker ?? ((c: any) => { c.handleInput(" "); c.handleInput("\r"); }))(component);
-				else (actions.selector ?? ((c: any, i: number) => {
-					const downs = menuDowns[i] ?? 0;
-					for (let d = 0; d < downs; d++) c.handleInput("\u001b[B");
-					c.handleInput("\r");
-				}))(component, selectorIndex++);
-			}, 0);
+			drive(component);
 			return handle;
 		},
 	};
@@ -156,6 +162,13 @@ function installOwnedAutopilot(ctx: { ui: Record<string, unknown> }, menuDowns: 
 		}
 	};
 	ctx.ui.onTerminalInput = () => () => {};
+	ctx.ui.custom = (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => unknown, options: unknown) => {
+		if (JSON.stringify(options) !== JSON.stringify({ overlay: false })) throw new Error(`harness autopilot: unexpected custom options ${JSON.stringify(options)}`);
+		return new Promise((resolve) => {
+			const component = factory(fakeTui, { fg: (_c: string, s: string) => s, bold: (s: string) => s }, {}, resolve);
+			drive(component);
+		});
+	};
 	return overlays;
 }
 

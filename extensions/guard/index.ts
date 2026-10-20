@@ -115,9 +115,10 @@ export default function guard(pi: ExtensionAPI) {
 	}
 	/**
 	 * Open one guard dialog selector. Presentation routing only: TUI hosts
-	 * render the guard-owned hideable overlay (ask-overlay.ts); hosts or modes
-	 * without the required capabilities fall back to the plain signal-aware
-	 * native selector inside the adapter.
+	 * render inline in the editor slot by default (runDialogStage in
+	 * ask-overlay.ts stacks the guard-owned hideable overlay when another
+	 * overlay is on screen); hosts or modes without the required capabilities
+	 * fall back to the plain signal-aware native selector inside the adapter.
 	 */
 	async function gatedSelect(ctx: ExtensionContext, title: string, options: string[], signal: AbortSignal): Promise<string | undefined> {
 		if (ctx.mode !== "tui") return ctx.ui.select(title, options, { signal });
@@ -148,9 +149,15 @@ export default function guard(pi: ExtensionAPI) {
 			pi.events.emit("herdr:blocked", { active: false });
 		}
 	}
-	/** True when the host can mount the owned editor/picker stages (full save contract). */
+	/**
+	 * True when the host can mount guard's editor/picker stages (full save
+	 * contract). The inline presentation needs only `ui.custom` (every TUI host
+	 * provides it); the owned overlay remains the stacking fallback inside the
+	 * stages themselves, and hosts missing it fail closed only while another
+	 * overlay is on screen.
+	 */
 	function ownedStagesFor(ctx: ExtensionContext): boolean {
-		return ctx.mode === "tui" && supportsOwnedStages(ctx.ui);
+		return ctx.mode === "tui" && typeof (ctx.ui as { custom?: unknown }).custom === "function";
 	}
 	/** The prompt-flow IO surface for one dialog body, bound to this context. */
 	function promptIO(ctx: ExtensionContext): PromptFlowIO {

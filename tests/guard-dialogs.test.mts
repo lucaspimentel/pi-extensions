@@ -187,12 +187,16 @@ function installSelector(ctx: Record<string, any>, log?: string[]): SelectorCont
  * for the directions in `fail`, so best-effort handling can be asserted. */
 /** Extend the fake ui with the owned-stage capabilities and a minimal fake
  * TUI renderer so the real editor/picker stages can mount over a controlled
- * boundary (same contract as the ask-components tests). */
+ * boundary (same contract as the ask-components tests). The fake custom mounts
+ * stages INLINE, mirroring guard's default presentation on a real pi TUI
+ * host; the setWidget/showOverlay bridge stays installed for the stacking
+ * fallback. */
 function installOwnedStages(ctx: Record<string, any>): { overlays: Array<{ component: any; handle: any }>; pressEnter(): void } {
 	const overlays: Array<{ component: any; handle: any }> = [];
 	const fakeTui = {
 		terminal: { columns: 120, rows: 40 },
 		requestRender() {},
+		hasOverlay: () => false,
 		showOverlay(component: any) {
 			const handle = {
 				hidden: false, focused: true,
@@ -212,6 +216,13 @@ function installOwnedStages(ctx: Record<string, any>): { overlays: Array<{ compo
 		}
 	};
 	(ctx.ui as Record<string, unknown>).onTerminalInput = () => () => {};
+	(ctx.ui as Record<string, unknown>).custom = (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => unknown, options: unknown) => {
+		if (JSON.stringify(options ?? {}) !== JSON.stringify({ overlay: false })) throw new Error(`owned-stages fake: unexpected custom options ${JSON.stringify(options)}`);
+		return new Promise((resolve) => {
+			const component = factory(fakeTui, { fg: (_c: string, s: string) => s, bold: (s: string) => s }, {}, resolve);
+			overlays.push({ component, handle: undefined });
+		});
+	};
 	const waitForOverlays = async (count: number): Promise<void> => {
 		for (let i = 0; i < 200 && overlays.length < count; i++) await new Promise((r) => setTimeout(r, 5));
 		if (overlays.length < count) throw new Error(`only ${overlays.length} of ${count} owned stages mounted`);

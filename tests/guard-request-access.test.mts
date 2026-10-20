@@ -175,29 +175,35 @@ function harnessCtx(h: Harness, cwd: string, options: { hasUI?: boolean; registr
 /** Install the owned editor/picker stage capabilities over a controlled fake
  * TUI and drive mounted stages automatically (mirrors the harness suite):
  * scripted DOWN-count answers for selector menus, Enter for editor prefills
- * and preview confirms. */
+ * and preview confirms. `ui.custom` mounts stages INLINE (guard's default
+ * presentation); the setWidget/showOverlay bridge covers the stacking
+ * fallback. */
 function installOwnedAutopilot(ctx: Record<string, any>, menuDowns: number[]): Array<{ kind: string; text: string }> {
 	const overlays: Array<{ kind: string; text: string }> = [];
+	const drive = (component: any): void => {
+		setTimeout(() => {
+			let text = "";
+			try { text = component.render(120).map((line: string) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n"); } catch { text = ""; }
+			let kind = "selector";
+			if (text.includes("space toggle")) kind = "picker";
+			else if (text.includes("enter submit")) kind = "editor";
+			else if (text.includes("Confirm")) kind = "preview";
+			overlays.push({ kind, text });
+			if (kind === "editor" || kind === "preview") component.handleInput("\r");
+			else {
+				const downs = menuDowns.shift() ?? 0;
+				for (let i = 0; i < downs; i++) component.handleInput("\u001b[B");
+				component.handleInput("\r");
+			}
+		}, 0);
+	};
 	const fakeTui: any = {
 		terminal: { columns: 120, rows: 40 },
 		requestRender() {},
+		hasOverlay: () => false,
 		showOverlay(component: any) {
 			const handle = { hidden: false, focused: true, isHidden: () => false, setHidden: () => {}, isFocused: () => true, hide: () => {} };
-			setTimeout(() => {
-				let text = "";
-				try { text = component.render(120).map((line: string) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n"); } catch { text = ""; }
-				let kind = "selector";
-				if (text.includes("space toggle")) kind = "picker";
-				else if (text.includes("enter submit")) kind = "editor";
-				else if (text.includes("Confirm")) kind = "preview";
-				overlays.push({ kind, text });
-				if (kind === "editor" || kind === "preview") component.handleInput("\r");
-				else {
-					const downs = menuDowns.shift() ?? 0;
-					for (let i = 0; i < downs; i++) component.handleInput("\u001b[B");
-					component.handleInput("\r");
-				}
-			}, 0);
+			drive(component);
 			return handle;
 		},
 	};
@@ -206,6 +212,12 @@ function installOwnedAutopilot(ctx: Record<string, any>, menuDowns: number[]): A
 		if (typeof content === "function") (content as (t: unknown, th: unknown) => unknown)(fakeTui, { fg: (_c: string, s: string) => s, bold: (s: string) => s });
 	};
 	ctx.ui.onTerminalInput = () => () => {};
+	ctx.ui.custom = (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => unknown) => {
+		return new Promise((resolve) => {
+			const component = factory(fakeTui, { fg: (_c: string, s: string) => s, bold: (s: string) => s }, {}, resolve);
+			drive(component);
+		});
+	};
 	return overlays;
 }
 
