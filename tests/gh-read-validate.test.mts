@@ -277,14 +277,30 @@ test("auth status: attached --hostname=value form is accepted", () => {
 	]);
 });
 
-test("auth status: tool-authored flags are rejected as user input", () => {
-	validateRejects("auth status", ["--json", "hosts"], ["unknown flag '--json'"]);
+test("auth status: user-supplied --json hosts is tolerated and dropped", () => {
+	assert.deepEqual(validateOk("auth status", ["--json", "hosts"]), ["auth", "status", "--json", "hosts"]);
+	assert.deepEqual(validateOk("auth status", ["--json=hosts"]), ["auth", "status", "--json", "hosts"]);
+	assert.deepEqual(validateOk("auth status", ["-a", "--json", "hosts"]), [
+		"auth",
+		"status",
+		"-a",
+		"--json",
+		"hosts",
+	]);
+});
+
+test("auth status: user-supplied --json with other fields is rejected with the reason", () => {
+	validateRejects("auth status", ["--json", "hostname"], ["only supports fields 'hosts'", "got 'hostname'"]);
+	validateRejects("auth status", ["--json"], ["only supports fields 'hosts'", "pass nothing"]);
+	validateRejects("auth status", ["--json="], ["only supports fields 'hosts'", "got ''"]);
+	validateRejects("auth status", ["--json=hostname"], ["only supports fields 'hosts'", "got 'hostname'"]);
+});
+
+test("auth status: other tool-authored flags are rejected as user input", () => {
 	validateRejects("auth status", ["--show-token"], ["unknown flag '--show-token'"]);
 	validateRejects("auth status", ["--template", "x"], ["unknown flag '--template'"]);
 	validateRejects("auth status", ["-R", "owner/repo"], ["unknown flag '-R'"]);
 	validateRejects("auth status", ["--repo", "owner/repo"], ["unknown flag '--repo'"]);
-	// Attached form of the rejected flag too.
-	validateRejects("auth status", ["--json=hosts"], ["unknown flag '--json=hosts'"]);
 });
 
 test("auth status: takes no positional arguments", () => {

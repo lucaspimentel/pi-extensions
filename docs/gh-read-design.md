@@ -54,8 +54,11 @@ the main session. Deliberately not tied to any one agent; agents opt in via
   construction.
 - `auth status` is the one deviation: validate.ts appends the tool-authored
   tokens `--json hosts` after the validated args (constructed directly,
-  bypassing the validation loop). The user never supplies `--json`; gh's JSON
-  output gives a stable, greppable payload instead of styled text.
+  bypassing the validation loop). gh's JSON output gives a stable, greppable
+  payload instead of styled text. A user-supplied `--json hosts` (separate or
+  attached form) is tolerated and dropped as redundant with the appended
+  tokens; any other field list is rejected naming `hosts` as the only
+  supported value.
 - No `--` separator logic: unlike git, there is no rev-vs-path ambiguity and
   no pathspec concept. Every token is validated against its flag's rule.
 
@@ -88,7 +91,8 @@ v1 (Go templates are argv-safe but add no capability `--jq` lacks).
   context exists); there it is rejected as an unknown flag.
 - `auth status` (no positionals): `--active`/`-a` (boolean, active account
   only), `--hostname <host>` (filter-token rule), `--jq <expr>`. `--json` is
-  tool-authored (appended as `--json hosts`), never user-supplied.
+  tool-authored (appended as `--json hosts`); a user-supplied `--json hosts`
+  is tolerated and dropped, any other fields value is rejected.
   `--show-token`/`-t` and `--template` are excluded: the tool never handles
   or displays tokens (see Non-goals).
 
@@ -211,9 +215,10 @@ Settled in the grill-me review:
   subcommands, value-flag bounds (`--limit`, `--state`, `--color`), the
   `-R` regex (accept/reject cases), `--json` field-shape, `--jq` and filter
   token rules, `auth status` happy paths with appended `--json hosts`,
-  `auth status` rejections (`--json`/`--show-token`/`--template`/`-R` as
-  unknown flags, positionals, filter-token and jq value rules, no attached
-  `-a` short form), all with error-message contents.
+  `auth status` rejections (`--json` with fields other than `hosts`,
+  `--show-token`/`--template`/`-R` as unknown flags, positionals, filter-token
+  and jq value rules, no attached `-a` short form), all with error-message
+  contents.
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout

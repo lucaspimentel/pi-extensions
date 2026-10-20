@@ -19,6 +19,8 @@
  * "auth status" is the one exception: validate.ts appends tool-authored
  * ["--json", "hosts"] tokens after the validated args, bypassing the
  * validation loop, so user-supplied --json can never reach the child.
+ * User-supplied `--json hosts` is tolerated and dropped as redundant; any
+ * other field list is rejected with an explanation.
  */
 
 export const SUBCOMMANDS = [
@@ -171,8 +173,9 @@ function checkValueFlag(
 /** True when `flag` takes a value on this subcommand. */
 function isValueFlag(subcommand: GhSubcommand, flag: string): boolean {
 	// "auth status" is deliberately scoped out of the universal cases:
-	// --json is tool-authored there and -R/--repo is not allowlisted, so both
-	// must fall through to unknown-flag rejection instead of consuming values.
+	// --json is handled specially in validateInvocation (tolerated only as
+	// `--json hosts`) and -R/--repo is not allowlisted, so both must fall
+	// through to rejection instead of consuming values.
 	if (subcommand === "auth status") return flag === "--hostname" || flag === "--jq";
 	switch (flag) {
 		case "-R":
@@ -272,6 +275,22 @@ export function validateInvocation(
 					validated.push(flag, value);
 					continue;
 				}
+			}
+
+			// auth status: user-supplied `--json hosts` is tolerated and dropped
+			// because the tool appends the identical tokens itself (callers that
+			// pass what the docs describe should not get a rejection). Any other
+			// field list is rejected with the reason.
+			if (subcommand === "auth status" && (token === "--json" || token.startsWith("--json="))) {
+				const fields = token === "--json" ? args[i + 1] : token.slice("--json=".length);
+				if (fields !== "hosts") {
+					return {
+						ok: false,
+						reason: `flag '--json' for gh auth status only supports fields 'hosts', which the tool appends automatically; pass nothing${fields === undefined ? "" : ` (got '${fields}')`}`,
+					};
+				}
+				if (token === "--json") i += 1;
+				continue;
 			}
 
 			// Attached short forms: -L50, -Rowner/repo.
