@@ -93,13 +93,15 @@ Registration details:
 
 ### Dialogs and grants
 
-- All four guard dialogs (execution approval, read grant, `/guard` profile
+- All five guard dialogs (execution approval, read grant, `/guard` profile
   picker, `/guard migrate` confirmation) serialize through **one dialog
   gate** owned by the guard factory (`extensions/guard/dialogs.ts`). Pi's TUI
   keeps at most one extension selector alive; the gate guarantees two live
   guard dialog bodies never overlap. The gate is independent of the
   execution queue: dialogs never hold it, and already-authorized executor
-  work proceeds while another call awaits a dialog.
+  work proceeds while another call awaits a dialog. The fifth dialog is the
+  `/guard model` classifier picker (`index.ts`); it shares the same gate,
+  spinner hiding, and `herdr:blocked` coverage as the other four.
 - Cancellation: aborting the owning operation's signal removes an aborted
   queued request promptly and cancels an open selector through the SDK's
   `{ signal }` option. The gate never aborts a caller-owned controller, holds
@@ -422,6 +424,7 @@ with a warning and never discards the other scope.
 | `/guard list` | profile, holder, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, webFetchAllow count, host-shell rule counts, read/write roots, toolClasses count, classifier, debug state |
 | `/guard reload` | reload guard.json, refresh sandbox detection, clear the annotation cache |
 | `/guard profile [name]` | set a profile directly (`unrestricted` included) |
+| `/guard model` / `/guard model clear` | pin the auto-mode classifier model to user config (picker over models with configured auth; `clear` resumes auto-select). A project-scope `classifier` pin in `.pi/guard.local.json` overrides the user pin and is a manual config edit |
 | `/guard migrate [dry]` | convert pi-tool-permissions configs (below) |
 | `/guard ack` | clear the workspace lock (step 3 sets it on audit findings) |
 | `/guard debug on\|off` | session-only; when on, each decision is also shown as a notification |
