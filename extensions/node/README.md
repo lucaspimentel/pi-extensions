@@ -1,5 +1,13 @@
 # node (sandboxed persistent interpreter)
 
+> **Retired from the extension manifest (2026-10-21).** This extension is no
+> longer registered in `package.json` and its tool never loads: guard
+> (`extensions/guard/`) registers its own sandboxed `node` tool
+> (`guard/tools/node/`, a ported fork of this code) and wins pi's
+> first-registration-wins. This directory remains as the pre-guard lineage
+> and the test target for `npm run test:node`; do not expect the tool to
+> appear in sessions. The original documentation follows.
+
 A pi extension providing one model-callable `node` tool that executes JavaScript
 snippets in a **persistent vm context inside a bubblewrap sandbox**. State
 (variables, functions, classes, including `let`/`const` declarations) survives

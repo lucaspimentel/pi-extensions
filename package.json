@@ -24,8 +24,6 @@
       "./extensions/idle-summary",
       "./extensions/slack-via-claude.ts",
       "./extensions/ollama-models.ts",
-      "./extensions/python",
-      "./extensions/node",
       "./extensions/session-search",
       "./extensions/subagent",
       "./extensions/update-jira",

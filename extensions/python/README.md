@@ -1,5 +1,13 @@
 # python (sandboxed persistent interpreter)
 
+> **Retired from the extension manifest (2026-10-21).** This extension is no
+> longer registered in `package.json` and its tool never loads: guard
+> (`extensions/guard/`) registers its own sandboxed `python` tool
+> (`guard/tools/python/`, a ported fork of this code) and wins pi's
+> first-registration-wins. This directory remains as the pre-guard lineage
+> and the test target for `npm run test:python`; do not expect the tool to
+> appear in sessions. The original documentation follows.
+
 A pi extension providing one model-callable `python` tool that executes Python
 snippets in a **persistent interpreter inside a bubblewrap sandbox**. State
 (variables, imports, functions, classes) survives across calls within a
