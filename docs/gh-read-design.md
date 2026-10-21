@@ -43,13 +43,14 @@ the main session. Deliberately not tied to any one agent; agents opt in via
 ## Invocation contract
 
 - Structured argv, no shell: `{ subcommand, args }` where `subcommand` is a
-  literal union of the seven two-word native commands below (modeled as one
+  literal union of the nine two-word native commands below (modeled as one
   string so the schema stays flat like `git_read`'s):
   - `pr view`, `pr diff`, `pr list`, `pr checks`, `issue view`, `issue list`,
-    `auth status`
-- Four narrowly scoped GitHub API operations share the same tool with
+    `auth status`, `run list`, `run view`
+- Six narrowly scoped GitHub API operations share the same tool with
   structured parameters instead of an args array: `repo contents`,
-  `repo tree`, `commit checks`, `advisory view` (see "GitHub API operations").
+  `repo tree`, `commit checks`, `advisory view`, `check annotations`, and
+  `repo metadata` (see "GitHub API operations").
   Mixing shapes is rejected in both directions: native subcommands reject
   structured fields, API operations reject `args`.
 - Command construction happens in validate.ts during validation: it emits the
@@ -104,7 +105,7 @@ v1 (Go templates are argv-safe but add no capability `--jq` lacks).
   JSON data. Exit codes 1 and 8 are never reinterpreted as success: they
   flow through the normal failure contract with whatever output gh printed.
   Native no-checks/no-required-checks errors pass through verbatim.
-- The seven repo subcommands (not `auth status`): `-R/--repo [HOST/]OWNER/REPO`,
+- The eight repo subcommands (not `auth status`): `-R/--repo [HOST/]OWNER/REPO`,
   value validated
   against `^([A-Za-z0-9.-]+/)?[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$`. Cross-repo reads
   are still reads; the strict regex prevents using the flag to smuggle other
@@ -369,8 +370,8 @@ simple contract (no per-argument conditional gating).
 One exemption: `auth status` skips the gate entirely (spawn.ts derives the
 exemption from the validated argv, `argv[0] === "auth" && argv[1] ===
 "status"`). It reports login state for gh's known hosts and needs no
-repository context, so it is useful precisely where the other seven are not:
-outside any worktree. The other seven keep the gate unchanged, including
+repository context, so it is useful precisely where the other eight are not:
+outside any worktree. The other eight keep the gate unchanged, including
 `run view --log`: the dual-window log runner reuses the identical
 worktreeCheckPassed gate even though `run view` accepts `-R` (settled
 one-simple-contract rule).

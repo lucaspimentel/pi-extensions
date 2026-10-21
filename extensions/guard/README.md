@@ -6,13 +6,15 @@ sandbox. See `docs/guard-design.md` for the settled design.
 
 **Status: steps 1 to 5 are built here. Step 3 registers guard's own tools
 (`bash`, `host_bash`, `python`, `node`) and enforces decisions on them;
-every other tool call stays observe-only** (decisions on `guard:decision`,
-nothing blocked or prompted), except the grep/ffgrep secret-mask
-`tool_result` filter below. **Step 5 adds subagent profile inheritance**
-(below). pi-tool-permissions stays loaded and enforcing
-until switchover (step 6); the old python/node extensions are dormant
-because guard is declared first and pi's registry is
-first-extension-wins.
+non-owned `write`/`edit` calls are also enforced since 2026-10-16 (block on
+deny, approval dialog on prompt); every other tool call stays observe-only**
+(decisions on `guard:decision`, nothing blocked or prompted), except the
+grep/ffgrep secret-mask `tool_result` filter below. **Step 5 adds subagent
+profile inheritance** (below). pi-tool-permissions stays loaded and
+enforcing until switchover (step 6); the old standalone python/node
+extensions were unregistered from the manifest on 2026-10-21 (guard's
+ported copies are the only registered python/node tools) and remain in the
+tree as lineage and test targets.
 
 ## Tools and enforcement (step 3)
 
@@ -31,9 +33,9 @@ transitions; `tools/` holds the tool implementations.
 
 Registration details:
 
-- Guard is declared before python/node in `pi.extensions`; first registration
-  per name wins, so guard's copies are authoritative and the old extensions
-  go dormant. In degraded mode guard still registers python/node (they report
+- The old standalone python/node extensions are no longer registered in
+  `pi.extensions` (dropped 2026-10-21); guard's copies are the only
+  registered python/node tools. In degraded mode guard still registers python/node (they report
   unavailability rather than falling back to the legacy extensions), so the
   old sandboxes' writable `.git`/`.pi` mounts never come back.
 - A sandbox launch or scan failure never falls back to host execution; the
@@ -249,8 +251,8 @@ restriction installed, runtime available) to the child startup gate over
 `guard:child-contract-request`/`guard:child-contract-ack`; without that proof
 the child exits nonzero before any delegated model or tool execution.
 
-Limits: guard still enforces only its four executors, so `write`, `edit`,
-local reads, and remote tools in the child remain observe-only during
+Limits: besides the four executors, guard enforces only `write`/`edit`, so
+local reads and remote tools in the child remain observe-only during
 coexistence; child cwd/config differences can change per-call permissions;
 running children keep their launch snapshot (entering research does not
 tighten them retroactively); environment inheritance governs supported
@@ -270,7 +272,7 @@ with a fixed notice; filter errors never leak the original output. `read`
 and `find` remain path-level (a direct masked-path read is denied in step 2;
 a directory listing is not filtered).
 
-## Policy (step 2, observe-only)
+## Policy (step 2)
 
 The policy core lives in `policy/`: profiles, the decision function, tool
 classification, guard.json, the save/migrate helpers, and the session state.
@@ -389,7 +391,8 @@ Registered-but-inactive tools are never activated, the pre-plan set is
 restored exactly on every exit path, and this is entry-time declaration
 filtering rather than execution containment: codemode/deferred tools can
 remain callable, other extensions can change activation afterwards, nested
-non-owned calls stay observe-only until the switchover, and trusted
+non-owned calls stay observe-only until the switchover (write/edit are
+enforced; local reads and remote tools are not), and trusted
 extensions have host privileges.
 
 ### Local reads and the directory-grep gap

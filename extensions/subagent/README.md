@@ -80,8 +80,8 @@ Notes:
   nonzero before any model or tool execution unless its guard proves it
   consumed the exact contract. Only the profile is inherited: the child loads
   its own guard configuration for its cwd. This is profile inheritance and
-  startup validation, not complete child-tool containment: tools guard does
-  not own remain observe-only, and running children keep their launch
+  startup validation, not complete child-tool containment: non-owned tools
+  other than write/edit remain observe-only, and running children keep their launch
   snapshot.
 
 ## Workflow prompts

@@ -166,7 +166,10 @@ the success intact.
 Offline behavior (configuration, resolution, queues, envelope/budget/spill
 handling, transport argument routing, pointer lifecycle) is covered by
 `npm run test:jira` against scrubbed fixtures recorded from read-only probes
-(`tests/fixtures/update-jira/`). Live write responses (transition, comment,
-edit, remote-link creation), HTML full-body round-trips, and the link no-op
-against a live ticket remain pending separately authorized smoke tests on a
-user-designated scratch ticket.
+(`tests/fixtures/update-jira/`). Live write behavior (comment, edit, remote
+link with a duplicate no-op, transitions by status and by explicit id) was
+verified on 2026-10-07 with authorized smoke tests on scratch ticket
+APMSVLS-670, including an HTML full-body round-trip; the observed write
+responses are recorded in [`docs/jira-extension-design.md`](../../docs/jira-extension-design.md)
+("Verification gates (satisfied 2026-10-07)") and the root `TODO.md` Done
+notes.
