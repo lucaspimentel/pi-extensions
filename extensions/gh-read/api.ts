@@ -1,7 +1,7 @@
 /**
  * gh-read API operations: pinned repository contents and trees, combined
- * commit checks, and exact advisory lookup. Operation orchestration and
- * result rendering live together in this module.
+ * commit checks, exact advisory lookup, and check-run annotations. Operation
+ * orchestration and result rendering live together in this module.
  *
  * Contract highlights (docs/gh-read-design.md, "GitHub API operations"):
  * - Omitted refs resolve through repository default-branch metadata, then
@@ -134,6 +134,16 @@ function cveAdvisoriesEndpoint(id: string, type: string, page: number): string {
 
 function advisoryEndpoint(id: string): string {
 	return `advisories/${encodeSegment(id)}`;
+}
+
+/**
+ * Endpoint for one check run's annotations: a single page of at most 100
+ * items, no pagination, no Link parsing, exactly ONE request ever. The id
+ * is a validated safe integer from validate.ts.
+ */
+function annotationsEndpoint(repo: string, checkRunId: number): string {
+	const [owner, name] = splitRepo(repo);
+	return `repos/${owner}/${name}/check-runs/${checkRunId}/annotations?${buildQuery([["per_page", PAGE_SIZE]])}`;
 }
 
 // ── Link-header pagination ───────────────────────────────────────────────────
@@ -1041,6 +1051,39 @@ async function opAdvisoryView(invocation: ValidApiInvocation, requester: ApiRequ
 	return await renderData(invocation, summary, metadata, result.items, notices, false, requester, deps);
 }
 
+// ── Operation: check-run annotations ──────────────────────────────────────
+
+async function opCheckAnnotations(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
+	const repo = invocation.repo!;
+	const checkRunId = invocation.checkRunId!;
+	const summary = `gh_read api: check annotations ${repo}`;
+	const metadata: Array<[string, string | number | boolean | null]> = [["repo", repo], ["check_run_id", checkRunId]];
+
+	// Exactly one tool-authored GET; 404/403 outcomes pass through verbatim.
+	const outcome = await requester.request(annotationsEndpoint(repo, checkRunId));
+	if (!isResponse(outcome)) {
+		return renderResult(summary, metadata, "", { isError: true, notices: [describeRequestFailure("annotations read", outcome)] });
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(outcome.body) as unknown;
+	} catch {
+		return renderResult(summary, metadata, "", { isError: true, notices: ["check annotations response was not valid JSON"] });
+	}
+	if (!Array.isArray(parsed)) {
+		return renderResult(summary, metadata, "", { isError: true, notices: ["check annotations response was not a JSON array"] });
+	}
+	// Incompleteness is computed from the ORIGINAL response array BEFORE jq,
+	// then carried through renderData, whose jq path preserves notices (and
+	// renderResult renders them in the metadata head, which is always
+	// complete even when the data block is display-truncated).
+	const notices: string[] = [];
+	if (parsed.length === PAGE_SIZE) {
+		notices.push("only the first page was fetched; the listing may be incomplete");
+	}
+	return await renderData(invocation, summary, metadata, parsed, notices, false, requester, deps);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export async function runApiOperation(
@@ -1068,5 +1111,7 @@ async function dispatchOperation(
 			return await opCommitChecks(invocation, requester, deps);
 		case "advisory view":
 			return await opAdvisoryView(invocation, requester, deps);
+		case "check annotations":
+			return await opCheckAnnotations(invocation, requester, deps);
 	}
 }

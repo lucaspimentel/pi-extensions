@@ -36,7 +36,7 @@ function validateRejects(subcommand: (typeof SUBCOMMANDS)[number], args: string[
 
 // ── Subcommand union ─────────────────────────────────────────────────────────
 
-test("subcommand union is the settled native seven", () => {
+test("subcommand union is the settled native nine", () => {
 	assert.deepEqual([...SUBCOMMANDS], [
 		"pr view",
 		"pr diff",
@@ -45,6 +45,8 @@ test("subcommand union is the settled native seven", () => {
 		"issue view",
 		"issue list",
 		"auth status",
+		"run list",
+		"run view",
 	]);
 });
 
@@ -54,7 +56,9 @@ test("unknown subcommands are rejected, naming the allowed set", () => {
 	if (!checked.ok) {
 		assert.ok(checked.reason.includes("unknown subcommand 'pr merge'"));
 		assert.ok(
-			checked.reason.includes("pr view, pr diff, pr list, pr checks, issue view, issue list, auth status"),
+			checked.reason.includes(
+				"pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view",
+			),
 		);
 	}
 });
@@ -451,8 +455,12 @@ test("validateToolParams rejects non-object params and unknown subcommands for b
 	const unknown = validateToolParams({ subcommand: "pr merge" });
 	assert.equal(unknown.ok, false);
 	if (!unknown.ok) {
-		assert.ok(unknown.reason.includes("pr view, pr diff, pr list, pr checks, issue view, issue list, auth status"));
-		assert.ok(unknown.reason.includes("repo contents, repo tree, commit checks, advisory view"));
+		assert.ok(
+			unknown.reason.includes(
+				"pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view",
+			),
+		);
+		assert.ok(unknown.reason.includes("repo contents, repo tree, commit checks, advisory view, check annotations"));
 	}
 });
 
@@ -604,4 +612,198 @@ test("API operations: full runtime validation applies to schema-bypassing calls"
 	apiRejects({ subcommand: "repo contents", repo: "o/r", path: null }, ["must be a string"]);
 	apiRejects({ subcommand: "repo tree", repo: "o/r", ref: ["main"] }, ["must be a string"]);
 	apiRejects({ subcommand: "advisory view", id: ["CVE-2026-1"] }, ["exact advisory identifier"]);
+});
+
+// ── run list ─────────────────────────────────────────────────────────────────
+
+test("run list: flags pass through verbatim in input order", () => {
+	assert.deepEqual(
+		validateOk("run list", ["-b", "feature", "--workflow", "ci.yml", "--limit", "5", "--json", "name,conclusion"]),
+		["run", "list", "-b", "feature", "--workflow", "ci.yml", "--limit", "5", "--json", "name,conclusion"],
+	);
+	assert.deepEqual(validateOk("run list", ["-a"]), ["run", "list", "-a"]);
+	assert.deepEqual(validateOk("run list", ["--all", "-s", "completed"]), ["run", "list", "--all", "-s", "completed"]);
+});
+
+test("run list: --limit bounds are 1..1000, separate and attached forms", () => {
+	assert.deepEqual(validateOk("run list", ["--limit", "1000"]), ["run", "list", "--limit", "1000"]);
+	assert.deepEqual(validateOk("run list", ["-L", "50"]), ["run", "list", "-L", "50"]);
+	assert.deepEqual(validateOk("run list", ["-L50"]), ["run", "list", "-L", "50"]);
+	validateRejects("run list", ["--limit", "0"], ["between 1 and 1000"]);
+	validateRejects("run list", ["--limit", "1001"], ["between 1 and 1000"]);
+	validateRejects("run list", ["--limit", "abc"], ["between 1 and 1000"]);
+	validateRejects("run list", ["--limit"], ["flag --limit requires a value"]);
+});
+
+test("run list: -R accepts the repo shape and rejects malformed values", () => {
+	assert.deepEqual(validateOk("run list", ["-R", "owner/repo"]), ["run", "list", "-R", "owner/repo"]);
+	assert.deepEqual(validateOk("run list", ["--repo", "github.com/owner/repo"]), [
+		"run",
+		"list",
+		"--repo",
+		"github.com/owner/repo",
+	]);
+	validateRejects("run list", ["-R", "owner"], ["requires [HOST/]OWNER/REPO"]);
+	validateRejects("run list", ["-R", "owner repo"], ["requires [HOST/]OWNER/REPO"]);
+});
+
+test("run list: --json shape and --jq rules", () => {
+	assert.deepEqual(validateOk("run list", ["--json", "databaseId,status"]), [
+		"run",
+		"list",
+		"--json",
+		"databaseId,status",
+	]);
+	validateRejects("run list", ["--json", "not a field list"], ["comma-separated list of field names"]);
+	assert.deepEqual(validateOk("run list", ["--jq", ".[] | .name"]), ["run", "list", "--jq", ".[] | .name"]);
+	validateRejects("run list", ["--jq", ""], ["non-empty jq expression"]);
+	validateRejects("run list", ["--jq", ".a\u0000b"], ["non-empty jq expression"]);
+});
+
+test("run list: filter values follow the filter-token rule", () => {
+	assert.deepEqual(validateOk("run list", ["--created", ">2026-01-01"]), ["run", "list", "--created", ">2026-01-01"]);
+	validateRejects("run list", ["--branch", "-x"], ["non-empty value without leading '-'"]);
+	validateRejects("run list", ["--created", "some date"], ["non-empty value without leading '-'"]);
+	validateRejects("run list", ["--workflow", "a\tb"], ["non-empty value without leading '-'"]);
+	validateRejects("run list", ["-c", ""], ["non-empty value without leading '-'"]);
+	validateRejects("run list", ["-s"], ["flag -s requires a value"]);
+});
+
+test("run list: takes no positional arguments; -- and unknown flags are rejected", () => {
+	validateRejects("run list", ["123"], ["takes no positional arguments"]);
+	validateRejects("run list", ["--"], ["unexpected argument '--'"]);
+	validateRejects("run list", ["--draft"], ["unknown flag '--draft'"]);
+	validateRejects("run list", ["--exit-status"], ["unknown flag '--exit-status'"]);
+});
+
+// ── run view ─────────────────────────────────────────────────────────────────
+
+test("run view: requires exactly one numeric run id; interactive selection is named as unsupported", () => {
+	assert.deepEqual(validateOk("run view", ["12345"]), ["run", "view", "12345"]);
+	validateRejects("run view", [], ["requires a numeric run id", "interactive selection is not supported"]);
+	validateRejects("run view", ["main"], ["numeric run id", "interactive selection is not supported"]);
+	validateRejects("run view", ["123", "456"], ["at most 1 positional"]);
+	validateRejects("run view", ["12345678901x"], ["numeric run id"]);
+});
+
+test("run view: --attempt is bounded 1..1000", () => {
+	assert.deepEqual(validateOk("run view", ["123", "--attempt", "1"]), ["run", "view", "123", "--attempt", "1"]);
+	assert.deepEqual(validateOk("run view", ["123", "-a", "1000"]), ["run", "view", "123", "-a", "1000"]);
+	validateRejects("run view", ["123", "--attempt", "0"], ["between 1 and 1000"]);
+	validateRejects("run view", ["123", "--attempt", "1001"], ["between 1 and 1000"]);
+	validateRejects("run view", ["123", "--attempt"], ["flag --attempt requires a value"]);
+});
+
+test("run view: --job accepts digits only, kept as a verbatim string beyond 2^53", () => {
+	assert.deepEqual(validateOk("run view", ["123", "-j", "456789"]), ["run", "view", "123", "-j", "456789"]);
+	const huge = "97354534680000000000";
+	assert.deepEqual(validateOk("run view", ["123", "--job", huge]), ["run", "view", "123", "--job", huge]);
+	validateRejects("run view", ["123", "--job", "abc"], ["flag --job requires a numeric job id, got 'abc'"]);
+	validateRejects("run view", ["123", "--job", "12abc"], ["numeric job id"]);
+	validateRejects("run view", ["123", "-j"], ["flag -j requires a value"]);
+});
+
+test("run view: log and verbose booleans; -R and --jq combine", () => {
+	assert.deepEqual(validateOk("run view", ["123", "--log"]), ["run", "view", "123", "--log"]);
+	assert.deepEqual(validateOk("run view", ["123", "--log-failed"]), ["run", "view", "123", "--log-failed"]);
+	assert.deepEqual(validateOk("run view", ["123", "-v", "--verbose"]), ["run", "view", "123", "-v", "--verbose"]);
+	assert.deepEqual(validateOk("run view", ["123", "-R", "owner/repo", "--jq", ".jobs"]), [
+		"run",
+		"view",
+		"123",
+		"-R",
+		"owner/repo",
+		"--jq",
+		".jobs",
+	]);
+});
+
+test("run view: excluded flags are unknown-flag rejections", () => {
+	validateRejects("run view", ["123", "--web"], ["unknown flag '--web'"]);
+	validateRejects("run view", ["123", "-w"], ["unknown flag '-w'"]);
+	validateRejects("run view", ["123", "--template", "x"], ["unknown flag '--template'"]);
+	validateRejects("run view", ["123", "-t", "x"], ["unknown flag '-t'"]);
+	validateRejects("run view", ["123", "--exit-status"], ["unknown flag '--exit-status'"]);
+});
+
+// ── Flag collisions resolve per subcommand ─────────────────────────────────
+
+test("collisions: -w is a value flag on run list only", () => {
+	assert.deepEqual(validateOk("run list", ["-w", "ci.yml"]), ["run", "list", "-w", "ci.yml"]);
+	validateRejects("run view", ["123", "-w", "ci.yml"], ["unknown flag '-w'"]);
+	validateRejects("pr checks", ["-w"], ["unknown flag '-w'"]);
+});
+
+test("collisions: -c is a value on run list but stays boolean on pr view", () => {
+	assert.deepEqual(validateOk("run list", ["-c", "abc123"]), ["run", "list", "-c", "abc123"]);
+	assert.deepEqual(validateOk("pr view", ["-c"]), ["pr", "view", "-c"]);
+});
+
+test("collisions: -a is a value on run view but boolean on auth status and run list", () => {
+	assert.deepEqual(validateOk("run view", ["123", "-a", "2"]), ["run", "view", "123", "-a", "2"]);
+	assert.deepEqual(validateOk("auth status", ["-a"]), ["auth", "status", "-a", "--json", "hosts"]);
+	assert.deepEqual(validateOk("run list", ["-a"]), ["run", "list", "-a"]);
+});
+
+test("run ls is not allowlisted (gh alias rejected as an unknown subcommand)", () => {
+	const checked = validateToolParams({ subcommand: "run ls", args: [] });
+	assert.equal(checked.ok, false);
+	if (!checked.ok) assert.ok(checked.reason.includes("unknown subcommand 'run ls'"));
+});
+
+// ── logMode structured state ─────────────────────────────────────────────────
+
+function logModeFor(args: string[]): boolean {
+	const checked = validateToolParams({ subcommand: "run view", args });
+	assert.equal(checked.ok, true);
+	if (!checked.ok || checked.kind !== "native") assert.fail("expected native");
+	return checked.logMode;
+}
+
+test("logMode is true only for validated --log/--log-failed boolean tokens", () => {
+	assert.equal(logModeFor(["123", "--log"]), true);
+	assert.equal(logModeFor(["123", "--log-failed"]), true);
+	assert.equal(logModeFor(["123"]), false);
+	assert.equal(logModeFor(["123", "-v"]), false);
+	assert.equal(logModeFor(["123", "--jq", "--log"]), false);
+	// The --jq VALUE "--log" stays intact in the emitted argv.
+	assert.deepEqual(validateOk("run view", ["123", "--jq", "--log"]), ["run", "view", "123", "--jq", "--log"]);
+});
+
+// ── check annotations (API operation) validation ─────────────────────────────
+
+test("check annotations: required repo and check_run_id, optional jq", () => {
+	assert.deepEqual(apiOk({ subcommand: "check annotations", repo: "owner/repo", check_run_id: 42 }), {
+		ok: true,
+		op: "check annotations",
+		repo: "owner/repo",
+		checkRunId: 42,
+	});
+	assert.equal(apiOk({ subcommand: "check annotations", repo: "o/r", check_run_id: 7, jq: ".[].message" }).jq, ".[].message");
+});
+
+test("check annotations: missing or invalid check_run_id values are rejected", () => {
+	apiRejects({ subcommand: "check annotations", repo: "o/r" }, ["check_run_id is required"]);
+	apiRejects({ subcommand: "check annotations", repo: "o/r", check_run_id: 0 }, ["safe integer >= 1"]);
+	apiRejects({ subcommand: "check annotations", repo: "o/r", check_run_id: -1 }, ["safe integer >= 1"]);
+	apiRejects({ subcommand: "check annotations", repo: "o/r", check_run_id: 1.5 }, ["safe integer >= 1"]);
+	apiRejects({ subcommand: "check annotations", repo: "o/r", check_run_id: Number.MAX_SAFE_INTEGER + 1 }, ["safe integer >= 1"]);
+	apiRejects({ subcommand: "check annotations", repo: "o/r", check_run_id: "5" }, ["check_run_id"]);
+	apiRejects({ subcommand: "check annotations", check_run_id: 5 }, ["repo is required"]);
+});
+
+test("check annotations: unknown fields and continuation are rejected; jq rules apply", () => {
+	apiRejects({ subcommand: "check annotations", repo: "o/r", check_run_id: 5, ref: "main" }, ["unknown field 'ref'"]);
+	apiRejects({ subcommand: "check annotations", repo: "o/r", check_run_id: 5, continuation: "abc" }, ["unknown field 'continuation'"]);
+	apiRejects({ subcommand: "check annotations", repo: "o/r", check_run_id: 5, jq: "" }, ["non-empty expression"]);
+	apiRejects({ subcommand: "check annotations", repo: "o/r", check_run_id: 5, jq: ".a\u0000b" }, ["control characters"]);
+});
+
+test("mixed shapes: check annotations rejects args arrays; native rejects structured fields", () => {
+	const apiWithArgs = validateToolParams({ subcommand: "check annotations", repo: "o/r", check_run_id: 5, args: ["-x"] });
+	assert.equal(apiWithArgs.ok, false);
+	if (!apiWithArgs.ok) assert.ok(apiWithArgs.reason.includes("structured parameters, not an args array"));
+	const nativeWithFields = validateToolParams({ subcommand: "run list", check_run_id: 5 });
+	assert.equal(nativeWithFields.ok, false);
+	if (!nativeWithFields.ok) assert.ok(nativeWithFields.reason.includes("unknown field 'check_run_id'"));
 });

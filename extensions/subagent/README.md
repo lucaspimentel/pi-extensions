@@ -24,14 +24,16 @@ streaming, usage display, security model).
   inspect diffs, history, and working-tree state via the allowlisted read-only
   `git_read` tool (extensions/git-read/): diff, log, show, and status only,
   with per-subcommand flag allowlists, no shell, and no repo mutation. PRs,
-  issues, checks, and pinned GitHub API reads are reachable via the
-  allowlisted read-only `gh_read` tool (extensions/gh-read/): pr
-  view/diff/list/checks, issue view/list, and auth status as native argv
-  commands, plus `repo contents`/`repo tree` (pinned file and tree reads),
+  issues, checks, Actions runs, and pinned GitHub API reads are reachable via
+  the allowlisted read-only `gh_read` tool (extensions/gh-read/): pr
+  view/diff/list/checks, issue view/list, auth status, and run list/view as
+  native argv commands (run logs are bounded to the first and last 50 KiB of
+  output), plus `repo contents`/`repo tree` (pinned file and tree reads),
   `commit checks` (check runs + legacy statuses with bounded continuation),
-  and `advisory view` (exact CVE/GHSA lookup) as structured API operations;
-  all network reads (guard class `remote-read`), and the API operations work
-  outside a git worktree.
+  `advisory view` (exact CVE/GHSA lookup), and `check annotations` (one
+  check run's annotations) as structured API operations; all network reads
+  (guard class `remote-read`), and the API operations work outside a git
+  worktree.
 - **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and
   `/implement-and-review` are renamed to `/scout-plan-implement`,
   `/scout-plan`, and `/implement-review`, so each name lists its chain's stages.

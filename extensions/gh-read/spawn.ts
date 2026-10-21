@@ -80,9 +80,10 @@ export function buildGhEnv(): Record<string, string | undefined> {
  * applies to every invocation, even with explicit -R (settled: one simple
  * contract). The single exemption is "auth status", which needs no repo and
  * is skipped by runGh before this function is called. Uses git-read's
- * sanitized git environment for the rev-parse.
+ * sanitized git environment for the rev-parse. Exported so the log runner
+ * (log-spawn.ts) can reuse the identical gate.
  */
-async function worktreeCheckPassed(cwd: string): Promise<boolean> {
+export async function worktreeCheckPassed(cwd: string): Promise<boolean> {
 	const outcome = await boundedExec("git", ["rev-parse", "--show-toplevel"], buildChildEnv(), cwd);
 	if (outcome.spawnError !== undefined || outcome.timedOut || outcome.code !== 0) return false;
 	const toplevel = outcome.stdout.trim();

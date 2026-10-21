@@ -5,7 +5,7 @@
  * docs/gh-read-design.md: a flat native subcommand union, per-subcommand
  * flag allowlists, value validators, and final argv construction, plus
  * structured validation for the narrowly scoped GitHub API operations
- * (repo contents, repo tree, commit checks, advisory view).
+ * (repo contents, repo tree, commit checks, advisory view, check annotations).
  *
  * This module is pure (no pi imports) so the argv layout can be unit-tested
  * directly; spawn.ts consumes `ValidInvocation.argv` as a cross-step contract.
@@ -33,6 +33,8 @@ export const SUBCOMMANDS = [
 	"issue view",
 	"issue list",
 	"auth status",
+	"run list",
+	"run view",
 ] as const;
 
 export type GhSubcommand = (typeof SUBCOMMANDS)[number];
@@ -73,6 +75,8 @@ const BOOLEAN_FLAGS: Record<GhSubcommand, ReadonlySet<string>> = {
 	"issue view": new Set(["--comments", "-c"]),
 	"issue list": new Set([]),
 	"auth status": new Set(["--active", "-a"]),
+	"run list": new Set(["-a", "--all"]),
+	"run view": new Set(["--log", "--log-failed", "-v", "--verbose"]),
 };
 
 /**
@@ -90,6 +94,9 @@ const VALUE_FLAG_FORMS: Record<GhSubcommand, string> = {
 	"issue list":
 		"--limit <n>, --state <open|closed|all>, --author <v>, --assignee <v>, --label <v>, --mention <v>, --milestone <v>, --search <q>, --json <fields>, --jq <expr>, -R <[HOST/]OWNER/REPO>",
 	"auth status": "--hostname <host>, --jq <expr>",
+	"run list":
+		"--branch <v>, --commit <v>, --created <v>, --event <v>, --limit <n>, --status <v>, --user <v>, --workflow <v>, --json <fields>, --jq <expr>, -R <[HOST/]OWNER/REPO>",
+	"run view": "--attempt <n>, --job <id>, --json <fields>, --jq <expr>, -R <[HOST/]OWNER/REPO>",
 };
 
 /** Positional-argument expectations per subcommand. */
@@ -101,6 +108,8 @@ const POSITIONAL: Record<GhSubcommand, { min: number; max: number; describe: str
 	"issue view": { min: 1, max: 1, describe: "an issue number" },
 	"issue list": { min: 0, max: 0, describe: "no positional arguments" },
 	"auth status": { min: 0, max: 0, describe: "no positional arguments" },
+	"run list": { min: 0, max: 0, describe: "no positional arguments" },
+	"run view": { min: 1, max: 1, describe: "a numeric run id (interactive selection is not supported)" },
 };
 
 function allowedFlagsText(subcommand: GhSubcommand): string {
@@ -177,8 +186,22 @@ function checkValueFlag(
 		}
 		return null;
 	}
+	// "run view" scoped value flags. --attempt is bounded like --limit; --job
+	// accepts any digits-only value kept as a STRING in argv (no Number()
+	// conversion), so job ids beyond 2^53 pass through verbatim.
+	if (subcommand === "run view" && (flag === "-a" || flag === "--attempt")) {
+		return checkIntFlag(flag, raw, 1, 1000);
+	}
+	if (subcommand === "run view" && (flag === "-j" || flag === "--job")) {
+		if (!/^\d+$/.test(raw)) {
+			return `flag --job requires a numeric job id, got '${raw}'`;
+		}
+		return null;
+	}
 	// Remaining value flags (--author, --assignee, --label, --head, --base,
-	// --search, --mention, --milestone) share the filter-token rule.
+	// --search, --mention, --milestone, and the "run list" filters --branch,
+	// --commit, --created, --event, --status, --user, --workflow) share the
+	// filter-token rule.
 	if (!isValidFilterToken(raw)) {
 		return `flag ${flag} requires a non-empty value without leading '-' or control characters`;
 	}
@@ -204,6 +227,7 @@ function isValueFlag(subcommand: GhSubcommand, flag: string): boolean {
 			return true;
 		case "--limit":
 		case "-L":
+			return subcommand === "pr list" || subcommand === "issue list" || subcommand === "run list";
 		case "--state":
 			return subcommand === "pr list" || subcommand === "issue list";
 		case "--color":
@@ -220,6 +244,29 @@ function isValueFlag(subcommand: GhSubcommand, flag: string): boolean {
 		case "--mention":
 		case "--milestone":
 			return subcommand === "issue list";
+		case "--branch":
+		case "-b":
+		case "--commit":
+		case "-c":
+		case "--created":
+		case "--event":
+		case "-e":
+		case "--status":
+		case "-s":
+		case "--user":
+		case "-u":
+		case "--workflow":
+		case "-w":
+			// "run list" only: -c stays boolean on pr view/issue view and -w
+			// stays an unknown flag on pr view/pr checks; per-subcommand scoping
+			// resolves every collision.
+			return subcommand === "run list";
+		case "--attempt":
+		case "-a":
+		case "--job":
+		case "-j":
+			// "run view" only: -a stays boolean on auth status and run list.
+			return subcommand === "run view";
 		default:
 			return false;
 	}
@@ -232,6 +279,14 @@ export interface ValidInvocation {
 	 * args in input order (flag and value tokens verbatim).
 	 */
 	argv: string[];
+	/**
+	 * True only when a validated boolean `--log`/`--log-failed` token was
+	 * accepted for "run view": the sole signal that selects the dual-window
+	 * log runner (log-spawn.ts). Structured state, never argv matching: a
+	 * `--jq` VALUE equal to "--log" is consumed as a value token and never
+	 * enters the boolean branch, so it cannot select the runner.
+	 */
+	logMode: boolean;
 }
 
 export interface InvalidInvocation {
@@ -254,6 +309,7 @@ export function validateInvocation(
 	const validated: string[] = [];
 	let positionals = 0;
 	let repoUsed = false;
+	let logMode = false;
 
 	for (let i = 0; i < args.length; i++) {
 		const token = args[i];
@@ -266,6 +322,11 @@ export function validateInvocation(
 
 			if (BOOLEAN_FLAGS[subcommand].has(token)) {
 				validated.push(token);
+				// Structured runner-selection state (see ValidInvocation.logMode):
+				// only a boolean token accepted HERE can set it.
+				if (subcommand === "run view" && (token === "--log" || token === "--log-failed")) {
+					logMode = true;
+				}
 				continue;
 			}
 
@@ -345,6 +406,13 @@ export function validateInvocation(
 			if (!/^\d+$/.test(token)) {
 				return { ok: false, reason: `invalid argument '${token}': gh issue view takes an issue number` };
 			}
+		} else if (subcommand === "run view") {
+			if (!/^\d+$/.test(token)) {
+				return {
+					ok: false,
+					reason: `invalid argument '${token}': gh run view takes a numeric run id; interactive selection is not supported`,
+				};
+			}
 		} else if (subcommand === "pr view" || subcommand === "pr diff" || subcommand === "pr checks") {
 			if (!isValidPrArg(token)) {
 				return { ok: false, reason: `invalid argument '${token}': expected ${POSITIONAL[subcommand].describe}` };
@@ -379,7 +447,7 @@ export function validateInvocation(
 		};
 	}
 
-	return { ok: true, argv: appendToolAuthoredTokens(subcommand, [noun, verb, ...validated]) };
+	return { ok: true, argv: appendToolAuthoredTokens(subcommand, [noun, verb, ...validated]), logMode };
 }
 
 /**
@@ -394,11 +462,11 @@ function appendToolAuthoredTokens(subcommand: GhSubcommand, argv: string[]): str
 
 // ── Structured GitHub API operations ────────────────────────────────────────
 //
-// The four API operations use structured parameters (never the legacy args
+// The five API operations use structured parameters (never the legacy args
 // array, never gh api with caller flags). They target github.com only and
 // are exempt from the worktree gate; api-spawn.ts owns the transport.
 
-export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view"] as const;
+export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations"] as const;
 
 export type ApiOperation = (typeof API_OPERATIONS)[number];
 
@@ -426,6 +494,7 @@ const OPERATION_FIELDS: Record<ApiOperation, ReadonlySet<string>> = {
 	"repo tree": new Set(["repo", "ref", "path", "recursive", "jq"]),
 	"commit checks": new Set(["repo", "ref", "jq", "continuation"]),
 	"advisory view": new Set(["id", "type", "jq", "continuation"]),
+	"check annotations": new Set(["repo", "check_run_id", "jq"]),
 };
 
 export interface ValidApiInvocation {
@@ -450,6 +519,8 @@ export interface ValidApiInvocation {
 	type?: AdvisoryType;
 	/** Opaque versioned continuation token from a previous incomplete result. */
 	continuation?: string;
+	/** Check annotations: the check run id whose annotations are fetched. */
+	checkRunId?: number;
 }
 
 function apiInvalid(reason: string): { ok: false; reason: string } {
@@ -643,6 +714,14 @@ export function validateApiInvocation(params: unknown): ValidApiInvocation | { o
 		}
 	}
 
+	if (op === "check annotations") {
+		const rawId = record["check_run_id"];
+		if (rawId === undefined) return apiInvalid("check_run_id is required");
+		const idError = checkLineNumber(rawId, "check_run_id");
+		if (idError !== null) return apiInvalid(idError);
+		result.checkRunId = rawId as number;
+	}
+
 	if (record["continuation"] !== undefined) {
 		const contError = checkContinuationShape(record["continuation"]);
 		if (contError !== null) return apiInvalid(contError);
@@ -658,7 +737,7 @@ export function validateApiInvocation(params: unknown): ValidApiInvocation | { o
  * API operations, and rejects mixed parameter shapes in both directions.
  */
 export type ValidToolInvocation =
-	| { ok: true; kind: "native"; subcommand: GhSubcommand; argv: string[] }
+	| { ok: true; kind: "native"; subcommand: GhSubcommand; argv: string[]; logMode: boolean }
 	| { ok: true; kind: "api"; api: ValidApiInvocation }
 	| { ok: false; reason: string };
 
@@ -698,5 +777,5 @@ export function validateToolParams(params: unknown): ValidToolInvocation {
 	}
 	const checked = validateInvocation(subcommand as GhSubcommand, (record["args"] as string[] | undefined) ?? []);
 	if (!checked.ok) return { ok: false, reason: `gh_read: ${checked.reason}` };
-	return { ok: true, kind: "native", subcommand: subcommand as GhSubcommand, argv: checked.argv };
+	return { ok: true, kind: "native", subcommand: subcommand as GhSubcommand, argv: checked.argv, logMode: checked.logMode };
 }

@@ -602,3 +602,112 @@ test("auth errors surface as errors with the HTTP status", async () => {
 	assert.equal(result.isError, true);
 	assert.ok(result.content[0].text.includes("HTTP 401"));
 });
+
+// ── Check-run annotations ─────────────────────────────────────────────────────
+
+function annotation(i: number): Record<string, unknown> {
+	return { id: i, path: `src/f${i}.ts`, message: `annotation ${i}`, annotation_level: "warning" };
+}
+
+test("check annotations: 0, 99, and 100 items; the notice appears ONLY at exactly 100", async () => {
+	for (const count of [0, 99, 100]) {
+		const apiRequester = requester([() => response(JSON.stringify(Array.from({ length: count }, (_, i) => annotation(i))))]);
+		const result = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 42 }, apiRequester);
+		assert.equal(result.isError, undefined, `count=${count}`);
+		const hasNotice = result.content[0].text.includes("only the first page was fetched; the listing may be incomplete");
+		assert.equal(hasNotice, count === 100, `count=${count} notice presence`);
+		assert.ok(result.content[0].text.includes("check_run_id: 42"));
+	}
+});
+
+test("check annotations: endpoint is exact and exactly ONE request is made even at 100 items", async () => {
+	const apiRequester = requester([() => response(JSON.stringify(Array.from({ length: 100 }, (_, i) => annotation(i))))]);
+	const result = await run({ subcommand: "check annotations", repo: "owner/repo", check_run_id: 42 }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.deepEqual(apiRequester.requests, ["repos/owner/repo/check-runs/42/annotations?per_page=100"]);
+	assert.ok(!result.details["continuation"], "no continuation machinery for a single-page read");
+});
+
+test("check annotations: the incompleteness notice survives jq scalar output and jq-empty output", async () => {
+	// jq scalar result.
+	const scalar = requester([() => response(JSON.stringify(Array.from({ length: 100 }, (_, i) => annotation(i))))]);
+	const scalarResult = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 42, jq: ".[0]" }, scalar, {
+		jqRun: async (expression, document) => {
+			assert.equal(expression, ".[0]");
+			const parsed = JSON.parse(document) as unknown[];
+			assert.equal(parsed.length, 100, "jq sees the ORIGINAL 100-item array");
+			return { kind: "result", output: '{"id":0}', outputTruncated: false, outputBytes: 9 };
+		},
+	});
+	assert.equal(scalarResult.isError, undefined);
+	assert.ok(scalarResult.content[0].text.includes("only the first page was fetched; the listing may be incomplete"));
+	assert.ok(scalarResult.content[0].text.trimEnd().endsWith('{"id":0}'));
+
+	// jq-empty result.
+	const empty = requester([() => response(JSON.stringify(Array.from({ length: 100 }, (_, i) => annotation(i))))]);
+	const emptyResult = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 42, jq: ".[]" }, empty, {
+		jqRun: async () => ({ kind: "result", output: "", outputTruncated: false, outputBytes: 0 }),
+	});
+	assert.equal(emptyResult.isError, undefined);
+	assert.ok(emptyResult.content[0].text.includes("only the first page was fetched; the listing may be incomplete"));
+	assert.ok(emptyResult.content[0].text.includes("jq produced no output values"));
+});
+
+test("check annotations: jq is applied exactly once via the jqRun seam", async () => {
+	const apiRequester = requester([() => response(JSON.stringify([annotation(1), annotation(2)]))]);
+	let jqCalls = 0;
+	const result = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 42, jq: "length" }, apiRequester, {
+		jqRun: async () => {
+			jqCalls += 1;
+			return { kind: "result", output: "2", outputTruncated: false, outputBytes: 1 };
+		},
+	});
+	assert.equal(result.isError, undefined);
+	assert.equal(jqCalls, 1);
+});
+
+test("check annotations: the notice coexists with the 50 KiB display-truncation overflow notice", async () => {
+	// 100 annotations with large paths push the rendered data past the cap.
+	const entries = Array.from({ length: 100 }, (_, i) => ({
+		...annotation(i),
+		message: "x".repeat(1200),
+	}));
+	const apiRequester = requester([() => response(JSON.stringify(entries))]);
+	const result = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 42 }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.ok(result.content[0].text.includes("only the first page was fetched; the listing may be incomplete"), "incompleteness notice in the metadata head");
+	assert.ok(result.content[0].text.includes("incomplete UTF-8-safe prefix, NOT complete JSON"), "overflow notice present");
+	assert.ok(result.content[0].text.includes("Narrow the request"));
+	assert.equal(result.details["output_truncated"], true);
+});
+
+test("check annotations: non-array bodies (object, string, invalid JSON) are errors", async () => {
+	const asObject = requester([() => response(JSON.stringify({ message: "not an array" }))]);
+	const objectResult = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 42 }, asObject);
+	assert.equal(objectResult.isError, true);
+	assert.ok(objectResult.content[0].text.includes("check annotations response was not a JSON array"));
+
+	const asString = requester([() => response('"just a string"')]);
+	const stringResult = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 42 }, asString);
+	assert.equal(stringResult.isError, true);
+	assert.ok(stringResult.content[0].text.includes("check annotations response was not a JSON array"));
+
+	const asGarbage = requester([() => response("<html>gateway error</html>")]);
+	const garbageResult = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 42 }, asGarbage);
+	assert.equal(garbageResult.isError, true);
+	assert.ok(garbageResult.content[0].text.includes("check annotations response was not valid JSON"));
+});
+
+test("check annotations: HTTP 404 and 403 outcomes pass through verbatim with no retry", async () => {
+	const notFound = requester([() => error("Not Found", 404)]);
+	const notFoundResult = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 999999 }, notFound);
+	assert.equal(notFoundResult.isError, true);
+	assert.ok(notFoundResult.content[0].text.includes("annotations read failed: Not Found (HTTP 404)"), notFoundResult.content[0].text);
+	assert.equal(notFound.requests.length, 1, "no retry after an HTTP error outcome");
+
+	const forbidden = requester([() => error("Forbidden", 403)]);
+	const forbiddenResult = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 42 }, forbidden);
+	assert.equal(forbiddenResult.isError, true);
+	assert.ok(forbiddenResult.content[0].text.includes("HTTP 403"));
+	assert.equal(forbidden.requests.length, 1);
+});

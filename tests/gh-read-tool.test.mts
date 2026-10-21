@@ -13,6 +13,7 @@ import ghReadExtension from "../extensions/gh-read/index.ts";
 import { PR_CHECKS_JSON_FIELDS } from "../extensions/gh-read/validate.ts";
 import { setSpawnOverride } from "../extensions/shared/bounded-spawn.ts";
 import { setApiSpawnOverride } from "../extensions/gh-read/api-spawn.ts";
+import { setLogSpawnOverride } from "../extensions/gh-read/log-spawn.ts";
 
 // ── Harness ──────────────────────────────────────────────────────────────────
 
@@ -75,7 +76,7 @@ function harness(script: (spawn: { args: string[]; child: FakeChild }, index: nu
 
 // ── Schema shape ─────────────────────────────────────────────────────────────
 
-test("gh_read registers with all seven native subcommands and four API operations, no outputSchema", () => {
+test("gh_read registers with all nine native subcommands and five API operations, no outputSchema", () => {
 	const tool = register();
 	assert.equal(tool.name, "gh_read");
 	assert.ok(tool.annotations.readOnlyHint === true);
@@ -85,7 +86,16 @@ test("gh_read registers with all seven native subcommands and four API operation
 	assert.ok(tool.description.includes("pr checks"));
 	assert.ok(tool.description.includes("repo contents"));
 	assert.ok(tool.description.includes("advisory view"));
+	assert.ok(tool.description.includes("check annotations"));
+	assert.ok(tool.description.includes("run list"));
+	assert.ok(tool.description.includes("run view"));
 	assert.ok(tool.promptGuidelines.some((line) => line.includes("pr checks")));
+	// The three new literals and the check_run_id field are in the schema.
+	const schemaText = JSON.stringify(schema);
+	for (const literal of ["run list", "run view", "check annotations"]) {
+		assert.ok(schemaText.includes(`"const":"${literal}"`), `schema literal '${literal}'`);
+	}
+	assert.ok(schema.properties["check_run_id"], "check_run_id schema field");
 });
 
 // ── Validation errors ────────────────────────────────────────────────────────
@@ -216,5 +226,159 @@ test("execute api: partial-source failure reports isError while preserving the c
 	assert.ok(result.content[0].text.includes("statuses_error"));
 	assert.ok(result.content[0].text.includes('"build"'), "completed check-runs data preserved");
 	assert.ok(typeof result.details["continuation"] === "string", "retry position retained");
+	setApiSpawnOverride(null);
+});
+
+// ── GitHub Actions inspection (run list / run view / check annotations) ─────
+
+test("execute native run list: gate then gh argv verbatim, details carry the subcommand", async () => {
+	const tool = register();
+	const { argsList } = harness((spawn, index) => {
+		if (index === 0) {
+			spawn.child.stdout.emit("data", Buffer.from("/repo\n"));
+			spawn.child.emit("close", 0);
+			return;
+		}
+		spawn.child.stdout.emit("data", Buffer.from('[{"name":"ci","conclusion":"success"}]'));
+		spawn.child.emit("close", 0);
+	});
+	const result = await tool.execute(
+		"id",
+		{ subcommand: "run list", args: ["--limit", "5", "--json", "name,conclusion"] },
+		undefined,
+		null,
+		{ cwd: "/repo" },
+	);
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(result.details["subcommand"], "run list");
+	assert.deepEqual(argsList[0], ["rev-parse", "--show-toplevel"]);
+	assert.deepEqual(argsList[1], ["run", "list", "--limit", "5", "--json", "name,conclusion"]);
+	setSpawnOverride(null);
+});
+
+test("execute native run view --log is routed to the dual-window log runner via the structured logMode state", async () => {
+	const tool = register();
+	const sharedArgs: string[][] = [];
+	const logArgs: string[][] = [];
+	setSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		sharedArgs.push([...args]);
+		queueMicrotask(() => {
+			// Only the rev-parse gate is expected on the shared seam.
+			child.stdout.emit("data", Buffer.from("/repo\n"));
+			child.emit("close", 0);
+		});
+		return child;
+	}) as never);
+	setLogSpawnOverride(((_command: string, args: string[]) => {
+		const child = fakeChild();
+		logArgs.push([...args]);
+		queueMicrotask(() => {
+			child.stdout.emit("data", Buffer.from("step log line\n"));
+			child.emit("close", 0);
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "run view", args: ["123", "--log"] }, undefined, null, { cwd: "/repo" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(result.details["subcommand"], "run view");
+	assert.equal(sharedArgs.length, 1, "the shared seam captured only the rev-parse gate");
+	assert.deepEqual(sharedArgs[0], ["rev-parse", "--show-toplevel"]);
+	assert.deepEqual(logArgs[0], ["run", "view", "123", "--log"]);
+	assert.ok(result.content[0].text.includes("step log line"));
+	setSpawnOverride(null);
+	setLogSpawnOverride(null);
+});
+
+test("execute native run view without log flags keeps the shared runner (not logMode)", async () => {
+	const tool = register();
+	const sharedArgs: string[][] = [];
+	const logArgs: string[][] = [];
+	setSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		sharedArgs.push([...args]);
+		queueMicrotask(() => {
+			if (sharedArgs.length === 1) {
+				child.stdout.emit("data", Buffer.from("/repo\n"));
+				child.emit("close", 0);
+			} else {
+				child.stdout.emit("data", Buffer.from("run summary\n"));
+				child.emit("close", 0);
+			}
+		});
+		return child;
+	}) as never);
+	setLogSpawnOverride(() => {
+		throw new Error("the log runner must not be selected without --log/--log-failed");
+	});
+	const result = await tool.execute("id", { subcommand: "run view", args: ["123"] }, undefined, null, { cwd: "/repo" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.deepEqual(sharedArgs[1], ["run", "view", "123"]);
+	assert.equal(logArgs.length, 0);
+	setSpawnOverride(null);
+	setLogSpawnOverride(null);
+});
+
+test("execute api check annotations: tool-authored gh api argv, no git gate anywhere", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setSpawnOverride(() => {
+		throw new Error("no git gate may spawn on the API path");
+	});
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => {
+			const body = JSON.stringify([{ id: 1, message: "annotation one" }]);
+			child.stdout.emit("data", Buffer.from(`HTTP/1.1 200 OK\r\n\r\n${body}`));
+			child.emit("close", 0, null);
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "check annotations", repo: "owner/repo", check_run_id: 7 }, undefined, null, { cwd: "/not-a-worktree" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(argsList.length, 1, "exactly one gh api child");
+	const argv = argsList[0]!;
+	assert.equal(argv[0], "api");
+	assert.equal(argv[argv.length - 1], "repos/owner/repo/check-runs/7/annotations?per_page=100");
+	assert.ok(argv.includes("--include"));
+	assert.ok(result.content[0].text.includes("annotation one"));
+	assert.equal(result.details["subcommand"], "check annotations");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
+test("execute: rejected run-family params fail closed with zero spawns", async () => {
+	const tool = register();
+	let spawns = 0;
+	setSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	setLogSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	setApiSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	for (const bad of [
+		{ subcommand: "check annotations", repo: "o/r" }, // missing check_run_id
+		{ subcommand: "check annotations", repo: "o/r", check_run_id: "5" }, // string id
+		{ subcommand: "run ls", args: [] }, // gh alias not allowlisted
+		{ subcommand: "run view", args: ["--bogus"] }, // unknown flag
+		{ subcommand: "run list", args: ["--limit", "1001"] }, // out of bounds
+	]) {
+		const result = await tool.execute("id", bad, undefined, null, { cwd: "/repo" });
+		assert.equal(result.isError, true, JSON.stringify(bad));
+		assert.ok(result.content[0].text.startsWith("gh_read: "), JSON.stringify(bad));
+	}
+	assert.equal(spawns, 0, "no child process for rejected invocations");
+	setSpawnOverride(null);
+	setLogSpawnOverride(null);
 	setApiSpawnOverride(null);
 });

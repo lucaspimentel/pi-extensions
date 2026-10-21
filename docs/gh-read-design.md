@@ -104,7 +104,7 @@ v1 (Go templates are argv-safe but add no capability `--jq` lacks).
   JSON data. Exit codes 1 and 8 are never reinterpreted as success: they
   flow through the normal failure contract with whatever output gh printed.
   Native no-checks/no-required-checks errors pass through verbatim.
-- The five repo subcommands (not `auth status`): `-R/--repo [HOST/]OWNER/REPO`,
+- The seven repo subcommands (not `auth status`): `-R/--repo [HOST/]OWNER/REPO`,
   value validated
   against `^([A-Za-z0-9.-]+/)?[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$`. Cross-repo reads
   are still reads; the strict regex prevents using the flag to smuggle other
@@ -116,6 +116,40 @@ v1 (Go templates are argv-safe but add no capability `--jq` lacks).
   is tolerated and dropped, any other fields value is rejected.
   `--show-token`/`-t` and `--template` are excluded: the tool never handles
   or displays tokens (see Non-goals).
+- `run list` (no positionals): `--all`/`-a` (boolean, include disabled
+  workflows), `--branch <v>`/`-b`, `--commit <v>`/`-c` (a value only here:
+  `-c` stays boolean on `pr view`/`issue view`), `--created <v>` (date
+  ranges use gh's `'..'`-style range syntax: the filter-token rule forbids
+  spaces, so `2026-01-01..2026-02-01` is fine and a spaced date is not),
+  `--event <v>`/`-e`, `--limit <n>`/`-L` (1..1000), `--status <v>`/`-s`,
+  `--user <v>`/`-u`, `--workflow <v>`/`-w` (a value only here: `-w` stays an
+  unknown flag on `pr view` and `pr checks`), `--json <fields>`,
+  `--jq <expr>`. All filter values use the generic filter-token rule
+  (non-empty, no leading `-`, no whitespace or control characters), so
+  `--created` and `--workflow` values cannot contain spaces: use `'..'
+  -style` date ranges and workflow file names. `-a` is boolean here and a
+  value only on `run view`; collisions resolve purely by per-subcommand
+  scoping.
+- `run view <run-id>` (exactly one digits-only positional; interactive
+  selection is not supported): `--log` (full run or, with `--job`, one
+  job's log), `--log-failed` (failed steps only), `--verbose`/`-v`,
+  `--attempt <n>`/`-a` (1..1000; a value only here: `-a` stays boolean on
+  `auth status` and `run list`), `--job <id>`/`-j` (strict digits, kept as a
+  STRING in argv so job ids beyond 2^53 pass through verbatim),
+  `--json <fields>`, `--jq <expr>`. `--web`/`-w` (opens a browser),
+  `--template`/`-t`, and `--exit-status` (failed runs already arrive as
+  data via `pr checks` and `run list` status fields) are unknown-flag
+  rejections; the `run ls` alias is not in the subcommand union, and
+  watch/rerun/download are out of scope entirely.
+- Attached short forms stay limited to `-L`/`-R` (the `/^(-L|-R)(.+)$/`
+  rule): `-a2`, `-j123`, `-bmain`, and `-wci.yml` are unknown-flag
+  rejections on every subcommand; use the separate value token or the
+  `--flag=value` form.
+- Output-mode passthrough policy: the tool performs NO mutual-exclusion
+  checks between output modes. `--log` combined with `--log-failed`, log
+  flags combined with `--json`/`--jq`, and `--jq` without `--json` are all
+  passed to gh verbatim, and gh's own errors (including its refusal of
+  meaningless combinations) surface unchanged through the failure contract.
 
 Value validation (native commands):
 
@@ -132,8 +166,8 @@ Value validation (native commands):
 
 ## GitHub API operations
 
-The four structured operations (`repo contents`, `repo tree`, `commit
-checks`, `advisory view`) make read-only GET requests to api.github.com
+The five structured operations (`repo contents`, `repo tree`, `commit
+checks`, `advisory view`, `check annotations`) make read-only GET requests to api.github.com
 ONLY, always inside `gh`, with a fixed tool-authored argv (see "API
 runner"). They name an explicit repository, so they are exempt from the
 worktree gate and work anywhere. Validation is complete at runtime (calls
@@ -225,6 +259,22 @@ advisory content is mutable and can be withdrawn or amended after a read.
 CVE searches reuse the bounded Link-header pagination and continuation
 machinery of commit checks.
 
+### check annotations
+
+Required `repo`, `check_run_id` (a safe integer >= 1, never coerced from a
+string); optional `jq`. A single tool-authored GET
+`repos/{owner}/{repo}/check-runs/{id}/annotations?per_page=100` is issued:
+no ref resolution, no pagination, no Link parsing, no continuation, exactly
+ONE request ever, even at 100 items. The response body MUST be a JSON
+array; an object, a string, or invalid JSON is an error with a reason.
+The incompleteness notice (`only the first page was fetched; the listing
+may be incomplete`) is computed from the ORIGINAL response array BEFORE jq,
+at exactly 100 items only, and survives jq-empty and jq-scalar output as
+well as 50 KiB display truncation, because renderData carries notices
+through its jq path and renderResult renders notices in the metadata head,
+which is always complete. HTTP 404/403 outcomes pass through verbatim with
+no retry or error-shape matching.
+
 ### API runner (api-spawn.ts)
 
 A dedicated runner per invocation, separate from the native executor
@@ -300,8 +350,11 @@ simple contract (no per-argument conditional gating).
 One exemption: `auth status` skips the gate entirely (spawn.ts derives the
 exemption from the validated argv, `argv[0] === "auth" && argv[1] ===
 "status"`). It reports login state for gh's known hosts and needs no
-repository context, so it is useful precisely where the other five are not:
-outside any worktree. The other five keep the gate unchanged.
+repository context, so it is useful precisely where the other seven are not:
+outside any worktree. The other seven keep the gate unchanged, including
+`run view --log`: the dual-window log runner reuses the identical
+worktreeCheckPassed gate even though `run view` accepts `-R` (settled
+one-simple-contract rule).
 
 ## Trust model for env and config
 
@@ -350,6 +403,33 @@ stdout+stderr, same as `git_read`; `TIMEOUT_MS = 15s`,
 if `--search` or high `--limit` invocations page repeatedly and time out in
 testing, raise `TIMEOUT_MS` for this tool only and document it here.
 
+### Log output (log-spawn.ts, run view --log/--log-failed)
+
+Log-carrying invocations are selected by the structured `logMode` state
+that validate.ts sets when a validated boolean `--log`/`--log-failed` token
+is accepted for `run view`; index.ts never inspects argv tokens. A `--jq`
+VALUE equal to `--log` is consumed as a value token and can never select
+the runner. Those invocations take the gh-read-local dual-window runner
+(log-spawn.ts) instead of the shared core: stdout is captured as the FIRST
+50 KiB plus the LAST 50 KiB (100 KiB worst case; the middle is dropped)
+with a separate 50 KiB stderr head cap so failure diagnostics are never
+starved by log bytes. When nothing is dropped the output is byte-identical
+to the child's stdout; otherwise the exact notice
+`[gh_read: <N> bytes omitted, showing first and last 50 KiB]` is inserted,
+where N counts discarded SOURCE bytes (UTF-8-safe window-edge trims are
+decode hygiene, at most 3 bytes per edge, and are never counted). The 30 s
+timeout (SIGTERM, then SIGKILL after 5 s) covers gh's zip fetch plus the
+per-job API fallback. Honest scope: these are CAPTURED-OUTPUT bounds only;
+gh's internal zip download and temp storage are not bounded by this tool.
+Very large logs legitimately time out as failures with the retained
+windows and stderr kept as diagnostics. Narrow first: `--log-failed` for
+failed-step logs only, or `-j <job id> --log` for one job's log. The
+dual-window shape may later be adopted elsewhere, but WITHOUT modifying
+`extensions/shared/bounded-spawn.ts`: the shared module keeps its single
+cap, and the log runner deliberately does NOT use `boundedExec` (different
+bounds) while reusing its `OUTPUT_CAP`/`KILL_ESCALATION_MS` constants.
+Non-log invocations keep the 15 s / 50 KiB contract unchanged.
+
 Failure contract mirrors `git_read` exactly, with `gh_read:`/`gh` prefixes:
 never throws; `ok` true only for exit 0 without timeout or spawn error;
 truncation noted inline; exit-code and timeout messages name what happened.
@@ -389,8 +469,9 @@ Settled in the grill-me review:
 
 ## Tests
 
-- `tests/gh-read-validate.test.mts`: argv construction for all seven
-  subcommands, value-flag bounds (`--limit`, `--state`, `--color`), the
+- `tests/gh-read-validate.test.mts`: argv construction for all nine
+  subcommands, value-flag bounds (`--limit`, `--state`, `--color`,
+  `--attempt`), the
   `-R` regex (accept/reject cases), `--json` field-shape, `--jq` and filter
   token rules, `auth status` happy paths with appended `--json hosts`,
   `auth status` rejections (`--json` with fields other than `hosts`,
@@ -400,12 +481,34 @@ Settled in the grill-me review:
   fail-fast/template rejections, tool-parameter discrimination (mixed shapes
   rejected both directions), and full API-operation validation (required
   fields, path injection inputs, line bounds, continuation shapes, advisory
-  identifier/type rules, schema-bypass coverage).
+  identifier/type rules, schema-bypass coverage). Run coverage: the `run
+  list` argv matrix (flags in input order, `--limit` bounds incl. attached
+  `-L50`, `-R`, `--json`/`--jq` rules, filter-token rejections, `--all`, no
+  positionals, `--`/unknown-flag rejections), `run view` (missing and
+  non-numeric positionals with the interactive-selection reason, `--attempt`
+  bounds, `--job` strict digits kept as a verbatim string beyond 2^53, log
+  and verbose booleans, `-R`+`--jq`), per-subcommand collision resolution
+  (`-w`/`-c`/`-a`), `run ls` rejection via `validateToolParams`, structured
+  `logMode` state (true only for validated `--log`/`--log-failed`; a `--jq`
+  value of `--log` stays false with the value intact), and `check
+  annotations` validation (missing/invalid `check_run_id` incl. strings
+  never coerced, unknown fields, `continuation` rejected, jq rules).
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout
   escalation, exit-code contract including `auth status` passthrough.
-  Reuse the git-read spawn test harness patterns.
+  Reuse the git-read spawn test harness patterns. Log runner coverage
+  through its own spawn seam (gate still arriving via the shared seam as
+  spawn 0): byte-identical under-cap output, exact 100 KiB boundary and
+  100 KiB + 1 with N = 1, dual-window content assertions with the middle
+  marker absent, 1-byte/7-byte/64 KiB chunked drains, multibyte characters
+  straddling window edges with no U+FFFD, concurrent 120 KiB stdout +
+  60 KiB stderr on a nonzero exit proving the 50 KiB stderr head is fully
+  retained beside both stdout windows and the exact omission notice,
+  timeout SIGTERM/SIGKILL escalation via an injected clock with reaping
+  parity, spawn errors, cancellation mid-stream and abort-before-spawn
+  (zero spawns), argv verbatim plus env/option parity, and the gate still
+  applying to `run view --log` even with `-R`.
 - `tests/gh-read-api-spawn.test.mts`: the API runner network-free through
   its spawn/clock seams: tool-authored argv and sanitized env, no git gate,
   header/body framing with redirect-block skipping, HTTP error passthrough,
@@ -425,7 +528,12 @@ Settled in the grill-me review:
   data retention, resume without re-resolution, mismatch rejection),
   advisories (direct GHSA, CVE defaults and types, empty results,
   continuation matching), jq applied once to the final batch, and the
-  50 KiB display cap with incomplete-prefix labeling.
+  50 KiB display cap with incomplete-prefix labeling. Check annotations:
+  0/99/100 items with the notice only at exactly 100, endpoint exactness
+  with one request even at 100 items, the notice surviving jq scalar and
+  jq-empty output and coexisting with 50 KiB display truncation, jq applied
+  exactly once, non-array bodies (object, string, invalid JSON) as errors,
+  and 404/403 passthrough with no retry.
 - `tests/gh-read-jq.test.mts`: REAL-jq coverage (required in CI): lexical
   security matrix (benign keywords, imports incl. interpolations, malformed
   constructs), preflight compile rejection, zero/multi-value output, env/
@@ -436,7 +544,14 @@ Settled in the grill-me review:
   validation errors with zero spawns, native path (gate + argv verbatim,
   details.subcommand), `pr checks` tool-authored JSON fields reaching the
   child, and the API path end to end (no worktree gate, pinned SHA,
-  partial-source isError with preserved data and continuation).
+  partial-source isError with preserved data and continuation). Run
+  coverage: `run list` end to end with argv verbatim, `run view --log`
+  routed to the log runner via the structured `logMode` state (the shared
+  seam captures only the rev-parse gate; the log seam captures the gh
+  child), `run view` without log flags keeping the shared runner, `check
+  annotations` end to end through the API seam with no git-gate spawn and
+  the tool-authored annotations argv, zero spawns on rejected run-family
+  params, and the three new schema literals plus the `check_run_id` field.
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 
@@ -444,6 +559,11 @@ Settled in the grill-me review:
 
 - A read-only agent (no `bash`) with `gh_read` but no other network tools
   can list a repo's open PRs, view a PR with comments, and view its diff.
+- The same agent can triage GitHub Actions runs: `run list` finds runs,
+  `run view` (numeric run id, no interactive selection) shows a summary or,
+  with `--log`/`--log-failed`, bounded first-and-last-50 KiB log output, and
+  `check annotations` fetches one check run's annotations with an explicit
+  incompleteness notice at a full page.
 - Non-allowlisted subcommands (including every write verb: `pr create`,
   `pr merge`, `issue close`, `gh api`), unknown flags, and unsafe values are
   rejected with clear errors naming the allowed set, verified by tests.
@@ -461,8 +581,11 @@ Settled in the grill-me review:
 - No write or write-adjacent commands, even "usually harmless" ones
   (`pr edit`, `issue comment` are out; so is `pr checkout`, which mutates
   the worktree).
-- No `gh api`, `gh search`, `gh release`, `gh run` for v1; expand the
-  allowlist only on demonstrated need, one design-review cycle per addition.
+- No `gh api` (direct, with caller flags), `gh search`, `gh release`; the
+  `gh run` surface stays limited to the read-only `run list`/`run view`
+  pair: `gh run watch`, `gh run rerun`, `gh run download`, and
+  `--exit-status` remain excluded. Expand the allowlist only on demonstrated
+  need, one design-review cycle per addition.
 - No URL arguments, no `--template`, no `--web` forms.
 - No token handling, masking, or account switching inside the tool. Keeping
   `--show-token` off the `auth status` allowlist is what keeps this non-goal
