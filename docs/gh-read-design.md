@@ -166,8 +166,8 @@ Value validation (native commands):
 
 ## GitHub API operations
 
-The five structured operations (`repo contents`, `repo tree`, `commit
-checks`, `advisory view`, `check annotations`) make read-only GET requests to api.github.com
+The six structured operations (`repo contents`, `repo tree`, `commit
+checks`, `advisory view`, `check annotations`, `repo metadata`) make read-only GET requests to api.github.com
 ONLY, always inside `gh`, with a fixed tool-authored argv (see "API
 runner"). They name an explicit repository, so they are exempt from the
 worktree gate and work anywhere. Validation is complete at runtime (calls
@@ -274,6 +274,25 @@ well as 50 KiB display truncation, because renderData carries notices
 through its jq path and renderResult renders notices in the metadata head,
 which is always complete. HTTP 404/403 outcomes pass through verbatim with
 no retry or error-shape matching.
+
+### repo metadata
+
+Required `repo`; optional `jq`. A single tool-authored GET
+`repos/{owner}/{repo}` returns the flat REST repository object (default
+branch, description, visibility, created/updated/pushed dates, web/clone/SSH
+URLs, license, primary language, archived/fork/template flags, topics,
+homepage, star/fork/issue counts, size) as one unpaged request: no ref
+resolution, no pagination, no Link parsing, no continuation, exactly ONE
+request ever. The body MUST be a JSON object (arrays, strings, and invalid
+JSON are errors). The response passes through verbatim, including the
+viewer-specific `.permissions` object (the authenticated token's admin/maintain/push/triage/pull
+facts), which metadata labels as token-dependent without rewriting anything.
+Narrow with jq (e.g. `.default_branch`). Settled (interview, 2026-10-21):
+this supersedes the original "via `gh repo view`" plan for the repository
+metadata follow-up, because `gh repo view --json` is GraphQL-backed with
+relationship collections (`issues`, `pullRequests`, `milestones`, ...) that
+would let non-metadata data through the door, and its text mode prints the
+README; the README stays covered by `repo contents` instead.
 
 ### API runner (api-spawn.ts)
 
@@ -492,7 +511,9 @@ Settled in the grill-me review:
   `logMode` state (true only for validated `--log`/`--log-failed`; a `--jq`
   value of `--log` stays false with the value intact), and `check
   annotations` validation (missing/invalid `check_run_id` incl. strings
-  never coerced, unknown fields, `continuation` rejected, jq rules).
+  never coerced, unknown fields, `continuation` rejected, jq rules), and
+  `repo metadata` validation (required repo, optional jq only, ref/path/
+  continuation rejected).
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout
@@ -533,7 +554,9 @@ Settled in the grill-me review:
   with one request even at 100 items, the notice surviving jq scalar and
   jq-empty output and coexisting with 50 KiB display truncation, jq applied
   exactly once, non-array bodies (object, string, invalid JSON) as errors,
-  and 404/403 passthrough with no retry.
+  and 404/403 passthrough with no retry. Repo metadata: one unpaged request
+  with the flat object passed through verbatim, jq applied once, non-object
+  bodies (array, string, invalid JSON) as errors, and 404/403 passthrough.
 - `tests/gh-read-jq.test.mts`: REAL-jq coverage (required in CI): lexical
   security matrix (benign keywords, imports incl. interpolations, malformed
   constructs), preflight compile rejection, zero/multi-value output, env/
@@ -552,6 +575,8 @@ Settled in the grill-me review:
   annotations` end to end through the API seam with no git-gate spawn and
   the tool-authored annotations argv, zero spawns on rejected run-family
   params, and the three new schema literals plus the `check_run_id` field.
+  Repo metadata end to end: tool-authored `repos/{owner}/{repo}` GET with no
+  git-gate spawn and the full object (viewer permissions included) as data.
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 

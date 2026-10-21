@@ -5,7 +5,8 @@
  * docs/gh-read-design.md: a flat native subcommand union, per-subcommand
  * flag allowlists, value validators, and final argv construction, plus
  * structured validation for the narrowly scoped GitHub API operations
- * (repo contents, repo tree, commit checks, advisory view, check annotations).
+ * (repo contents, repo tree, commit checks, advisory view, check annotations,
+ * repo metadata).
  *
  * This module is pure (no pi imports) so the argv layout can be unit-tested
  * directly; spawn.ts consumes `ValidInvocation.argv` as a cross-step contract.
@@ -462,11 +463,11 @@ function appendToolAuthoredTokens(subcommand: GhSubcommand, argv: string[]): str
 
 // ── Structured GitHub API operations ────────────────────────────────────────
 //
-// The five API operations use structured parameters (never the legacy args
+// The six API operations use structured parameters (never the legacy args
 // array, never gh api with caller flags). They target github.com only and
 // are exempt from the worktree gate; api-spawn.ts owns the transport.
 
-export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations"] as const;
+export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata"] as const;
 
 export type ApiOperation = (typeof API_OPERATIONS)[number];
 
@@ -495,6 +496,7 @@ const OPERATION_FIELDS: Record<ApiOperation, ReadonlySet<string>> = {
 	"commit checks": new Set(["repo", "ref", "jq", "continuation"]),
 	"advisory view": new Set(["id", "type", "jq", "continuation"]),
 	"check annotations": new Set(["repo", "check_run_id", "jq"]),
+	"repo metadata": new Set(["repo", "jq"]),
 };
 
 export interface ValidApiInvocation {

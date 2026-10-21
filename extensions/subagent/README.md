@@ -30,10 +30,11 @@ streaming, usage display, security model).
   native argv commands (run logs are bounded to the first and last 50 KiB of
   output), plus `repo contents`/`repo tree` (pinned file and tree reads),
   `commit checks` (check runs + legacy statuses with bounded continuation),
-  `advisory view` (exact CVE/GHSA lookup), and `check annotations` (one
-  check run's annotations) as structured API operations; all network reads
-  (guard class `remote-read`), and the API operations work outside a git
-  worktree.
+  `advisory view` (exact CVE/GHSA lookup), `check annotations` (one check
+  run's annotations), and `repo metadata` (flat repository facts: default
+  branch, description, visibility, URLs) as structured API operations; all
+  network reads (guard class `remote-read`), and the API operations work
+  outside a git worktree.
 - **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and
   `/implement-and-review` are renamed to `/scout-plan-implement`,
   `/scout-plan`, and `/implement-review`, so each name lists its chain's stages.

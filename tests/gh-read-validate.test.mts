@@ -807,3 +807,21 @@ test("mixed shapes: check annotations rejects args arrays; native rejects struct
 	assert.equal(nativeWithFields.ok, false);
 	if (!nativeWithFields.ok) assert.ok(nativeWithFields.reason.includes("unknown field 'check_run_id'"));
 });
+
+// ── repo metadata (API operation) validation ─────────────────────────────────
+
+test("repo metadata: required repo, optional jq, no other fields", () => {
+	assert.deepEqual(apiOk({ subcommand: "repo metadata", repo: "owner/repo" }), {
+		ok: true,
+		op: "repo metadata",
+		repo: "owner/repo",
+	});
+	assert.equal(apiOk({ subcommand: "repo metadata", repo: "o/r", jq: ".default_branch" }).jq, ".default_branch");
+	apiRejects({ subcommand: "repo metadata" }, ["repo is required"]);
+	apiRejects({ subcommand: "repo metadata", repo: "github.com/o/r" }, ["exactly OWNER/REPO on github.com"]);
+	apiRejects({ subcommand: "repo metadata", repo: "o/r", ref: "main" }, ["unknown field 'ref'"]);
+	apiRejects({ subcommand: "repo metadata", repo: "o/r", path: "" }, ["unknown field 'path'"]);
+	apiRejects({ subcommand: "repo metadata", repo: "o/r", continuation: "abc" }, ["unknown field 'continuation'"]);
+	apiRejects({ subcommand: "repo metadata", repo: "o/r", jq: "" }, ["non-empty expression"]);
+	apiRejects({ subcommand: "repo metadata", repo: "o/r", jq: ".a\u0000b" }, ["control characters"]);
+});

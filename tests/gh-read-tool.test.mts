@@ -382,3 +382,33 @@ test("execute: rejected run-family params fail closed with zero spawns", async (
 	setLogSpawnOverride(null);
 	setApiSpawnOverride(null);
 });
+
+test("execute api repo metadata: tool-authored repos GET, no git gate, full object as data", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setSpawnOverride(() => {
+		throw new Error("no git gate may spawn on the API path");
+	});
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => {
+			const body = JSON.stringify({ default_branch: "main", visibility: "public", permissions: { push: true } });
+			child.stdout.emit("data", Buffer.from(`HTTP/1.1 200 OK\r\n\r\n${body}`));
+			child.emit("close", 0, null);
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "repo metadata", repo: "owner/repo" }, undefined, null, { cwd: "/not-a-worktree" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(argsList.length, 1);
+	const argv = argsList[0]!;
+	assert.equal(argv[0], "api");
+	assert.equal(argv[argv.length - 1], "repos/owner/repo");
+	assert.equal(result.details["subcommand"], "repo metadata");
+	assert.ok(result.content[0].text.includes('"default_branch":"main"'));
+	assert.ok(result.content[0].text.includes('"permissions":{"push":true}'), "viewer permissions pass through");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});

@@ -711,3 +711,79 @@ test("check annotations: HTTP 404 and 403 outcomes pass through verbatim with no
 	assert.ok(forbiddenResult.content[0].text.includes("HTTP 403"));
 	assert.equal(forbidden.requests.length, 1);
 });
+
+// ── Repository metadata ──────────────────────────────────────────────────────
+
+test("repo metadata: one request, full flat object passed through verbatim", async () => {
+	const repoObject = {
+		default_branch: "main",
+		description: "d",
+		visibility: "public",
+		pushed_at: "2026-10-21T20:09:23Z",
+		html_url: "https://github.com/o/r",
+		clone_url: "https://github.com/o/r.git",
+		ssh_url: "git@github.com:o/r.git",
+		license: { spdx_id: "MIT" },
+		language: "TypeScript",
+		archived: false,
+		fork: false,
+		is_template: false,
+		topics: [],
+		permissions: { admin: true, push: true, pull: true },
+	};
+	const apiRequester = requester([() => response(JSON.stringify(repoObject))]);
+	const result = await run({ subcommand: "repo metadata", repo: "owner/repo" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.deepEqual(apiRequester.requests, ["repos/owner/repo"], "exactly one unpaged request");
+	const dataLine = result.content[0].text.split("data:\n")[1]!;
+	assert.deepEqual(JSON.parse(dataLine.trimEnd()), repoObject, "response passes through unmodified");
+	assert.ok(!result.details["continuation"], "no continuation machinery");
+	assert.ok(result.content[0].text.includes("permissions reflect the authenticated token"), "viewer-specific fact labeled");
+});
+
+test("repo metadata: jq narrows the object; applied exactly once", async () => {
+	const apiRequester = requester([() => response(JSON.stringify({ default_branch: "main", description: "d" }))]);
+	let jqCalls = 0;
+	const result = await run({ subcommand: "repo metadata", repo: "o/r", jq: ".default_branch" }, apiRequester, {
+		jqRun: async (expression, document) => {
+			assert.equal(expression, ".default_branch");
+			JSON.parse(document);
+			jqCalls += 1;
+			return { kind: "result", output: '"main"', outputTruncated: false, outputBytes: 6 };
+		},
+	});
+	assert.equal(result.isError, undefined);
+	assert.equal(jqCalls, 1);
+	assert.ok(result.content[0].text.trimEnd().endsWith('"main"'));
+});
+
+test("repo metadata: non-object bodies (array, string, invalid JSON) are errors", async () => {
+	const asArray = requester([() => response(JSON.stringify([{ id: 1 }]))]);
+	const arrayResult = await run({ subcommand: "repo metadata", repo: "o/r" }, asArray);
+	assert.equal(arrayResult.isError, true);
+	assert.ok(arrayResult.content[0].text.includes("response body was not a JSON object"));
+
+	const asString = requester([() => response('"just a string"')]);
+	const stringResult = await run({ subcommand: "repo metadata", repo: "o/r" }, asString);
+	assert.equal(stringResult.isError, true);
+	assert.ok(stringResult.content[0].text.includes("not a JSON object"));
+
+	const asGarbage = requester([() => response("<html>gateway error</html>")]);
+	const garbageResult = await run({ subcommand: "repo metadata", repo: "o/r" }, asGarbage);
+	assert.equal(garbageResult.isError, true);
+	assert.ok(garbageResult.content[0].text.includes("not valid JSON"));
+});
+
+test("repo metadata: HTTP 404 and 403 pass through verbatim with no retry", async () => {
+	const notFound = requester([() => error("Not Found", 404)]);
+	const notFoundResult = await run({ subcommand: "repo metadata", repo: "o/missing" }, notFound);
+	assert.equal(notFoundResult.isError, true);
+	assert.ok(notFoundResult.content[0].text.includes("metadata read failed: Not Found (HTTP 404)"), notFoundResult.content[0].text);
+	assert.equal(notFound.requests.length, 1);
+
+	const forbidden = requester([() => error("Forbidden", 403)]);
+	const forbiddenResult = await run({ subcommand: "repo metadata", repo: "o/private" }, forbidden);
+	assert.equal(forbiddenResult.isError, true);
+	assert.ok(forbiddenResult.content[0].text.includes("HTTP 403"));
+	assert.equal(forbidden.requests.length, 1);
+});

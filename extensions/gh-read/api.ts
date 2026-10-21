@@ -1,7 +1,8 @@
 /**
  * gh-read API operations: pinned repository contents and trees, combined
- * commit checks, exact advisory lookup, and check-run annotations. Operation
- * orchestration and result rendering live together in this module.
+ * commit checks, exact advisory lookup, check-run annotations, and repository
+ * metadata. Operation orchestration and result rendering live together in
+ * this module.
  *
  * Contract highlights (docs/gh-read-design.md, "GitHub API operations"):
  * - Omitted refs resolve through repository default-branch metadata, then
@@ -1084,6 +1085,34 @@ async function opCheckAnnotations(invocation: ValidApiInvocation, requester: Api
 	return await renderData(invocation, summary, metadata, parsed, notices, false, requester, deps);
 }
 
+// ── Operation: repository metadata ────────────────────────────────────────
+
+/**
+ * One tool-authored GET of the flat REST repository object: no ref
+ * resolution, no pagination, no Link parsing, no continuation, exactly ONE
+ * request ever. The response passes through verbatim (viewer-specific
+ * .permissions included and labeled in metadata, never rewritten).
+ */
+async function opRepoMetadata(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
+	const repo = invocation.repo!;
+	const summary = `gh_read api: repo metadata ${repo}`;
+	const metadata: Array<[string, string | number | boolean | null]> = [
+		["repo", repo],
+		["endpoint", "repos (single object; no pagination)"],
+		["viewer_specific", "permissions reflect the authenticated token"],
+	];
+
+	const outcome = await requester.request(`repos/${splitRepo(repo)[0]}/${splitRepo(repo)[1]}`);
+	if (!isResponse(outcome)) {
+		return renderResult(summary, metadata, "", { isError: true, notices: [describeRequestFailure("metadata read", outcome)] });
+	}
+	const body = parseJsonObject(outcome.body);
+	if (typeof body === "string") {
+		return renderResult(summary, metadata, "", { isError: true, notices: [body] });
+	}
+	return await renderData(invocation, summary, metadata, body, [], false, requester, deps);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export async function runApiOperation(
@@ -1113,5 +1142,7 @@ async function dispatchOperation(
 			return await opAdvisoryView(invocation, requester, deps);
 		case "check annotations":
 			return await opCheckAnnotations(invocation, requester, deps);
+		case "repo metadata":
+			return await opRepoMetadata(invocation, requester, deps);
 	}
 }

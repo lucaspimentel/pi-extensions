@@ -6,7 +6,8 @@
  * view/list, auth status, run list/view) as an argv-array child process,
  * never through a shell, plus five narrowly scoped GitHub API operations
  * (repo contents, repo tree, commit checks, advisory view, check
- * annotations) with tool-authored, encoded requests against github.com only.
+ * annotations, repo metadata) with tool-authored, encoded requests against
+ * github.com only.
  *
  * Argument validation lives in validate.ts; the bounded, sanitized spawn
  * layer for native commands lives in spawn.ts; log-carrying invocations
@@ -45,6 +46,7 @@ const SUBCOMMAND_SCHEMAS = [
 	Type.Literal("commit checks"),
 	Type.Literal("advisory view"),
 	Type.Literal("check annotations"),
+	Type.Literal("repo metadata"),
 ] as const;
 
 const ghReadParams = Type.Object({
@@ -97,7 +99,7 @@ interface GhReadDetails {
 }
 
 const NATIVE_DESCRIPTION =
-	"Run a read-only gh command (pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view) for the current repository (or anywhere, for `auth status`), or a narrowly scoped GitHub API operation: 'repo contents' (decoded file text or directory entries at a pinned ref), 'repo tree' (recursive or shallow tree), 'commit checks' (check runs plus legacy statuses for a commit), 'advisory view' (exact CVE/GHSA lookup), or 'check annotations' (annotations of one check run). Native commands take flags in args; API operations take structured fields (repo, path, ref, jq, ...) and work outside a git worktree. Only allowlisted flags and fields are accepted; output is capped and nothing mutates.";
+	"Run a read-only gh command (pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view) for the current repository (or anywhere, for `auth status`), or a narrowly scoped GitHub API operation: 'repo contents' (decoded file text or directory entries at a pinned ref), 'repo tree' (recursive or shallow tree), 'commit checks' (check runs plus legacy statuses for a commit), 'advisory view' (exact CVE/GHSA lookup), or 'check annotations' (annotations of one check run), or 'repo metadata' (default branch, description, visibility, URLs, and other flat repository facts). Native commands take flags in args; API operations take structured fields (repo, path, ref, jq, ...) and work outside a git worktree. Only allowlisted flags and fields are accepted; output is capped and nothing mutates.";
 
 export default function ghReadExtension(pi: ExtensionAPI): void {
 	pi.registerTool<typeof ghReadParams, GhReadDetails>({
@@ -105,7 +107,7 @@ export default function ghReadExtension(pi: ExtensionAPI): void {
 		label: "GitHub Read",
 		description: NATIVE_DESCRIPTION,
 		promptSnippet:
-			"Run read-only gh commands (pr/issue view, list, pr diff, pr checks, auth status, GitHub Actions run list/view with bounded log output) and pinned GitHub API reads (repo contents/tree, commit checks, advisories, check annotations)",
+			"Run read-only gh commands (pr/issue view, list, pr diff, pr checks, auth status, GitHub Actions run list/view with bounded log output) and pinned GitHub API reads (repo contents/tree, commit checks, advisories, check annotations, repo metadata)",
 		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 		promptGuidelines: [
 			"Prefer gh_read over asking the user to paste PR descriptions, review comments, or issue bodies; it runs allowlisted read-only gh in the session's repository.",
@@ -115,6 +117,7 @@ export default function ghReadExtension(pi: ExtensionAPI): void {
 			"Use API operations for pinned, cross-repository reads outside a worktree: 'repo contents' needs repo + path (empty path = root; optional ref, line range, jq); 'repo tree' needs repo (optional ref, subtree path, recursive); 'commit checks' needs repo + ref and returns check runs plus legacy statuses with bounded continuation for more pages; 'advisory view' needs an exact id (CVE-... or GHSA-...).",
 			"Run triage: use 'run list' with -b/--branch, -c/--commit, -s/--status, or --limit to find runs; 'run view' requires a numeric run id (interactive selection is unsupported); use --log-failed for failed-step logs or -j <job id> --log for one job's logs. Log output is bounded to the first and last 50 KiB; the middle is omitted and noted.",
 			"Annotations: 'check annotations' needs repo + check_run_id; a single page of at most 100 annotations is fetched, and results may be incomplete at exactly 100 items.",
+			"Repository facts: 'repo metadata' needs only repo and returns the flat REST repository object (default branch, description, visibility, dates, URLs, license, language, archived/fork/template flags, topics, counts, and the authenticated token's permissions) as one unpaged request; narrow with jq, e.g. .default_branch.",
 			"API operations report a resolved commit SHA and source completeness; pass the returned continuation token back with the same repo/ref (or id) to fetch remaining pages.",
 		],
 		parameters: ghReadParams,

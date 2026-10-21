@@ -32,7 +32,8 @@ Expand the allowlist in `extensions/gh-read/` and update [`docs/gh-read-design.m
 - [ ] Inline PR review comments, reviews, and replies via scoped API reads. `pr view --comments` does not cover inline discussions; resolved/outdated thread state would require a narrowly scoped, tool-authored GraphQL query.
 - [ ] Commit details and base/head comparisons without fetching locally.
 - [ ] Releases via `gh release list` and `gh release view`, plus tag listing: versions, release notes, and asset metadata only.
-- [ ] Repository metadata via `gh repo view`: default branch, description, visibility, and URLs.
+- [x] Repository metadata via `gh repo view`: default branch, description, visibility, and URLs.
+  - Done (2026-10-21, superseded by interview decision): implemented as the structured `repo metadata` API operation instead of the `gh repo view` command, because gh's `--json` field list is GraphQL-backed with relationship collections (`issues`, `pullRequests`, `milestones`, ...) that would let non-metadata data through the metadata door, and its text mode prints the README. One tool-authored REST GET `repos/{owner}/{repo}` returns the flat repository object (default branch, description, visibility, dates, URLs, license, language, archived/fork/template flags, topics, homepage, counts, size) as one unpaged request; the response passes through verbatim including the viewer-specific `.permissions` object, labeled in metadata as token-dependent; optional jq narrows; the body must be a JSON object; 404/403 pass through with no retry; the README stays covered by `repo contents`.
 - [ ] Search via `gh search code`, `gh search prs`, `gh search issues`, and `gh search repos`.
 
 ### Safety and validation (follow-up operations)
