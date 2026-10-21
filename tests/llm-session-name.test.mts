@@ -918,7 +918,15 @@ try {
 	assert.ok(tabHandlers.session_info_changed && tabHandlers.session_start);
 
 	const readLog = () => {
-		const content = readFileSync(logFile, "utf8").trim();
+		// The fake herdr binary creates the log on its first invocation, so an
+		// early poll can race the exec: a missing file means no calls yet.
+		let content: string;
+		try {
+			content = readFileSync(logFile, "utf8").trim();
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			return [];
+		}
 		return content ? content.split("\n") : [];
 	};
 	const waitForLog = async (pred: (lines: string[]) => boolean, desc: string) => {
