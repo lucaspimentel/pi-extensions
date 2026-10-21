@@ -1,0 +1,604 @@
+// Tests for gh-read API operation orchestration (extensions/gh-read/api.ts).
+// Network-free: the requester seam is stubbed with scripted GitHub-shaped
+// responses, so no gh child or network is involved. Real-jq filtering has
+// its own suite (tests/gh-read-jq.test.mts); jq here uses the injected seam.
+//
+// Design: docs/gh-read-design.md ("GitHub API operations").
+//
+// Run: node --test tests/gh-read-api.test.mts
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import {
+	API_DISPLAY_CAP,
+	MAX_PAGES_PER_SOURCE,
+	PAGE_SIZE,
+	type ApiOperationDeps,
+	type ApiToolResult,
+	runApiOperation,
+} from "../extensions/gh-read/api.ts";
+import type { ApiRequester, ApiRequestOutcome, GhApiResponse } from "../extensions/gh-read/api-spawn.ts";
+import { validateToolParams } from "../extensions/gh-read/validate.ts";
+
+// ── Harness ──────────────────────────────────────────────────────────────────
+
+function response(body: string, headers = ""): Extract<ApiRequestOutcome, { kind: "response" }> {
+	return {
+		kind: "response",
+		httpStatus: 200,
+		headers: `HTTP/1.1 200 OK\r\n${headers}\r\n`,
+		body,
+		bodyBytes: Buffer.byteLength(body, "utf8"),
+	} satisfies GhApiResponse;
+}
+
+function error(reason: string, httpStatus?: number): ApiRequestOutcome {
+	return { kind: "error", reason, ...(httpStatus !== undefined ? { httpStatus } : {}), interrupted: httpStatus !== undefined };
+}
+
+interface ScriptedRequester extends ApiRequester {
+	requests: string[];
+	script: Array<(pathAndQuery: string) => ApiRequestOutcome>;
+}
+
+function requester(script: Array<(pathAndQuery: string) => ApiRequestOutcome>): ScriptedRequester {
+	const self: ScriptedRequester = {
+		requests: [],
+		script,
+		async request(pathAndQuery: string) {
+			self.requests.push(pathAndQuery);
+			const next = self.script.shift();
+			if (next === undefined) throw new Error(`unexpected request: ${pathAndQuery}`);
+			return next(pathAndQuery);
+		},
+		capturedBytes: () => 0,
+		budgetExhausted: () => false,
+		deadline: () => Date.now() + 30_000,
+	};
+	return self;
+}
+
+function jsonScript(entries: Array<[string, unknown]>, headers = ""): ScriptedRequester {
+	return requester(entries.map(([, value]) => () => response(JSON.stringify(value), headers)));
+}
+
+async function run(params: Record<string, unknown>, apiRequester: ApiRequester, deps?: Omit<ApiOperationDeps, "requester">): Promise<ApiToolResult> {
+	const checked = validateToolParams(params);
+	if (!checked.ok || checked.kind !== "api") throw new Error(`unexpected validation outcome: ${JSON.stringify(checked)}`);
+	return await runApiOperation(checked.api, "/repo", undefined, { requester: apiRequester, ...deps });
+}
+
+const SHA = "a".repeat(40);
+const SHA2 = "b".repeat(40);
+
+function linkHeader(nextPage: number, endpoint: string, query: string): string {
+	return `Link: <https://api.github.com/${endpoint}?${query}&page=${nextPage}>; rel="next"\r\n`;
+}
+
+// ── Contents: ref resolution and pinning ─────────────────────────────────────
+
+test("contents: omitted ref resolves default branch then a full SHA, and pins the read", async () => {
+	const apiRequester = jsonScript([
+		["repos/o/r", { default_branch: "main" }],
+		["commits", { sha: SHA }],
+		["contents", { type: "file", path: "README.md", encoding: "base64", size: 5, content: Buffer.from("hello").toString("base64") }],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "README.md" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.deepEqual(apiRequester.requests, [
+		"repos/o/r",
+		"repos/o/r/commits/main",
+		`repos/o/r/contents/README.md?ref=${SHA}`,
+	]);
+	assert.ok(result.content[0].text.includes("target: default branch 'main'"));
+	assert.ok(result.content[0].text.includes(`resolved_sha: ${SHA}`));
+	assert.ok(result.content[0].text.includes("hello"));
+});
+
+test("contents: explicit ref resolves once; complete lowercase SHAs skip resolution", async () => {
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", { type: "file", encoding: "base64", size: 1, content: Buffer.from("x").toString("base64") }],
+	]);
+	await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "v1.2.3" }, apiRequester);
+	assert.deepEqual(apiRequester.requests, [
+		"repos/o/r/commits/v1.2.3",
+		`repos/o/r/contents/f.txt?ref=${SHA}`,
+	]);
+
+	const direct = jsonScript([
+		["contents", { type: "file", encoding: "base64", size: 1, content: Buffer.from("x").toString("base64") }],
+	]);
+	await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: SHA }, direct);
+	assert.deepEqual(direct.requests, [`repos/o/r/contents/f.txt?ref=${SHA}`]);
+});
+
+test("contents: root path hits the bare contents endpoint and returns a directory array", async () => {
+	const entries = [{ type: "file", path: "a.txt" }, { type: "dir", path: "src" }];
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", entries],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "", ref: "main" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.equal(apiRequester.requests[1], `repos/o/r/contents?ref=${SHA}`);
+	assert.ok(result.content[0].text.includes(JSON.stringify(entries)));
+});
+
+// ── Contents: text, ranges, and unsupported content ─────────────────────────
+
+function fileEntry(content: string, size?: number): Record<string, unknown> {
+	return {
+		type: "file",
+		path: "f.txt",
+		encoding: "base64",
+		size: size ?? Buffer.byteLength(content, "utf8"),
+		content: Buffer.from(content, "utf8").toString("base64"),
+	};
+}
+
+test("contents: line ranges are 1-based inclusive, preserve CRLF and trailing-newline behavior", async () => {
+	// "l1\r\nl2\r\nl3\n": splitLines -> ["l1\r\n","l2\r\n","l3\n"]; range 2..3.
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", fileEntry("l1\r\nl2\r\nl3\n")],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main", start_line: 2, end_line: 3 }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.ok(result.content[0].text.endsWith("l2\r\nl3\n"));
+	assert.ok(result.content[0].text.includes("line_range: 2-3"));
+});
+
+test("contents: end alone means 1..end; omitted end means EOF; start past EOF yields empty text", async () => {
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", fileEntry("a\nb\nc\n")],
+	]);
+	const head = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main", end_line: 2 }, apiRequester);
+	assert.ok(head.content[0].text.includes("a\nb\n"));
+
+	const eof = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", fileEntry("a\nb\nc\n")],
+	]);
+	const tail = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main", start_line: 2 }, eof);
+	assert.ok(tail.content[0].text.includes("b\nc\n"));
+
+	const past = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", fileEntry("a\n")],
+	]);
+	const empty = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main", start_line: 5 }, past);
+	assert.equal(empty.isError, undefined);
+});
+
+test("contents: binary, non-UTF-8, and oversized content return metadata with reasons, not errors", async () => {
+	// NUL bytes: binary heuristic.
+	const binary = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", { type: "file", encoding: "base64", size: 4, content: Buffer.from([0x61, 0x00, 0x62, 0x63]).toString("base64") }],
+	]);
+	const binaryResult = await run({ subcommand: "repo contents", repo: "o/r", path: "f.bin", ref: "main" }, binary);
+	assert.equal(binaryResult.isError, undefined);
+	assert.ok(binaryResult.content[0].text.includes("binary content"));
+	assert.ok(binaryResult.content[0].text.includes("NUL"));
+
+	// Invalid UTF-8.
+	const bad = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", { type: "file", encoding: "base64", size: 2, content: Buffer.from([0xff, 0xfe]).toString("base64") }],
+	]);
+	const badResult = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main" }, bad);
+	assert.equal(badResult.isError, undefined);
+	assert.ok(badResult.content[0].text.includes("not valid UTF-8"));
+
+	// GitHub serves large files without inline content.
+	const big = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", { type: "file", encoding: "base64", size: 5 * 1024 * 1024, content: "" }],
+	]);
+	const bigResult = await run({ subcommand: "repo contents", repo: "o/r", path: "f.bin", ref: "main" }, big);
+	assert.equal(bigResult.isError, undefined);
+	assert.ok(bigResult.content[0].text.includes("oversized file"));
+
+	// Malformed base64 from upstream is an error.
+	const corrupt = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", { type: "file", encoding: "base64", size: 4, content: "!!!not-base64!!!" }],
+	]);
+	const corruptResult = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main" }, corrupt);
+	assert.equal(corruptResult.isError, true);
+});
+
+test("contents: 1000-entry directories are flagged possibly incomplete; ranges/jq on directories rejected", async () => {
+	const entries = Array.from({ length: 1000 }, (_, i) => ({ type: "file", path: `f${i}.txt` }));
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", entries],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "", ref: "main" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.ok(result.content[0].text.includes("may be incomplete"));
+	assert.ok(result.content[0].text.includes("tree read"));
+
+	const range = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", entries],
+	]);
+	const ranged = await run({ subcommand: "repo contents", repo: "o/r", path: "", ref: "main", start_line: 1 }, range);
+	assert.equal(ranged.isError, true);
+	assert.ok(ranged.content[0].text.includes("line ranges apply only to text files"));
+
+	const jqDir = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", entries],
+	]);
+	const jqResult = await run({ subcommand: "repo contents", repo: "o/r", path: "", ref: "main", jq: "length" }, jqDir, {
+		jqRun: async () => ({ kind: "result", output: "1000", outputTruncated: false, outputBytes: 4 }),
+	});
+	assert.equal(jqResult.isError, undefined);
+	assert.ok(jqResult.content[0].text.trimEnd().endsWith("1000"));
+});
+
+test("contents: jq on file text is rejected with an explicit reason", async () => {
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", fileEntry("text")],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main", jq: "." }, apiRequester);
+	assert.equal(result.isError, true);
+	assert.ok(result.content[0].text.includes("jq is supported only for directory JSON"));
+});
+
+// ── Contents: symlinks and submodules ───────────────────────────────────────
+
+test("contents: in-repository symlink to an ordinary file is followed exactly one level", async () => {
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", { type: "symlink", path: "link", encoding: "base64", size: 6, content: Buffer.from("docs/f.txt").toString("base64") }],
+		["contents", fileEntry("real content")],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "link", ref: "main" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.equal(apiRequester.requests[2], `repos/o/r/contents/docs/f.txt?ref=${SHA}`);
+	assert.ok(result.content[0].text.includes("real content"));
+	assert.ok(result.content[0].text.includes("followed_symlink: docs/f.txt"));
+});
+
+test("contents: broken or non-file symlink targets return metadata without following", async () => {
+	// Broken: 404 on the target.
+	const broken = requester([
+		() => response(JSON.stringify({ sha: SHA })),
+		() => response(JSON.stringify({ type: "symlink", path: "link", encoding: "base64", content: Buffer.from("gone.txt").toString("base64") })),
+		() => error("Not Found", 404),
+	]);
+	const brokenResult = await run({ subcommand: "repo contents", repo: "o/r", path: "link", ref: "main" }, broken);
+	assert.equal(brokenResult.isError, undefined);
+	assert.ok(brokenResult.content[0].text.includes("not followed"));
+
+	// Target is a directory.
+	const dir = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", { type: "symlink", path: "link", encoding: "base64", content: Buffer.from("src").toString("base64") }],
+		["contents", [{ type: "file", path: "src/a" }]],
+	]);
+	const dirResult = await run({ subcommand: "repo contents", repo: "o/r", path: "link", ref: "main" }, dir);
+	assert.equal(dirResult.isError, undefined);
+	assert.ok(dirResult.content[0].text.includes("is not an ordinary file"));
+
+	// Target escapes the repository root: no request at all.
+	const escape = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", { type: "symlink", path: "link", encoding: "base64", content: Buffer.from("../../../etc/passwd").toString("base64") }],
+	]);
+	const escapeResult = await run({ subcommand: "repo contents", repo: "o/r", path: "link", ref: "main" }, escape);
+	assert.equal(escapeResult.isError, undefined);
+	assert.ok(escapeResult.content[0].text.includes("escapes the repository root"));
+	assert.equal(escape.requests.length, 2, "no target request for a root-escaping symlink");
+});
+
+test("contents: submodule entries return metadata and are never traversed", async () => {
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", { type: "commit", path: "vendor/lib", sha: SHA2, size: 0 }],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "vendor/lib", ref: "main" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.ok(result.content[0].text.includes("submodule"));
+	assert.ok(result.content[0].text.includes("never traversed"));
+});
+
+// ── Trees ────────────────────────────────────────────────────────────────────
+
+test("tree: recursive default includes recursive=1; shallow omits the parameter entirely", async () => {
+	const treeBody = { sha: "t".repeat(40), tree: [{ path: "a", type: "blob", mode: "100644", sha: SHA2 }], truncated: false };
+
+	const recursive = jsonScript([
+		["commits", { sha: SHA }],
+		["git/commits", { tree: { sha: "t".repeat(40) } }],
+		["git/trees", treeBody],
+	]);
+	const recursiveResult = await run({ subcommand: "repo tree", repo: "o/r", ref: "main" }, recursive);
+	assert.equal(recursiveResult.isError, undefined);
+	assert.ok(recursive.requests[2]!.startsWith(`repos/o/r/git/trees/${"t".repeat(40)}?recursive=1`));
+	assert.ok(recursiveResult.content[0].text.includes('"mode":"100644"'));
+	assert.ok(recursiveResult.content[0].text.includes("recursive: true"));
+
+	const shallow = jsonScript([
+		["commits", { sha: SHA }],
+		["git/commits", { tree: { sha: "t".repeat(40) } }],
+		["git/trees", treeBody],
+	]);
+	const shallowResult = await run({ subcommand: "repo tree", repo: "o/r", ref: "main", recursive: false }, shallow);
+	assert.equal(shallowResult.isError, undefined);
+	assert.ok(!shallow.requests[2]!.includes("recursive"), "shallow mode omits the recursive query parameter");
+	assert.ok(shallow.requests[2]!.endsWith(`repos/o/r/git/trees/${"t".repeat(40)}`));
+	assert.ok(shallowResult.content[0].text.includes("recursive: false"));
+});
+
+test("tree: subtree filter keeps exact and child entries; upstream truncation is preserved, not repaired", async () => {
+	const treeBody = {
+		sha: "t".repeat(40),
+		truncated: true,
+		tree: [
+			{ path: "src", type: "tree" },
+			{ path: "src/a.ts", type: "blob" },
+			{ path: "srcx.ts", type: "blob" },
+			{ path: "docs/b.md", type: "blob" },
+		],
+	};
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["git/commits", { tree: { sha: "t".repeat(40) } }],
+		["git/trees", treeBody],
+	]);
+	const result = await run({ subcommand: "repo tree", repo: "o/r", ref: "main", path: "src" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.ok(result.content[0].text.includes('"src/a.ts"'));
+	assert.ok(!result.content[0].text.includes("srcx.ts"));
+	assert.ok(!result.content[0].text.includes("docs/b.md"));
+	assert.ok(result.content[0].text.includes("upstream_truncated: true"));
+	assert.ok(result.content[0].text.includes("does not repair truncation"));
+});
+
+// ── Combined commit checks ───────────────────────────────────────────────────
+
+const CHECK_RUN = { id: 1, name: "build", status: "completed", conclusion: "success" };
+const STATUS = { context: "ci/legacy", state: "success" };
+
+test("commit checks: both sources fetched against the pinned SHA; statuses deduped per context", async () => {
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["check-runs", { check_runs: [CHECK_RUN], total_count: 1 }],
+		["status", { state: "success", statuses: [{ ...STATUS }, { ...STATUS, state: "pending" }] }],
+	]);
+	const result = await run({ subcommand: "commit checks", repo: "o/r", ref: "main" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.ok(apiRequester.requests[1]!.startsWith(`repos/o/r/commits/${SHA}/check-runs?filter=latest&per_page=${PAGE_SIZE}`));
+	assert.ok(apiRequester.requests[2]!.startsWith(`repos/o/r/commits/${SHA}/status?per_page=${PAGE_SIZE}`));
+	const dataLine = result.content[0].text.split("data:\n")[1]!;
+	const data = JSON.parse(dataLine.trimEnd()) as { check_runs: unknown[]; statuses: Array<Record<string, unknown>> };
+	assert.equal(data.check_runs.length, 1);
+	assert.equal(data.statuses.length, 1, "duplicate contexts collapse to the newest entry");
+	assert.equal(data.statuses[0]!.state, "success");
+	assert.ok(result.content[0].text.includes("not a transactional snapshot"));
+});
+
+test("commit checks: valid Link headers auto-page sequentially and reconstruct requests internally", async () => {
+	const script = requester([
+		() => response(JSON.stringify({ check_runs: [CHECK_RUN] }), linkHeader(2, `repos/o/r/commits/${SHA}/check-runs`, `filter=latest&per_page=${PAGE_SIZE}`)),
+		() => response(JSON.stringify({ check_runs: [{ ...CHECK_RUN, id: 2 }] })),
+		() => response(JSON.stringify({ statuses: [STATUS] })),
+	]);
+	const result = await run({ subcommand: "commit checks", repo: "o/r", ref: SHA }, script);
+	assert.equal(result.isError, undefined);
+	assert.equal(script.requests[0]!.endsWith(`page=1`), true);
+	assert.equal(script.requests[1]!.endsWith(`page=2`), true);
+	assert.ok(script.requests[2]!.includes("/status?"), "statuses source fetched after check runs");
+	const dataLine = result.content[0].text.split("data:\n")[1]!;
+	const data = JSON.parse(dataLine.trimEnd()) as { check_runs: unknown[] };
+	assert.equal(data.check_runs.length, 2);
+});
+
+test("commit checks: malicious, foreign, and parameter-mutating next links are rejected as source errors", async () => {
+	for (const badLink of [
+		`Link: <https://evil.example.com/repos/o/r/commits/${SHA}/check-runs?filter=latest&per_page=${PAGE_SIZE}&page=2>; rel="next"\r\n`,
+		`Link: <https://api.github.com/repos/o/r/other?filter=latest&per_page=${PAGE_SIZE}&page=2>; rel="next"\r\n`,
+		`Link: <https://api.github.com/repos/o/r/commits/${SHA}/check-runs?filter=all&per_page=${PAGE_SIZE}&page=2>; rel="next"\r\n`,
+		`Link: <https://api.github.com/repos/o/r/commits/${SHA}/check-runs?filter=latest&per_page=${PAGE_SIZE}&injected=1&page=2>; rel="next"\r\n`,
+		`Link: <https://api.github.com/repos/o/r/commits/${SHA}/check-runs?filter=latest&per_page=${PAGE_SIZE}&page=5>; rel="next"\r\n`,
+	]) {
+		const script = requester([
+			() => response(JSON.stringify({ check_runs: [CHECK_RUN] }), badLink),
+			() => response(JSON.stringify({ statuses: [STATUS] })),
+		]);
+		const result = await run({ subcommand: "commit checks", repo: "o/r", ref: SHA }, script);
+		assert.equal(result.isError, true, badLink);
+		assert.ok(result.content[0].text.includes("next-link validation failed"), badLink);
+		// The malicious URL is never fetched: page 2 is reconstructed or rejected.
+		assert.ok(!script.requests.some((requestPath) => requestPath.includes("evil") || requestPath.includes("injected=1") || requestPath.includes("filter=all")));
+	}
+});
+
+test("commit checks: page-limit stop is nonerror incompleteness with a continuation", async () => {
+	const script = requester([
+		...Array.from({ length: MAX_PAGES_PER_SOURCE }, (_, i) =>
+			() => response(JSON.stringify({ check_runs: [CHECK_RUN] }), linkHeader(i + 2, `repos/o/r/commits/${SHA}/check-runs`, `filter=latest&per_page=${PAGE_SIZE}`)),
+		),
+		() => response(JSON.stringify({ statuses: [] })),
+	]);
+	const result = await run({ subcommand: "commit checks", repo: "o/r", ref: SHA }, script);
+	assert.equal(result.isError, undefined, "a stop between complete responses is not an error");
+	assert.ok(result.content[0].text.includes("page limit reached"));
+	assert.ok(typeof result.details["continuation"] === "string");
+});
+
+test("commit checks: failed source preserves completed-source data and reports a per-source error", async () => {
+	const script = requester([
+		() => response(JSON.stringify({ check_runs: [CHECK_RUN] })),
+		() => error("boom", 500),
+	]);
+	const result = await run({ subcommand: "commit checks", repo: "o/r", ref: SHA }, script);
+	assert.equal(result.isError, true);
+	const dataLine = result.content[0].text.split("data:\n")[1]!;
+	const data = JSON.parse(dataLine.trimEnd()) as { check_runs: unknown[]; statuses: unknown[] };
+	assert.equal(data.check_runs.length, 1, "completed source data is preserved");
+	assert.equal(data.statuses.length, 0);
+	assert.ok(result.content[0].text.includes("statuses_error"));
+});
+
+test("commit checks: continuation resumes at the saved positions without re-resolving refs", async () => {
+	// First run: checks completes, statuses fails on page 1.
+	const first = requester([
+		() => response(JSON.stringify({ sha: SHA })),
+		() => response(JSON.stringify({ check_runs: [CHECK_RUN] })),
+		() => error("boom", 500),
+	]);
+	const firstResult = await run({ subcommand: "commit checks", repo: "o/r", ref: "main" }, first);
+	const continuation = firstResult.details["continuation"];
+	assert.ok(typeof continuation === "string");
+
+	// Resume: the pinned SHA is reused, no repos/o/r/commits/main resolution
+	// request is issued, and only the failed source is retried.
+	const second = requester([
+		() => response(JSON.stringify({ statuses: [STATUS] })),
+	]);
+	const secondResult = await run({ subcommand: "commit checks", repo: "o/r", ref: "main", continuation }, second);
+	assert.equal(secondResult.isError, undefined);
+	assert.deepEqual(second.requests, [`repos/o/r/commits/${SHA}/status?per_page=${PAGE_SIZE}&page=1`]);
+	assert.ok(secondResult.content[0].text.includes("statuses source completed in the earlier invocation") === false);
+	assert.ok(secondResult.content[0].text.includes("resumed: true"));
+	const dataLine = secondResult.content[0].text.split("data:\n")[1]!;
+	const data = JSON.parse(dataLine.trimEnd()) as { check_runs: unknown[] };
+	assert.equal(data.check_runs.length, 0, "completed sources are not refetched on resume");
+});
+
+test("commit checks: continuation mismatched to the invocation is rejected", async () => {
+	const first = requester([
+		() => response(JSON.stringify({ sha: SHA })),
+		() => response(JSON.stringify({ check_runs: [] })),
+		() => error("boom", 500),
+	]);
+	const firstResult = await run({ subcommand: "commit checks", repo: "o/r", ref: "main" }, first);
+	const continuation = firstResult.details["continuation"] as string;
+	const mismatched = requester([]);
+	const result = await run({ subcommand: "commit checks", repo: "o/r", ref: "other-branch", continuation }, mismatched);
+	assert.equal(result.isError, true);
+	assert.ok(result.content[0].text.includes("does not match this invocation"));
+	assert.equal(mismatched.requests.length, 0, "mismatched continuations never spawn requests");
+});
+
+// ── Advisory view ────────────────────────────────────────────────────────────
+
+test("advisory view: GHSA is fetched directly as one object; withdrawn field surfaced", async () => {
+	const apiRequester = jsonScript([["advisories", { ghsa_id: "GHSA-2345-6789-cfgh", withdrawn: "2026-01-01T00:00:00Z" }]]);
+	const result = await run({ subcommand: "advisory view", id: "GHSA-2345-6789-cfgh" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.deepEqual(apiRequester.requests, ["advisories/GHSA-2345-6789-cfgh"]);
+	assert.ok(result.content[0].text.includes("withdrawn: 2026-01-01T00:00:00Z"));
+});
+
+test("advisory view: CVE searches send an explicit reviewed default and report the searched type", async () => {
+	const apiRequester = jsonScript([["advisories", [{ ghsa_id: "GHSA-2345-6789-cfgh" }]]]);
+	const result = await run({ subcommand: "advisory view", id: "CVE-2026-111943" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.equal(apiRequester.requests[0], `advisories?cve_id=CVE-2026-111943&type=reviewed&per_page=${PAGE_SIZE}&page=1`);
+	assert.ok(result.content[0].text.includes("searched_type: reviewed"));
+});
+
+test("advisory view: empty CVE results are successful searches, not proof of global absence", async () => {
+	const apiRequester = jsonScript([["advisories", []]]);
+	const result = await run({ subcommand: "advisory view", id: "CVE-2026-999999" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.ok(result.content[0].text.includes("not proof of global absence"));
+});
+
+test("advisory view: CVE pagination continuation matches id and type on resume", async () => {
+	// Ten linked pages reach the per-invocation page limit and produce a
+	// continuation positioned at the next unfetched page.
+	const apiRequester = requester(
+		Array.from({ length: MAX_PAGES_PER_SOURCE }, (_, i) =>
+			() => response(JSON.stringify([{ ghsa_id: "GHSA-2345-6789-cfgh" }]), linkHeader(i + 2, "advisories", `cve_id=CVE-2026-111943&type=reviewed&per_page=${PAGE_SIZE}`)),
+		),
+	);
+	const first = await run({ subcommand: "advisory view", id: "CVE-2026-111943" }, apiRequester);
+	const continuation = first.details["continuation"];
+	assert.ok(typeof continuation === "string", "page-limit stop yields a continuation");
+	assert.equal(first.isError, undefined);
+
+	const second = requester([
+		() => response(JSON.stringify([])),
+	]);
+	const secondResult = await run({ subcommand: "advisory view", id: "CVE-2026-111943", continuation }, second);
+	assert.equal(secondResult.isError, undefined);
+	assert.equal(second.requests[0], `advisories?cve_id=CVE-2026-111943&type=reviewed&per_page=${PAGE_SIZE}&page=${MAX_PAGES_PER_SOURCE + 1}`);
+
+	const wrongType = requester([]);
+	const wrongTypeResult = await run({ subcommand: "advisory view", id: "CVE-2026-111943", type: "malware", continuation }, wrongType);
+	assert.equal(wrongTypeResult.isError, true);
+	assert.ok(wrongTypeResult.content[0].text.includes("does not match this invocation"));
+});
+
+// ── jq wiring and result bounds ──────────────────────────────────────────────
+
+test("jq: applied once to the final fetched batch, never to metadata; failures become errors", async () => {
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["check-runs", { check_runs: [CHECK_RUN] }],
+		["status", { statuses: [] }],
+	]);
+	const documents: string[] = [];
+	const result = await run({ subcommand: "commit checks", repo: "o/r", ref: "main", jq: "[.check_runs[].name]" }, apiRequester, {
+		jqRun: async (expression, document) => {
+			documents.push(document);
+			assert.equal(expression, "[.check_runs[].name]");
+			return { kind: "result", output: '"build"', outputTruncated: false, outputBytes: 7 };
+		},
+	});
+	assert.equal(result.isError, undefined);
+	assert.equal(documents.length, 1);
+	const parsed = JSON.parse(documents[0]!) as { check_runs: unknown[] };
+	assert.ok(Array.isArray(parsed.check_runs), "the document is the data batch, not the rendered result");
+	assert.ok(!documents[0]!.includes("resolved_sha"), "tool metadata is outside filtered data");
+	assert.ok(result.content[0].text.trimEnd().endsWith('"build"'));
+
+	const failing = jsonScript([
+		["commits", { sha: SHA }],
+		["check-runs", { check_runs: [] }],
+		["status", { statuses: [] }],
+	]);
+	const failed = await run({ subcommand: "commit checks", repo: "o/r", ref: "main", jq: "." }, failing, {
+		jqRun: async () => ({ kind: "error", reason: "jq exploded" }),
+	});
+	assert.equal(failed.isError, true);
+	assert.ok(failed.content[0].text.includes("jq filtering failed"));
+});
+
+test("display cap: oversized results render an explicitly incomplete UTF-8-safe prefix under 50 KiB", async () => {
+	const bigEntry = { type: "file", path: "x".repeat(50), size: 10 };
+	const entries = Array.from({ length: 2000 }, () => bigEntry);
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", entries],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "", ref: "main" }, apiRequester);
+	assert.ok(Buffer.byteLength(result.content[0].text, "utf8") <= API_DISPLAY_CAP + 1024, "display text stays near the cap");
+	assert.ok(result.content[0].text.includes("incomplete UTF-8-safe prefix, NOT complete JSON"));
+	assert.ok(result.content[0].text.includes("Narrow the request"));
+	assert.equal(result.details["output_truncated"], true);
+	// No hidden full payload: details must not contain the data.
+	assert.ok(!JSON.stringify(result.details).includes('"path": "' + "x".repeat(50) + '"'));
+});
+
+test("auth errors surface as errors with the HTTP status", async () => {
+	const apiRequester = jsonScript([
+		["repos", { message: "Bad credentials" }],
+	]);
+	const forced = requester([
+		() => error("Bad credentials", 401),
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "f", ref: "main" }, forced);
+	void apiRequester;
+	assert.equal(result.isError, true);
+	assert.ok(result.content[0].text.includes("HTTP 401"));
+});

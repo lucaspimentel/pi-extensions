@@ -2,6 +2,42 @@
 
 > See also [`extensions/pi-tool-permissions/TODO.md`](extensions/pi-tool-permissions/TODO.md) for the pi-tool-permissions extension's own task list.
 
+## gh-read: additional read-only operations
+
+Expand the allowlist in `extensions/gh-read/` and update [`docs/gh-read-design.md`](docs/gh-read-design.md), tool descriptions, prompt guidelines, and tests. Keep native gh commands on the existing argv interface; use structured parameters for narrowly scoped API operations, not unrestricted `gh api`.
+
+### First increment (done 2026-10-21)
+
+- [x] Repository file/directory contents: required `repo` (`OWNER/REPO`) and repository-relative `path`, optional `ref` (branch, tag, or SHA; omitted means the default branch). Return decoded file text or directory entries. Support explicit-repository reads outside a git worktree. Covers inspecting pinned action definitions and upstream source without cloning.
+  - Done: `repo contents` resolves an omitted ref through default-branch metadata, pins every dependent read to a full commit SHA, serves strict-base64/UTF-8 text up to 1 MiB with 1-based inclusive line ranges (CRLF and trailing-newline preserving), returns directory entries (1,000-entry pages flagged possibly incomplete with a tree-read recommendation), follows in-repository symlink targets exactly one level when they resolve to ordinary files, and returns metadata-with-reason (not errors) for binary, non-UTF-8, oversized, and submodule content.
+- [x] PR check status via `gh pr checks`, with JSON output. Preserve check results for failed/pending checks instead of treating their documented nonzero exit codes solely as execution errors.
+  - Done, with the assumption corrected: verified against the gh 2.102.1 source, JSON export happens BEFORE the failed/pending exit logic, so `gh pr checks --json` exits 0 even with failed or pending checks and the states arrive as data. The tool appends exactly `--json bucket,completedAt,description,event,link,name,startedAt,state,workflow` (caller field selection rejected; watch/web/interval/fail-fast/template excluded; `-R` requires a selector). Exit codes 1 and 8 are never reinterpreted as success: they keep the normal failure contract, and native no-checks errors pass through verbatim.
+- [x] Commit check status for a repo + SHA/ref: retrieve both check runs and legacy commit status contexts, including external CI integrations. Resolve a mutable ref once so both reads target the same commit.
+  - Done: `commit checks` resolves the ref once to a 40-hex SHA, fetches check runs (`filter=latest`) and latest-per-context legacy statuses against that immutable SHA, auto-pages at most 10 pages x 100 items per source via strictly validated Link headers, and carries a versioned size-bounded continuation with independent per-source page/done states (completed sources are never refetched; failed pages retry at their saved position). Page/budget stops between complete responses are nonerror incompleteness; interrupted responses are errors; mutable results are documented as non-transactional.
+- [x] Repository trees and advisory lookup (added during the same increment):
+  - `repo tree`: recursive by default (shallow mode omits the `recursive` query parameter entirely), optional subtree path filter, upstream fields and `truncated` preserved, truncation never repaired by subtree expansion.
+  - `advisory view`: exact CVE/GHSA identifiers only. GHSAs fetch directly as one object (`type`/`continuation` rejected); CVEs query as array searches with an explicit type defaulting to `reviewed` (`unreviewed`/`malware` allowed, searched type reported), with bounded Link pagination and continuations; empty results are successful type-scoped searches, not proof of global absence; advisory mutability documented.
+
+### Safety and validation (done 2026-10-21, first increment scope)
+
+- [x] Keep API methods, headers, and endpoint/query construction tool-controlled; validate and encode repo/path/ref inputs. No caller-supplied request bodies, arbitrary API hosts, or arbitrary GraphQL.
+  - Done: all GitHub requests stay inside `gh api` with a fixed tool-authored argv (`--hostname github.com --method GET`, JSON Accept and API-version headers, `--include`); endpoint segments and query values are percent-encoded internally; per-segment encoding keeps braces, percent escapes, `?`, `#`, dashes, and `@` literal and makes gh placeholder expansion unreachable; no direct HTTP client, token handling, retries, GraphQL, downloads, or caches were added.
+- [x] Exclude watch/browser modes, checkout, artifact/asset downloads, and all mutations. Bound pagination, runtime, and output, including logs; add regression tests for rejected flags and unsafe inputs.
+  - Done: one monotonic 30 s deadline spans resolution, all children, and jq; an 8 MiB cumulative captured-output budget (headers included, honestly a capture bound rather than a transfer bound), 64 KiB per-response header and 16 KiB cumulative stderr caps; children are killed (SIGTERM, 5 s SIGKILL teardown grace), reaped, and interrupted responses rejected even when the retained prefix would parse; displayed API results are capped at 50 KiB with an explicitly incomplete UTF-8-safe prefix preview. External jq is optional and preflighted before network access (absolute executable resolution, grammar-grounded lexical security check rejecting module/import/include constructs, jq compile check) and runs with a minimal HOME+LC_ALL-only environment whose HOME is a tool-owned guard file. Regression suites: `npm run test:gh-read` (validate, spawn, api-spawn, api, real-jq, registered-tool).
+
+### Follow-up operations
+
+- [ ] GitHub Actions inspection via `gh run list` and `gh run view`: run/job status, job details, and bounded full or failed-job logs. External CI logs remain the responsibility of their own tools.
+- [ ] Inline PR review comments, reviews, and replies via scoped API reads. `pr view --comments` does not cover inline discussions; resolved/outdated thread state would require a narrowly scoped, tool-authored GraphQL query.
+- [ ] Commit details and base/head comparisons without fetching locally.
+- [ ] Releases via `gh release list` and `gh release view`, plus tag listing: versions, release notes, and asset metadata only.
+- [ ] Repository metadata via `gh repo view`: default branch, description, visibility, and URLs.
+- [ ] Search via `gh search code`, `gh search prs`, `gh search issues`, and `gh search repos`.
+
+### Safety and validation (follow-up operations)
+
+- [ ] Keep the same guarantees for follow-up operations: tool-controlled request construction, validated/encoded inputs, bounded pagination/runtime/output, and regression tests for rejected flags and unsafe inputs.
+
 ## update-jira extension
 
 Design: [`docs/jira-extension-design.md`](docs/jira-extension-design.md) (v2 contract). The live-write smoke and HTML round-trip gates were executed and verified on 2026-10-07 against scratch ticket APMSVLS-670 (see the Done notes below); the design doc's gate section records the same status.

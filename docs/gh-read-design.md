@@ -43,9 +43,15 @@ the main session. Deliberately not tied to any one agent; agents opt in via
 ## Invocation contract
 
 - Structured argv, no shell: `{ subcommand, args }` where `subcommand` is a
-  literal union of the six two-word commands below (modeled as one string so
-  the schema stays flat like `git_read`'s):
-  - `pr view`, `pr diff`, `pr list`, `issue view`, `issue list`, `auth status`
+  literal union of the seven two-word native commands below (modeled as one
+  string so the schema stays flat like `git_read`'s):
+  - `pr view`, `pr diff`, `pr list`, `pr checks`, `issue view`, `issue list`,
+    `auth status`
+- Four narrowly scoped GitHub API operations share the same tool with
+  structured parameters instead of an args array: `repo contents`,
+  `repo tree`, `commit checks`, `advisory view` (see "GitHub API operations").
+  Mixing shapes is rejected in both directions: native subcommands reject
+  structured fields, API operations reject `args`.
 - Command construction happens in validate.ts during validation: it emits the
   complete final argv `[<noun>, <verb>, ...validatedArgs]`, and spawn.ts
   consumes it verbatim, appending nothing. The command position never
@@ -83,6 +89,21 @@ v1 (Go templates are argv-safe but add no capability `--jq` lacks).
   (gh also accepts URLs here; URLs are excluded in v1)
 - `issue list`: same as `pr list` minus `merged` in `--state`, minus
   `--head`/`--base`/`--draft`, plus `--mention <v>`, `--milestone <v>`
+- `pr checks [<number> | <branch>]`: `--required`, `--jq <expr>`,
+  `-R/--repo [HOST/]OWNER/REPO` (a selector is required with `-R`; gh has no
+  current-branch context to infer a PR from). `--json` is tool-authored:
+  validate.ts appends exactly
+  `--json bucket,completedAt,description,event,link,name,startedAt,state,workflow`
+  after the validated args (mirroring the auth status `--json hosts`
+  pattern), so caller field selection is impossible; a user-supplied `--json`
+  with that exact field list is tolerated and dropped, any other field list
+  is rejected. Watch (`--watch`/`-w`), `--web`, `--interval`, `--fail-fast`,
+  and `--template` are excluded. Verified against gh 2.102.1 source: JSON
+  export happens BEFORE the failed/pending exit logic, so JSON mode exits 0
+  even with failed or pending checks, and the check states are read from the
+  JSON data. Exit codes 1 and 8 are never reinterpreted as success: they
+  flow through the normal failure contract with whatever output gh printed.
+  Native no-checks/no-required-checks errors pass through verbatim.
 - The five repo subcommands (not `auth status`): `-R/--repo [HOST/]OWNER/REPO`,
   value validated
   against `^([A-Za-z0-9.-]+/)?[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$`. Cross-repo reads
@@ -96,7 +117,7 @@ v1 (Go templates are argv-safe but add no capability `--jq` lacks).
   `--show-token`/`-t` and `--template` are excluded: the tool never handles
   or displays tokens (see Non-goals).
 
-Value validation:
+Value validation (native commands):
 
 - `<fields>` for `--json`: `^[A-Za-z0-9_,]+$`. gh itself rejects unknown
   field names, so the tool validates shape, not membership.
@@ -108,6 +129,163 @@ Value validation:
 - PR/issue number or branch argument: `^[0-9]+$`, or the string-filter token
   rule (branch names contain `/`, which is fine; they go to the API, never
   to a filesystem).
+
+## GitHub API operations
+
+The four structured operations (`repo contents`, `repo tree`, `commit
+checks`, `advisory view`) make read-only GET requests to api.github.com
+ONLY, always inside `gh`, with a fixed tool-authored argv (see "API
+runner"). They name an explicit repository, so they are exempt from the
+worktree gate and work anywhere. Validation is complete at runtime (calls
+that bypass schema validation still get checked): unknown or mixed fields,
+wrong types, missing required fields, unsafe integers, and malformed
+continuations are rejected before any child runs.
+
+- Repositories are exact `OWNER/REPO` on github.com (no host prefix; the
+  legacy `-R` host-prefixed form stays native-only). Endpoint segments and
+  query values are percent-encoded per segment inside api.ts. Injection-test
+  inputs (braces, percent escapes, slashes, `?`, `#`, leading dashes, `@`)
+  are transported literally or rejected: path segments that cannot be
+  encoded (lone surrogates) fail validation; `.`, `..`, empty, leading and
+  trailing slash segments are rejected outright. gh placeholder expansion
+  (`:owner`) is unreachable because `:` is percent-encoded, and no caller
+  text reaches a flag position (the endpoint argument always starts with
+  `repos/` or `advisories/`).
+- Ref pinning: an omitted ref resolves through repository default-branch
+  metadata; branch/tag/short-SHA refs resolve through the commits endpoint
+  once to a full 40-hex commit SHA. The requested target and resolved SHA
+  are reported, and every dependent read is pinned to the SHA (query
+  `ref=<sha>` or URL path). A complete lowercase 40-hex input is used
+  directly (it is already immutable); uppercase hex and short SHAs still
+  resolve through the API.
+
+### repo contents
+
+Required `repo`, `path` (empty string = repository root); optional `ref`,
+1-based inclusive `start_line`/`end_line` (omitted end = EOF; end alone =
+`1..end`), and `jq`. Directory listings return GitHub-shaped entries; a
+1,000-entry listing (GitHub's contents page cap) is conservatively marked
+possibly incomplete with a tree-read recommendation. File text is decoded
+strictly from base64 and served only as valid UTF-8 up to 1 MiB decoded;
+NUL-containing content (binary heuristic), invalid UTF-8, oversized files,
+and nonordinary types (submodules, unknown types) return metadata with a
+reason instead of content, and are NOT errors. Line ranges apply only to
+text and preserve original line endings and trailing-newline behavior; jq
+applies only to directory JSON, never file text. In-repository symlink
+targets that resolve to ordinary files are followed exactly one level;
+broken, non-file, or root-escaping targets return metadata. External URLs,
+download URLs, and submodules are never followed.
+
+### repo tree
+
+Required `repo`; optional `ref`, subtree `path`, `recursive` (default
+true), `jq`. The commit's tree SHA is resolved, then the tree is read with
+`recursive=1` appended, or with the `recursive` query parameter omitted
+entirely in shallow mode. Upstream fields (`type`, `mode`, SHA,
+`truncated`) are preserved as-is; a truncated upstream tree is reported and
+NEVER repaired by expanding subtrees. A subtree path filters entries to the
+exact path and its children.
+
+### commit checks
+
+Required `repo`, `ref`; optional `jq`, `continuation`. Both sources are
+fetched against the one resolved immutable SHA: check runs (with
+`filter=latest`) and legacy statuses (combined-status endpoint, latest per
+context, newest occurrence wins). Output assembles
+`{check_runs:[...], statuses:[...]}` preserving source fields; history is
+never substituted, mergeability is never inferred, and aggregate green is
+never claimed. Auto-pagination runs at most 10 pages x 100 items per
+source per invocation via strictly validated `Link` headers: origin must
+be https://api.github.com, the path must match, every invariant query
+parameter must be present and unchanged, no unexpected parameter may
+appear, and the page must be exactly current + 1; requests are always
+reconstructed from tool-owned templates, and foreign URLs, cycles, and
+ambiguous links are rejected as per-source errors. Stops between complete
+responses (page or budget limits) are nonerror incompleteness;
+interrupted/truncated responses are errors. A versioned, size-bounded
+continuation token carries the operation, target/query, pinned SHA, and
+independent per-source page/done states; it is matched against the
+invocation (repo + ref, or id + type), resumed refs are never re-resolved,
+completed-source data is preserved when the other source fails, and retry
+positions are retained. Note: check results are mutable CI state, not a
+transactional snapshot; GitHub also bounds which check suites it returns
+for old commits (service-side), so local completion does not prove
+historical completeness.
+
+### advisory view
+
+Required `id` (exact `CVE-YYYY-NNNN` or `GHSA-xxxx-xxxx-xxxx` identifier;
+anything else is rejected); optional `type`, `jq`, `continuation`. GHSAs
+are fetched directly as one object; `type` and `continuation` are rejected
+for GHSA ids. CVEs are queried as array searches with an explicit type
+defaulting to `reviewed` (also `unreviewed`, `malware`); the searched type
+is reported, and an empty result is a successful search of that type, not
+proof of global absence. Vulnerable/patched/withdrawn fields pass through;
+advisory content is mutable and can be withdrawn or amended after a read.
+CVE searches reuse the bounded Link-header pagination and continuation
+machinery of commit checks.
+
+### API runner (api-spawn.ts)
+
+A dedicated runner per invocation, separate from the native executor
+(which keeps its 15 s / 50 KiB contract unchanged). Every request is a
+fixed argv: `gh api --hostname github.com --method GET --header "Accept:
+application/vnd.github+json" --header "X-GitHub-Api-Version: 2022-11-28"
+--include <encoded-path>`; no caller flags, field arguments, or
+`--paginate`. One monotonic 30-second deadline is shared across ref
+resolution, all paged children, and jq. The captured-output budget is 8
+MiB of gh response stdout CUMULATIVELY (resolution requests and response
+headers included). Honest scope: this bounds what the tool CAPTURES, not
+network transfer or gh's internal memory use. Header blocks are bounded
+separately (64 KiB) and stderr diagnostics cumulatively (16 KiB). Streams
+are drained continuously; on overflow, deadline, or cancellation the child
+gets SIGTERM then SIGKILL (5 s teardown grace, documented separately from
+the deadline) and is reaped before the promise resolves. A response whose
+bytes were dropped mid-stream is rejected as interrupted even when the
+retained prefix would parse. Malformed UTF-8 bodies reject the response
+instead of silently substituting replacement characters. Spawn function
+and clock are injectable seams; tests run network-free.
+
+### External jq filtering (jq.ts)
+
+jq is optional (only invoked when requested) and preflighted BEFORE any
+network access: absolute executable resolution, a lexical security check,
+and compilation by jq itself (`jq -c -n <expr>`; exit 3 rejects). The
+lexical check is grounded in jq's grammar, not substring regexes: it
+recognizes comments, strings, escapes, executable tokens, and nested
+string interpolation; rejects executable module/import/include constructs
+including data imports; inspects executable code inside interpolations;
+permits benign property names and quoted keywords such as `.include` and
+`"include"`; and rejects malformed or unsupported lexical constructs
+rather than guessing. jq 1.7 loads no modules at startup (verified against
+the jq manual/source: loading happens only via import/include, which the
+lexical gate rejects; there is no config file). Defense in depth: the jq
+child gets a minimal environment (exactly HOME and LC_ALL, no inherited
+credentials or loader-injection variables) with HOME overridden to a
+tool-owned guard FILE, proven unusable as a directory, so `~/.jq` and
+`$HOME/.jq` search locations cannot exist. `-L` is never passed and no
+caller-controlled flags, module paths, filter files, or input files are
+accepted; the expression is one argv element and the document flows
+through stdin. The binary's own directory ($ORIGIN) is a residual path,
+accepted because writing there requires root and canary tests assert
+startup loads nothing. Output is compact JSON lines; zero output is an
+empty filtered result, not failure; jq applies once to the final newly
+fetched batch, never to tool metadata. Target, completeness, errors, and
+continuation stay outside filtered output.
+
+### API result shape and display cap
+
+API metadata (target/SHA, `source_complete`, reasons/per-source state,
+errors, `output_truncated`, next continuation) renders outside the data
+block and is also exposed in tool details. Validation, auth, parse,
+timeout, jq, and partial-source failures set `isError: true` while
+preserving useful results. The ENTIRE displayed API result is capped at
+50 KiB including metadata, escaping, diagnostics, and notices (metadata
+space reserved); on overflow the data becomes an explicitly incomplete
+UTF-8-safe prefix preview labeled "NOT complete JSON" plus narrowing
+guidance. Source completeness and display clipping are distinct facts. No
+hidden full payload is retained in details or on disk. Native command
+result conventions are unchanged.
 
 ## Worktree enforcement
 
@@ -211,19 +389,54 @@ Settled in the grill-me review:
 
 ## Tests
 
-- `tests/gh-read-validate.test.mts`: argv construction for all six
+- `tests/gh-read-validate.test.mts`: argv construction for all seven
   subcommands, value-flag bounds (`--limit`, `--state`, `--color`), the
   `-R` regex (accept/reject cases), `--json` field-shape, `--jq` and filter
   token rules, `auth status` happy paths with appended `--json hosts`,
   `auth status` rejections (`--json` with fields other than `hosts`,
   `--show-token`/`--template`/`-R` as unknown flags, positionals, filter-token
-  and jq value rules, no attached `-a` short form), all with error-message
-  contents.
+  and jq value rules, no attached `-a` short form), `pr checks` argv with
+  appended tool JSON fields, `-R`-requires-selector, watch/web/interval/
+  fail-fast/template rejections, tool-parameter discrimination (mixed shapes
+  rejected both directions), and full API-operation validation (required
+  fields, path injection inputs, line bounds, continuation shapes, advisory
+  identifier/type rules, schema-bypass coverage).
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout
   escalation, exit-code contract including `auth status` passthrough.
   Reuse the git-read spawn test harness patterns.
+- `tests/gh-read-api-spawn.test.mts`: the API runner network-free through
+  its spawn/clock seams: tool-authored argv and sanitized env, no git gate,
+  header/body framing with redirect-block skipping, HTTP error passthrough,
+  malformed UTF-8 rejection, exact cumulative budget boundary,
+  mid-response overflow (kill, poison, later stops), up-front budget
+  stops, header/stderr caps, deadline SIGTERM->SIGKILL escalation and
+  reaping, pre-spawn deadline/cancellation refusals, and spawn errors.
+- `tests/gh-read-api.test.mts`: orchestration with a scripted requester
+  seam: ref resolution and pinning (default branch, explicit refs, 40-hex
+  fast path), text files with CRLF/EOF-preserving line ranges, binary/
+  non-UTF-8/oversized metadata results, 1,000-entry directory flags,
+  symlink following (one level, broken/non-file/root-escape), submodules,
+  trees (recursive query omission in shallow mode, subtree filters,
+  upstream truncation preserved), combined checks (pinned SHA, status
+  dedupe, sequential Link paging, malicious/foreign/mutating/misordered
+  next-link rejection, page-limit stops with continuations, failed-source
+  data retention, resume without re-resolution, mismatch rejection),
+  advisories (direct GHSA, CVE defaults and types, empty results,
+  continuation matching), jq applied once to the final batch, and the
+  50 KiB display cap with incomplete-prefix labeling.
+- `tests/gh-read-jq.test.mts`: REAL-jq coverage (required in CI): lexical
+  security matrix (benign keywords, imports incl. interpolations, malformed
+  constructs), preflight compile rejection, zero/multi-value output, env/
+  $ENV isolation asserting exactly HOME+LC_ALL, HOME guard-file canaries,
+  startup module canary, runtime errors, and output-cap truncation.
+- `tests/gh-read-tool.test.mts`: registered-tool coverage through a capture
+  stub and the spawn seams: schema shape without outputSchema, fail-closed
+  validation errors with zero spawns, native path (gate + argv verbatim,
+  details.subcommand), `pr checks` tool-authored JSON fields reaching the
+  child, and the API path end to end (no worktree gate, pinned SHA,
+  partial-source isError with preserved data and continuation).
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 

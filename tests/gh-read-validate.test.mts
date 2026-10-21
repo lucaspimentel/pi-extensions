@@ -10,7 +10,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { LIMIT_MAX, SUBCOMMANDS, validateInvocation } from "../extensions/gh-read/validate.ts";
+import {
+	LIMIT_MAX,
+	PR_CHECKS_JSON_FIELDS,
+	SUBCOMMANDS,
+	validateInvocation,
+	validateToolParams,
+} from "../extensions/gh-read/validate.ts";
 
 function validateOk(subcommand: (typeof SUBCOMMANDS)[number], args: string[]): string[] {
 	const checked = validateInvocation(subcommand, args);
@@ -30,11 +36,12 @@ function validateRejects(subcommand: (typeof SUBCOMMANDS)[number], args: string[
 
 // ── Subcommand union ─────────────────────────────────────────────────────────
 
-test("subcommand union is the settled six", () => {
+test("subcommand union is the settled native seven", () => {
 	assert.deepEqual([...SUBCOMMANDS], [
 		"pr view",
 		"pr diff",
 		"pr list",
+		"pr checks",
 		"issue view",
 		"issue list",
 		"auth status",
@@ -46,7 +53,9 @@ test("unknown subcommands are rejected, naming the allowed set", () => {
 	assert.equal(checked.ok, false);
 	if (!checked.ok) {
 		assert.ok(checked.reason.includes("unknown subcommand 'pr merge'"));
-		assert.ok(checked.reason.includes("pr view, pr diff, pr list, issue view, issue list, auth status"));
+		assert.ok(
+			checked.reason.includes("pr view, pr diff, pr list, pr checks, issue view, issue list, auth status"),
+		);
 	}
 });
 
@@ -322,4 +331,277 @@ test("auth status: --jq follows the existing jq rule", () => {
 
 test("auth status: no attached short form for -a", () => {
 	validateRejects("auth status", ["-afoo"], ["unknown flag '-afoo'"]);
+});
+
+// ── pr checks (native) ───────────────────────────────────────────────────────
+
+test("pr checks: selector, --required, and --jq pass through and tool-authored --json is appended last", () => {
+	assert.deepEqual(validateOk("pr checks", []), [
+		"pr",
+		"checks",
+		"--json",
+		PR_CHECKS_JSON_FIELDS,
+	]);
+	assert.deepEqual(validateOk("pr checks", ["123", "--required"]), [
+		"pr",
+		"checks",
+		"123",
+		"--required",
+		"--json",
+		PR_CHECKS_JSON_FIELDS,
+	]);
+	assert.deepEqual(validateOk("pr checks", ["-R", "owner/repo", "feature-branch"]), [
+		"pr",
+		"checks",
+		"-R",
+		"owner/repo",
+		"feature-branch",
+		"--json",
+		PR_CHECKS_JSON_FIELDS,
+	]);
+	assert.deepEqual(validateOk("pr checks", ["--jq", ".state"]), [
+		"pr",
+		"checks",
+		"--jq",
+		".state",
+		"--json",
+		PR_CHECKS_JSON_FIELDS,
+	]);
+	assert.deepEqual(validateOk("pr checks", ["-Rowner/repo", "42"]), [
+		"pr",
+		"checks",
+		"-R",
+		"owner/repo",
+		"42",
+		"--json",
+		PR_CHECKS_JSON_FIELDS,
+	]);
+});
+
+test("pr checks: -R/--repo without a selector is rejected before spawn", () => {
+	validateRejects("pr checks", ["-R", "owner/repo"], ["-R/--repo requires a PR number or branch selector"]);
+	validateRejects("pr checks", ["--repo", "owner/repo"], ["-R/--repo requires a PR number or branch selector"]);
+	validateRejects("pr checks", ["-Rowner/repo"], ["-R/--repo requires a PR number or branch selector"]);
+});
+
+test("pr checks: watch/web/interval/fail-fast/template flags and attached forms are unknown", () => {
+	validateRejects("pr checks", ["--watch"], ["unknown flag '--watch'"]);
+	validateRejects("pr checks", ["-w"], ["unknown flag '-w'"]);
+	validateRejects("pr checks", ["--interval", "3"], ["unknown flag '--interval'"]);
+	validateRejects("pr checks", ["--fail-fast"], ["unknown flag '--fail-fast'"]);
+	validateRejects("pr checks", ["--web"], ["unknown flag '--web'"]);
+	validateRejects("pr checks", ["--template", "x"], ["unknown flag '--template'"]);
+	validateRejects("pr checks", ["--required=true"], ["unknown flag '--required=true'"]);
+});
+
+test("pr checks: caller JSON selection is rejected; exact tool field list tolerated and dropped", () => {
+	validateRejects("pr checks", ["--json", "name,state"], ["tool-authored", "caller field selection is rejected"]);
+	validateRejects("pr checks", ["--json"], ["tool-authored", "pass nothing"]);
+	validateRejects("pr checks", ["--json=name,state"], ["got 'name,state'"]);
+	assert.deepEqual(validateOk("pr checks", ["--json", PR_CHECKS_JSON_FIELDS]), [
+		"pr",
+		"checks",
+		"--json",
+		PR_CHECKS_JSON_FIELDS,
+	]);
+	assert.deepEqual(validateOk("pr checks", [`--json=${PR_CHECKS_JSON_FIELDS}`]), [
+		"pr",
+		"checks",
+		"--json",
+		PR_CHECKS_JSON_FIELDS,
+	]);
+});
+
+test("pr checks: positionals follow the PR-number/branch rule", () => {
+	validateRejects("pr checks", ["123", "456"], ["at most 1 positional"]);
+	validateRejects("pr checks", ["some branch"], ["expected a PR number or branch name"]);
+	validateRejects("pr checks", ["--limit", "5"], ["unknown flag '--limit'"]);
+});
+
+// ── validateToolParams: discrimination and mixed-shape rejection ─────────────
+
+test("validateToolParams routes native subcommands through the legacy argv contract", () => {
+	const checked = validateToolParams({ subcommand: "pr list", args: ["--state", "open"] });
+	assert.equal(checked.ok, true);
+	if (checked.ok && checked.kind === "native") {
+		assert.deepEqual(checked.argv, ["pr", "list", "--state", "open"]);
+	} else {
+		assert.fail("expected native");
+	}
+});
+
+test("validateToolParams rejects mixed shapes in both directions", () => {
+	for (const bad of [
+		{ subcommand: "pr view", repo: "owner/repo" },
+		{ subcommand: "auth status", jq: ".x" },
+	]) {
+		const checked = validateToolParams(bad);
+		assert.equal(checked.ok, false, JSON.stringify(bad));
+		if (!checked.ok) assert.ok(checked.reason.includes("unknown field"));
+	}
+	const apiWithArgs = validateToolParams({ subcommand: "repo contents", repo: "o/r", path: "", args: ["-x"] });
+	assert.equal(apiWithArgs.ok, false);
+	if (!apiWithArgs.ok) assert.ok(apiWithArgs.reason.includes("structured parameters, not an args array"));
+});
+
+test("validateToolParams rejects non-object params and unknown subcommands for both families", () => {
+	assert.equal(validateToolParams(null).ok, false);
+	assert.equal(validateToolParams("pr view").ok, false);
+	assert.equal(validateToolParams([]).ok, false);
+	const unknown = validateToolParams({ subcommand: "pr merge" });
+	assert.equal(unknown.ok, false);
+	if (!unknown.ok) {
+		assert.ok(unknown.reason.includes("pr view, pr diff, pr list, pr checks, issue view, issue list, auth status"));
+		assert.ok(unknown.reason.includes("repo contents, repo tree, commit checks, advisory view"));
+	}
+});
+
+// ── validateApiInvocation: contract validation ───────────────────────────────
+
+function apiOk(params: Record<string, unknown>): Record<string, unknown> {
+	const checked = validateToolParams(params);
+	if (!checked.ok) assert.fail(`unexpected rejection: ${checked.reason}`);
+	if (checked.kind !== "api") assert.fail("expected api");
+	return checked.api as unknown as Record<string, unknown>;
+}
+
+function apiRejects(params: Record<string, unknown>, includes: string[]): void {
+	const checked = validateToolParams(params);
+	assert.equal(checked.ok, false, `expected rejection for: ${JSON.stringify(params)}`);
+	if (!checked.ok) {
+		for (const fragment of includes) {
+			assert.ok(checked.reason.includes(fragment), `reason '${checked.reason}' must include '${fragment}'`);
+		}
+	}
+}
+
+test("repo contents: required repo and path, optional ref/lines/jq accepted", () => {
+	assert.deepEqual(apiOk({ subcommand: "repo contents", repo: "owner/repo", path: "" }), {
+		ok: true,
+		op: "repo contents",
+		repo: "owner/repo",
+		path: "",
+	});
+	const withExtras = apiOk({
+		subcommand: "repo contents",
+		repo: "owner/repo",
+		path: "src/main.rs",
+		ref: "v1.2.3",
+		start_line: 2,
+		end_line: 10,
+		jq: ".[] | .name",
+	});
+	assert.deepEqual(withExtras, {
+		ok: true,
+		op: "repo contents",
+		repo: "owner/repo",
+		path: "src/main.rs",
+		ref: "v1.2.3",
+		startLine: 2,
+		endLine: 10,
+		jq: ".[] | .name",
+	});
+});
+
+test("repo contents: missing repo/path, host-prefixed repo, and unsafe lines are rejected", () => {
+	apiRejects({ subcommand: "repo contents", repo: "owner/repo" }, ["path is required"]);
+	apiRejects({ subcommand: "repo contents", path: "a.txt" }, ["repo is required"]);
+	apiRejects({ subcommand: "repo contents", repo: "github.com/owner/repo", path: "" }, ["exactly OWNER/REPO on github.com"]);
+	apiRejects({ subcommand: "repo contents", repo: "owner", path: "" }, ["exactly OWNER/REPO"]);
+	apiRejects({ subcommand: "repo contents", repo: "owner/repo", path: "", start_line: 0 }, ["safe integer >= 1"]);
+	apiRejects({ subcommand: "repo contents", repo: "owner/repo", path: "", end_line: 1.5 }, ["safe integer >= 1"]);
+	apiRejects({ subcommand: "repo contents", repo: "owner/repo", path: "", start_line: 10, end_line: 2 }, ["start_line (10) must be <= end_line (2)"]);
+	apiRejects({ subcommand: "repo contents", repo: "owner/repo", path: "", start_line: Number.MAX_SAFE_INTEGER + 1 }, ["safe integer >= 1"]);
+});
+
+test("repo contents/tree: path injection-test inputs are validated", () => {
+	// Transportable-literal inputs are accepted (each segment is encoded).
+	assert.equal(apiOk({ subcommand: "repo contents", repo: "o/r", path: "a{b}/c%d/e?f/g#h/-i/@j" }).path, "a{b}/c%d/e?f/g#h/-i/@j");
+	// Structural rejections.
+	apiRejects({ subcommand: "repo contents", repo: "o/r", path: "/abs" }, ["must not start or end with '/'"]);
+	apiRejects({ subcommand: "repo contents", repo: "o/r", path: "a/" }, ["must not start or end with '/'"]);
+	apiRejects({ subcommand: "repo contents", repo: "o/r", path: "a//b" }, ["empty segments"]);
+	apiRejects({ subcommand: "repo contents", repo: "o/r", path: "." }, ["'.' or '..' segments"]);
+	apiRejects({ subcommand: "repo contents", repo: "o/r", path: "a/../b" }, ["'.' or '..' segments"]);
+	apiRejects({ subcommand: "repo contents", repo: "o/r", path: "a\u0000b" }, ["control characters"]);
+	apiRejects({ subcommand: "repo contents", repo: "o/r", path: "a\nb" }, ["control characters"]);
+	// Lone surrogates cannot be transported literally.
+	const withLoneSurrogate = { subcommand: "repo contents", repo: "o/r", path: "a\uD800b" };
+	apiRejects(withLoneSurrogate, ["cannot be transported literally"]);
+	// No newline smuggling via percent escapes: '%2F' stays a literal segment
+	// (it encodes to '%252F'), so it cannot escape the segment structure.
+	assert.equal(apiOk({ subcommand: "repo contents", repo: "o/r", path: "a%2Fb" }).path, "a%2Fb");
+});
+
+test("repo tree: recursive must be boolean; ref optional; jq accepted", () => {
+	assert.deepEqual(apiOk({ subcommand: "repo tree", repo: "o/r" }), { ok: true, op: "repo tree", repo: "o/r" });
+	assert.deepEqual(apiOk({ subcommand: "repo tree", repo: "o/r", recursive: false, path: "src", ref: "main" }), {
+		ok: true,
+		op: "repo tree",
+		repo: "o/r",
+		recursive: false,
+		path: "src",
+		ref: "main",
+	});
+	apiRejects({ subcommand: "repo tree", repo: "o/r", recursive: "yes" }, ["recursive must be a boolean"]);
+});
+
+test("commit checks: ref required; continuation shape validated", () => {
+	assert.deepEqual(apiOk({ subcommand: "commit checks", repo: "o/r", ref: "main" }), {
+		ok: true,
+		op: "commit checks",
+		repo: "o/r",
+		ref: "main",
+	});
+	apiRejects({ subcommand: "commit checks", repo: "o/r" }, ["ref"]);
+	apiRejects({ subcommand: "commit checks", repo: "o/r", ref: "" }, ["non-empty"]);
+	apiRejects({ subcommand: "commit checks", repo: "o/r", ref: "a\u0000b" }, ["control characters"]);
+	apiRejects({ subcommand: "commit checks", repo: "o/r", ref: "main", continuation: "!!!" }, ["not base64url"]);
+	apiRejects({ subcommand: "commit checks", repo: "o/r", ref: "main", continuation: Buffer.from('{"v":2}').toString("base64url") }, ["unsupported version"]);
+	apiRejects({ subcommand: "commit checks", repo: "o/r", ref: "main", continuation: Buffer.from("not json").toString("base64url") }, ["not decodable JSON"]);
+	// A structurally valid v1 token is accepted here; semantic matching is api.ts's job.
+	const good = apiOk({
+		subcommand: "commit checks",
+		repo: "o/r",
+		ref: "main",
+		continuation: Buffer.from(JSON.stringify({ v: 1, op: "commit checks", repo: "o/r", ref: "main", sha: "a".repeat(40), checks: { page: 1, done: true }, statuses: { page: 2, done: false } })).toString("base64url"),
+	});
+	assert.ok(typeof good.continuation === "string");
+});
+
+test("advisory view: exact identifiers only; GHSA rejects type and continuation; CVE types validated", () => {
+	assert.deepEqual(apiOk({ subcommand: "advisory view", id: "CVE-2026-111943" }), {
+		ok: true,
+		op: "advisory view",
+		id: "CVE-2026-111943",
+	});
+	assert.deepEqual(apiOk({ subcommand: "advisory view", id: "GHSA-2345-6789-cfgh" }), {
+		ok: true,
+		op: "advisory view",
+		id: "GHSA-2345-6789-cfgh",
+	});
+	apiRejects({ subcommand: "advisory view", id: "cve-2026-111943" }, ["exact advisory identifier"]);
+	apiRejects({ subcommand: "advisory view", id: "CVE-2026-abc" }, ["exact advisory identifier"]);
+	apiRejects({ subcommand: "advisory view", id: "GHSA-0111-2222-3333" }, ["exact advisory identifier"]); // 0/1 not in GHSA alphabet
+	apiRejects({ subcommand: "advisory view", id: "GHSA-2345-6789-cfgh", type: "reviewed" }, ["only valid for CVE lookups"]);
+	apiRejects({ subcommand: "advisory view", id: "GHSA-2345-6789-cfgh", continuation: "abc" }, ["only valid for CVE searches"]);
+	apiRejects({ subcommand: "advisory view", id: "CVE-2026-111943", type: "everything" }, ["reviewed|unreviewed|malware"]);
+	assert.equal(apiOk({ subcommand: "advisory view", id: "CVE-2026-111943", type: "malware" }).type, "malware");
+});
+
+test("API operations: jq follows the legacy jq rule; unknown fields rejected per operation", () => {
+	apiRejects({ subcommand: "repo tree", repo: "o/r", jq: "" }, ["non-empty expression"]);
+	apiRejects({ subcommand: "repo tree", repo: "o/r", jq: ".a\u0000b" }, ["control characters"]);
+	assert.equal(apiOk({ subcommand: "repo tree", repo: "o/r", jq: '.["include"]' }).jq, '.["include"]');
+	apiRejects({ subcommand: "repo contents", repo: "o/r", path: "", recursive: true }, ["unknown field 'recursive'"]);
+	apiRejects({ subcommand: "commit checks", repo: "o/r", ref: "main", path: "x" }, ["unknown field 'path'"]);
+	apiRejects({ subcommand: "advisory view", id: "CVE-2026-1", repo: "o/r" }, ["unknown field 'repo'"]);
+});
+
+test("API operations: full runtime validation applies to schema-bypassing calls", () => {
+	// Numbers as strings, nulls, arrays in structured fields all reject.
+	apiRejects({ subcommand: "repo contents", repo: 42, path: "" }, ["repo"]);
+	apiRejects({ subcommand: "repo contents", repo: "o/r", path: null }, ["must be a string"]);
+	apiRejects({ subcommand: "repo tree", repo: "o/r", ref: ["main"] }, ["must be a string"]);
+	apiRejects({ subcommand: "advisory view", id: ["CVE-2026-1"] }, ["exact advisory identifier"]);
 });

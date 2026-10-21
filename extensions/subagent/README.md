@@ -23,10 +23,15 @@ streaming, usage display, security model).
   substitutes the built-in `grep`/`find` at dispatch time. The same agents can
   inspect diffs, history, and working-tree state via the allowlisted read-only
   `git_read` tool (extensions/git-read/): diff, log, show, and status only,
-  with per-subcommand flag allowlists, no shell, and no repo mutation. PRs and
-  issues are reachable via the allowlisted read-only `gh_read` tool
-  (extensions/gh-read/): pr view/diff/list, issue view/list, and auth status
-  only, a network read on every invocation (guard class `remote-read`).
+  with per-subcommand flag allowlists, no shell, and no repo mutation. PRs,
+  issues, checks, and pinned GitHub API reads are reachable via the
+  allowlisted read-only `gh_read` tool (extensions/gh-read/): pr
+  view/diff/list/checks, issue view/list, and auth status as native argv
+  commands, plus `repo contents`/`repo tree` (pinned file and tree reads),
+  `commit checks` (check runs + legacy statuses with bounded continuation),
+  and `advisory view` (exact CVE/GHSA lookup) as structured API operations;
+  all network reads (guard class `remote-read`), and the API operations work
+  outside a git worktree.
 - **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and
   `/implement-and-review` are renamed to `/scout-plan-implement`,
   `/scout-plan`, and `/implement-review`, so each name lists its chain's stages.
