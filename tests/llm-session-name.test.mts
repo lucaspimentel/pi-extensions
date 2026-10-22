@@ -4,7 +4,8 @@
 // recent-turns build) and drives the REAL default export with a mock pi/ctx
 // to verify: one title per session, regeneration cadence with provenance
 // tracking, manual /name locking, the /name-auto force command, fallback
-// naming on model failure, and manual /name always winning.
+// naming on model failure, manual /name always winning, and /name-auto
+// outcome reporting (applied, unchanged, noop, failed with cause).
 //
 // Run: node tests/llm-session-name.test.mts
 import assert from "node:assert/strict";
@@ -710,6 +711,172 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	assert.equal(calls, 2);
 	assert.equal(pi.setCallCount(), 1, "identical title must not re-set the session name");
 	assert.equal(pi.name(), "same title");
+}
+
+// 14b. An unchanged regeneration through /name-auto is a success, not a
+// failure: the model runs, the name is not re-set, and the toast says
+// "Title unchanged" with no failure warning.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ messageType: "user", prompt: "p" }, makeCtx());
+	let calls = 0;
+	const ctx = makeCtx({
+		complete: async () => {
+			calls++;
+			return textResponse("same title");
+		},
+		entries: [msgEntry("user", "recent")],
+	});
+	await handlers.turn_end({}, ctx); // turn 1: first title
+	await waitFor(() => pi.setCallCount() === 1);
+	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx); // turn 11: identical regen
+	await waitFor(() => calls === 2);
+	assert.equal(pi.name(), "same title");
+	assert.ok(commands["name-auto"], "/name-auto must be registered");
+	await commands["name-auto"].handler("", ctx); // forced regen: third model call
+	assert.equal(calls, 3, "/name-auto must run the model even when the title is unchanged");
+	assert.equal(pi.setCallCount(), 1, "an unchanged title must not call setSessionName again");
+	assert.equal(pi.name(), "same title");
+	const toast = ctx.notifies.find((n: { msg: string }) => n.msg.includes("Title unchanged: same title"));
+	assert.ok(toast, "the unchanged title must be reported");
+	assert.equal((toast as { level?: string }).level, "info");
+	assert.ok(
+		!ctx.notifies.some((n: { msg: string }) => n.msg.includes("Could not regenerate")),
+		"an unchanged title is not a failure",
+	);
+}
+
+// 14c. /name-auto on a fresh, empty session: nothing to work from, zero
+// model calls, the name stays unset.
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	const ctx = makeCtx({ complete: async () => textResponse("never"), entries: [] });
+	await commands["name-auto"].handler("", ctx);
+	assert.equal(pi.setCallCount(), 0, "an empty session must not call the model");
+	assert.equal(pi.name(), undefined, "an empty session must stay unnamed");
+	const toast = ctx.notifies.find((n: { msg: string }) => n.msg.includes("Nothing to title yet"));
+	assert.ok(toast, "the empty-session noop must be reported");
+	assert.equal((toast as { level?: string }).level, "info");
+	assert.ok(!ctx.notifies.some((n: { msg: string }) => n.msg.includes("Could not regenerate")));
+}
+
+// 14d. /name-auto with a failing model reports the failure cause (warning)
+// and keeps the existing name.
+{
+	const pi = makePi("existing name");
+	mod.default(pi as any);
+	const ctx = makeCtx({
+		complete: async () => {
+			throw new Error("api down");
+		},
+		entries: [msgEntry("user", "recent work")],
+	});
+	await commands["name-auto"].handler("", ctx);
+	assert.equal(pi.name(), "existing name", "a failed regeneration must keep the existing name");
+	const toast = ctx.notifies.find((n: { msg: string }) => n.msg === "Could not regenerate the session title: api down.");
+	assert.ok(toast, "the failure cause must be reported");
+	assert.equal((toast as { level?: string }).level, "warning");
+}
+
+// 14e. The title call requests enough tokens for thinking + answer and
+// passes no reasoning option (omitting it is what disables thinking on
+// Anthropic's streamSimple).
+{
+	const pi = makePi();
+	mod.default(pi as any);
+	await handlers.before_agent_start({ messageType: "user", prompt: "options prompt" }, makeCtx());
+	const optionCalls: any[] = [];
+	const ctx = makeCtx({
+		complete: async (_model: any, _context: any, options: any) => {
+			optionCalls.push(options);
+			return textResponse("t");
+		},
+		entries: [msgEntry("user", "recent")],
+	});
+	await commands["name-auto"].handler("", ctx);
+	assert.equal(optionCalls.length, 1, "/name-auto must make exactly one model call");
+	assert.equal(optionCalls[0].maxTokens, 2048, "the cap must leave room for reasoning + answer");
+	assert.equal(optionCalls[0].reasoning, undefined, "no reasoning option must be passed");
+	await waitFor(() => pi.name() === "t");
+	assert.equal(pi.name(), "t");
+}
+
+// 14f. /name-auto that regenerates the identical manual name reports
+// "unchanged" and still adopts the name as extension-owned, so cadence
+// regeneration resumes from it.
+{
+	const pi = makePi("manual name");
+	mod.default(pi as any);
+	let calls = 0;
+	const ctx = makeCtx({
+		complete: async () => {
+			calls++;
+			return textResponse("manual name");
+		},
+		entries: [msgEntry("user", "recent work")],
+	});
+	await commands["name-auto"].handler("", ctx);
+	assert.equal(calls, 1, "the forced regen must call the model once");
+	assert.equal(pi.setCallCount(), 0, "an unchanged title must not be re-set");
+	assert.ok(
+		ctx.notifies.some((n: { msg: string }) => n.msg.includes("Title unchanged: manual name")),
+		"the unchanged manual name must be reported as a success",
+	);
+	// Ownership adopted: the next cadence point (turn 1, the first turn_end
+	// of this run's counter) regenerates without a lock. Only turn 1 is in
+	// range so the poll sees exactly one extra call.
+	for (let t = 1; t <= 10; t++) await handlers.turn_end({}, ctx);
+	await waitFor(() => calls === 2);
+	assert.equal(calls, 2, "ownership must be adopted after an unchanged forced regen");
+	assert.equal(pi.name(), "manual name");
+}
+
+// 14g. Failure reasons: an error response surfaces its (collapsed)
+// errorMessage, a stop reason is surfaced when there is no errorMessage,
+// and an overlong cause is truncated to 120 characters plus "...".
+{
+	const pi = makePi("named");
+	mod.default(pi as any);
+	const errCtx = makeCtx({
+		complete: async () => ({ content: [], errorMessage: "429  rate\nlimit" }),
+		entries: [msgEntry("user", "recent work")],
+	});
+	await commands["name-auto"].handler("", errCtx);
+	assert.equal(pi.name(), "named", "a failed regeneration must keep the existing name");
+	assert.ok(
+		errCtx.notifies.some((n: { msg: string }) => n.msg.includes("empty response: 429 rate limit")),
+		"the error-response cause must be whitespace-collapsed and surfaced",
+	);
+
+	const stopCtx = makeCtx({
+		complete: async () => ({ content: [], stopReason: "length" }),
+		entries: [msgEntry("user", "recent work")],
+	});
+	await commands["name-auto"].handler("", stopCtx);
+	assert.ok(
+		stopCtx.notifies.some((n: { msg: string }) => n.msg.includes("stop reason length")),
+		"a stop reason is surfaced when there is no errorMessage",
+	);
+
+	const longCtx = makeCtx({
+		complete: async () => {
+			throw new Error("z".repeat(200));
+		},
+		entries: [msgEntry("user", "recent work")],
+	});
+	await commands["name-auto"].handler("", longCtx);
+	assert.ok(
+		longCtx.notifies.some((n: { msg: string }) =>
+			n.msg.includes(`Could not regenerate the session title: ${"z".repeat(120)}...`),
+		),
+		"an overlong cause must be truncated to 120 chars plus ...",
+	);
+	assert.ok(
+		!longCtx.notifies.some((n: { msg: string }) => n.msg.includes("z".repeat(121))),
+		"no more than 120 raw characters are surfaced",
+	);
 }
 
 // 15. Config reading and cadence honoring a configured interval.

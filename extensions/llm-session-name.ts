@@ -35,7 +35,9 @@
  * unattributable (restart, /resume, /fork), which locks the session against
  * regeneration. Clearing the name also locks. `/name-auto` forces one
  * regeneration that bypasses the lock; the new title is adopted as
- * extension-owned, so periodic regeneration resumes from it.
+ * extension-owned, so periodic regeneration resumes from it. The command
+ * reports the outcome: applied, unchanged, nothing to title from, or a
+ * failure with its cause.
  *
  * Renames that bypass the live session manager are also honored. The live
  * getSessionName() reads an in-memory entry list that is loaded once when
@@ -64,7 +66,12 @@ import { join } from "node:path";
 const MAX_TITLE_LENGTH = 40;
 const FALLBACK_LENGTH = 36;
 const PROMPT_SAMPLE_LENGTH = 2000;
-const MAX_TOKENS = 64;
+// Reasoning and the answer share `max_tokens` on openai-completions
+// providers, and some reasoning models cannot disable thinking (Baseten GLM
+// exposes no "off" effort, so pi sends no reasoning_effort and the provider
+// default keeps thinking on). A tight cap therefore returns no text and
+// reads as a title-generation failure; sanitizeTitle clips the answer.
+const MAX_TOKENS = 2048;
 const DEFAULT_TURN_INTERVAL = 10;
 const CONFIG_FILE = "llm-session-name.json";
 const RECENT_MESSAGE_COUNT = 10;
@@ -299,6 +306,36 @@ export const buildRecentTurnsText = (entries: unknown[], maxMessages: number = R
 		.join("\n");
 };
 
+// ── Title outcomes ───────────────────────────────────────────────────────────
+
+/** Result of one title-generation model call. */
+type TitleGeneration = { ok: true; title: string } | { ok: false; reason: string };
+
+/**
+ * Result of applying a title: "applied" and "unchanged" both adopt extension
+ * ownership ("unchanged" skips the redundant setSessionName); "noop" covers
+ * nothing to work from and internal skips (locked, renamed, stale runner);
+ * "failed" carries a user-facing cause. Only user-invoked callers
+ * (/name-auto) surface the outcome; the turn_end cadence ignores it.
+ */
+type TitleOutcome =
+	| { status: "applied"; title: string }
+	| { status: "unchanged"; title: string }
+	| { status: "noop"; reason: string }
+	| { status: "failed"; reason: string };
+
+// Noop reasons that mean "no input yet" (as opposed to an internal skip like
+// a lock or a rename); /name-auto phrases these differently.
+const NOOP_NO_CONVERSATION = "no conversation to summarize yet";
+const NOOP_NO_PROMPT = "no prompt to title from yet";
+
+/** Collapse whitespace and cap a failure reason for a user-facing toast. */
+const clampReason = (reason: string): string => {
+	const collapsed = collapseWhitespace(reason);
+	if (collapsed.length <= 120) return collapsed;
+	return `${collapsed.slice(0, 120)}...`;
+};
+
 // ── Extension ────────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -332,14 +369,18 @@ export default function (pi: ExtensionAPI) {
 	// by the generation counter inside applyTitle.
 	const titleRunsInFlight = new Set<string>();
 
-	async function generateTitle(ctx: ExtensionContext, prompt: string): Promise<string | undefined> {
+	async function generateTitle(ctx: ExtensionContext, prompt: string): Promise<TitleGeneration> {
 		const model = ctx.model;
-		if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
-			return undefined;
+		if (!model) return { ok: false, reason: "no model selected" };
+		if (!ctx.modelRegistry.hasConfiguredAuth(model)) {
+			return { ok: false, reason: "model has no configured auth" };
 		}
 
 		let response;
 		try {
+			// Do not pass `reasoning` here: omitting it disables thinking on
+			// Anthropic's streamSimple, while passing "off" would enable
+			// high-effort thinking there (its mapThinkingLevelToEffort default).
 			response = await ctx.modelRegistry.streamSimple(
 				model,
 				{
@@ -353,8 +394,8 @@ export default function (pi: ExtensionAPI) {
 				},
 				{ maxTokens: MAX_TOKENS },
 			).result();
-		} catch {
-			return undefined;
+		} catch (err) {
+			return { ok: false, reason: clampReason(err instanceof Error ? err.message : String(err)) };
 		}
 
 		const text = response.content
@@ -363,28 +404,38 @@ export default function (pi: ExtensionAPI) {
 			.join(" ");
 		// `complete` can resolve with an error response (empty content plus
 		// errorMessage) instead of throwing; an empty title counts as failure.
-		if (!text.trim()) return undefined;
-		return sanitizeTitle(text);
+		if (!text.trim()) {
+			const detail = response.errorMessage
+				? `empty response: ${response.errorMessage}`
+				: response.stopReason
+					? `empty response: stop reason ${response.stopReason}`
+					: "empty response";
+			return { ok: false, reason: clampReason(detail) };
+		}
+		return { ok: true, title: sanitizeTitle(text) };
 	}
 
 	/**
-	 * Generate and apply a session title. Returns the newly applied name, or
-	 * undefined when nothing was applied (locked, no context, model failure,
-	 * unchanged title, or a stale runner). force=true bypasses the manual
-	 * lock and the provenance checks (/name-auto).
+	 * Generate and apply a session title. Returns the outcome: "applied" (a
+	 * new name or the first-title fallback was set), "unchanged" (the
+	 * regenerated title matches the current one; ownership is still adopted),
+	 * "noop" (nothing to work from, or an internal skip: locked, renamed,
+	 * stale runner), or "failed" (model or setSessionName failure, with a
+	 * user-facing cause). force=true bypasses the manual lock and the
+	 * provenance checks (/name-auto).
 	 */
-	async function applyTitle(ctx: ExtensionContext, sessionId: string, force: boolean): Promise<string | undefined> {
+	async function applyTitle(ctx: ExtensionContext, sessionId: string, force: boolean): Promise<TitleOutcome> {
 		// getSessionName() is undefined for an unset name; normalize to "".
 		const current = pi.getSessionName() ?? "";
 
 		if (!force) {
-			if (manualLock.has(sessionId)) return undefined;
+			if (manualLock.has(sessionId)) return { status: "noop", reason: "session name is manual" };
 			// An external rename (session selector, another pi process on the
 			// same session file) never reaches getSessionName(); detect it by
 			// divergence from the file on disk and lock, same as a manual /name.
 			if (externallyRenamed(ctx, current)) {
 				manualLock.add(sessionId);
-				return undefined;
+				return { status: "noop", reason: "session was renamed externally" };
 			}
 			const owned = lastGeneratedTitle.get(sessionId);
 			if (owned !== undefined) {
@@ -392,13 +443,13 @@ export default function (pi: ExtensionAPI) {
 				// manual action. Lock the session and stop regenerating.
 				if (current !== owned) {
 					manualLock.add(sessionId);
-					return undefined;
+					return { status: "noop", reason: "session name is manual" };
 				}
 			} else if (current) {
 				// Named but never titled by us: a pre-named session (manual
 				// /name, /resume, /fork, restored session). Never generate.
 				manualLock.add(sessionId);
-				return undefined;
+				return { status: "noop", reason: "session name is manual" };
 			}
 		}
 
@@ -411,7 +462,7 @@ export default function (pi: ExtensionAPI) {
 		if (isRegen) {
 			const branch = ctx.sessionManager.getBranch() as unknown[];
 			const recent = buildRecentTurnsText(branch);
-			if (!recent.trim()) return undefined;
+			if (!recent.trim()) return { status: "noop", reason: NOOP_NO_CONVERSATION };
 			// Theme anchors come from the branch's original user messages, so
 			// they survive /resume and /fork. The first prompt captured via
 			// before_agent_start is only a fallback for branches without user
@@ -424,13 +475,13 @@ export default function (pi: ExtensionAPI) {
 			prompt = buildRegenerationPrompt(current || owned || "", anchors, recent);
 		} else {
 			const first = firstPromptBySession.get(sessionId);
-			if (!first) return undefined;
+			if (!first) return { status: "noop", reason: NOOP_NO_PROMPT };
 			prompt = buildTitlePrompt(first);
 		}
 
 		const runGeneration = generation;
-		const title = await generateTitle(ctx, prompt);
-		if (generation !== runGeneration) return undefined;
+		const generated = await generateTitle(ctx, prompt);
+		if (generation !== runGeneration) return { status: "noop", reason: "session replaced during generation" };
 
 		if (!force) {
 			// A /name during the model await wins: discard the generated title
@@ -442,41 +493,46 @@ export default function (pi: ExtensionAPI) {
 			const now = pi.getSessionName() ?? "";
 			if (now !== (lastGeneratedTitle.get(sessionId) ?? "") || externallyRenamed(ctx, now)) {
 				manualLock.add(sessionId);
-				return undefined;
+				return { status: "noop", reason: "session was renamed during generation" };
 			}
 		}
 
-		if (!title) {
+		if (!generated.ok) {
 			// First-title failure falls back to a truncated prompt so the
 			// session still gets a stable, short name. Regeneration failure
-			// keeps the existing name rather than degrading it.
-			if (isRegen) return undefined;
+			// keeps the existing name rather than degrading it, and reports
+			// the cause to user-invoked callers.
+			if (isRegen) return { status: "failed", reason: generated.reason };
 			const first = firstPromptBySession.get(sessionId);
-			if (!first) return undefined;
+			if (!first) return { status: "noop", reason: NOOP_NO_PROMPT };
 			const fallback = truncateFallbackName(first);
 			try {
 				pi.setSessionName(fallback);
 			} catch {
-				return undefined;
+				return { status: "failed", reason: "could not set the session name" };
 			}
 			lastGeneratedTitle.set(sessionId, fallback);
-			return fallback;
+			return { status: "applied", title: fallback };
 		}
+		const title = generated.title;
 
 		// No thrash: never fire a redundant session_info_changed (and tab
-		// rename) when the generated title matches the current name.
+		// rename) when the generated title matches the current name. This is
+		// still a success for the caller (reported as "unchanged"), and the
+		// ownership bookkeeping below still runs so cadence regeneration
+		// resumes from this title.
 		if (title === current) {
 			lastGeneratedTitle.set(sessionId, title);
-			return undefined;
+			return { status: "unchanged", title };
 		}
 		try {
 			pi.setSessionName(title);
 		} catch {
 			// Stale runner race between the generation check and the call.
-			return undefined;
+			return { status: "failed", reason: "could not set the session name" };
 		}
 		lastGeneratedTitle.set(sessionId, title);
-		return title;
+		return { status: "applied", title };
 	}
 
 	pi.on("before_agent_start", (event, ctx) => {
@@ -520,11 +576,28 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral";
 				manualLock.delete(sessionId);
-				const title = await applyTitle(ctx, sessionId, true);
-				if (title) {
-					ctx.ui.notify(`Session title: ${title}`, "info");
-				} else {
-					ctx.ui.notify("Could not regenerate the session title.", "warning");
+				const outcome = await applyTitle(ctx, sessionId, true);
+				switch (outcome.status) {
+					case "applied":
+						ctx.ui.notify(`Session title: ${outcome.title}`, "info");
+						break;
+					case "unchanged":
+						ctx.ui.notify(`Title unchanged: ${outcome.title}`, "info");
+						break;
+					case "noop": {
+						// "Nothing to title yet" only fits missing input; locks,
+						// renames, and stale runners get a neutral prefix.
+						const waiting =
+							outcome.reason === NOOP_NO_CONVERSATION || outcome.reason === NOOP_NO_PROMPT;
+						ctx.ui.notify(
+							`${waiting ? "Nothing to title yet" : "No title change"}: ${outcome.reason}.`,
+							"info",
+						);
+						break;
+					}
+					case "failed":
+						ctx.ui.notify(`Could not regenerate the session title: ${outcome.reason}.`, "warning");
+						break;
 				}
 			} catch {
 				ctx.ui.notify("Could not regenerate the session title.", "error");
