@@ -56,6 +56,10 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 - **git-read** – model-facing `git_read` tool: allowlisted read-only git subcommands (diff, log, show, status) as an argv-array child process, never through a shell. See [docs/git-read-design.md](docs/git-read-design.md).
 - **gh-read** – model-facing `gh_read` tool: allowlisted read-only gh subcommands (pr view/diff/list/checks, issue view/list, auth status, run list/view) as an argv-array child process, never through a shell, plus six pinned GitHub API reads with structured parameters and worktree-free operation: `repo contents` (decoded file text with line ranges, directory entries), `repo tree` (recursive or shallow), `commit checks` (check runs plus legacy statuses, bounded continuation), `advisory view` (exact CVE/GHSA lookup), `check annotations` (one check run's annotations, single 100-item page with an incompleteness notice at a full page), and `repo metadata` (flat repository object: default branch, description, visibility, URLs, and related facts). `run view --log`/`--log-failed` fetch run or failed-step logs through a dual-window runner that keeps the first and last 50 KiB of stdout (the middle is omitted with an exact byte-count notice) under a 30 s timeout. External jq filtering is preflighted and sandboxed; API results are capped at 50 KiB with explicit incompleteness labeling. See [docs/gh-read-design.md](docs/gh-read-design.md).
 
+## Package prompts
+
+- **rebase** – `/rebase [base-branch]` rebases the current branch onto its parent branch via the local `git-rebase-parent` script (parent resolution: `--parent` flag, open PR base branch, then repo default branch), keeping conflicts in progress for the agent to resolve. Defined in `prompts/rebase.md`.
+
 Skills shared between pi and Claude Code live in the separate
 [agent-skills](https://github.com/lucaspimentel/agent-skills) repository.
 
@@ -64,6 +68,7 @@ Skills shared between pi and Claude Code live in the separate
 ```
 pi-extensions/
 ├── package.json          # pi manifest
+├── prompts/              # package-level prompt templates (prompts/*.md)
 ├── extensions/
 │   ├── *.ts              # single-file extensions
 │   └── */                # multi-file extensions (web, pi-tool-permissions, idle-summary, ...)
