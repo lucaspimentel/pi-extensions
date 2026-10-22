@@ -33,16 +33,19 @@ test("agentRunning = false", initialState().agentRunning, false);
 
 // ── Basic transitions ──────────────────────────────────────────────────────
 
-section("agent_start / agent_end");
+section("agent_start / agent_settled");
 
 test("agent_start → working",
 	run([{ type: "agent_start" }]).state,
 	"working");
-test("agent_start, agent_end → idle",
-	run([{ type: "agent_start" }, { type: "agent_end" }]).state,
+test("agent_start, agent_settled → idle",
+	run([{ type: "agent_start" }, { type: "agent_settled" }]).state,
 	"idle");
-test("agent_end without start stays idle",
-	run([{ type: "agent_end" }]).state,
+test("agent_settled without start stays idle",
+	run([{ type: "agent_settled" }]).state,
+	"idle");
+test("repeated agent_settled is idempotent",
+	run([{ type: "agent_start" }, { type: "agent_settled" }, { type: "agent_settled" }]).state,
 	"idle");
 
 // ── Dialog (waiting) takes precedence over working ─────────────────────────
@@ -84,11 +87,11 @@ section("tool_error / tool_success");
 test("tool_error during working → error",
 	run([{ type: "agent_start" }, { type: "tool_error" }]).state,
 	"error");
-test("error sticks through agent_end (turn ended on failing tool)",
+test("error sticks through agent_settled (turn ended on failing tool)",
 	run([
 		{ type: "agent_start" },
 		{ type: "tool_error" },
-		{ type: "agent_end" },
+		{ type: "agent_settled" },
 	]).state,
 	"error");
 test("tool_success clears error mid-turn (agent recovered)",
@@ -98,12 +101,12 @@ test("tool_success clears error mid-turn (agent recovered)",
 		{ type: "tool_success" },
 	]).state,
 	"working");
-test("recovered turn ends idle (no ❌ stuck after agent_end)",
+test("recovered turn ends idle (no ❌ stuck after agent_settled)",
 	run([
 		{ type: "agent_start" },
 		{ type: "tool_error" },
 		{ type: "tool_success" },
-		{ type: "agent_end" },
+		{ type: "agent_settled" },
 	]).state,
 	"idle");
 test("tool_success when no error is a no-op (stays working)",
@@ -116,7 +119,7 @@ test("agent_start clears prior error from last turn",
 	run([
 		{ type: "agent_start" },
 		{ type: "tool_error" },
-		{ type: "agent_end" },
+		{ type: "agent_settled" },
 		{ type: "agent_start" },
 	]).state,
 	"working");
@@ -179,35 +182,53 @@ test("shutdown clears dialogDepth",
 	]).dialogDepth,
 	0);
 
+section("agent_settled under masks");
+
+test("settlement during a dialog: waiting persists, close exposes idle",
+	trace([
+		{ type: "agent_start" },
+		{ type: "dialog_open" },
+		{ type: "agent_settled" },
+		{ type: "dialog_close" },
+	]).join(","),
+	"working,waiting,waiting,idle");
+test("settlement keeps unrecovered error visible (no state change)",
+	trace([
+		{ type: "agent_start" },
+		{ type: "tool_error" },
+		{ type: "agent_settled" },
+	]).join(","),
+	"working,error,error");
+
 // ── Realistic full flow ───────────────────────────────────────────────────
 
 section("realistic flow");
 
 test("idle → working → waiting (permission) → working → idle",
 	trace([
-		{ type: "agent_start" },     // working
-		{ type: "dialog_open" },     // waiting
-		{ type: "dialog_close" },    // working
-		{ type: "agent_end" },       // idle
+		{ type: "agent_start" },      // working
+		{ type: "dialog_open" },      // waiting
+		{ type: "dialog_close" },     // working
+		{ type: "agent_settled" },    // idle
 	]).join(","),
 	"working,waiting,working,idle");
 
 test("turn ends on failing tool: ❌ persists until next agent_start",
 	trace([
-		{ type: "agent_start" },     // working
-		{ type: "tool_error" },      // error
-		{ type: "agent_end" },       // error (still ❌ on idle tab)
-		{ type: "agent_start" },     // working (cleared)
-		{ type: "agent_end" },       // idle
+		{ type: "agent_start" },      // working
+		{ type: "tool_error" },       // error
+		{ type: "agent_settled" },    // error (still ❌ on idle tab)
+		{ type: "agent_start" },      // working (cleared)
+		{ type: "agent_settled" },    // idle
 	]).join(","),
 	"working,error,error,working,idle");
 
 test("agent recovers mid-turn: error → working → idle (no ❌ sticks)",
 	trace([
-		{ type: "agent_start" },     // working
-		{ type: "tool_error" },      // error  (failing tool)
-		{ type: "tool_success" },    // working (next tool worked)
-		{ type: "agent_end" },       // idle
+		{ type: "agent_start" },      // working
+		{ type: "tool_error" },       // error  (failing tool)
+		{ type: "tool_success" },     // working (next tool worked)
+		{ type: "agent_settled" },    // idle
 	]).join(","),
 	"working,error,working,idle");
 

@@ -17,7 +17,7 @@
  * no extra glyph; idle/waiting/error are still distinguished by glyph.
  *
  * Detection:
- *   working   – between agent_start and agent_end
+ *   working   – between agent_start and agent_settled
  *   waiting   – any time a blocking ctx.ui.* call is open
  *               (confirm / select / input / editor / custom — covers permission
  *               prompts from pi-tool-permissions, /commands, custom wizards
@@ -25,7 +25,7 @@
  *   error     – last tool_result was an error and we haven't recovered.
  *               Cleared by the next successful tool_result (agent worked
  *               around the failure), agent_start (new turn), or
- *               session_shutdown. Persists through agent_end — so if a
+ *               session_shutdown. Persists through agent_settled — so if a
  *               turn ends on a failing tool, the ❌ stays visible on the
  *               idle tab until you send the next message.
  *   idle      – otherwise (and on session_shutdown)
@@ -103,23 +103,23 @@ export function formatProgressSequence(state: State): string {
  *     state            – current visible state
  *     dialogDepth      – number of nested dialogs open (>0 forces "waiting")
  *     lastToolErrored  – set by tool_error; cleared by tool_success,
- *                        agent_start, session_shutdown (NOT agent_end)
- *     agentRunning     – between agent_start and agent_end
+ *                        agent_start, session_shutdown (NOT agent_settled)
+ *     agentRunning     – between agent_start and agent_settled
  */
 export interface ReducerState {
 	state: State;
 	dialogDepth: number;
 	/** True iff the *most recent* tool_result was an error and we haven't
 	 *  recovered. Cleared by tool_success, agent_start, or session_shutdown.
-	 *  Deliberately NOT cleared by agent_end — a turn that ends on a failing
-	 *  tool leaves ❌ visible until the next agent_start. */
+	 *  Deliberately NOT cleared by agent_settled — a turn that ends on a
+	 *  failing tool leaves ❌ visible until the next agent_start. */
 	lastToolErrored: boolean;
 	agentRunning: boolean;
 }
 
 export type ReducerEvent =
 	| { type: "agent_start" }
-	| { type: "agent_end" }
+	| { type: "agent_settled" }
 	| { type: "tool_error" }
 	| { type: "tool_success" }
 	| { type: "dialog_open" }
@@ -137,9 +137,13 @@ export function reduce(s: ReducerState, ev: ReducerEvent): ReducerState {
 			next.agentRunning = true;
 			next.lastToolErrored = false;
 			break;
-		case "agent_end":
+		case "agent_settled":
 			// Note: leave lastToolErrored alone — if the turn ended on a
 			// failing tool, we want ❌ to persist into idle until next turn.
+			// agent_settled (not agent_end) is the clearing boundary: agent_end
+			// fires before retries, overflow compaction, and queued follow-ups
+			// finish, so clearing there would flash idle mid-work. Clears on
+			// every settlement, including aborted ones.
 			next.agentRunning = false;
 			break;
 		case "tool_error":
@@ -276,9 +280,11 @@ export default function (pi: ExtensionAPI) {
 		dispatch(ctx, { type: "agent_start" });
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_settled", async (_event, ctx) => {
 		currentCtx = ctx;
-		dispatch(ctx, { type: "agent_end" });
+		// Cleared for every settlement; the event's `aborted` flag makes no
+		// difference to the visible state (working -> idle either way).
+		dispatch(ctx, { type: "agent_settled" });
 	});
 
 	pi.on("tool_result", async (event, ctx) => {

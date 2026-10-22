@@ -84,7 +84,8 @@ async function reloadCycle() {
 	const { ctx, invalidate } = makeCtx();
 	await handlers.session_start?.({}, ctx);
 	await handlers.agent_start?.({}, ctx);
-	await handlers.agent_end?.({}, ctx);
+	// Required settlement boundary; a missing registration must fail loudly.
+	await handlers.agent_settled({}, ctx);
 	// /reload: session_shutdown fires, THEN the runner is invalidated.
 	await handlers.session_shutdown?.({ reason: "reload" }, ctx);
 	invalidate();

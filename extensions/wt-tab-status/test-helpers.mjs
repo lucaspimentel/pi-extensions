@@ -52,7 +52,7 @@ export function reduce(s, ev) {
 			next.agentRunning = true;
 			next.lastToolErrored = false;
 			break;
-		case "agent_end":
+		case "agent_settled":
 			// Leave lastToolErrored alone — if the turn ended on a failing
 			// tool, we want ❌ to persist into idle until next turn.
 			next.agentRunning = false;
