@@ -470,8 +470,14 @@ removed.
 - `guard:profile`: `{ profile, sandbox: { mode, workspaceMode, readRoots },
   workspaceLocked }` - emitted on session start, every profile change,
   reload, and research release. Step-3 tools subscribe to this.
-- `guard:decision`: `{ toolName, class, call, action, reason }` - emitted for
-  every mapped tool call, observe-only.
+- `guard:decision`: `{ toolName, class, call, action, reason, fromCodemode }` - emitted for
+  every mapped tool call, observe-only. `fromCodemode` is true when the call was
+  issued by another tool (a codemode script, MCP wrapper, or subagent tool:
+  `parentToolCallId` set on the event, or a `<parent id>/<n>` `toolCallId`); in
+  that case `reason` carries the suffix `(from codemode script)`, which also
+  appears in the debug notify, block/deny reasons, the headless prompt deny,
+  and approval dialog titles (including the read-grant dialog a nested
+  `python`/`node` worker or `request_read_access` call opens).
 - `herdr:blocked`: `{ active: true, label: "guard: awaiting user input" }`
   while a guard dialog (approval, read grant, profile picker, migrate
   confirm, including every save/picker/editor/steering stage inside one)

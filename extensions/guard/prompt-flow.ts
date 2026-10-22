@@ -407,6 +407,8 @@ export interface ReadGrantPromptDeps {
 	io: PromptFlowIO;
 	signal: AbortSignal;
 	workerName: string;
+	/** Optional suffix appended to the title's first line, marking the requester as a nested tool call. */
+	originSuffix?: string;
 	requestPath: string;
 	suggestedRoot: string;
 	scopes: readonly ConfigScope[];
@@ -425,7 +427,7 @@ export async function runReadGrantPrompt(deps: ReadGrantPromptDeps): Promise<Rea
 	const { io, signal } = deps;
 	const editorAvailable = typeof io.editor === "function";
 	const title = [
-		`${deps.workerName} requests read-only access`,
+		`${deps.workerName} requests read-only access${deps.originSuffix ?? ""}`,
 		"",
 		"Path:",
 		`  ${deps.requestPath}`,

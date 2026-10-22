@@ -238,14 +238,16 @@ test("harness: tool_call observer records decisions and never blocks", async () 
 		assert.equal(observers.length, 1, "exactly one observe hook");
 
 		// Sandboxed bash allows and emits a decision.
-		const result = await observers[0]({ toolName: "bash", input: { command: "ls" } }, ctx);
+		const result = await observers[0]({ toolName: "bash", input: { command: "ls" }, toolCallId: "call-1" }, ctx);
 		assert.equal(result, undefined, "the observer must never return a block");
 		const decisions = h.emitted.filter(([c]) => c === "guard:decision");
 		assert.equal(decisions.length, 1);
-		const payload = decisions[0][1] as { action: string; class: string; call: { kind: string }; reason: string };
+		const payload = decisions[0][1] as { action: string; class: string; call: { kind: string }; reason: string; fromCodemode: boolean };
 		assert.equal(payload.action, "allow");
 		assert.equal(payload.class, "sandboxed-exec");
 		assert.equal(payload.call.kind, "sandboxed-exec");
+		assert.equal(payload.fromCodemode, false, "a top-level call is not labeled");
+		assert.doesNotMatch(payload.reason, /codemode/, "top-level reasons stay unsuffixed");
 
 		// A host-shell command that would be denied is observed as deny, never blocked.
 		fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
@@ -277,6 +279,37 @@ test("harness: tool_call observer records decisions and never blocks", async () 
 		const unknown = h.emitted.filter(([c]) => c === "guard:decision").at(-1)?.[1] as { action: string; class: string };
 		assert.equal(unknown.class, "remote-write");
 		assert.equal(unknown.action, "prompt", "remote writes prompt in default (observe-only)");
+	});
+});
+
+test("harness: nested tool calls are labeled as codemode origin in decisions and debug notify", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-harness-nested-obs-");
+		const ctx = harnessCtx(h, cwd);
+		for (const handler of h.handlers["session_start"] ?? []) await handler({}, ctx);
+		h.emitted.length = 0;
+		const observers = h.handlers["tool_call"] ?? [];
+
+		// A nested call (parentToolCallId set) emits fromCodemode and a suffixed reason.
+		await observers[0]({ toolName: "bash", input: { command: "ls" }, toolCallId: "parent/1", parentToolCallId: "parent" }, ctx);
+		const nested = h.emitted.filter(([c]) => c === "guard:decision").at(-1)?.[1] as { action: string; reason: string; fromCodemode: boolean };
+		assert.equal(nested.fromCodemode, true);
+		assert.match(nested.reason, /\(from codemode script\)$/);
+
+		// A nested id shape alone (no parentToolCallId) is also labeled, matching
+		// the execute() path where the parent field is unavailable.
+		h.emitted.length = 0;
+		await observers[0]({ toolName: "bash", input: { command: "ls" }, toolCallId: "parent/2" }, ctx);
+		const byShape = h.emitted.filter(([c]) => c === "guard:decision").at(-1)?.[1] as { reason: string; fromCodemode: boolean };
+		assert.equal(byShape.fromCodemode, true);
+		assert.match(byShape.reason, /\(from codemode script\)$/);
+
+		// The debug notify carries the same suffix.
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("debug on", ctx);
+		await observers[0]({ toolName: "bash", input: { command: "ls" }, toolCallId: "parent/3", parentToolCallId: "parent" }, ctx);
+		assert.match(h.notifications.at(-1) ?? "", /\(from codemode script\)\)$/);
 	});
 });
 
@@ -925,6 +958,26 @@ test("enforced write/edit: out-of-root and protected prompts never offer the swi
 		assert.equal(headlessResult?.block, true);
 		assert.match((headlessResult as { reason: string }).reason, /non-interactive prompt collapses to deny/);
 		assert.equal(seen.length, 2, "headless denial opens no dialog");
+	});
+});
+
+test("enforced write/edit: nested calls label the dialog title with the codemode origin", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-harness-nested-write-");
+		const observers = h.handlers["tool_call"] ?? [];
+		const ctx = harnessCtx(h, cwd);
+		for (const handler of h.handlers["session_start"] ?? []) await handler({}, ctx);
+		// Record dialog titles through a wrapper around ui.select.
+		const titles: string[] = [];
+		(ctx.ui as Record<string, unknown>).select = async (title: string) => { titles.push(title); return undefined; };
+		// A top-level write: no suffix in the title.
+		await observers[0]({ toolName: "write", input: { path: path.join(cwd, "a.ts"), content: "x" }, toolCallId: "call-1" }, ctx);
+		assert.doesNotMatch(titles[0], /codemode/);
+		// A nested write: the title's Why line carries the suffix.
+		await observers[0]({ toolName: "write", input: { path: path.join(cwd, "b.ts"), content: "y" }, toolCallId: "parent/1", parentToolCallId: "parent" }, ctx);
+		assert.equal(titles.length, 2, "exactly one dialog per call; a skipped selector would misindex the titles array");
+		assert.match(titles[1], /Why: .*\(from codemode script\)$/);
 	});
 });
 

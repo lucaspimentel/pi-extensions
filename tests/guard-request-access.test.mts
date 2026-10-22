@@ -360,6 +360,49 @@ test("deny decisions refuse with the cause and never open a dialog", async () =>
 	});
 });
 
+test("a nested call labels the read-grant dialog title with the codemode origin", async () => {
+	const external = externalDir();
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = tempDir("guard-req-access-nested-");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const calls: SelectCall[] = [];
+		// Nested id shape (<parent id>/<n>): the title carries the suffix.
+		scriptSelect(ctx, [undefined], calls);
+		const nested = await tool(h).execute("parent/1", { path: path.join(external, "data.txt") }, undefined, undefined, ctx);
+		assert.equal(calls.length, 1, "exactly one dialog opened");
+		assert.match(calls[0].title, /requests read-only access \(from codemode script\)/);
+		assert.equal(nested.isError, true, "declining grants nothing");
+		// Control: a top-level id never carries the suffix.
+		scriptSelect(ctx, [undefined], calls);
+		const top = await tool(h).execute("id", { path: path.join(external, "data.txt") }, undefined, undefined, ctx);
+		assert.equal(calls.length, 2, "exactly one dialog per call");
+		assert.match(calls[1].title, /requests read-only access/);
+		assert.doesNotMatch(calls[1].title, /codemode/);
+		assert.deepEqual(effectiveReadRoots(h), [], "nothing granted");
+		await shutdownSession(h);
+	});
+});
+
+test("a nested call's read-grant deny reason carries the codemode origin suffix", async () => {
+	const external = externalDir();
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = tempDir("guard-req-access-nested-deny-");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		await setProfile(h, ctx, "research");
+		const calls: SelectCall[] = [];
+		scriptSelect(ctx, [], calls);
+		const result = await tool(h).execute("parent/1", { path: path.join(external, "data.txt") }, undefined, undefined, ctx);
+		assert.equal(result.isError, true);
+		assert.match(resultText(result), /guard denied the request \(.*\(from codemode script\)\)/);
+		assert.equal(calls.length, 0, "no dialog on deny");
+		await shutdownSession(h);
+	});
+});
+
 test("allow decisions still open the dialog and never grant automatically", async () => {
 	const external = externalDir();
 	await withTempHome(async () => {

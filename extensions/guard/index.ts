@@ -33,6 +33,40 @@ import { modelLabel, pickableModels } from "../shared/model-selection.ts";
 
 const DEFAULT_CYCLE_SHORTCUT = "ctrl+alt+g";
 
+/** Suffix appended to decision reasons for calls issued by another tool (for example a codemode script). */
+const CODEMODE_ORIGIN = "(from codemode script)";
+
+/** The reason/title suffix for a nested call: a leading space plus CODEMODE_ORIGIN, or empty. */
+function originSuffix(nested: boolean): string {
+	return nested ? ` ${CODEMODE_ORIGIN}` : "";
+}
+
+/**
+ * Copy `decision` with the codemode origin suffix appended to the reason when
+ * `nested` is true. Pi does not render nested tool calls, so guard is the only
+ * surface that can label them, and every decision surface (the guard:decision
+ * payload, the debug notify, block/deny reasons, and approval dialog titles)
+ * renders `reason` directly.
+ */
+function withCodemodeOrigin(decision: Decision, nested: boolean): Decision {
+	return nested ? { ...decision, reason: `${decision.reason}${originSuffix(nested)}` } : decision;
+}
+
+/**
+ * True when a tool call was issued by another tool (a codemode script, MCP
+ * wrapper, or subagent tool). `parentToolCallId` is authoritative on the
+ * tool_call hook; a `/` in the id matches the `<parent id>/<n>` shape pi
+ * assigns to nested calls, the only signal available on the execute() path,
+ * which receives the id but never the parent field. Top-level ids are
+ * provider issued (call_..., toolu_...) and slash-free today; a provider that
+ * emitted a slash-bearing top-level id would get a false origin label on the
+ * execute() path. That label is cosmetic: it changes no enforcement
+ * semantics.
+ */
+function callIsNested(toolCallId?: string, parentToolCallId?: string): boolean {
+	return parentToolCallId !== undefined || (typeof toolCallId === "string" && toolCallId.includes("/"));
+}
+
 /** Hideable, bounded dialog overlay for guard's four TUI dialogs (see ask-overlay.ts). */
 const askSelect = createGuardAskSelect({ ExtensionSelectorComponent, matchesKey, isKeyRelease, isKeyRepeat });
 
@@ -333,14 +367,16 @@ export default function guard(pi: ExtensionAPI) {
 			const input = (event.input ?? {}) as Record<string, unknown>;
 			const policy = policyFor(ctx);
 			const mapped = mappedCall(event.toolName, input);
+			const nested = callIsNested(event.toolCallId, event.parentToolCallId);
 			// No classifier or dialog here for owned tools: execute is authoritative.
 			const decision = owned ? decide({ ...policy, interactive: ctx.hasUI }, mapped.call) : await decisionFor(event.toolName, input, ctx, policy);
+			const labeled = withCodemodeOrigin(decision, nested);
 			// Pathless local writes (memory_write, scratchpad, ...) stay observe-only.
 			const enforced = enforceWriteEdit && mapped.call.kind === "local-write" && mapped.call.path !== undefined;
-			pi.events.emit("guard:decision", { toolName: event.toolName, class: mapped.cls, call: mapped.call, ...decision, enforcement: owned || enforced });
-			if (debugEnabled) notify(ctx, `[guard ${owned || enforced ? "enforce" : "observe"}] ${event.toolName}: ${decision.action} (${decision.reason})`);
-			if (owned && (decision.action === "deny" || runtime?.teardownFailure)) return { block: true, reason: runtime?.teardownFailure ?? decision.reason };
-			if (enforced && runtime) return await enforceLocalWrite(runtime, event.toolName, input, ctx, decision);
+			pi.events.emit("guard:decision", { toolName: event.toolName, class: mapped.cls, call: mapped.call, ...labeled, enforcement: owned || enforced, fromCodemode: nested });
+			if (debugEnabled) notify(ctx, `[guard ${owned || enforced ? "enforce" : "observe"}] ${event.toolName}: ${labeled.action} (${labeled.reason})`);
+			if (owned && (labeled.action === "deny" || runtime?.teardownFailure)) return { block: true, reason: runtime?.teardownFailure ?? labeled.reason };
+			if (enforced && runtime) return await enforceLocalWrite(runtime, event.toolName, input, ctx, labeled);
 		} catch (err) {
 			if (owned) return { block: true, reason: `guard: authorization failed closed: ${String(err)}` };
 			if (enforceWriteEdit) return { block: true, reason: `guard: write/edit authorization failed closed: ${String(err)}` };
@@ -447,8 +483,13 @@ export default function guard(pi: ExtensionAPI) {
 	 * full approval dialog again. Nothing is carried between iterations: old
 	 * occurrence IDs are never adopted. Cancellation or staleness after a
 	 * commit keeps the saved rules but never authorizes execution.
+	 *
+	 * `nested` marks calls issued by another tool (for example a codemode
+	 * script): when true, every decision reason surfaced here (deny throws, the
+	 * headless deny, and the approval dialog title) carries the codemode origin
+	 * suffix.
 	 */
-	async function authorize(rt: GuardRuntime, name: OwnedExecutor, input: Record<string, unknown>, ctx: ExtensionContext, signal?: AbortSignal): Promise<number> {
+	async function authorize(rt: GuardRuntime, name: OwnedExecutor, input: Record<string, unknown>, ctx: ExtensionContext, signal?: AbortSignal, nested = false): Promise<number> {
 		for (;;) {
 			rt.assertAvailable();
 			assertCallActive(signal);
@@ -457,9 +498,13 @@ export default function guard(pi: ExtensionAPI) {
 			assertCallActive(signal);
 			rt.assertAvailable();
 			if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw new Error("guard: approval expired after a policy change");
-			if (decision.action === "deny") throw new Error(`guard: ${decision.reason}`);
-			if (decision.action === "allow") return epoch;
-			if (!ctx.hasUI) throw new Error("guard: headless prompts deny");
+			const labeled = withCodemodeOrigin(decision, nested);
+			if (labeled.action === "deny") throw new Error(`guard: ${labeled.reason}`);
+			if (labeled.action === "allow") return epoch;
+			// Defensive: decisionFor collapses non-interactive prompts to deny, so
+			// this is unreachable today; kept labeled for consistency if that
+			// ever changes.
+			if (!ctx.hasUI) throw new Error(`guard: headless prompts deny${originSuffix(nested)}`);
 		const policy = policyFor(ctx);
 		const mapped = mappedCall(name, input).call;
 		// Raw/degraded bash is a host shell for routing and saving, too.
@@ -486,7 +531,7 @@ export default function guard(pi: ExtensionAPI) {
 				signal: dialogSignal,
 				toolName: name,
 				command: commandText,
-				decision,
+				decision: labeled,
 				explanation,
 				allowPlan,
 				denySaveSupported,
@@ -563,7 +608,7 @@ export default function guard(pi: ExtensionAPI) {
 				throw new Error("guard: approval expired after a policy change");
 			}
 			if (freshDecision.action === "allow") return rt.epoch;
-			if (freshDecision.action === "deny") throw new Error(`guard: ${freshDecision.reason}`);
+			if (freshDecision.action === "deny") throw new Error(`guard: ${withCodemodeOrigin(freshDecision, nested).reason}`);
 			continue;
 		}
 		if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
@@ -598,7 +643,7 @@ export default function guard(pi: ExtensionAPI) {
 	async function executeShell(name: "bash" | "host_bash", id: string, input: { command: string; timeout?: number }, signal: AbortSignal | undefined, onUpdate: any, ctx: ExtensionContext): Promise<AgentToolResult<any>> {
 		const rt = runtime;
 		if (!rt) throw new Error("guard session state not initialized");
-		const epoch = await authorize(rt, name, input, ctx, signal);
+		const epoch = await authorize(rt, name, input, ctx, signal, callIsNested(id));
 		const outcome = await rt.run(async (policy) => {
 			if (rt !== runtime || rt.epoch !== epoch) return false;
 			const decision = await decisionFor(name, input, ctx, policy);
@@ -639,14 +684,14 @@ export default function guard(pi: ExtensionAPI) {
 		// constrain it at execution time, which annotations do not describe).
 		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 		description: `Persistent ${name} interpreter managed by guard. Sandboxed workers use throwaway workspace overlays, no network and shared real-path scratch. action=reset discards state, not scratch; action=status never starts a worker. Raw profiles expose the host. Unavailable in degraded mode.`,
-		execute: async (_id, input, signal, _onUpdate, ctx) => {
+		execute: async (id, input, signal, _onUpdate, ctx) => {
 			const rt = runtime;
 			if (!rt) throw new Error("guard session state not initialized");
-			const epoch = await authorize(rt, name, input, ctx, signal);
+			const epoch = await authorize(rt, name, input, ctx, signal, callIsNested(id));
 			const outcome = await rt.run(async (policy) => rt === runtime && rt.epoch === epoch && (await decisionFor(name, input, ctx, policy)).action === "allow", (execution) => rt.worker(name, input, execution), signal);
 			let data = outcome.result as Record<string, any>;
 			if (data.status === "permission_needed" && typeof data.permissionPath === "string") {
-				const grant = await requestReadGrant(rt, name, String(data.permissionPath), ctx, signal, "worker");
+				const grant = await requestReadGrant(rt, name, String(data.permissionPath), ctx, signal, "worker", callIsNested(id));
 				// Project the typed outcome into the existing worker response fields
 				// (diagnostic/stateLost/stateLostReason), byte-identical to the former
 				// handleReadGrant payloads. An empty refusal diagnostic is the no-UI
@@ -676,8 +721,9 @@ export default function guard(pi: ExtensionAPI) {
 		parameters: Type.Object({ path: Type.String({ description: "Absolute path to the file or directory to read" }) }),
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 		description: "Opens a guard dialog asking the user for read-only access to an absolute host path outside the sandbox mounts: a session grant or a persistent read root saved to the guard config. Mutates guard authorization state; applying a grant stops running interpreter workers. Requires an interactive session; non-interactive contexts refuse. Never re-runs anything: nothing is executed or replayed here, and no read happens; re-run the read yourself after a grant.",
-		execute: async (_id, input, signal, _onUpdate, ctx) => {
+		execute: async (id, input, signal, _onUpdate, ctx) => {
 			const errorResult = (text: string): AgentToolResult<any> => ({ content: [{ type: "text", text }], details: undefined, isError: true });
+			const nested = callIsNested(id);
 			const rt = runtime;
 			if (!rt) throw new Error("guard session state not initialized");
 			if (signal?.aborted) return errorResult("No read grant: call aborted.");
@@ -706,10 +752,10 @@ export default function guard(pi: ExtensionAPI) {
 			// with no UI refuses with an actionable diagnostic; prompt with UI and
 			// allow both open the dialog (the consent surface, never an automatic
 			// grant); classifier failures and indeterminate verdicts fail closed.
-			if (decision.action === "deny") return errorResult(`No read grant: guard denied the request (${decision.reason}). No interpreter workers were stopped and no previously run code was replayed.`);
+			if (decision.action === "deny") return errorResult(`No read grant: guard denied the request (${withCodemodeOrigin(decision, nested).reason}). No interpreter workers were stopped and no previously run code was replayed.`);
 			if (decision.action === "prompt" && /classifier (call failed|had no verdict)/.test(decision.reason)) return errorResult("No read grant: guard could not classify this request, so it fails closed. Retry later, or have the user add a covering read root to the guard config.");
 			if (decision.action === "prompt" && !ctx.hasUI) return errorResult("No read grant: no interactive UI is available to approve read access. Ask the user in an interactive session, or have the user add a covering read root to the guard config.");
-			const outcome = await requestReadGrant(rt, "request_read_access", requestPath, ctx, signal, "tool");
+			const outcome = await requestReadGrant(rt, "request_read_access", requestPath, ctx, signal, "tool", nested);
 			if (outcome.kind === "granted") {
 				const savedTo = outcome.savedTo ? ` Saved to ${outcome.savedTo}.` : "";
 				return { content: [{ type: "text", text: `Read-only grant added for ${outcome.root} (${outcome.scope} scope).${savedTo} Running interpreter workers were stopped; their state was discarded; previously run code was not replayed.` }], details: undefined };
@@ -745,9 +791,11 @@ export default function guard(pi: ExtensionAPI) {
 	 * absent diagnostics or message text. The caller projects the outcome
 	 * into its own response shape. The dialog keeps disclosing the actual
 	 * request path, suggested root, and scope being authorized
-	 * (runReadGrantPrompt); nothing is ever replayed.
+	 * (runReadGrantPrompt); nothing is ever replayed. When `nested` is true
+	 * (the request came from a nested tool call), the dialog title carries the
+	 * codemode origin suffix.
 	 */
-	async function requestReadGrant(rt: GuardRuntime, requesterName: string, requestPath: string, ctx: ExtensionContext, signal: AbortSignal | undefined, caller: "worker" | "tool"): Promise<GrantOutcome> {
+	async function requestReadGrant(rt: GuardRuntime, requesterName: string, requestPath: string, ctx: ExtensionContext, signal: AbortSignal | undefined, caller: "worker" | "tool", nested: boolean): Promise<GrantOutcome> {
 		if (signal?.aborted) return { kind: "refused", diagnostic: "No read grant: call aborted." };
 		if (!ctx.hasUI) {
 			// The tool gets an actionable diagnostic; the worker path keeps the
@@ -774,6 +822,7 @@ export default function guard(pi: ExtensionAPI) {
 					io: promptIO(ctx),
 					signal: dialogSignal,
 					workerName: requesterName,
+					originSuffix: originSuffix(nested),
 					requestPath,
 					suggestedRoot,
 					scopes: ["project", "user"],

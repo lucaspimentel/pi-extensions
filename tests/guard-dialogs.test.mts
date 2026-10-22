@@ -807,6 +807,55 @@ test("two approval prompts serialize: the second selector never replaces the fir
 	});
 });
 
+test("a nested tool call id labels the approval title with the codemode origin", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-nested-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		const tool = h.registeredTools.get("host_bash")!;
+		// Nested id shape (<parent id>/<n>): the title carries the suffix.
+		const nested = tool.execute("parent/1", { command: "echo asked" }, undefined, undefined, ctx);
+		void nested.catch(() => {});
+		await selector.waitFor(1);
+		assert.match(selector.opened[0], /\(from codemode script\)/);
+		selector.answer("Allow once");
+		await nested;
+		// Control: a top-level id never carries the suffix.
+		const top = tool.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
+		void top.catch(() => {});
+		await selector.waitFor(2);
+		assert.doesNotMatch(selector.opened[1], /\(from codemode script\)/);
+		selector.answer("Allow once");
+		await top;
+	});
+});
+
+test("a nested call denied headlessly carries the codemode origin suffix; a top-level call does not", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-headless-nested-");
+		writeAskRule(cwd, "echo asked");
+		const ctx = harnessCtx(h, cwd);
+		ctx.hasUI = false;
+		await startSession(h, ctx);
+		// A nested id (<parent id>/<n>) never prompts headlessly: the surfaced
+		// deny reason carries the suffix (the hook blocks with it, or execute
+		// rejects with it).
+		await assert.rejects(
+			h.registeredTools.get("host_bash")!.execute("parent/1", { command: "echo asked" }, undefined, undefined, ctx),
+			/\(from codemode script\)/,
+		);
+		// Control: a top-level id keeps the unsuffixed deny reason.
+		await assert.rejects(
+			h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx),
+			/^(?!.*\(from codemode script\)).*deny/,
+		);
+	});
+});
+
 test("aborting a queued approval settles it promptly while the open dialog continues", async () => {
 	await withTempHome(async () => {
 		const h = makeHarness();
