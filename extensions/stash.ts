@@ -18,8 +18,6 @@
  *   /stash drop <n>     Remove entry n without restoring it.
  *   /stash clear        Remove all entries (confirms first when UI is available).
  *   /stash help         Show command usage.
- * The old flat names (/pop, /stash-list, /stash-drop, /stash-clear) still
- * work as deprecated aliases during the migration window.
  *
  * Indexes are positional and only valid until the next stash/pop/drop —
  * re-run /stash list after any mutation before addressing by number again.
@@ -242,8 +240,6 @@ export default function stash(pi: ExtensionAPI) {
 			"Stash the current editor draft with ctrl+alt+s, restore it with ctrl+alt+r.",
 			"Indexes are positional: re-run /stash list after any mutation before",
 			"addressing entries by number again.",
-			"The old flat names (/pop, /stash-list, /stash-drop, /stash-clear) still",
-			"work as deprecated aliases.",
 		];
 		return lines.join("\n");
 	}
@@ -346,37 +342,6 @@ export default function stash(pi: ExtensionAPI) {
 				default:
 					ctx.ui.notify(`Unknown stash subcommand: ${sub}\n\n${usageText()}`, "warning");
 			}
-		},
-	});
-
-	// Deprecated flat aliases, kept during the migration window.
-	pi.registerCommand("pop", {
-		description: "(Deprecated: use /stash pop) Restore stash entry n (1 = newest, default) into the editor",
-		getArgumentCompletions: (prefix) => indexCompletions(prefix),
-		handler: async (args, ctx) => {
-			doPop(ctx, args.trim() || undefined);
-		},
-	});
-
-	pi.registerCommand("stash-list", {
-		description: "(Deprecated: use /stash list) List stashed drafts",
-		handler: async (_args, ctx) => {
-			doList(ctx);
-		},
-	});
-
-	pi.registerCommand("stash-drop", {
-		description: "(Deprecated: use /stash drop) Remove stash entry n without restoring it",
-		getArgumentCompletions: (prefix) => indexCompletions(prefix),
-		handler: async (args, ctx) => {
-			doDrop(ctx, args);
-		},
-	});
-
-	pi.registerCommand("stash-clear", {
-		description: "(Deprecated: use /stash clear) Remove all stashed drafts",
-		handler: async (_args, ctx) => {
-			await doClear(ctx);
 		},
 	});
 

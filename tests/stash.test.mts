@@ -4,9 +4,8 @@
 // captures registered commands/shortcuts via a mock `pi`, and drives a mock
 // `ctx` whose ui.getEditorText/setEditorText read/write a local variable.
 //
-// Scenarios run through the canonical /stash <subcommand> surface; the
-// deprecated flat aliases (/pop, /stash-list, /stash-drop, /stash-clear)
-// get dedicated compatibility checks.
+// Scenarios run through the canonical /stash <subcommand> surface and
+// verify that removed flat aliases are no longer registered.
 //
 // Run: node tests/stash.test.mts
 import assert from "node:assert/strict";
@@ -83,10 +82,9 @@ async function stashCmd(args: string) {
 
 async function main() {
 	assert.ok(commands.stash, "should register canonical /stash");
-	assert.ok(commands.pop, "should register deprecated /pop alias");
-	assert.ok(commands["stash-list"], "should register deprecated /stash-list alias");
-	assert.ok(commands["stash-drop"], "should register deprecated /stash-drop alias");
-	assert.ok(commands["stash-clear"], "should register deprecated /stash-clear alias");
+	for (const alias of ["pop", "stash-list", "stash-drop", "stash-clear"]) {
+		assert.equal(Object.hasOwn(commands, alias), false, `should not register removed /${alias} alias`);
+	}
 	assert.ok(shortcuts["ctrl+alt+s"], "should register ctrl+alt+s");
 	assert.ok(shortcuts["ctrl+alt+r"], "should register ctrl+alt+r");
 
@@ -94,13 +92,15 @@ async function main() {
 	sessionStartHandler?.({}, makeCtx());
 
 	// 0. Bare /stash and /stash help show usage; unknown subcommands warn.
-	await stashCmd("");
-	assert.match(lastNotification(), /usage/i);
-	await stashCmd("help");
-	assert.match(lastNotification(), /usage/i);
-	await stashCmd("bogus");
-	assert.match(lastNotification(), /Unknown stash subcommand: bogus/);
-	assert.equal(notifications[notifications.length - 1].type, "warning");
+	for (const args of ["", "help", "bogus"]) {
+		await stashCmd(args);
+		assert.match(lastNotification(), /usage/i);
+		assert.doesNotMatch(lastNotification(), /\/pop\b|stash-list|stash-drop|stash-clear|deprecated/i);
+		if (args === "bogus") {
+			assert.match(lastNotification(), /Unknown stash subcommand: bogus/);
+			assert.equal(notifications[notifications.length - 1].type, "warning");
+		}
+	}
 
 	// 0b. Root argument completion offers subcommands for the first word.
 	const subCompletions = commands.stash.getArgumentCompletions("");
@@ -216,38 +216,27 @@ async function main() {
 	await stashCmd("pop");
 	assert.equal(editorText, "second draft (unsaved)", "swapped text should be recoverable");
 
-	// 11. /stash clear empties everything (with confirm)
+	// 11. /stash clear preserves entries when declined and empties them when confirmed.
 	await stashDraft("one more");
+	confirmResult = false;
+	await stashCmd("clear");
+	assert.deepEqual(stashModule.loadStash().entries.map((entry) => entry.text), ["one more"]);
 	confirmResult = true;
 	await stashCmd("clear");
 	editorText = "";
 	await stashCmd("pop");
 	assert.match(lastNotification(), /empty/i);
 
-	// 11b. Deprecated flat aliases still route to the same operations.
-	await stashDraft("alias entry"); // entries: [alias entry]
-	assert.deepEqual(
-		commands.pop.getArgumentCompletions("1").map((i: any) => i.value),
-		["1"],
-		"alias /pop still completes bare indexes",
-	);
-	editorText = "";
+	// 11b. The restore shortcut pops the newest draft saved by the stash shortcut.
+	await stashDraft("shortcut oldest");
+	await stashDraft("shortcut newest");
 	notifications.length = 0;
-	await commands.pop.handler("", makeCtx());
-	assert.equal(editorText, "alias entry", "/pop alias should restore");
-	await stashDraft("alias drop");
-	await stashDraft("alias list");
-	notifications.length = 0;
-	await commands["stash-drop"].handler("1", makeCtx());
-	assert.match(lastNotification(), /Dropped entry 1/);
-	notifications.length = 0;
-	await commands["stash-list"].handler("", makeCtx());
-	assert.match(lastNotification(), /Stash \(1\)/);
-	confirmResult = true;
-	await commands["stash-clear"].handler("", makeCtx());
+	await shortcuts["ctrl+alt+r"].handler(makeCtx());
+	assert.equal(editorText, "shortcut newest");
+	assert.match(lastNotification(), /Restored/);
 	editorText = "";
 	await stashCmd("pop");
-	assert.match(lastNotification(), /empty/i);
+	assert.equal(editorText, "shortcut oldest");
 
 	// 12. State survives a fresh extension instance (disk-backed).
 	await stashDraft("persisted");

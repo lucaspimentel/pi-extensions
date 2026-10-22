@@ -1,7 +1,7 @@
 // Test harness that runs the ACTUAL plan extension code.
 //
 // Exercises the /plan command surface (tool narrowing, snapshot/restore,
-// cancel, deprecated alias) and the post-plan flow: clipboard copy, the
+// cancel, removed-alias regression) and the post-plan flow: clipboard copy, the
 // 4-option select, implement-here / clear-context / revise / stop paths,
 // revise loop, and empty-plan handling.
 //
@@ -158,7 +158,7 @@ async function main() {
 	{
 		const h = makeHarness(CHOICE_STOP);
 		assert.ok(h.commands["plan"], "expected /plan to be registered");
-		assert.ok(h.commands["plan-cancel"], "expected the deprecated /plan-cancel alias to be registered");
+		assert.equal(Object.hasOwn(h.commands, "plan-cancel"), false, "must not register the removed /plan-cancel alias");
 
 		// Argument completion offers the cancel subcommand only.
 		assert.deepEqual(h.commands["plan"].getArgumentCompletions("c"), [{ value: "cancel", label: "cancel" }]);
@@ -188,10 +188,10 @@ async function main() {
 		assert.equal(h.notifications[0].msg, "Not in planning mode.");
 		assert.ok(h.restored());
 
-		// The deprecated flat alias still routes to the same cancellation.
+		// Starting and cancelling another plan still restores the tools.
 		await h.commands["plan"].handler("another task", h.ctx);
 		assert.equal(h.sent.length, 2);
-		await h.commands["plan-cancel"].handler("", h.ctx);
+		await h.commands["plan"].handler("cancel", h.ctx);
 		assert.ok(h.restored());
 
 		// A task that merely starts with the word cancel is still a task.

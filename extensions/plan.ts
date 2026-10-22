@@ -36,7 +36,7 @@
  * The extension does not switch the model or thinking effort — switch to your
  * preferred planner model (and thinking level) yourself before calling
  * `/plan`, and switch back afterwards. `/plan cancel` restores your tools
- * early; the flat `/plan-cancel` name still works as a deprecated alias.
+ * early.
  */
 
 import { spawnSync } from "node:child_process";
@@ -377,7 +377,7 @@ export default function plan(pi: ExtensionAPI) {
 		updateStatus(ctx);
 	}
 
-	// Shared cancellation for /plan cancel and the deprecated /plan-cancel alias.
+	// Cancel /plan and restore the previous tool set.
 	async function cancelPlanning(ctx: ExtensionContext): Promise<void> {
 		if (!planning) {
 			ctx.ui.notify("Not in planning mode.", "info");
@@ -484,14 +484,6 @@ export default function plan(pi: ExtensionAPI) {
 				return;
 			}
 			await startPlanning(args ?? "", ctx);
-		},
-	});
-
-	// Deprecated alias for the old flat name, kept during the migration window.
-	pi.registerCommand("plan-cancel", {
-		description: "(Deprecated: use /plan cancel) Cancel planning mode and restore your tools immediately",
-		handler: async (_args, ctx) => {
-			await cancelPlanning(ctx);
 		},
 	});
 
