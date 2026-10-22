@@ -258,11 +258,14 @@ test("breakdown reliability: trailing descriptor dups and git @{...} refs keep t
 	}
 });
 
-test("breakdown reliability: a purely structural command has no evaluable steps", () => {
+test("breakdown reliability: a purely structural command has no evaluable steps and prompts", () => {
 	const policy = makePolicy();
 	const explained = explainHostShellCommand(shellCall("for x in 1 2; do done"), policy);
-	assert.equal(explained.decision.action, "allow");
-	assert.equal(explained.decision.reason, "no commands after structural stripping");
+	// A discarded loop head may still expand its word list (`for x in
+	// $(touch probe); do done` runs the substitution), so "nothing to
+	// evaluate" prompts instead of allowing (active-construct screen).
+	assert.equal(explained.decision.action, "prompt");
+	assert.match(explained.decision.reason, /structural/);
 	assert.equal(explained.steps.length, 0);
 	assert.equal(explained.breakdown.available, false);
 });

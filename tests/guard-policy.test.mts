@@ -28,6 +28,7 @@ import {
 	type GuardConfig,
 } from "../extensions/guard/policy/config.ts";
 import {
+	activeConstructReason,
 	decide,
 	decideHostShellCommand,
 	effectiveWorkspaceMode,
@@ -382,9 +383,14 @@ test("degraded research allows only read-only-tier commands, even with an allow 
 		config: makeConfig({ hostBash: { allow: ["HostBash(git push*)"] } }),
 	});
 	assert.equal(
-		decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "ls -la && pwd" }).action,
+		decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "ls -la" }).action,
 		"allow",
 		"tier-proven read-only commands run",
+	);
+	assert.equal(
+		decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "ls -la && pwd" }).action,
+		"deny",
+		"compounds are not tier-proven in degraded research (active-construct screen; previously the `&&` slipped through as a cwd-relative path token)",
 	);
 	assert.equal(
 		decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "git push origin" }).action,
@@ -448,6 +454,88 @@ test("tightened host tier vetoes: env/printenv, $ expansion, and mask arguments"
 		"allow",
 		"pwsh has no read-only tier; trusted cell allows",
 	);
+});
+
+test("host tier fail-closed screen: the five verified bypasses and their variants prompt", () => {
+	// Regression matrix for the 2026-10-20 spike: every command below used to
+	// auto-allow as "read-only host command (tightened tier)". Each must now
+	// prompt on the host tier and deny in degraded research (degraded
+	// execution IS host execution: only tier-proven read-only commands run).
+	const bypasses = [
+		"echo `touch probe`", // backtick substitution after a safe-always command
+		"echo <(touch probe)", // process substitution after a safe-always command
+		"printf x & touch probe", // single `&` is not a splitter operator; backgrounded command
+		"command touch probe", // `command` executes its arguments (removed from the safe list)
+		"for x in $(touch probe); do echo ok; done", // discarded loop head holds the substitution
+		"for x in `touch probe`; do echo ok; done", // same, backtick form
+		"for x in $(touch probe); do done", // empty body still expands the word list
+		"if true; then echo yes; fi", // conditional structure is never tier-proven
+		"sleep 5 &", // trailing backgrounding is an active semantic
+		"echo \"'$HOME'\"", // a single quote inside double quotes does not stop expansion
+		"echo \"`touch probe`\"", // backticks are active inside double quotes
+		"[[ -f x ]] && touch probe", // every step must independently fail to prove read-only
+	];
+	for (const command of bypasses) {
+		const decision = decideHost("default", command);
+		assert.equal(decision.action, "prompt", `${command}: ${decision.reason}`);
+		assert.doesNotMatch(decision.reason, /tightened tier/, `${command}: must not tier-allow`);
+		const degraded = decide(
+			makePolicy({ profile: "research", sandboxMode: "degraded" }),
+			{ kind: "sandboxed-exec", tool: "bash", command },
+		);
+		assert.equal(degraded.action, "deny", `${command}: degraded research must deny`);
+	}
+	// `command -v git` also prompts: the conservative removal of the wrapper
+	// builtin does not attempt to parse its flag forms. A later narrowly
+	// validated introspection path may restore it.
+	assert.equal(decideHost("default", "command -v git").action, "prompt");
+});
+
+test("structural collapse: saved allow rules cannot authorize a discarded head", () => {
+	// An allow rule saved against a simple command (or a projected body
+	// fragment) must never approve a loop whose discarded head runs other
+	// code. Fragments of a collapsed structural command derive no allow
+	// authorization at all (tier, plain allow rules, and redirect-aware allow
+	// rules are all skipped); deny/ask rules still apply.
+	const policy = makePolicy({ config: makeConfig({ hostBash: { allow: ["HostBash(echo ok)"] } }) });
+	assert.equal(decideHost("default", "echo ok").action, "allow", "the rule still covers the simple command");
+	const loop = decideHost("default", "for x in $(touch probe); do echo ok; done");
+	assert.equal(loop.action, "prompt");
+	assert.doesNotMatch(loop.reason, /allow rule/, "the body fragment's allow rule must not fire");
+});
+
+test("host tier fail-closed screen: screen reasons and boundary compat", () => {
+	assert.equal(activeConstructReason("echo hello"), null);
+	assert.equal(activeConstructReason("printf x"), null);
+	assert.equal(activeConstructReason("echo ok;"), null, "a trailing separator is inert");
+	assert.equal(activeConstructReason("git status > /dev/null 2>&1"), null, "redirects and dups are judged by the redirect machinery");
+	assert.equal(activeConstructReason("echo hi >/dev/null"), null);
+	assert.equal(activeConstructReason("ls 2>&1"), null);
+	assert.equal(activeConstructReason("timeout 120 ls"), null);
+	assert.equal(activeConstructReason("cat <<'EOF'"), "heredoc or here-string");
+	assert.equal(activeConstructReason("diff <(ls) <(ls -a)"), "process substitution");
+	assert.equal(activeConstructReason("sleep 5 & echo done"), "background execution");
+	assert.equal(activeConstructReason("echo a && echo b"), "&& control operator");
+	assert.equal(activeConstructReason("echo a | tee f"), "pipeline");
+	assert.equal(activeConstructReason("echo 'it; stays'"), null, "quoted separators are literal");
+	assert.equal(activeConstructReason('echo "(literal)"'), null, "quoted grouping is literal");
+	assert.equal(activeConstructReason("echo \\;"), null, "an escaped separator is a literal argument");
+	assert.equal(activeConstructReason("echo \"\\$HOME\""), null, "an escaped dollar is literal");
+	assert.equal(activeConstructReason("echo {a,b}"), "brace grouping", "unquoted brace expansion is declined");
+	assert.equal(activeConstructReason("(echo hi)"), "subshell or grouping");
+	assert.equal(activeConstructReason("echo 'unmatched"), "unterminated quotes");
+	// Quoted constructs stay inert for the screen while active ones inside
+	// double quotes still flag.
+	assert.equal(activeConstructReason("echo \"$(cat x)\""), "dollar expansion");
+	// Trusted simple commands keep their tier allow despite the screen.
+	assert.equal(decideHost("default", "echo hello").action, "allow");
+	assert.equal(decideHost("default", "printf x").action, "allow");
+	assert.equal(decideHost("default", "echo '(inert); chars'").action, "allow");
+	assert.equal(decideHost("default", "ls 2>&1").action, "allow");
+	assert.equal(decideHost("default", "echo hi >/dev/null").action, "allow");
+	assert.equal(decideHost("default", "timeout 120 ls").action, "allow");
+	assert.equal(decideHost("default", "which node").action, "allow", "introspection-only wrappers stay");
+	assert.equal(decideHost("default", "type ls").action, "allow", "introspection-only wrappers stay");
 });
 
 test("pi's built-in powershell tool maps to the pwsh shell tier", () => {
@@ -521,9 +609,12 @@ test("compound host commands aggregate to the worst subcommand", () => {
 	assert.equal(pushPrompt.action, "prompt");
 	assert.match(pushPrompt.reason, /git push origin/);
 	assert.equal(decideHost("trusted", "ls && git status").action, "allow");
-	// Structural keywords never prompt.
+	// Structural keywords never bypass the vetoes, and a loop is never
+	// tier-allowed: the discarded head could hold the active construct
+	// (`for f in a b; do ls; done` prompts since the active-construct screen;
+	// compatibility change, see the fail-closed screen tests below).
 	assert.equal(decideHost("default", "for f in *.txt; do cat $f; done").action, "prompt", "$ veto on the loop body");
-	assert.equal(decideHost("default", "for f in a b; do ls; done").action, "allow");
+	assert.equal(decideHost("default", "for f in a b; do ls; done").action, "prompt", "loops are never tier-allowed: the discarded head is unevaluated");
 	// timeout wrapper stripped.
 	assert.equal(decideHost("default", "timeout 120 ls").action, "allow");
 	// Ambiguous split prompts, but an explicit deny rule on the raw command still denies.

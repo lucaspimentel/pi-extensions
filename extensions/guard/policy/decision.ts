@@ -115,20 +115,102 @@ export type ClassifyStrategy = (call: GuardCall, policy: PolicyState) => Promise
 /**
  * True when `s` contains a `$` outside single quotes: any shell expansion
  * vetoes the host tier's auto-allow (`echo $GITHUB_TOKEN` must prompt).
- * Double quotes do NOT protect: `"$HOME"` still expands.
+ * Double quotes do NOT protect: `"$HOME"` still expands. A single quote
+ * inside double quotes is a literal character, not a toggle: `echo "'$HOME'"`
+ * still expands and must be flagged.
  */
 export function hasDollarExpansionOutsideSingleQuotes(s: string): boolean {
 	let inSingle = false;
+	let inDouble = false;
 	let i = 0;
 	while (i < s.length) {
 		const ch = s[i];
 		if (ch === "\\" && !inSingle) { i += 2; continue; }
-		if (ch === "'" && !inSingle) { inSingle = true; i++; continue; }
-		if (ch === "'" && inSingle) { inSingle = false; i++; continue; }
+		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
+		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
 		if (!inSingle && ch === "$") return true;
 		i++;
 	}
 	return false;
+}
+
+/**
+ * The active-construct screen for the read-only tier: returns a reason string
+ * when `cmd` contains shell syntax the tier's per-command checks cannot prove
+ * harmless, or null when the command is syntactically simple enough for the
+ * tier. Fail closed: a flagged command never auto-allows, it falls through to
+ * the normal rule/cell pipeline (a prompt in the default profile).
+ *
+ * Flagged constructs:
+ *   - Dollar expansion and backtick command substitution outside literal
+ *     single quotes (both are ACTIVE inside double quotes).
+ *   - Process substitution `<(...)` / `>(...)`, subshells and grouping
+ *     `(...)`, brace grouping `{`.
+ *   - Background execution `&`, pipelines `|`, `&&` / `||`, and command
+ *     separators `;` / newlines the top-level splitter did not handle.
+ *   - Heredocs and here-strings `<<` / `<<<`.
+ *   - Unterminated quotes (uncertain syntax).
+ *
+ * Deliberately NOT flagged: file-output redirects `>` / `>>` / `&>` (judged
+ * by the redirect-aware allow-rule machinery, not here), plain input
+ * redirects `<`, and descriptor dups `N>&M` / `>&-` / `&>target` (not file
+ * writes in the dup case; the `&>` write case is judged by the redirect
+ * machinery). Trailing separators are inert in bash (`echo ok;`) and are
+ * trimmed before scanning; a trailing `&` is NOT trimmed, backgrounding is
+ * an active semantic.
+ */
+export function activeConstructReason(cmd: string): string | null {
+	const s = cmd.replace(/(?:\|\||&&|\||;|\s)+$/, "");
+	let inSingle = false;
+	let inDouble = false;
+	let i = 0;
+	while (i < s.length) {
+		const ch = s[i];
+		// Backslash escape outside single quotes: the next character cannot be
+		// an active construct (bash itself treats it as literal, including
+		// inside double quotes for the escapable set).
+		if (ch === "\\" && !inSingle) { i += 2; continue; }
+		// Quote toggles: a single quote inside double quotes (and vice versa)
+		// is a literal character, not a toggle.
+		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
+		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
+		// Expansion and backtick substitution are active outside AND inside
+		// double quotes; only literal single quotes neutralize them.
+		if (ch === "$" && !inSingle) return "dollar expansion";
+		if (ch === "`" && !inSingle) return "backtick command substitution";
+		if (inSingle || inDouble) { i++; continue; }
+		// Everything below is unquoted and therefore active shell syntax.
+		if (ch === "&") {
+			const next = s[i + 1] ?? "";
+			const prev = s[i - 1] ?? "";
+			if (next === "&") return "&& control operator";
+			if (next === ">") { i += 2; continue; } // &> file: judged by the redirect machinery
+			if (prev === ">" && (next === "-" || /[0-9]/.test(next))) {
+				// Descriptor dup `N>&M` / `>&-`: skip past `&` and the fd digits.
+				i++;
+				while (i < s.length && /[0-9]/.test(s[i] ?? "")) i++;
+				continue;
+			}
+			return "background execution";
+		}
+		if (ch === "|") return s[i + 1] === "|" ? "|| control operator" : "pipeline";
+		if (ch === ";" || ch === "\n" || ch === "\r") return "command separator";
+		if (ch === "(") {
+			const prev = s[i - 1] ?? "";
+			if (prev === "<" || prev === ">") return "process substitution";
+			return "subshell or grouping";
+		}
+		if (ch === ")") return "subshell or grouping";
+		if (ch === "{") return "brace grouping";
+		if (ch === "<") {
+			if (s[i + 1] === "<") return "heredoc or here-string";
+			i++; // plain input redirect: read-only
+			continue;
+		}
+		i++;
+	}
+	if (inSingle || inDouble) return "unterminated quotes";
+	return null;
 }
 
 /**
@@ -212,6 +294,12 @@ function matchedHostShellRule(list: readonly string[], shell: "host-bash" | "pws
  */
 function hostTierAllowReason(cmd: string, config: ResolvedGuardConfig): string | null {
 	if (hostTierVetoReason(cmd, config) !== null) return null;
+	// Active-construct screen (fail closed): command/process substitution,
+	// background execution, grouping, heredocs, and separators the splitter
+	// did not handle all make the per-command checks below unsound. A flagged
+	// command does not deny: it falls through to the normal pipeline (rules,
+	// then the profile cell, typically a prompt).
+	if (activeConstructReason(cmd) !== null) return null;
 	if (isReadOnlyBashSubcommand(cmd, config.cwd, {}, config.writeRoots, config.readRoots)) {
 		return "read-only host command (tightened tier)";
 	}
@@ -293,7 +381,7 @@ export interface HostShellExplanation {
  * rules > redirect requirement > cell. Returns the decision plus the exact
  * matching subjects so suggestions can anchor to what the evaluator matched.
  */
-function evaluateHostShellSub(command: string, policy: PolicyState, shell: "host-bash" | "pwsh"): { decision: Decision; subject: string; allowSubject: string; requiresRedirectAwareAllow: boolean } {
+function evaluateHostShellSub(command: string, policy: PolicyState, shell: "host-bash" | "pwsh", tierEligible: boolean): { decision: Decision; subject: string; allowSubject: string; requiresRedirectAwareAllow: boolean } {
 	const { config, profile } = policy;
 	const cmd = stripTimeoutPrefix(stripLineContinuations(command).trim());
 	const subject = cmd;
@@ -307,28 +395,39 @@ function evaluateHostShellSub(command: string, policy: PolicyState, shell: "host
 	const askRule = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
 	if (askRule !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'`, provenance: "explicit-ask" }, subject, allowSubject, requiresRedirectAwareAllow };
 	if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, subject, allowSubject, requiresRedirectAwareAllow };
-	// Tightened read-only tier (host_bash only; host vetoes first).
-	if (shell === "host-bash") {
+	// Tightened read-only tier (host_bash only; host vetoes first). Skipped
+	// entirely when the whole command contains a structural construct whose
+	// head was discarded during step projection: the fragments evaluated here
+	// do not stand for what bash will actually run.
+	if (shell === "host-bash" && tierEligible) {
 		const tier = hostTierAllowReason(cmd, config);
 		if (tier !== null) return { decision: { action: "allow", reason: tier }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
 	// Redirect handling: a top-level file redirect (outside the writeRoots
 	// exemptions) may only be authorized by a redirect-aware allow rule (one
 	// whose pattern contains ">"). Broad rules and the profile cell never
-	// authorize a write redirect.
+	// authorize a write redirect. When the projection is unfaithful
+	// (tierEligible false: a structural head was discarded), allow rules are
+	// skipped entirely: a rule saved against a projected body fragment must
+	// never authorize a command whose discarded head runs other code.
 	if (requiresRedirectAwareAllow) {
-		for (const raw of config.hostBash.allow) {
-			const rule = parseRule(raw);
-			if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, ruleToolFor(shell), { command: cmd }, config.cwd)) {
-				return { decision: { action: "allow", reason: `matched redirect-aware allow rule '${raw}'` }, subject, allowSubject, requiresRedirectAwareAllow };
+		if (tierEligible) {
+			for (const raw of config.hostBash.allow) {
+				const rule = parseRule(raw);
+				if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, ruleToolFor(shell), { command: cmd }, config.cwd)) {
+					return { decision: { action: "allow", reason: `matched redirect-aware allow rule '${raw}'` }, subject, allowSubject, requiresRedirectAwareAllow };
+				}
 			}
 		}
-		return { decision: { action: "prompt", reason: "file redirect requires a redirect-aware allow rule (a pattern containing '>')" }, subject, allowSubject, requiresRedirectAwareAllow };
+		return { decision: { action: "prompt", reason: tierEligible ? "file redirect requires a redirect-aware allow rule (a pattern containing '>')" : "structural command could not be evaluated (loop or case head discarded)" }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
-	// Plain allow rules.
-	const allowRule = matchedHostShellRule(config.hostBash.allow, shell, stripTrailingHarmlessRedirects(cmd), config.cwd);
-	if (allowRule !== undefined) {
-		return { decision: { action: "allow", reason: `matched ${ruleToolFor(shell)} allow rule '${allowRule}'` }, subject, allowSubject, requiresRedirectAwareAllow };
+	// Plain allow rules. Skipped when the projection is unfaithful, like the
+	// tier above.
+	if (tierEligible) {
+		const allowRule = matchedHostShellRule(config.hostBash.allow, shell, stripTrailingHarmlessRedirects(cmd), config.cwd);
+		if (allowRule !== undefined) {
+			return { decision: { action: "allow", reason: `matched ${ruleToolFor(shell)} allow rule '${allowRule}'` }, subject, allowSubject, requiresRedirectAwareAllow };
+		}
 	}
 	// Profile cell.
 	return { decision: cellAction(hostShellCell(profile), "host shell"), subject, allowSubject, requiresRedirectAwareAllow };
@@ -369,7 +468,7 @@ function evaluateHostShell(
 	const stepOf = (occurrenceId: number, display: string, ev: ReturnType<typeof evaluateHostShellSub>): HostShellStep => ({ occurrenceId, display, subject: ev.subject, allowSubject: ev.allowSubject, requiresRedirectAwareAllow: ev.requiresRedirectAwareAllow, decision: ev.decision });
 	if (split.kind === "single") {
 		const effective = split.effectiveCmd ?? cmd;
-		const ev = evaluateHostShellSub(effective, policy, shell);
+		const ev = evaluateHostShellSub(effective, policy, shell, true);
 		const decision = ev.decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt" as const, reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" as const } : ev.decision;
 		// Pair the single fragment with its structurally stripped form so pure
 		// timeout wrappers stay reliable while structural keywords do not.
@@ -378,19 +477,35 @@ function evaluateHostShell(
 		return { decision, steps: [stepOf(0, effective, ev)], rawAskRule: rawAsk, breakdown: reliability };
 	}
 	const pairs: Array<{ raw: string; stripped: string }> = [];
+	// A raw part that stripStructuralKeywords discards (a pure iteration/case
+	// head or a bare block keyword) was never evaluated, so the projected steps
+	// do not stand for the whole command: the discarded head can hold the
+	// active construct (`for x in $(touch probe); do echo ok; done`). No step
+	// of such a command may auto-allow via the tier.
+	let structuralCollapse = false;
 	for (const rawSub of split.parts) {
 		const stripped = stripStructuralKeywords(rawSub);
 		if (stripped !== null) pairs.push({ raw: rawSub, stripped });
+		else structuralCollapse = true;
 	}
-	if (pairs.length === 0) return { decision: { action: "allow", reason: "no commands after structural stripping" }, steps: [], rawAskRule: rawAsk, breakdown: { available: false, reason: "the command is purely structural and has no evaluable steps" } };
+	if (pairs.length === 0) {
+		if (structuralCollapse) {
+			// A pure loop/select head may still expand its word list (`for x in
+			// $(touch probe); do done` runs the substitution), so "nothing to
+			// evaluate" must not auto-allow.
+			return { decision: { action: "prompt", reason: "structural command could not be evaluated (loop or case head discarded)" }, steps: [], rawAskRule: rawAsk, breakdown: { available: false, reason: "the command is purely structural and has no evaluable steps" } };
+		}
+		return { decision: { action: "allow", reason: "no commands after structural stripping" }, steps: [], rawAskRule: rawAsk, breakdown: { available: false, reason: "the command is purely structural and has no evaluable steps" } };
+	}
 	const parts = pairs.map((p) => p.stripped);
+	const tierEligible = !structuralCollapse;
 	const reliability = assessBreakdownReliability(shell, pairs.map((p) => p.raw), parts);
 	if (parts.length === 1) {
-		const ev = evaluateHostShellSub(parts[0], policy, shell);
+		const ev = evaluateHostShellSub(parts[0], policy, shell, tierEligible);
 		const decision = ev.decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt" as const, reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" as const } : ev.decision;
 		return { decision, steps: [stepOf(0, parts[0], ev)], rawAskRule: rawAsk, breakdown: reliability };
 	}
-	const breakdown = pairs.map((p) => ({ sub: p.stripped, ev: evaluateHostShellSub(p.stripped, policy, shell) }));
+	const breakdown = pairs.map((p) => ({ sub: p.stripped, ev: evaluateHostShellSub(p.stripped, policy, shell, tierEligible) }));
 	if (!breakdown.some((b) => b.ev.decision.action === "deny") && rawAsk !== undefined) {
 		return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" }, steps: breakdown.map((b, i) => stepOf(i, b.sub, b.ev)), rawAskRule: rawAsk, breakdown: reliability };
 	}

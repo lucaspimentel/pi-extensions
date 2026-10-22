@@ -15,11 +15,18 @@ export { isNoopCd };
  * meaningfully; safe to auto-allow regardless of arguments. The host tier
  * (host_bash and pwsh) additionally vetoes `env`/`printenv` before consulting
  * these lists; see hostTierVetoReason in decision.ts.
+ *
+ * `command` is deliberately absent: it EXECUTES its arguments (`command
+ * touch probe`), so wrapper builtins must never be auto-allowed here; a
+ * later narrowly validated introspection path may restore `command -v`.
+ * `printf`'s `-v varname` assignment semantics are safe here only because
+ * the varname's expansion vectors (any `$`, backticks) are already vetoed
+ * or screened by the host tier before this list is consulted.
  */
 const READONLY_BASH_SAFE_ALWAYS = new Set([
 	"test", "[", "[[",
 	"pwd", "echo", "printf", "date", "whoami", "id", "hostname",
-	"uname", "env", "printenv", "true", "false", "which", "type", "command",
+	"uname", "env", "printenv", "true", "false", "which", "type",
 	"where", "sleep",
 ]);
 

@@ -321,8 +321,13 @@ filter stays observe-only:
   proves read-only; allow rules never widen that set.
 - **default / auto / trusted:** deny rules > ask rules > the tightened
   read-only tier (host vetoes first: `env`/`printenv` as the command, any `$`
-  outside single quotes, file arguments matching the secret-mask patterns
-  minus exceptions) > redirect-aware allow rules > the profile cell.
+  outside single quotes, the active-construct screen (command/process
+  substitution, backgrounding, grouping, heredocs, unhandled separators,
+  unterminated quotes; `command` removed from the safe list), file arguments
+  matching the secret-mask patterns minus exceptions) > redirect-aware allow
+  rules > the profile cell. A command with a discarded structural head (a
+  loop/case head removed by step projection) derives no allow authorization
+  on any step and a purely structural command prompts.
 - A top-level file redirect (outside the writeRoots exemptions) is allowed
   only by a redirect-aware allow rule, one whose pattern contains `>` (e.g.
   `HostBash(rg * > *)`). Broad rules and the profile cell never authorize a
