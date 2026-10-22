@@ -272,15 +272,19 @@ test("breakdown reliability: a purely structural command has no evaluable steps 
 
 test("assessBreakdownReliability pairs raw fragments with evaluated steps one-to-one", () => {
 	assert.ok(assessBreakdownReliability("host-bash", ["echo a", "echo b"], ["echo a", "echo b"]).available);
+	assert.equal(assessBreakdownReliability("host-bash", ["echo a", "echo b"], ["echo a", "echo b"]).offending, undefined);
 	// A pure timeout wrapper keeps the pair reliable.
 	assert.ok(assessBreakdownReliability("host-bash", ["timeout 5 echo a", "echo b"], ["echo a", "echo b"]).available);
 	// Any other difference means a structural keyword collapsed.
 	const structural = assessBreakdownReliability("host-bash", ["do echo a", "echo b"], ["echo a", "echo b"]);
 	assert.equal(structural.available, false);
 	assert.ok(/structural/.test(structural.reason ?? ""));
-	// Length mismatch (a purely structural fragment was dropped).
+	assert.equal(structural.offending, "do echo a");
+	// Length mismatch (a purely structural fragment was dropped): the first
+	// raw part with no matching stripped step is the offending fragment.
 	const dropped = assessBreakdownReliability("host-bash", ["for x in a b", "echo $x", "done"], ["echo $x"]);
 	assert.equal(dropped.available, false);
+	assert.equal(dropped.offending, "for x in a b");
 	// Trailing harmless redirects do not make a step opaque; backgrounding
 	// and git @{...} refs behave as documented.
 	assert.ok(assessBreakdownReliability("host-bash", ["echo a 2>&1"], ["echo a 2>&1"]).available);
@@ -288,6 +292,7 @@ test("assessBreakdownReliability pairs raw fragments with evaluated steps one-to
 	const background = assessBreakdownReliability("host-bash", ["sleep 5 &"], ["sleep 5 &"]);
 	assert.equal(background.available, false);
 	assert.ok(/background/.test(background.reason ?? ""));
+	assert.equal(background.offending, "sleep 5 &");
 	// Quoted punctuation is inert: it does not make the step unreliable.
 	assert.ok(assessBreakdownReliability("host-bash", ['git commit -m "msg ([?])"'], ['git commit -m "msg ([?])"']).available);
 	// Unquoted grouping still flags (true-positive guard for the fix).

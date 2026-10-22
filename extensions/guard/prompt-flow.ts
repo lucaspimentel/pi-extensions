@@ -133,6 +133,7 @@ export function executionPromptTitle(input: {
 			lines.push("", "Breakdown:", ...breakdownRows(explanation));
 		} else {
 			lines.push("", `Breakdown unavailable: ${explanation.breakdown.reason ?? "unreliable parsing"}`);
+			if (explanation.breakdown.offending) lines.push(`  Offending step: ${truncateCommand(explanation.breakdown.offending)}`);
 			if (failingSub) lines.push("", "Failing step:", `  ${failingStepLine(failingSub)}`);
 		}
 	}

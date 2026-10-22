@@ -196,6 +196,31 @@ test("an unavailable breakdown is explicitly marked in the prompt", async () => 
 	}));
 	const title = calls.select[0].split("\n@@")[0];
 	assert.ok(title.includes("Breakdown unavailable:"), title);
+	// The offending fragment (the per-step mismatch part) renders directly
+	// below the reason line with the shared two-space gutter.
+	assert.ok(
+		title.includes("Breakdown unavailable: structural constructs (loops, conditionals) are not reliably attributed to steps\n  Offending step: do curl https://example.com"),
+		title,
+	);
+	assert.ok(!title.includes("Breakdown:\n"), title);
+});
+
+test("an unavailable breakdown renders the offending fragment for a hidden conditional", async () => {
+	const command = 'cd bottlecap && cargo fmt --all -- --check && cargo clippy --locked --workspace --all-targets --features default,test-mode --jobs 2 -- -D warnings > /tmp/bottlecap-simplify-clippy.log 2>&1 && cargo nextest run --locked --workspace --features test-mode --build-jobs 2 --test-threads 2 > /tmp/bottlecap-simplify-after.log 2>&1 && cargo test --locked --workspace --doc --features test-mode --jobs 2 > /tmp/bottlecap-simplify-doctests.log 2>&1; result=$?; tail -n 12 /tmp/bottlecap-simplify-clippy.log; tail -n 5 /tmp/bottlecap-simplify-after.log; if test -f /tmp/bottlecap-simplify-doctests.log; then tail -n 14 /tmp/bottlecap-simplify-doctests.log; fi; exit "$result"';
+	const real = realDeps(command);
+	const { io, calls } = makeIO({ select: [undefined] });
+	await runExecutionPrompt(baseExecutionDeps({
+		io,
+		command: real.call.command,
+		decision: real.explanation.decision,
+		explanation: real.explanation,
+		allowPlan: null,
+	}));
+	const title = calls.select[0].split("\n@@")[0];
+	assert.ok(
+		title.includes("Breakdown unavailable: structural constructs (loops, conditionals) are not reliably attributed to steps\n  Offending step: if test -f /tmp/bottlecap-simplify-doctests.log"),
+		title,
+	);
 	assert.ok(!title.includes("Breakdown:\n"), title);
 });
 

@@ -173,7 +173,9 @@ Registration details:
   step's decision (✓ allow, ? ask/classify, ✗ deny, with a » cursor on each
   prompting step), and a trailing "Why:" line with the aggregate
   decision reason. Unavailable breakdowns are explicitly marked ("Breakdown
-  unavailable: ...", plus a labeled failing step when attributed) and never
+  unavailable: ...", plus an indented "Offending step:" line with the raw
+  fragment that caused the unavailability when one is identifiable, and a
+  labeled failing step when attributed) and never
   become guessed rules.
 - **Persistent saves** (capable TUI hosts only; capability gaps are detected
   before the dialog and keep once actions): every save opens an editor (one

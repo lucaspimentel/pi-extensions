@@ -229,6 +229,9 @@ export interface BreakdownReliability {
 	available: boolean;
 	/** Why the breakdown is unavailable, when it is. */
 	reason?: string;
+	/** The raw shell fragment that caused the unavailability, when a single
+	 *  fragment is identifiable; display-only. */
+	offending?: string;
 }
 
 /**
@@ -338,7 +341,9 @@ function unreliableConstructReason(part: string): string | null {
  * are the fragments actually evaluated (after stripStructuralKeywords). A
  * difference between the two beyond pure `timeout` wrapper stripping means a
  * structural construct (loop head, conditional keyword) was collapsed and
- * the evaluated step does not stand for the fragment.
+ * the evaluated step does not stand for the fragment. When the
+ * unavailability is attributable to a single fragment, `offending` carries
+ * that raw fragment for display; presentation-only.
  */
 export function assessBreakdownReliability(
 	shell: "host-bash" | "pwsh",
@@ -352,13 +357,14 @@ export function assessBreakdownReliability(
 		return { available: false, reason: "the command has no evaluable steps" };
 	}
 	if (rawParts.length !== steps.length) {
-		return { available: false, reason: "structural constructs could not be attributed to steps" };
+		const unpaired = rawParts.find((raw) => !steps.includes(stripStructuralKeywords(raw) ?? ""));
+		return { available: false, reason: "structural constructs could not be attributed to steps", offending: unpaired ?? rawParts[0] };
 	}
 	for (let i = 0; i < steps.length; i++) {
 		// Timeout wrappers are pure wrappers: stripping them keeps the step
 		// reliable. Any other difference means a structural keyword collapsed.
 		if (stripTimeoutPrefix(rawParts[i]) !== steps[i]) {
-			return { available: false, reason: "structural constructs (loops, conditionals) are not reliably attributed to steps" };
+			return { available: false, reason: "structural constructs (loops, conditionals) are not reliably attributed to steps", offending: rawParts[i] };
 		}
 		// Trailing harmless redirects (descriptor dups like `2>&1`, /dev/null
 		// targets) do not make a step opaque: the evaluated step text keeps
@@ -367,7 +373,7 @@ export function assessBreakdownReliability(
 		// survives it and its `&` still reads as backgrounding, which is
 		// the conservative outcome.
 		const construct = unreliableConstructReason(stripTrailingHarmlessRedirects(steps[i]));
-		if (construct !== null) return { available: false, reason: `the command uses ${construct}` };
+		if (construct !== null) return { available: false, reason: `the command uses ${construct}`, offending: steps[i] };
 	}
 	return { available: true };
 }
