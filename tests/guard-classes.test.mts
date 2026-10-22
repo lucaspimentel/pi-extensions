@@ -64,6 +64,7 @@ test("every built-in tool name maps to its class", () => {
 		["fffind", "local-read"],
 		["ffgrep", "local-read"],
 		["git_read", "local-read"],
+		["gh_read", "remote-read"],
 		["session_search", "local-read"],
 		["memory_read", "local-read"],
 		["memory_search", "local-read"],
@@ -99,6 +100,22 @@ test("every built-in tool name maps to its class", () => {
 	for (const [name, cls] of cases) {
 		assert.equal(classifyToolCall(name, {}), cls, name);
 	}
+});
+
+test("gh_read (covering pr comments and pr reviews) is remote-read; configured overrides still win", () => {
+	assert.equal(classifyToolCall("gh_read"), "remote-read");
+	// Both PR operations are the same tool call: classification is per tool,
+	// not per subcommand, so both ops ride the single remote-read mapping.
+	assert.equal(classifyToolCall("gh_read", { subcommand: "pr comments", repo: "o/r", pr: 9 }), "remote-read");
+	assert.equal(classifyToolCall("gh_read", { subcommand: "pr reviews", repo: "o/r", pr: 9 }), "remote-read");
+	// The built-in entry wins over annotations and the name heuristic.
+	assert.equal(
+		classifyToolCall("gh_read", {}, { getAnnotations: () => ({ readOnlyHint: true, destructiveHint: false }) }),
+		"remote-read",
+	);
+	// Configured overrides beat the built-in map, like every other tool.
+	assert.equal(classifyToolCall("gh_read", {}, { toolClasses: { gh_read: "meta" } }), "meta");
+	assert.equal(classifyToolCall("gh_read", {}, { toolClasses: { "gh_*": "local-read" } }), "local-read");
 });
 
 // ── MCP styles ────────────────────────────────────────────────────────────────

@@ -60,6 +60,13 @@ function fakeChild(): FakeChild {
 	return child;
 }
 
+/** Emits one complete successful HTTP response on the fake child. */
+function httpOk(child: FakeChild, body: string, link?: string): void {
+	const headers = link === undefined ? "" : `Link: ${link}\r\n`;
+	child.stdout.emit("data", Buffer.from(`HTTP/1.1 200 OK\r\n${headers}\r\n${body}`));
+	child.emit("close", 0, null);
+}
+
 function harness(script: (spawn: { args: string[]; child: FakeChild }, index: number) => void): { argsList: string[][] } {
 	const argsList: string[][] = [];
 	setSpawnOverride(((command: string, args: string[], _options: unknown, ...rest: unknown[]) => {
@@ -76,7 +83,7 @@ function harness(script: (spawn: { args: string[]; child: FakeChild }, index: nu
 
 // ── Schema shape ─────────────────────────────────────────────────────────────
 
-test("gh_read registers with all nine native subcommands and five API operations, no outputSchema", () => {
+test("gh_read registers native subcommands and API operations without outputSchema", () => {
 	const tool = register();
 	assert.equal(tool.name, "gh_read");
 	assert.ok(tool.annotations.readOnlyHint === true);
@@ -410,5 +417,231 @@ test("execute api repo metadata: tool-authored repos GET, no git gate, full obje
 	assert.ok(result.content[0].text.includes('"default_branch":"main"'));
 	assert.ok(result.content[0].text.includes('"permissions":{"push":true}'), "viewer permissions pass through");
 	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
+// ── pr comments / pr reviews ───────────────────────────────────────
+
+test("gh_read registers the pr comments and pr reviews literals, the numeric pr field, and PR guidance", () => {
+	const tool = register();
+	const schema = tool.parameters as { properties: Record<string, unknown> };
+	const schemaText = JSON.stringify(schema);
+	for (const literal of ["pr comments", "pr reviews"]) {
+		assert.ok(schemaText.includes(`"const":"${literal}"`), `schema literal '${literal}'`);
+	}
+	assert.equal((schema.properties["pr"] as { type?: string } | undefined)?.type, "number", "pr is a numeric schema field");
+	assert.ok(tool.description.includes("pr comments"));
+	assert.ok(tool.description.includes("pr reviews"));
+	// Read-only/idempotent/open-world annotations are unchanged by the PR ops.
+	assert.deepEqual(tool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true });
+	// Guidance distinguishes inline review comments (with replies), review
+	// bodies/verdicts, and native conversation comments.
+	assert.ok(tool.promptGuidelines.some((line) => line.includes("in_reply_to_id")), "inline comments guidance");
+	assert.ok(tool.promptGuidelines.some((line) => line.includes("pr reviews")), "reviews guidance");
+	assert.ok(tool.promptGuidelines.some((line) => line.includes("pr view --comments")), "conversation-comment distinction");
+});
+
+test("execute: rejected pr comments/reviews params fail closed with zero spawns", async () => {
+	const tool = register();
+	let spawns = 0;
+	setSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	setApiSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	for (const bad of [
+		{ subcommand: "pr comments", repo: "owner/repo" }, // missing pr
+		{ subcommand: "pr reviews", repo: "owner/repo", pr: "9" }, // string pr never coerced
+		{ subcommand: "pr comments", repo: "owner/repo", pr: 0 }, // below the positive range
+		{ subcommand: "pr reviews", pr: 9 }, // missing repo
+		{ subcommand: "pr comments", repo: "owner/repo", pr: 9, args: [] }, // structured ops reject args
+		{ subcommand: "pr reviews", repo: "owner/repo", pr: 9, ref: "main" }, // unrelated structured field
+	]) {
+		const result = await tool.execute("id", bad, undefined, null, { cwd: "/repo" });
+		assert.equal(result.isError, true, JSON.stringify(bad));
+		assert.ok(result.content[0].text.startsWith("gh_read: "), JSON.stringify(bad));
+	}
+	assert.equal(spawns, 0, "no child process for rejected invocations");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
+test("execute api pr comments: tool-authored pulls comments GET, no git gate, verbatim array outside a worktree", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setSpawnOverride(() => {
+		throw new Error("no git gate or ref resolution may spawn on the API path");
+	});
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => {
+			httpOk(child, JSON.stringify([
+				{ id: 1, body: "inline question", path: "src/x.ts", line: 42, in_reply_to_id: 5 },
+			]));
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "pr comments", repo: "owner/repo", pr: 9 }, undefined, null, { cwd: "/not-a-worktree" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(argsList.length, 1, "exactly one gh api child; no ref resolution");
+	const argv = argsList[0]!;
+	assert.equal(argv[0], "api");
+	assert.deepEqual(argv, ["api", "--hostname", "github.com", "--method", "GET", "--header", "Accept: application/vnd.github+json", "--header", "X-GitHub-Api-Version: 2022-11-28", "--include", "repos/owner/repo/pulls/9/comments?per_page=100&page=1"]);
+	assert.ok(result.content[0].text.includes("inline question"), "comment bodies pass through");
+	assert.ok(result.content[0].text.includes('"in_reply_to_id":5'), "replies pass through without thread reconstruction");
+	assert.equal(result.details["subcommand"], "pr comments");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
+test("execute api pr reviews: tool-authored pulls reviews GET, no git gate, verbatim verdicts outside a worktree", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setSpawnOverride(() => {
+		throw new Error("no git gate or ref resolution may spawn on the API path");
+	});
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => {
+			httpOk(child, JSON.stringify([
+				{ id: 7, user: { login: "reviewer" }, state: "CHANGES_REQUESTED", body: "please fix", commit_id: "c".repeat(40) },
+			]));
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "pr reviews", repo: "owner/repo", pr: 4 }, undefined, null, { cwd: "/not-a-worktree" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(argsList.length, 1, "exactly one gh api child; no ref resolution");
+	const argv = argsList[0]!;
+	assert.equal(argv[0], "api");
+	assert.deepEqual(argv, ["api", "--hostname", "github.com", "--method", "GET", "--header", "Accept: application/vnd.github+json", "--header", "X-GitHub-Api-Version: 2022-11-28", "--include", "repos/owner/repo/pulls/4/reviews?per_page=100&page=1"]);
+	assert.ok(result.content[0].text.includes('"state":"CHANGES_REQUESTED"'), "review verdicts pass through without reduction");
+	assert.ok(result.content[0].text.includes('"login":"reviewer"'));
+	assert.equal(result.details["subcommand"], "pr reviews");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
+test("execute api pr comments: non-array and invalid JSON bodies are errors", async () => {
+	const tool = register();
+	const bodies = [JSON.stringify({ message: "not an array" }), "not json at all"];
+	for (const body of bodies) {
+		setApiSpawnOverride(((command: string, args: string[]) => {
+			void command;
+			void args;
+			const child = fakeChild();
+			queueMicrotask(() => httpOk(child, body));
+			return child;
+		}) as never);
+		const result = await tool.execute("id", { subcommand: "pr comments", repo: "owner/repo", pr: 9 }, undefined, null, { cwd: "/w" });
+		assert.equal(result.isError, true, body);
+	}
+	setApiSpawnOverride(null);
+});
+
+test("execute api pr comments: independent paging resumes at the next batch via the continuation token", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => {
+			if (argsList.length <= 10) {
+				httpOk(
+					child,
+					JSON.stringify([{ id: argsList.length, body: "page one comment" }]),
+					`<https://api.github.com/repos/owner/repo/pulls/9/comments?per_page=100&page=${argsList.length + 1}>; rel="next"`,
+				);
+			} else {
+				httpOk(child, JSON.stringify([{ id: 2, body: "page two comment", in_reply_to_id: 1 }]));
+			}
+		});
+		return child;
+	}) as never);
+	const first = await tool.execute("id", { subcommand: "pr comments", repo: "owner/repo", pr: 9 }, undefined, null, { cwd: "/w" });
+	assert.equal(first.isError, undefined, first.content[0].text);
+	const token = first.details["continuation"];
+	assert.ok(typeof token === "string", "an unfetched page yields a continuation token");
+	assert.ok(first.content[0].text.includes("page one comment"));
+	assert.ok(!first.content[0].text.includes("page two comment"), "each call returns only its newly fetched batch");
+
+	const second = await tool.execute(
+		"id",
+		{ subcommand: "pr comments", repo: "owner/repo", pr: 9, continuation: token as string },
+		undefined,
+		null,
+		{ cwd: "/w" },
+	);
+	assert.equal(second.isError, undefined, second.content[0].text);
+	assert.equal(argsList.length, 11, "the resume fetched exactly one more batch");
+	assert.equal(argsList[10]![argsList[10]!.length - 1], "repos/owner/repo/pulls/9/comments?per_page=100&page=11");
+	assert.ok(second.content[0].text.includes("page two comment"));
+	assert.ok(!second.content[0].text.includes("page one comment"), "resumes fetch only the next batch, not earlier batches");
+	assert.equal(second.details["continuation"], undefined, "exhausted listing carries no further token");
+	setApiSpawnOverride(null);
+});
+
+test("execute api: continuation tokens cannot cross operations or targets", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => {
+			httpOk(
+					child,
+					JSON.stringify([{ id: 1, body: "first page" }]),
+					'<https://api.github.com/repos/owner/repo/pulls/9/comments?per_page=100&page=2>; rel="next"',
+				);
+			});
+		return child;
+	}) as never);
+	const token = Buffer.from(JSON.stringify({ v: 1, op: "pr comments", repo: "owner/repo", pr: 9, perPage: 100, source: { page: 2, done: false } })).toString("base64url");
+
+	for (const bad of [
+		{ subcommand: "pr reviews", repo: "owner/repo", pr: 9, continuation: token as string }, // op differs
+		{ subcommand: "pr comments", repo: "owner/repo", pr: 10, continuation: token as string }, // pr differs
+	]) {
+		const result = await tool.execute("id", bad, undefined, null, { cwd: "/w" });
+		assert.equal(result.isError, true, JSON.stringify(bad));
+		assert.ok(result.content[0].text.includes("continuation does not match"), JSON.stringify(bad));
+	}
+	assert.equal(argsList.length, 0, "mismatched continuations are detected before any request");
+	setApiSpawnOverride(null);
+});
+
+test("execute api pr reviews: a later-page failure is an error that retains completed items and the retry position", async () => {
+	const tool = register();
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		queueMicrotask(() => {
+			if (args[args.length - 1]?.endsWith("page=1")) {
+				httpOk(
+					child,
+					JSON.stringify([{ id: 1, state: "APPROVED", body: "review one" }]),
+					'<https://api.github.com/repos/owner/repo/pulls/4/reviews?per_page=100&page=2>; rel="next"',
+				);
+			} else {
+				child.stderr.emit("data", Buffer.from("gh: boom (HTTP 500)\n"));
+				child.stdout.emit("data", Buffer.from("HTTP/1.1 500 Internal Server Error\r\n\r\n"));
+				child.emit("close", 1, null);
+			}
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "pr reviews", repo: "owner/repo", pr: 4 }, undefined, null, { cwd: "/w" });
+	assert.equal(result.isError, true, "HTTP errors pass through without automatic retries");
+	assert.ok(result.content[0].text.includes("review one"), "completed page data is preserved");
+	assert.ok(typeof result.details["continuation"] === "string", "the failed page is kept as the retry position");
 	setApiSpawnOverride(null);
 });

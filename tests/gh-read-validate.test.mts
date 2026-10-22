@@ -808,6 +808,46 @@ test("mixed shapes: check annotations rejects args arrays; native rejects struct
 	if (!nativeWithFields.ok) assert.ok(nativeWithFields.reason.includes("unknown field 'check_run_id'"));
 });
 
+for (const subcommand of ["pr comments", "pr reviews"] as const) {
+	test(`${subcommand}: required exact repo and positive safe integer pr`, () => {
+		for (const pr of [1, Number.MAX_SAFE_INTEGER]) {
+			assert.deepEqual(apiOk({ subcommand, repo: "OWNER/REPO", pr }), { ok: true, op: subcommand, repo: "OWNER/REPO", pr });
+		}
+		for (const repo of [undefined, "", "owner", "o/r/x", "https://github.com/o/r", "github.com/o/r", 42, null]) {
+			apiRejects({ subcommand, repo, pr: 1 }, ["repo"]);
+		}
+		apiRejects({ subcommand, repo: "o/r" }, ["pr is required"]);
+		for (const pr of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, "1", null, true]) {
+			apiRejects({ subcommand, repo: "o/r", pr }, ["safe integer >= 1"]);
+		}
+	});
+	test(`${subcommand}: continuation and jq transport validation`, () => {
+		const base = { subcommand, repo: "o/r", pr: 1 };
+		const token = Buffer.from('{"v":1}').toString("base64url");
+		assert.equal(apiOk({ ...base, continuation: token, jq: "length" }).continuation, token);
+		for (const continuation of ["", "!", 1, null, "a".repeat(4097), Buffer.from('[]').toString("base64url"), Buffer.from('{"v":2}').toString("base64url"), Buffer.from('no json').toString("base64url")]) {
+			apiRejects({ ...base, continuation }, ["continuation"]);
+		}
+		for (const jq of ["", ".a\u0000b", ".\nb", 1, null, false]) apiRejects({ ...base, jq }, ["jq"]);
+	});
+	test(`${subcommand}: unknown and mixed fields rejected before target validation`, () => {
+		for (const field of ["args", "ref", "path", "check_run_id", "id", "type", "recursive", "start_line", "end_line", "page", "per_page", "endpoint", "host", "unknown"]) {
+			apiRejects({ subcommand, repo: "o/r", pr: 1, [field]: field === "args" ? [] : "x" }, [field]);
+		}
+		for (const unrelated of [
+			{ subcommand: "repo metadata", repo: "o/r" },
+			{ subcommand: "repo contents", repo: "o/r", path: "" },
+			{ subcommand: "repo tree", repo: "o/r" },
+			{ subcommand: "commit checks", repo: "o/r", ref: "main" },
+			{ subcommand: "advisory view", id: "CVE-2026-1234" },
+			{ subcommand: "check annotations", repo: "o/r", check_run_id: 1 },
+		]) apiRejects({ ...unrelated, pr: 1 }, ["unknown field 'pr'"]);
+		const native = validateToolParams({ subcommand: "pr view", args: [], pr: 1 });
+		assert.equal(native.ok, false);
+		if (!native.ok) assert.ok(native.reason.includes("unknown field 'pr'"));
+	});
+}
+
 // ── repo metadata (API operation) validation ─────────────────────────────────
 
 test("repo metadata: required repo, optional jq, no other fields", () => {

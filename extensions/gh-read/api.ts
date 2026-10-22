@@ -1,8 +1,8 @@
 /**
  * gh-read API operations: pinned repository contents and trees, combined
- * commit checks, exact advisory lookup, check-run annotations, and repository
- * metadata. Operation orchestration and result rendering live together in
- * this module.
+ * commit checks, exact advisory lookup, check-run annotations, repository
+ * metadata, and mutable PR comments/reviews. Operation orchestration and
+ * result rendering live together in this module.
  *
  * Contract highlights (docs/gh-read-design.md, "GitHub API operations"):
  * - Omitted refs resolve through repository default-branch metadata, then
@@ -115,6 +115,16 @@ function statusEndpoint(repo: string, sha: string, page: number): string {
 		["page", page],
 	]);
 	return `repos/${owner}/${name}/commits/${sha}/status?${query}`;
+}
+
+function prCommentsEndpoint(repo: string, pr: number, page: number): string {
+	const [owner, name] = splitRepo(repo);
+	return `repos/${owner}/${name}/pulls/${pr}/comments?${buildQuery([["per_page", PAGE_SIZE], ["page", page]])}`;
+}
+
+function prReviewsEndpoint(repo: string, pr: number, page: number): string {
+	const [owner, name] = splitRepo(repo);
+	return `repos/${owner}/${name}/pulls/${pr}/reviews?${buildQuery([["per_page", PAGE_SIZE], ["page", page]])}`;
 }
 
 function treeEndpoint(repo: string, treeSha: string, recursive: boolean): string {
@@ -231,7 +241,29 @@ interface AdvisoryContinuation {
 	advisories: SourceState;
 }
 
-type ContinuationPayload = CommitChecksContinuation | AdvisoryContinuation;
+type PrReadOperation = "pr comments" | "pr reviews";
+
+interface PrReadContinuation {
+	v: 1;
+	op: PrReadOperation;
+	repo: string;
+	pr: number;
+	perPage: number;
+	source: SourceState;
+}
+
+function decodePrReadContinuation(record: Record<string, unknown>): PrReadContinuation | null {
+	if (record["v"] !== 1 || (record["op"] !== "pr comments" && record["op"] !== "pr reviews")) return null;
+	if (typeof record["repo"] !== "string" || typeof record["pr"] !== "number" || !Number.isSafeInteger(record["pr"]) || record["pr"] < 1) return null;
+	if (record["perPage"] !== PAGE_SIZE) return null;
+	const source = record["source"];
+	if (typeof source !== "object" || source === null || Array.isArray(source)) return null;
+	const state = source as Record<string, unknown>;
+	if (typeof state["page"] !== "number" || !Number.isSafeInteger(state["page"]) || state["page"] < 1 || state["done"] !== false) return null;
+	return record as unknown as PrReadContinuation;
+}
+
+type ContinuationPayload = CommitChecksContinuation | AdvisoryContinuation | PrReadContinuation;
 
 function encodeContinuation(payload: ContinuationPayload): { ok: true; token: string } | { ok: false; reason: string } {
 	const token = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
@@ -248,6 +280,7 @@ function decodeContinuation(token: string): ContinuationPayload | null {
 		const record = parsed as Record<string, unknown>;
 		if (record["v"] !== 1) return null;
 		if (record["op"] === "commit checks" || record["op"] === "advisory view") return parsed as ContinuationPayload;
+		if (record["op"] === "pr comments" || record["op"] === "pr reviews") return decodePrReadContinuation(record);
 		return null;
 	} catch {
 		return null;
@@ -1052,6 +1085,61 @@ async function opAdvisoryView(invocation: ValidApiInvocation, requester: ApiRequ
 	return await renderData(invocation, summary, metadata, result.items, notices, false, requester, deps);
 }
 
+// ── Operations: PR inline comments and reviews ─────────────────────────────
+
+async function opPrRead(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
+	const op = invocation.op as PrReadOperation;
+	const repo = invocation.repo!;
+	const pr = invocation.pr!;
+	const endpoint = op === "pr comments" ? prCommentsEndpoint : prReviewsEndpoint;
+	const summary = `gh_read api: ${op} ${repo} PR ${pr}`;
+	const metadata: Array<[string, string | number | boolean | null]> = [["repo", repo], ["pr", pr]];
+	const notices = [
+		"PR comments/reviews are mutable reads, not commit-pinned or transactional snapshots; completion describes traversal, not historical completeness",
+		"REST responses do not provide resolved/outdated review-thread state",
+	];
+	let page = 1;
+	if (invocation.continuation !== undefined) {
+		const payload = decodeContinuation(invocation.continuation);
+		if (payload === null || payload.op !== op || payload.repo !== repo || payload.pr !== pr) {
+			return renderResult(summary, metadata, "", { isError: true, notices: [...notices, "continuation does not match this invocation (operation, repo, PR, or page invariants differ)"] });
+		}
+		page = payload.source.page;
+		metadata.push(["resumed", true]);
+		notices.push("a resumed result contains only the newly fetched batch, not items returned by earlier invocations");
+	}
+	// Check the deadline between responses without changing the runner's
+	// interrupted-response errors or the other operations' paging behavior.
+	const clock = deps?.clock ?? defaultClock;
+	const pagedRequester: ApiRequester = {
+		request: async (path) => clock.now() >= requester.deadline()
+			? { kind: "stop", reason: "shared deadline exceeded between responses" }
+			: await requester.request(path),
+		capturedBytes: () => requester.capturedBytes(),
+		budgetExhausted: () => requester.budgetExhausted(),
+		deadline: () => requester.deadline(),
+	};
+	const result = await fetchPagedSource(
+		pagedRequester,
+		(p) => ({ endpoint: endpoint(repo, pr, p), query: [["per_page", PAGE_SIZE], ["page", p]] }),
+		(body) => Array.isArray(body) ? body : `${op} response was not a JSON array`,
+		{ page, done: false },
+	);
+	let isError = result.error !== undefined;
+	metadata.push(["source_complete", result.done], ["items_returned", result.items.length], ["pages_fetched", result.pagesFetched]);
+	if (result.error !== undefined) metadata.push(["source_error", result.error.reason]);
+	if (result.stopReason !== undefined) metadata.push(["incomplete_reason", result.stopReason]);
+	if (!result.done) {
+		const encoded = encodeContinuation({ v: 1, op, repo, pr, perPage: PAGE_SIZE, source: { page: result.page, done: false } });
+		if (encoded.ok) metadata.push(["continuation", encoded.token]);
+		else {
+			isError = true;
+			notices.push(`continuation could not be encoded: ${encoded.reason}`);
+		}
+	}
+	return await renderData(invocation, summary, metadata, result.items, notices, isError, requester, deps);
+}
+
 // ── Operation: check-run annotations ──────────────────────────────────────
 
 async function opCheckAnnotations(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
@@ -1144,5 +1232,8 @@ async function dispatchOperation(
 			return await opCheckAnnotations(invocation, requester, deps);
 		case "repo metadata":
 			return await opRepoMetadata(invocation, requester, deps);
+		case "pr comments":
+		case "pr reviews":
+			return await opPrRead(invocation, requester, deps);
 	}
 }

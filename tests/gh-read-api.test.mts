@@ -8,6 +8,8 @@
 // Run: node --test tests/gh-read-api.test.mts
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { EventEmitter } from "node:events";
+import { GhApiRunner, setApiSpawnOverride } from "../extensions/gh-read/api-spawn.ts";
 
 import {
 	API_DISPLAY_CAP,
@@ -73,6 +75,221 @@ const SHA2 = "b".repeat(40);
 
 function linkHeader(nextPage: number, endpoint: string, query: string): string {
 	return `Link: <https://api.github.com/${endpoint}?${query}&page=${nextPage}>; rel="next"\r\n`;
+}
+
+for (const subcommand of ["pr comments", "pr reviews"] as const) {
+	const endpoint = `repos/OWNER/REPO/pulls/123/${subcommand.split(" ")[1]}`;
+	const params = { subcommand, repo: "OWNER/REPO", pr: 123 };
+	test(`${subcommand}: empty and verbatim arrays without ref resolution`, async () => {
+		for (const data of [[], [{ id: 42, body: "review", state: "CHANGES_REQUESTED", in_reply_to_id: 12, unknown: { nested: [1, null] } }]]) {
+			const api = requester([() => response(JSON.stringify(data))]);
+			const result = await run(params, api);
+			assert.equal(result.isError, undefined);
+			assert.deepEqual(api.requests, [`${endpoint}?per_page=100&page=1`]);
+			assert.ok(result.content[0].text.endsWith(JSON.stringify(data)));
+			assert.equal(result.details.source_complete, true);
+			assert.equal(result.details.items_returned, data.length);
+		}
+	});
+	test(`${subcommand}: sequential pages preserve order and duplicates`, async () => {
+		const item = { id: 1, in_reply_to_id: 7, nested: { extra: true } };
+		const api = requester([
+			() => response(JSON.stringify([item]), linkHeader(2, endpoint, "per_page=100")),
+			() => response(JSON.stringify([item])),
+		]);
+		const result = await run(params, api);
+		assert.deepEqual(api.requests, [1, 2].map(page => `${endpoint}?per_page=100&page=${page}`));
+		assert.ok(result.content[0].text.endsWith(JSON.stringify([item, item])));
+		assert.equal(result.details.pages_fetched, 2);
+	});
+}
+
+for (const subcommand of ["pr comments", "pr reviews"] as const) {
+	const params = { subcommand, repo: "OWNER/REPO", pr: 123 };
+	const endpoint = `repos/OWNER/REPO/pulls/123/${subcommand.split(" ")[1]}`;
+	const token = (overrides: Record<string, unknown> = {}) => Buffer.from(JSON.stringify({ v: 1, op: subcommand, repo: params.repo, pr: params.pr, perPage: PAGE_SIZE, source: { page: 11, done: false }, ...overrides })).toString("base64url");
+	const data = (result: ApiToolResult) => JSON.parse(result.content[0].text.split("\ndata:\n")[1]!);
+	const position = (result: ApiToolResult) => JSON.parse(Buffer.from(result.details.continuation as string, "base64url").toString("utf8"));
+
+	test(`${subcommand}: ten-page bound and independent continuation, newly fetched batch only`, async () => {
+		const api = requester(Array.from({ length: MAX_PAGES_PER_SOURCE }, (_, i) => () => response(JSON.stringify([{ id: i + 1 }]), linkHeader(i + 2, endpoint, "per_page=100"))));
+		const first = await run(params, api);
+		assert.equal(first.isError, undefined);
+		assert.equal(first.details.source_complete, false);
+		assert.equal(first.details.pages_fetched, 10);
+		assert.equal(first.details.items_returned, 10);
+		assert.match(first.details.incomplete_reason as string, /page limit/);
+		assert.equal(position(first).source.page, 11);
+		assert.equal(position(first).op, subcommand);
+		assert.equal(first.content[0].text.match(/^continuation:/gm)?.length, 1);
+		const next = requester([() => response('[{"id":11}]')]);
+		const resumed = await run({ ...params, continuation: first.details.continuation }, next);
+		assert.deepEqual(next.requests, [`${endpoint}?per_page=100&page=11`]);
+		assert.deepEqual(data(resumed), [{ id: 11 }]);
+		assert.equal(resumed.details.resumed, true);
+		assert.equal(resumed.details.source_complete, true);
+		assert.equal(resumed.details.continuation, undefined);
+		assert.match(resumed.content[0].text, /only the newly fetched batch/);
+	});
+
+	test(`${subcommand}: invalid token target and page invariants reject before any request`, async () => {
+		const variants = [
+			{ op: subcommand === "pr comments" ? "pr reviews" : "pr comments" },
+			{ repo: "other/repo" }, { pr: 124 }, { pr: "123" }, { pr: 0 },
+			{ perPage: 99 }, { perPage: "100" }, { source: null }, { source: [] }, { source: {} },
+			...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2", null, true].map(page => ({ source: { page, done: false } })),
+			{ source: { page: 2, done: true } }, { source: { page: 2, done: "false" } },
+		];
+		for (const variant of variants) {
+			const api = requester([]);
+			const result = await run({ ...params, continuation: token(variant) }, api);
+			assert.equal(result.isError, true, JSON.stringify(variant));
+			assert.equal(api.requests.length, 0);
+		}
+	});
+
+	test(`${subcommand}: unsafe next links never requested and accepted items survive`, async () => {
+		for (const url of [
+			`https://evil.example/${endpoint}?per_page=100&page=2`,
+			`https://api.github.com/${endpoint.replace("123", "124")}?per_page=100&page=2`,
+			`https://api.github.com/${endpoint}/extra?per_page=100&page=2`,
+			`https://api.github.com/${endpoint}?per_page=50&page=2`,
+			`https://api.github.com/${endpoint}?page=2`,
+			`https://api.github.com/${endpoint}?per_page=100&page=2&extra=1`,
+			...[1, 3].map(page => `https://api.github.com/${endpoint}?per_page=100&page=${page}`),
+		]) {
+			const api = requester([() => response('[{"id":1}]', `Link: <${url}>; rel="next"\r\n`)]);
+			const result = await run(params, api);
+			assert.equal(result.isError, true, url);
+			assert.equal(api.requests.length, 1);
+			assert.equal(api.requests[0], `${endpoint}?per_page=100&page=1`);
+			assert.deepEqual(data(result), [{ id: 1 }]);
+			assert.equal(position(result).source.page, 2);
+			assert.match(result.details.source_error as string, /next-link validation failed/);
+		}
+	});
+
+	test(`${subcommand}: exactly 100 without next Link is complete; display clipping is separate`, async () => {
+		for (const items of [Array.from({ length: 100 }, (_, id) => ({ id })), [{ body: "界🙂".repeat(API_DISPLAY_CAP) }]]) {
+			const result = await run(params, requester([() => response(JSON.stringify(items))]));
+			assert.equal(result.isError, undefined);
+			assert.equal(result.details.source_complete, true);
+			assert.equal(result.details.items_returned, items.length);
+			assert.equal(result.details.continuation, undefined);
+			assert.ok(Buffer.byteLength(result.content[0].text, "utf8") <= API_DISPLAY_CAP);
+			if (items.length === 1) {
+				assert.equal(result.details.output_truncated, true);
+				assert.match(result.content[0].text, /NOT complete JSON/);
+				assert.ok(!result.content[0].text.includes("\uFFFD"));
+				assert.ok(Buffer.byteLength(JSON.stringify(result.details)) < 1000, "no hidden full payload");
+			}
+		}
+	});
+
+	test(`${subcommand}: budget and deadline stops retain partial batch without errors`, async () => {
+		for (const stop of ["budget", "deadline"]) {
+			let now = 0;
+			const api = requester([() => {
+				now = 2;
+				return response('[{"id":1}]', linkHeader(2, endpoint, "per_page=100"));
+			}]);
+			if (stop === "budget") api.budgetExhausted = () => api.requests.length > 0;
+			else api.deadline = () => 1;
+			const result = await run(params, api, { clock: { now: () => now, setTimeout, clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout) } });
+			assert.equal(result.isError, undefined);
+			assert.deepEqual(data(result), [{ id: 1 }]);
+			assert.equal(result.details.source_complete, false);
+			assert.equal(result.details.pages_fetched, 1);
+			assert.equal(position(result).source.page, 2);
+			assert.match(result.details.incomplete_reason as string, stop === "budget" ? /budget/ : /deadline/);
+		}
+	});
+
+	test(`${subcommand}: real runner deadline between responses is a nonerror stop`, async () => {
+		let now = 1_000_000;
+		let spawns = 0;
+		const clock = { now: () => now, setTimeout, clearTimeout: (handle: unknown) => clearTimeout(handle as NodeJS.Timeout) };
+		const runner = new GhApiRunner({ clock });
+		setApiSpawnOverride(((_command: string, args: string[]) => {
+			spawns++;
+			assert.equal(args.at(-1), `${endpoint}?per_page=100&page=1`);
+			const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+			queueMicrotask(() => {
+				child.stdout.emit("data", Buffer.from(`HTTP/1.1 200 OK\r\n${linkHeader(2, endpoint, "per_page=100")}\r\n[{"id":1}]`));
+				child.emit("close", 0, null);
+				now += 30_000;
+			});
+			return child;
+		}) as never);
+		try {
+			const result = await run(params, runner, { clock });
+			assert.equal(result.isError, undefined);
+			assert.deepEqual(data(result), [{ id: 1 }]);
+			assert.equal(result.details.source_complete, false);
+			assert.equal(position(result).source.page, 2);
+			assert.match(result.details.incomplete_reason as string, /deadline/);
+			assert.equal(spawns, 1);
+		} finally {
+			setApiSpawnOverride(null);
+		}
+	});
+
+	test(`${subcommand}: HTTP, interrupted, JSON and extraction failures retain retry positions`, async () => {
+		for (const failure of [error("forbidden diagnostic", 403), error("not found diagnostic", 404), error("response interrupted", 200), response("invalid json"), response('{"not":"array"}')]) {
+			for (const partial of [false, true]) {
+				const api = requester([
+					...(partial ? [() => response('[{"id":1}]', linkHeader(2, endpoint, "per_page=100"))] : []),
+					() => failure,
+				]);
+				const result = await run(params, api);
+				assert.equal(result.isError, true);
+				assert.deepEqual(data(result), partial ? [{ id: 1 }] : []);
+				assert.equal(api.requests.length, partial ? 2 : 1, "no retry");
+				assert.equal(position(result).source.page, partial ? 2 : 1);
+				if (failure.kind === "error") {
+					assert.ok((result.details.source_error as string).includes(failure.reason));
+					assert.ok((result.details.source_error as string).includes(String(failure.httpStatus)));
+				}
+				const retry = requester([() => response("[]")]);
+				await run({ ...params, continuation: result.details.continuation }, retry);
+				assert.deepEqual(retry.requests, [`${endpoint}?per_page=100&page=${partial ? 2 : 1}`]);
+			}
+		}
+	});
+
+	test(`${subcommand}: jq once on assembled arrays, counts and continuation are unfiltered`, async () => {
+		for (const partial of [false, true]) {
+			for (const output of ["2", ""]) {
+				const api = requester([
+					() => response('[{"id":1}]', linkHeader(2, endpoint, "per_page=100")),
+					() => partial ? error("forbidden", 403) : response('[{"id":2}]'),
+				]);
+				let calls = 0;
+				const result = await run({ ...params, jq: "length", ...(partial ? { continuation: token({ source: { page: 1, done: false } }) } : {}) }, api, {
+					jqRun: async (expression, document) => {
+						calls++;
+						assert.equal(expression, "length");
+						assert.deepEqual(JSON.parse(document), partial ? [{ id: 1 }] : [{ id: 1 }, { id: 2 }]);
+						return { kind: "result", output, outputTruncated: false, outputBytes: output.length };
+					},
+				});
+				assert.equal(calls, 1);
+				assert.equal(result.details.items_returned, partial ? 1 : 2);
+				assert.equal(result.details.source_complete, !partial);
+				assert.equal(typeof result.details.continuation, partial ? "string" : "undefined");
+				assert.match(result.content[0].text, /mutable reads/);
+				assert.match(result.content[0].text, /resolved\/outdated/);
+				if (partial) assert.equal(result.details.resumed, true);
+			}
+		}
+		const api = requester([() => response('[{"id":1}]', linkHeader(2, endpoint, "per_page=100")), () => error("forbidden", 403)]);
+		const failed = await run({ ...params, jq: "bad" }, api, { jqRun: async () => ({ kind: "error", reason: "compile error" }) });
+		assert.equal(failed.isError, true);
+		assert.equal(failed.details.items_returned, 1);
+		assert.equal(failed.details.source_complete, false);
+		assert.equal(typeof failed.details.continuation, "string");
+		assert.match(failed.content[0].text, /jq filtering failed/);
+	});
 }
 
 // ── Contents: ref resolution and pinning ─────────────────────────────────────

@@ -463,11 +463,11 @@ function appendToolAuthoredTokens(subcommand: GhSubcommand, argv: string[]): str
 
 // ── Structured GitHub API operations ────────────────────────────────────────
 //
-// The six API operations use structured parameters (never the legacy args
+// The eight API operations use structured parameters (never the legacy args
 // array, never gh api with caller flags). They target github.com only and
 // are exempt from the worktree gate; api-spawn.ts owns the transport.
 
-export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata"] as const;
+export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata", "pr comments", "pr reviews"] as const;
 
 export type ApiOperation = (typeof API_OPERATIONS)[number];
 
@@ -497,12 +497,14 @@ const OPERATION_FIELDS: Record<ApiOperation, ReadonlySet<string>> = {
 	"advisory view": new Set(["id", "type", "jq", "continuation"]),
 	"check annotations": new Set(["repo", "check_run_id", "jq"]),
 	"repo metadata": new Set(["repo", "jq"]),
+	"pr comments": new Set(["repo", "pr", "continuation", "jq"]),
+	"pr reviews": new Set(["repo", "pr", "continuation", "jq"]),
 };
 
 export interface ValidApiInvocation {
 	ok: true;
 	op: ApiOperation;
-	/** Exact OWNER/REPO on github.com (repo contents / repo tree / commit checks). */
+	/** Exact OWNER/REPO on github.com for repository-scoped operations. */
 	repo?: string;
 	/** Repository-relative path; empty string is the repository root. */
 	path?: string;
@@ -523,6 +525,8 @@ export interface ValidApiInvocation {
 	continuation?: string;
 	/** Check annotations: the check run id whose annotations are fetched. */
 	checkRunId?: number;
+	/** PR comments/reviews: positive safe integer pull request number. */
+	pr?: number;
 }
 
 function apiInvalid(reason: string): { ok: false; reason: string } {
@@ -714,6 +718,14 @@ export function validateApiInvocation(params: unknown): ValidApiInvocation | { o
 		if (record["continuation"] !== undefined && !isCve) {
 			return apiInvalid("continuation is only valid for CVE searches; a GHSA identifier is fetched directly as one object");
 		}
+	}
+
+	if (op === "pr comments" || op === "pr reviews") {
+		const rawPr = record["pr"];
+		if (rawPr === undefined) return apiInvalid("pr is required");
+		const prError = checkLineNumber(rawPr, "pr");
+		if (prError !== null) return apiInvalid(prError);
+		result.pr = rawPr as number;
 	}
 
 	if (op === "check annotations") {

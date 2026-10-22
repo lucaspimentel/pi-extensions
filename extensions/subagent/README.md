@@ -24,17 +24,24 @@ streaming, usage display, security model).
   inspect diffs, history, and working-tree state via the allowlisted read-only
   `git_read` tool (extensions/git-read/): diff, log, show, and status only,
   with per-subcommand flag allowlists, no shell, and no repo mutation. PRs,
-  issues, checks, Actions runs, and pinned GitHub API reads are reachable via
+  issues, checks, Actions runs, and scoped GitHub API reads are reachable via
   the allowlisted read-only `gh_read` tool (extensions/gh-read/): pr
   view/diff/list/checks, issue view/list, auth status, and run list/view as
   native argv commands (run logs are bounded to the first and last 50 KiB of
   output), plus `repo contents`/`repo tree` (pinned file and tree reads),
   `commit checks` (check runs + legacy statuses with bounded continuation),
   `advisory view` (exact CVE/GHSA lookup), `check annotations` (one check
-  run's annotations), and `repo metadata` (flat repository facts: default
-  branch, description, visibility, URLs) as structured API operations; all
-  network reads (guard class `remote-read`), and the API operations work
-  outside a git worktree.
+  run's annotations, still a single 100-item page), `repo metadata` (flat
+  repository facts: default branch, description, visibility, URLs),
+  `pr comments` (inline review comments and replies), and `pr reviews`
+  (review bodies and verdicts) as structured API operations; all network
+  reads (guard class `remote-read`), and the API operations work outside a
+  git worktree. Both PR API operations require explicit `repo` + a positive
+  safe-integer `pr` number, return verbatim arrays, and accept optional jq
+  and independent continuation tokens bound to the same operation/repo/PR.
+  They are mutable listings, not SHA-pinned snapshots, and provide no
+  resolved/outdated thread state. Native `pr view --comments` covers PR
+  conversation comments instead of inline discussions.
 - **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and
   `/implement-and-review` are renamed to `/scout-plan-implement`,
   `/scout-plan`, and `/implement-review`, so each name lists its chain's stages.

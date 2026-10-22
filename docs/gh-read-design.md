@@ -47,10 +47,10 @@ the main session. Deliberately not tied to any one agent; agents opt in via
   string so the schema stays flat like `git_read`'s):
   - `pr view`, `pr diff`, `pr list`, `pr checks`, `issue view`, `issue list`,
     `auth status`, `run list`, `run view`
-- Six narrowly scoped GitHub API operations share the same tool with
+- Eight narrowly scoped GitHub API operations share the same tool with
   structured parameters instead of an args array: `repo contents`,
-  `repo tree`, `commit checks`, `advisory view`, `check annotations`, and
-  `repo metadata` (see "GitHub API operations").
+  `repo tree`, `commit checks`, `advisory view`, `check annotations`,
+  `repo metadata`, `pr comments`, and `pr reviews` (see "GitHub API operations").
   Mixing shapes is rejected in both directions: native subcommands reject
   structured fields, API operations reject `args`.
 - Command construction happens in validate.ts during validation: it emits the
@@ -167,8 +167,9 @@ Value validation (native commands):
 
 ## GitHub API operations
 
-The six structured operations (`repo contents`, `repo tree`, `commit
-checks`, `advisory view`, `check annotations`, `repo metadata`) make read-only GET requests to api.github.com
+The eight structured operations (`repo contents`, `repo tree`, `commit
+checks`, `advisory view`, `check annotations`, `repo metadata`, `pr comments`,
+`pr reviews`) make read-only GET requests to api.github.com
 ONLY, always inside `gh`, with a fixed tool-authored argv (see "API
 runner"). They name an explicit repository, so they are exempt from the
 worktree gate and work anywhere. Validation is complete at runtime (calls
@@ -186,8 +187,9 @@ continuations are rejected before any child runs.
   (`:owner`) is unreachable because `:` is percent-encoded, and no caller
   text reaches a flag position (the endpoint argument always starts with
   `repos/` or `advisories/`).
-- Ref pinning: an omitted ref resolves through repository default-branch
-  metadata; branch/tag/short-SHA refs resolve through the commits endpoint
+- Ref pinning (repo contents/tree and commit checks only): an omitted ref
+  resolves through repository default-branch metadata; branch/tag/short-SHA
+  refs resolve through the commits endpoint
   once to a full 40-hex commit SHA. The requested target and resolved SHA
   are reported, and every dependent read is pinned to the SHA (query
   `ref=<sha>` or URL path). A complete lowercase 40-hex input is used
@@ -295,6 +297,70 @@ relationship collections (`issues`, `pullRequests`, `milestones`, ...) that
 would let non-metadata data through the door, and its text mode prints the
 README; the README stays covered by `repo contents` instead.
 
+### pr comments and pr reviews
+
+Each operation requires explicit `repo` (`OWNER/REPO` on github.com) and
+`pr` (a positive safe-integer PR number, never coerced from a string).
+Only `jq` and `continuation` are optional. Branch names, URLs, `args`,
+`ref`, and unrelated structured fields are rejected before spawning.
+There is no worktree gate, ref resolution, or SHA pinning for either read.
+
+#### pr comments
+
+Tool-authored GET
+`repos/{owner}/{repo}/pulls/{pr}/comments?per_page=100&page=<n>`.
+Returns a verbatim REST array of inline review comments, including
+replies carrying `in_reply_to_id`. Fields such as `path`, `line`, `side`,
+`original_line`, `diff_hunk`, `commit_id`, `body`, and `html_url` pass
+through without projection or thread reconstruction. This is distinct
+from PR conversation comments exposed by native `pr view --comments`.
+
+#### pr reviews
+
+Tool-authored GET
+`repos/{owner}/{repo}/pulls/{pr}/reviews?per_page=100&page=<n>`.
+Returns a separate verbatim REST array of review bodies and verdicts,
+preserving fields such as `user.login`, `state`, `body`, `submitted_at`,
+and `commit_id`. No latest-verdict reduction or aggregate approval state
+is computed.
+
+#### Shared PR read guarantees
+
+Each response body must be a JSON array; objects, strings, and invalid JSON
+are errors. Each operation pages independently, at most 10 pages x 100
+items per invocation, reusing the strict Link validation and tool-owned
+request reconstruction of commit checks. No combined result object,
+combined comments/reviews token, or automatic cross-operation fetch exists.
+A versioned, size-bounded continuation binds the operation, repo, PR number,
+and next-page state; it must be returned unchanged with the same
+`subcommand` + `repo` + `pr`. Tokens cannot cross operations or targets.
+Resumes fetch only the next batch, not earlier batches. Completed pages
+are retained if a later page fails, with the failed page kept as the retry
+position; page/budget stops between complete responses are nonerror
+incompleteness, while request/parse/interruption failures remain errors.
+HTTP errors pass through without automatic retries.
+
+These are mutable, non-transactional listings: comments/reviews can change
+between pages and between calls, so offset paging can miss or duplicate
+items. Source completion means the observed listing was exhausted, not a
+historical snapshot or proof of an unchanged review state. Metadata reports
+the PR target, completeness, and continuation without fabricating a resolved
+SHA. Neither operation supplies `isResolved`/`isOutdated` review-thread
+state, infers resolution from line fields, nor reconstructs complete thread
+history; that needs a separately designed tool-authored GraphQL operation.
+
+The existing API bounds apply unchanged: one 30 s shared deadline, 8 MiB
+cumulative captured-output budget, external jq applied once to the newly
+fetched array, and the 50 KiB display cap. Target/completeness/errors/continuation remain outside jq and survive
+empty or scalar output and display truncation. For example:
+
+```json
+{"subcommand":"pr comments","repo":"DataDog/dd-trace-dotnet","pr":9479,"jq":".[] | {author: .user.login, path, line, body, html_url}"}
+```
+
+`check annotations` remains a single-page operation with its existing
+exactly-100-items incompleteness notice; it does not adopt PR pagination.
+
 ### API runner (api-spawn.ts)
 
 A dedicated runner per invocation, separate from the native executor
@@ -344,6 +410,27 @@ fetched batch, never to tool metadata. Target, completeness, errors, and
 continuation stay outside filtered output.
 
 ### API result shape and display cap
+
+PR continuation payloads carry `v: 1`, `op` (`pr comments` or `pr reviews`),
+`repo`, numeric `pr`, `perPage: 100`, and `source: {page, done: false}`.
+Before any request, the decoder requires a non-array source object and a
+positive safe-integer page, then the handler matches operation/repo/PR
+exactly. Tokens are opaque bounded payloads, not signed credentials. They
+are not bound to jq, so a resumed batch may use a different filter.
+Existing commit-checks and CVE token formats remain unchanged.
+
+PR metadata includes `repo`, `pr`, `source_complete`, `items_returned`
+(before jq), `pages_fetched`, and `resumed: true` on resumption. Incomplete
+reads include `continuation` plus `incomplete_reason` for nonerror stops or
+`source_error` for failures. HTTP, interruption, JSON, extraction, and
+invalid-Link failures preserve accepted items and set `isError`; no failed
+request is automatically retried. Request/parse failures retain the failed
+page for retry; invalid Links retain the shared engine's tool-owned next
+page, never a page derived from the rejected URL. Continuation encoding
+failure is itself an error. Page-limit and between-response budget/deadline
+stops are nonerror incompleteness. Exactly 100 items without a next Link is
+complete. Display clipping alone never creates a continuation or changes
+source completeness.
 
 API metadata (target/SHA, `source_complete`, reasons/per-source state,
 errors, `output_truncated`, next continuation) renders outside the data
@@ -514,7 +601,10 @@ Settled in the grill-me review:
   annotations` validation (missing/invalid `check_run_id` incl. strings
   never coerced, unknown fields, `continuation` rejected, jq rules), and
   `repo metadata` validation (required repo, optional jq only, ref/path/
-  continuation rejected).
+  continuation rejected). PR coverage: `pr comments`/`pr reviews` require
+  explicit repo and positive safe-integer pr, reject string/branch/URL PR
+  selectors and unrelated fields, and validate operation/repo/PR-bound
+  continuations, including calls that bypass schema validation.
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout
@@ -558,6 +648,12 @@ Settled in the grill-me review:
   and 404/403 passthrough with no retry. Repo metadata: one unpaged request
   with the flat object passed through verbatim, jq applied once, non-object
   bodies (array, string, invalid JSON) as errors, and 404/403 passthrough.
+  PR coverage: exact comments/reviews endpoints with no ref resolution,
+  verbatim arrays including replies and review states, independent bounded
+  Link paging and target-bound resume, retained data/retry positions on
+  later-page errors, jq once on the newly fetched array with metadata
+  preserved, and array-body validation/error passthrough. Existing
+  single-page annotations behavior remains a regression check.
 - `tests/gh-read-jq.test.mts`: REAL-jq coverage (required in CI): lexical
   security matrix (benign keywords, imports incl. interpolations, malformed
   constructs), preflight compile rejection, zero/multi-value output, env/
@@ -578,6 +674,12 @@ Settled in the grill-me review:
   params, and the three new schema literals plus the `check_run_id` field.
   Repo metadata end to end: tool-authored `repos/{owner}/{repo}` GET with no
   git-gate spawn and the full object (viewer permissions included) as data.
+  PR coverage: both schema literals plus the numeric pr field, tool
+  guidance distinguishing inline comments/replies, review bodies/verdicts,
+  and conversation comments, and end-to-end worktree-free API routing.
+  Read-only/idempotent/open-world tool annotations remain unchanged.
+- `tests/guard-classes.test.mts`: built-in `gh_read` mapping and both PR
+  operations classify as `remote-read`; configured class overrides win.
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 
@@ -585,6 +687,10 @@ Settled in the grill-me review:
 
 - A read-only agent (no `bash`) with `gh_read` but no other network tools
   can list a repo's open PRs, view a PR with comments, and view its diff.
+- The same agent can fetch inline PR review comments/replies with `pr
+  comments` and review bodies/verdicts with `pr reviews`, using explicit
+  `repo` + numeric `pr`, verbatim arrays, and independent bounded
+  continuations without a worktree. No resolved/outdated state is claimed.
 - The same agent can triage GitHub Actions runs: `run list` finds runs,
   `run view` (numeric run id, no interactive selection) shows a summary or,
   with `--log`/`--log-failed`, bounded first-and-last-50 KiB log output, and
@@ -612,6 +718,8 @@ Settled in the grill-me review:
   pair: `gh run watch`, `gh run rerun`, `gh run download`, and
   `--exit-status` remain excluded. Expand the allowlist only on demonstrated
   need, one design-review cycle per addition.
+- No GraphQL review-thread reads or resolved/outdated thread state in the
+  REST PR operations; that is a separate future design cycle.
 - No URL arguments, no `--template`, no `--web` forms.
 - No token handling, masking, or account switching inside the tool. Keeping
   `--show-token` off the `auth status` allowlist is what keeps this non-goal
