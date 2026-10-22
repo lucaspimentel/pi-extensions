@@ -206,11 +206,16 @@ Holes, verified 2026-10-02:
 | `python`, `node` | Persistent interpreters moved into guard. Every sandboxed profile uses a worker-lifetime workspace overlay (read-only in reduced mode); workspace writes never reach the host. Persist outputs in shared scratch. Yolo/unrestricted are fully raw. |
 | `pwsh` | Not registered by guard. pi's built-in opt-in `powershell` tool is classified as a host shell on the pwsh tier (`Pwsh(...)` rules) whenever it is enabled. |
 
-- **Read-only tier on both shells:** the read-only command tier, the
-  validators (duckdb/mlr/find/awk), and the redirect checks apply to sandboxed
-  `bash` **and** to `host_bash`; provably read-only host commands auto-allow.
-  The tier has no network commands, and path-taking commands are already
-  restricted to cwd and read roots.
+- **Read-only tier:** the read-only command tier, the validators
+  (duckdb/mlr/find/awk), and the redirect checks apply to `host_bash` and to
+  every path where sandboxed `bash` executes on the host: degraded mode (all
+  profiles; research is tier-only, others take the host-shell row) and
+  yolo/unrestricted raw execution (the host-shell row, so HostBash
+  deny/ask rules are honored). Sandboxed `bash` under the kernel sandbox
+  (full/reduced, non-raw) is decided by the profile cell alone: the sandbox
+  is the guarantee, so no string-based tier runs. Provably read-only host
+  commands auto-allow. The tier has no network commands, and path-taking
+  commands are already restricted to cwd and read roots.
 - **Tightened host tier** (host_bash only; these cases prompt instead):
   - `env` and `printenv` are removed from the tier (the host environment
     holds tokens; the sandbox environment is scrubbed);
@@ -236,8 +241,6 @@ Holes, verified 2026-10-02:
     expands its word list);
   - file arguments matching the secret-mask patterns veto auto-allow
     (`cat .env`).
-
-  Sandboxed `bash` keeps the full tier.
 - **python/node in yolo and unrestricted** are fully raw: the persistent worker and protocol
   stay (state, results, replay semantics), but there is no bwrap, no seccomp,
   no rlimits, the full environment, and the full filesystem.
@@ -982,7 +985,7 @@ remain useful.
 | Auto classifier scope (step 0) | host_bash, pwsh, write/edit, exfil-capable remote reads, remote writes; sandboxed calls skip it |
 | Degraded tools (step 0) | Both names registered, identical host executors, footer warning |
 | NuGet audit (step 0) | `NuGetAudit=false` in sandboxes, documented |
-| Read-only tier on host_bash (step 0) | Applies, tightened: no env/printenv, `$` expansion and secret-mask file args veto |
+| Read-only tier on host_bash (step 0) | Applies, tightened: no env/printenv, `$` expansion (quote-correct scanner), active-construct screen (2026-10-21: substitution, backgrounding, grouping, heredocs, unhandled separators, unterminated quotes; `command` removed from the safe list), and secret-mask file args veto |
 | Sandbox library origin | Fresh in guard, borrowing the duplicated python/node code; old extensions untouched |
 | Seccomp mechanism | One compiled C launcher for bash, python, and node; python's ctypes install dropped |
 | Overlay step | Launcher outer mode (no shell) |

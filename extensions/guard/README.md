@@ -639,14 +639,18 @@ process tree down, and `kill(-pid)` on the returned child's pid works too.
 - `npm run test:guard`: unit (`tests/guard-sandbox-unit.test.mts`) and
   integration (`tests/guard-sandbox-integration.test.mts`) suites for the
   sandbox library, plus the policy suites: `tests/guard-policy.test.mts`
-  (decision table, host shell, protected paths, local reads, config, state),
-  `tests/guard-classes.test.mts` (classification, suggestions, save helper),
-  `tests/guard-migrate.test.mts` (migrate fixtures and idempotence),
-  `tests/guard-filter.test.mts` (grep/ffgrep mask filter),
-  `tests/guard-workers.test.mts` (ported python/node controllers on the
-  shared sandbox, real workers), `tests/guard-runtime.test.mts` (queue,
-  transitions, locks, dialogs), and `tests/guard-harness.test.mts`
-  (extension entry point with a fake pi API).
+  (decision table, host shell and the active-construct screen, protected
+  paths, local reads, config, state), `tests/guard-classes.test.mts`
+  (classification, suggestions, save helper), `tests/guard-migrate.test.mts`
+  (migrate fixtures and idempotence), `tests/guard-filter.test.mts`
+  (grep/ffgrep mask filter), `tests/guard-workers.test.mts` (ported
+  python/node controllers on the shared sandbox, real workers),
+  `tests/guard-runtime.test.mts` (queue, transitions, locks, dialogs), and
+  `tests/guard-harness.test.mts` (extension entry point with a fake pi API).
+  The dialog/save/explanation surfaces have their own suites
+  (`tests/guard-{dialogs,ask-overlay,ask-inline,ask-components,explain,save,prompt-flow,render-call,shell-hints,subagent}.test.mts`);
+  the script wires all of them, together with the read-only git/gh tool
+  suites, in one run.
   The sandbox and worker integration suites drive the real sandbox (escape
   attempts, protected paths, overlays, offline `cargo test` and
   `dotnet build`) and skip with an explicit reason when the runtime cannot
