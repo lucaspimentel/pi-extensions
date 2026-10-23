@@ -14,6 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
+import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 import { mergeConfig } from "../extensions/guard/policy/config.ts";
 import {
@@ -36,6 +37,7 @@ import {
 } from "../extensions/guard/policy/state.ts";
 import guardExtension from "../extensions/guard/index.ts";
 import subagentExtension, { setBootstrapPathOverride, setSpawnOverride } from "../extensions/subagent/index.ts";
+import { discoverAgents } from "../extensions/subagent/agents.ts";
 import {
 	CHILD_CONTRACT_ACK,
 	CHILD_CONTRACT_REQUEST,
@@ -1164,6 +1166,97 @@ piSubprocessTests.push({
 		assert.match(run.stderr, /guard subagent startup gate/);
 		assert.equal(fs.readFileSync(callLog, "utf8").trim(), "");
 	},
+});
+
+// ── G. Bundled researcher agent (offline discovery) ───────────────────────────
+
+const BUNDLED_AGENTS_DIR = path.join(repoRoot, "extensions", "subagent", "agents");
+const RESEARCHER_FILE = path.join(BUNDLED_AGENTS_DIR, "researcher.md");
+const RESEARCHER_TOOLS = [
+	"read",
+	"ffgrep",
+	"fffind",
+	"ls",
+	"git_read",
+	"gh_read",
+	"web_fetch",
+	"web_search",
+	"slack_search",
+	"slack_read_channel",
+	"slack_read_thread",
+	"session_search",
+	"memory_read",
+	"memory_search",
+	"memory_status",
+];
+// Tools that execute or mutate; a read-only agent must not declare any of them.
+const MUTATION_TOOLS = ["bash", "write", "edit", "subagent", "python", "node"];
+
+/**
+ * Isolate agent discovery from the machine's real user/project agents: point
+ * PI_CODING_AGENT_DIR at an empty temp config dir and use a temp cwd whose
+ * nearest `.pi/agents` is empty, so bundled agents are the only ones found.
+ * Discovery reads the env at call time, so no module reload is needed. The
+ * process cwd is never changed, and an originally absent variable is deleted.
+ */
+async function withIsolatedAgents<T>(fn: (cwd: string) => Promise<T> | T): Promise<T> {
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const agentDir = makeTempDir("guard-subagent-agentdir-");
+	const cwd = makeTempDir("guard-subagent-cwd-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	try {
+		return await fn(cwd);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	}
+}
+
+test("researcher is discovered exactly once as a bundled agent in every scope", async () => {
+	await withIsolatedAgents((cwd) => {
+		for (const scope of ["user", "project", "both"] as const) {
+			const { agents } = discoverAgents(cwd, scope);
+			const researchers = agents.filter((a) => a.name === "researcher");
+			assert.equal(researchers.length, 1, `${scope}: exactly one researcher`);
+			assert.equal(researchers[0].source, "bundled", `${scope}: bundled source`);
+			assert.equal(researchers[0].filePath, RESEARCHER_FILE, `${scope}: resolves to the bundled file`);
+		}
+	});
+});
+
+test("researcher frontmatter and prompt are nonempty and pin no model", async () => {
+	await withIsolatedAgents((cwd) => {
+		const content = fs.readFileSync(RESEARCHER_FILE, "utf8");
+		const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content);
+		assert.equal(frontmatter.name, "researcher");
+		assert.equal(typeof frontmatter.description, "string", "description is a string");
+		assert.ok((frontmatter.description as string).trim().length > 0, "description is nonempty");
+		assert.ok(body.trim().length > 0, "body is nonempty");
+		assert.equal(
+			Object.prototype.hasOwnProperty.call(frontmatter, "model"),
+			false,
+			"frontmatter declares no model key",
+		);
+		const { agents } = discoverAgents(cwd, "both");
+		const researcher = agents.find((a) => a.name === "researcher");
+		assert.ok(researcher, "researcher discovered");
+		assert.equal(researcher.model, undefined, "discovery yields no model override");
+	});
+});
+
+test("researcher tools match the declared list and reviewer's, and exclude mutation tools", async () => {
+	await withIsolatedAgents((cwd) => {
+		const { agents } = discoverAgents(cwd, "both");
+		const researcher = agents.find((a) => a.name === "researcher");
+		const reviewer = agents.find((a) => a.name === "reviewer");
+		assert.ok(researcher && reviewer, "researcher and reviewer discovered");
+		assert.deepEqual(researcher.tools, RESEARCHER_TOOLS, "researcher declares the expected tools");
+		assert.deepEqual(researcher.tools, reviewer.tools, "researcher mirrors reviewer's read-only tool list");
+		for (const tool of MUTATION_TOOLS) {
+			assert.equal(researcher.tools?.includes(tool), false, `researcher must not declare ${tool}`);
+		}
+	});
 });
 
 // ── Runner ────────────────────────────────────────────────────────────────────

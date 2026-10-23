@@ -17,10 +17,11 @@ streaming, usage display, security model).
 - **Model overrides**: all agents inherit the dispatching session's model. Pin
   per-agent models in `~/.pi/agent/subagent.json` (see below) without
   duplicating agent files.
-- **Read-only tooling**: scout, planner, and reviewer use `ffgrep`/`fffind`
-  instead of `grep`/`find`, and none of them has `bash`. If `ffgrep`/`fffind`
-  are not registered (the `@ff-labs/pi-fff` package is optional), the extension
-  substitutes the built-in `grep`/`find` at dispatch time. The same agents can
+- **Read-only tooling**: scout, planner, reviewer, and researcher use
+  `ffgrep`/`fffind` instead of `grep`/`find`, and none of them has `bash`. If
+  `ffgrep`/`fffind` are not registered (the `@ff-labs/pi-fff` package is
+  optional), the extension substitutes the built-in `grep`/`find` at dispatch
+  time. The same agents can
   inspect diffs, history, and working-tree state via the allowlisted read-only
   `git_read` tool (extensions/git-read/): diff, log, show, and status only,
   with per-subcommand flag allowlists, no shell, and no repo mutation. PRs,
@@ -55,6 +56,7 @@ streaming, usage display, security model).
 | `planner` | read, ffgrep, fffind, ls, git_read, gh_read                                                                                                                 | inherit  |
 | `worker`  | (all default)                                                                                                                                     | inherit  |
 | `reviewer` | read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, memory_read, memory_search, memory_status | inherit |
+| `researcher` | read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, memory_read, memory_search, memory_status | inherit |
 
 Notes:
 
@@ -66,12 +68,18 @@ Notes:
 
   Overrides win over agent frontmatter; unknown agent names and malformed
   entries are warned about and ignored.
-- Reviewer is enforced read-only by tool selection: no bash, so no builds,
-  tests, or repo mutation. It can review recent commits itself via `git_read`
-  (diff/log/show/status), but only when the dispatching session registered
-  that tool: `resolveAgentTools` silently drops tools the session does not
-  have, and `git_read` has no fallback. Without it, name the files (or
-  describe the changes) in the task.
+- Reviewer and researcher are read-only by tool selection: no bash, so no
+  builds, tests, or repo mutation. Their evidence tools (`git_read`,
+  `gh_read`, `web_fetch`, `web_search`, `slack_search`,
+  `slack_read_channel`, `slack_read_thread`, `session_search`,
+  `memory_read`, `memory_search`, `memory_status`) are declared names, not a
+  runtime guarantee: `resolveAgentTools` silently drops a tool the
+  dispatching session did not register, and only `ffgrep`/`fffind` have
+  substitutes (the built-in `grep`/`find`). Every other dropped name has no
+  fallback, so web, Slack, session, memory, git, and GitHub sources can be
+  missing at runtime depending on the session's extensions and
+  configuration. Name the files (or describe the changes) in the task when
+  `git_read` may be unavailable.
 - Worker has no `tools:` line and therefore gets the child process's default
   tool set (your `defaultTools` settings apply). Child processes are
   non-interactive, so any guard-owned prompt in a child is denied regardless
@@ -90,6 +98,23 @@ Notes:
   startup validation, not complete child-tool containment: non-owned tools
   other than write/edit remain observe-only, and running children keep their launch
   snapshot.
+
+## Choosing an agent
+
+- `scout`: locate code and summarize how it connects; compressed context for
+  a handoff.
+- `planner`: turn context and requirements into an ordered implementation
+  plan.
+- `researcher`: investigate a question and synthesize evidence with
+  citations, uncertainty, and gaps; no implementation steps or verdicts.
+- `worker`: execute the task with the full default tool set.
+- `reviewer`: inspect changes and return a code-review verdict.
+
+Single-agent example:
+
+```json
+{"agent":"researcher","task":"Investigate why this behavior changed; synthesize relevant available evidence with citations and identify uncertainty."}
+```
 
 ## Workflow prompts
 
