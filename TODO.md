@@ -45,6 +45,14 @@ Expand the allowlist in `extensions/gh-read/` and update [`docs/gh-read-design.m
 
 - [ ] Keep the same guarantees for follow-up operations: tool-controlled request construction, validated/encoded inputs, bounded pagination/runtime/output, and regression tests for rejected flags and unsafe inputs.
 
+## GitHub review write extension
+
+- [ ] Port `../gh-pr-threads/` API operations to a native TypeScript pi extension exposing `gh_review_write` with `reply`, `resolve`, and `submit_review` actions. Keep `gh_read` strictly read-only; retain the standalone CLI for manual use and other agents.
+  - Source: `../gh-pr-threads/gh-pr-threads` and its stubbed tests. Use `gh` for authentication/API transport with tool-controlled requests and typed inputs/results, not a Bash wrapper, raw API passthrough, temporary body files, or a jq dependency. Reuse the environment sanitization and bounded-process patterns in `extensions/gh-read/`; its API runner is GET-only, not a write transport.
+  - Safety: require explicit repo/PR targets; verify thread/comment membership and the expected GitHub account before mutation; keep reply and resolve separate initially. Bound runtime/output, handle cancellation, and report ambiguous post-dispatch outcomes as unknown with verification-read guidance, never automatic write retries. Use `extensions/update-jira/update-tool.ts` as the structured write-result reference.
+  - Permissions: declare write-capable annotations and verify Guard approval/denial and planning behavior. Coordinate with the pending remote-write enforcement task below: classification alone does not currently enforce remote-write decisions.
+  - Read-side companion: use the existing review-thread resolved/outdated-state task above, without duplicating it; implement bounded thread/comment pagination and explicit completeness/continuation metadata rather than carrying over the CLI's unpaginated first-100-threads/first-50-comments limits. Add network-free regression tests for validation, targeting, account mismatch, approval paths, and uncertain write outcomes; update registration, docs, and relevant skill guidance.
+
 ## update-jira extension
 
 Design: [`docs/jira-extension-design.md`](docs/jira-extension-design.md) (v2 contract). The live-write smoke and HTML round-trip gates were executed and verified on 2026-10-07 against scratch ticket APMSVLS-670 (see the Done notes below); the design doc's gate section records the same status.
