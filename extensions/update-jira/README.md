@@ -171,5 +171,4 @@ link with a duplicate no-op, transitions by status and by explicit id) was
 verified on 2026-10-07 with authorized smoke tests on scratch ticket
 APMSVLS-670, including an HTML full-body round-trip; the observed write
 responses are recorded in [`docs/jira-extension-design.md`](../../docs/jira-extension-design.md)
-("Verification gates (satisfied 2026-10-07)") and the root `TODO.md` Done
-notes.
+("Verification gates (satisfied 2026-10-07)").
