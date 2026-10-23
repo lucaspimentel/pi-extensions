@@ -102,6 +102,12 @@ export interface SpawnOptions {
  * world-writable. Returns a diagnostic or null.
  */
 export function verifyRuntimeDirPermissions(p: string, options: SpawnOptions = {}): string | null {
+	// Windows does not map ACLs onto POSIX mode bits: statSync reports a
+	// 0666-style mode for every directory, so the group/world-writable check
+	// would reject every path. The sandbox is Linux-only and runs degraded
+	// here; the runtime dir lives under the per-user temp dir, which Windows
+	// already restricts to the owner.
+	if (process.platform === "win32") return null;
 	return verifyCachePathPermissions(p, { stat: options.stat, uid: options.uid });
 }
 

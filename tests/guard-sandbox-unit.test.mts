@@ -27,6 +27,7 @@ import {
 	resetSandboxDetection,
 } from "../extensions/guard/sandbox/detect.ts";
 import { sanitizeNugetConfig } from "../extensions/guard/sandbox/nuget.ts";
+import { verifyRuntimeDirPermissions } from "../extensions/guard/sandbox/run.ts";
 import { classifyEntries, findScanArgs, fdScanArgs, ScanFailure, scanRawEntries } from "../extensions/guard/sandbox/scan.ts";
 import {
 	buildBwrapArgs,
@@ -156,6 +157,16 @@ test("compileLauncher refuses a group-writable cache root with an existing binar
 	const r = compileLauncher({ cacheRoot: root });
 	assert.equal(r.ok, false);
 	assert.match(r.diagnostic ?? "", /group or world writable/);
+});
+
+test("runtime dir checks skip POSIX mode verification on Windows", (skip) => {
+	if (process.platform !== "win32") return skip("Windows-only behavior");
+	const dir = makeTempDir("guard-unit-winperm-");
+	// Precondition: Windows statSync reports a 0666-style mode for every
+	// directory, which the POSIX check would reject.
+	const s = fs.statSync(dir);
+	assert.equal((s.mode & 0o022) !== 0, true, `expected writable mode bits, got ${s.mode.toString(8)}`);
+	assert.equal(verifyRuntimeDirPermissions(dir), null);
 });
 
 test("compileLauncher refuses a foreign-owned cache dir (injected stat)", () => {
