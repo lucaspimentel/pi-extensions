@@ -332,6 +332,26 @@ if (supported) {
 		assert.doesNotMatch(r.out, /SECRET_TOKEN/, ".env content must never appear");
 	});
 
+	test("an empty extra mask list still applies the built-in masks", async () => {
+		const ws = makeWorkspace();
+		const r = await bash(ws, "cat .env; echo env-rc=$?", { maskPatterns: [], maskExceptions: [] });
+		assert.equal(r.code, 0, r.err);
+		assert.doesNotMatch(r.out, /SECRET_TOKEN/, "an empty extras list must not disable the default discovery masks");
+		assert.equal(r.effective.maskedFiles, 1);
+	});
+
+	test("the find fallback scans with find argv when fd is absent", async () => {
+		const ws = makeWorkspace();
+		const detection: SandboxDetection = { ...detectSandboxMode(), fdPath: "/usr/bin/find", scanner: "find" };
+		const r = await runInSandbox(
+			{ workspace: ws, target: ["bash", "-c", "cat .env 2>/dev/null; echo rc=$?"] },
+			{ detection },
+		);
+		assert.equal(r.code, 0, r.err);
+		assert.equal(r.effective.scanner, "find");
+		assert.doesNotMatch(r.out, /SECRET_TOKEN/, "the find fallback must mask through the real launch path");
+	});
+
 	test("a protected path created inside the sandbox is quarantined by the audit", async () => {
 		const ws = makeWorkspace();
 		const before = snapshotProtected(ws);

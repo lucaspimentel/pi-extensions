@@ -232,9 +232,9 @@ export interface LaunchSpec {
 	runtimeDir?: string;
 	/** Override the host home path (tests use a fake home). */
 	homePath?: string;
-	/** Mask filename patterns; defaults to DEFAULT_MASK_PATTERNS. */
+	/** Extra mask filename patterns, added to the built-in DEFAULT_MASK_PATTERNS. */
 	maskPatterns?: string[];
-	/** Mask exceptions; defaults to DEFAULT_MASK_EXCEPTIONS. */
+	/** Extra mask exceptions, added to the built-in DEFAULT_MASK_EXCEPTIONS. */
 	maskExceptions?: string[];
 	/** Extra prune basenames added to the built-in scan prune list. */
 	pruneNames?: string[];

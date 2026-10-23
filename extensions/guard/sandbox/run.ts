@@ -37,7 +37,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
-import { GUARD_LAUNCH_MOUNT, buildEnv, type LaunchSpec, type WorkspaceMode } from "./spec.ts";
+import { DEFAULT_MASK_EXCEPTIONS, DEFAULT_MASK_PATTERNS, GUARD_LAUNCH_MOUNT, buildEnv, type LaunchSpec, type WorkspaceMode } from "./spec.ts";
 import { buildBwrapArgs, buildOuterLauncherArgv, filterMountableReadRoots, mountTable, resolveWorktreeCommonDir, type BwrapContext, type MountEntry, type OverlaySpec } from "./bwrap.ts";
 import { detectSandboxMode, chmodTree, type SandboxDetection } from "./detect.ts";
 import { scanWorkspace } from "./scan.ts";
@@ -244,10 +244,13 @@ export function spawnSandboxed(spec: LaunchSpec, options: SpawnOptions = {}): Sp
 	const launchOverlaysRoot = path.join(sessionDir, "overlays", launchId);
 
 	// Discovery scan: fails the launch on timeout or cap; never unmasked.
+	// The built-in mask defaults are always applied; LaunchSpec extras add to
+	// them. Passing an empty extras list must not disable discovery masking.
 	const scan = scanWorkspace(workspace, {
 		fdPath: detection.fdPath,
-		patterns: spec.maskPatterns,
-		exceptions: spec.maskExceptions,
+		scanner: detection.scanner ?? undefined,
+		patterns: [...DEFAULT_MASK_PATTERNS, ...(spec.maskPatterns ?? [])],
+		exceptions: [...DEFAULT_MASK_EXCEPTIONS, ...(spec.maskExceptions ?? [])],
 		pruneNames: spec.pruneNames,
 		cap: spec.discoveryMatchCap,
 		timeoutMs: spec.discoveryTimeoutMs,

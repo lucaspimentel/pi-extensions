@@ -208,7 +208,10 @@ export class GuardRuntime {
 		return filterMountableReadRoots(normalizeRootList(policy.config.readRoots, policy.cwd, homedir()), policy.cwd).mountable;
 	}
 	private auditOptions() {
-		return { fdPath: this.detection.fdPath, patterns: [...DEFAULT_MASK_PATTERNS, ...this.currentPolicy.config.maskPatterns], exceptions: [...DEFAULT_MASK_EXCEPTIONS, ...this.currentPolicy.config.maskExceptions], protectedPaths: this.currentPolicy.config.protectedPaths, pruneNames: this.currentPolicy.config.discoveryPruneNames, cap: this.currentPolicy.config.discoveryMatchCap, timeoutMs: this.currentPolicy.config.discoveryTimeoutMs };
+		// scanner is threaded explicitly: when fd is absent, detection.fdPath is
+		// "/usr/bin/find" with scanner "find", and inferring the kind from the
+		// path would run find with fd argv.
+		return { fdPath: this.detection.fdPath, scanner: this.detection.scanner ?? undefined, patterns: [...DEFAULT_MASK_PATTERNS, ...this.currentPolicy.config.maskPatterns], exceptions: [...DEFAULT_MASK_EXCEPTIONS, ...this.currentPolicy.config.maskExceptions], protectedPaths: this.currentPolicy.config.protectedPaths, pruneNames: this.currentPolicy.config.discoveryPruneNames, cap: this.currentPolicy.config.discoveryMatchCap, timeoutMs: this.currentPolicy.config.discoveryTimeoutMs };
 	}
 	private snapshot(): ProtectedSnapshot {
 		const snapshot = snapshotProtected(this.currentPolicy.cwd, this.auditOptions());
