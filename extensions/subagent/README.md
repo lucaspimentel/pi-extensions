@@ -17,6 +17,9 @@ streaming, usage display, security model).
 - **Model overrides**: all agents inherit the dispatching session's model. Pin
   per-agent models in `~/.pi/agent/subagent.json` (see below) without
   duplicating agent files.
+- **Agent discovery**: the `subagent` tool describes the discovered scope-`user`
+  agents, rewritten per request, and the `subagent_list` tool returns the full
+  catalog (source, model, tools) without spawning. See "Discovering agents".
 - **Read-only tooling**: scout, planner, reviewer, and researcher use
   `ffgrep`/`fffind` instead of `grep`/`find`, and none of them has `bash`. If
   `ffgrep`/`fffind` are not registered (the `@ff-labs/pi-fff` package is
@@ -102,6 +105,31 @@ Notes:
   startup validation, not complete child-tool containment: non-owned tools
   other than write/edit remain observe-only, and running children keep their launch
   snapshot.
+
+## Discovering agents
+
+The model is given the discovered agents without a separate call:
+
+- **`subagent` description (per request)**: `prepareLoadout` rewrites the tool
+  description on every request with the scope-`user` agents sorted by name, as
+  `name (source) [model: ...]: description`. It lists at most 20 agents and
+  truncates each description at 160 characters (`...`), adding a
+  `(+N more; call subagent_list for the full list)` suffix. When a project
+  agents dir exists, a fixed notice points at `agentScope: "both"` without
+  naming project agents, so the description never implies they are reachable
+  under the default scope. Output is byte-stable across calls (plain name sort,
+  no timestamps), so prompt caching is not churned. The per-agent `tools` list
+  is deliberately omitted here and available from `subagent_list`. Discovery
+  runs synchronously per request; a throw, or no known cwd, leaves the static
+  description in place and never breaks the request. Because discovery now runs
+  per request, a malformed `subagent.json` or unknown model-override name warns
+  on every request instead of once.
+- **`subagent_list` tool**: lists the agents for a single optional parameter,
+  `agentScope` (`"user"` default, `"project"`, `"both"`), with source, model,
+  and tools. It spawns nothing, asks for no confirmation, and never queries the
+  guard snapshot; project agents appear only when the scope includes them. It
+  declares `outputSchema` (and matching `structuredContent`), so codemode gets
+  structured data, and `readOnlyHint`, so it is allowed during planning.
 
 ## Choosing an agent
 

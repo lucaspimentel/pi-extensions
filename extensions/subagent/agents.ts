@@ -212,12 +212,58 @@ function applyModelOverrides(agentMap: Map<string, AgentConfig>): void {
 	}
 }
 
+/**
+ * Deterministic name ordering for every model-facing agent list. A plain `<`
+ * comparison (not `localeCompare`) keeps the output byte-stable across
+ * machines and locales, so unchanged files produce identical prompt text and
+ * prompt caching is not churned.
+ */
+export function sortAgentsByName(agents: AgentConfig[]): AgentConfig[] {
+	return [...agents].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/** Compact `name (source)` list used by the spawn path's error text. */
+export function formatAgentNames(agents: AgentConfig[]): string {
+	if (agents.length === 0) return "none";
+	return agents.map((a) => `${a.name} (${a.source})`).join(", ");
+}
+
+/**
+ * Deterministic one-line catalog for the model-facing `subagent` description:
+ * `name (source)[ [model: X]]: description`, `; `-joined, with a `...` truncation
+ * past `maxDescriptionChars` and a single `(+N more; call subagent_list ...)`
+ * suffix when more than `maxItems` agents exist. The caller sorts first.
+ */
+export function formatAgentCatalog(agents: AgentConfig[], maxItems: number, maxDescriptionChars: number): string {
+	if (agents.length === 0) return "none";
+	const listed = agents.slice(0, maxItems);
+	const remaining = agents.length - listed.length;
+	const entries = listed.map((a) => {
+		const description =
+			a.description.length > maxDescriptionChars ? `${a.description.slice(0, maxDescriptionChars)}...` : a.description;
+		const model = a.model ? ` [model: ${a.model}]` : "";
+		return `${a.name} (${a.source})${model}: ${description}`;
+	});
+	const suffix = remaining > 0 ? ` (+${remaining} more; call subagent_list for the full list)` : "";
+	return `${entries.join("; ")}${suffix}`;
+}
+
+/**
+ * Detailed listing for `subagent_list`: one multi-field line per agent, newline
+ * joined. Unlike the description catalog this includes the `tools` list, which
+ * is available on demand rather than injected into every request.
+ */
 export function formatAgentList(agents: AgentConfig[], maxItems: number): { text: string; remaining: number } {
 	if (agents.length === 0) return { text: "none", remaining: 0 };
 	const listed = agents.slice(0, maxItems);
 	const remaining = agents.length - listed.length;
 	return {
-		text: listed.map((a) => `${a.name} (${a.source}): ${a.description}`).join("; "),
+		text: listed
+			.map(
+				(a) =>
+					`${a.name} (${a.source}): ${a.description} | model: ${a.model ?? "inherit"} | tools: ${a.tools?.join(", ") ?? "default"}`,
+			)
+			.join("\n"),
 		remaining,
 	};
 }

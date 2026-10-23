@@ -38,7 +38,16 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import {
+	type AgentConfig,
+	type AgentScope,
+	type AgentSource,
+	discoverAgents,
+	formatAgentCatalog,
+	formatAgentList,
+	formatAgentNames,
+	sortAgentsByName,
+} from "./agents.ts";
 import { INHERIT_ENV, serializeInheritance } from "../guard/policy/inheritance.ts";
 import { queryGuardSnapshot, type GuardSnapshot } from "./guard-snapshot.ts";
 
@@ -316,6 +325,19 @@ export function setBootstrapPathOverride(path: string | null): void {
 	bootstrapOverride = path;
 }
 
+/**
+ * Directory used by `subagent`'s per-request description rewrite. `prepareLoadout`
+ * receives no ctx, so the factory captures the session cwd from the
+ * `session_start` / `before_agent_start` handlers (both call this seam). Null
+ * until a cwd is known, in which case the declared static description is used.
+ */
+let agentListCwd: string | null = null;
+
+/** Test seam: seed or clear the cwd used by `prepareLoadout`. */
+export function setAgentListCwd(cwd: string | null): void {
+	agentListCwd = cwd;
+}
+
 function refusedResult(agentName: string, agentSource: SingleResult["agentSource"], task: string, step: number | undefined, reason: string): SingleResult {
 	return {
 		agent: agentName,
@@ -352,7 +374,7 @@ async function runSingleAgent(
 	const agent = agents.find((a) => a.name === agentName);
 
 	if (!agent) {
-		const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
+		const available = formatAgentNames(sortAgentsByName(agents));
 		return {
 			agent: agentName,
 			agentSource: "unknown",
@@ -563,6 +585,76 @@ const SubagentParams = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 });
 
+const SubagentListAgentSchema = Type.Object({
+	name: Type.String(),
+	source: StringEnum(["user", "project", "bundled"] as const),
+	description: Type.String(),
+	model: Type.Union([Type.String(), Type.Null()]),
+	tools: Type.Array(Type.String()),
+});
+
+const SubagentListParams = Type.Object({
+	agentScope: Type.Optional(AgentScopeSchema),
+});
+
+const SubagentListOutput = Type.Object({
+	agentScope: StringEnum(["user", "project", "both"] as const),
+	projectAgentsDir: Type.Union([Type.String(), Type.Null()]),
+	agents: Type.Array(SubagentListAgentSchema),
+});
+
+interface SubagentListDetails {
+	agentScope: AgentScope;
+	projectAgentsDir: string | null;
+	agents: Array<{ name: string; source: AgentSource; description: string; model: string | null; tools: string[] }>;
+}
+
+/** Agent cap and per-agent description cap for the per-request description catalog. */
+const DESCRIPTION_MAX_AGENTS = 20;
+const DESCRIPTION_MAX_DESCRIPTION_CHARS = 160;
+
+/** Cap for `subagent_list`; high enough that the full list normally fits. */
+const SUBAGENT_LIST_MAX_AGENTS = 100;
+
+/**
+ * Static base text for the `subagent` tool. A function, not a constant, so the
+ * user agents path reflects the environment at call time (relevant after a
+ * reload that changes `PI_CODING_AGENT_DIR`).
+ */
+function baseSubagentDescription(): string {
+	return [
+		"Delegate tasks to specialized subagents with isolated context.",
+		"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
+		"Bundled agents are always available; agents in the user agents dir override them by name.",
+		`User agents live in ${path.join(getAgentDir(), "agents")}.`,
+		`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
+		"Call subagent_list to list the discovered agents with their source, model, and tools without spawning anything.",
+	].join(" ");
+}
+
+/**
+ * Per-request description: the static base text plus one deterministic catalog
+ * sentence for the scope-"user" agents. Two calls with unchanged files return
+ * byte-identical strings (plain name sort, fixed punctuation, no timestamps).
+ * The catalog lists only user-scope agents and mentions the project agents dir
+ * without naming its agents, so it never implies they are reachable without
+ * agentScope: "both". Never throws: returns undefined when no cwd is known.
+ */
+function buildSubagentDescription(): string | undefined {
+	if (agentListCwd === null) return undefined;
+	const discovery = discoverAgents(agentListCwd, "user");
+	const catalog = formatAgentCatalog(
+		sortAgentsByName(discovery.agents),
+		DESCRIPTION_MAX_AGENTS,
+		DESCRIPTION_MAX_DESCRIPTION_CHARS,
+	);
+	const projectNotice =
+		discovery.projectAgentsDir !== null
+			? ` Project-local agents exist under ${CONFIG_DIR_NAME}/agents but are not listed here; pass agentScope: "both" to subagent or subagent_list to include them.`
+			: "";
+	return `${baseSubagentDescription()} Discovered agents for agentScope "user": ${catalog}.${projectNotice}`;
+}
+
 export default function (pi: ExtensionAPI) {
 	// Guard step 5: every spawn asks the parent guard for a fresh profile
 	// snapshot over the synchronous bus handshake and passes the child startup
@@ -571,17 +663,33 @@ export default function (pi: ExtensionAPI) {
 		bootstrapPath: bootstrapOverride ?? GUARD_BOOTSTRAP_PATH,
 		snapshot: (cwd) => queryGuardSnapshot(pi.events, cwd),
 	};
+	// prepareLoadout has no ctx, so capture the session cwd from the events that
+	// carry one. Before the first event the static description is used.
+	pi.on("session_start", (_event, ctx) => {
+		setAgentListCwd(ctx.cwd);
+	});
+	pi.on("before_agent_start", (_event, ctx) => {
+		setAgentListCwd(ctx.cwd);
+	});
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: [
-			"Delegate tasks to specialized subagents with isolated context.",
-			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
-			"Bundled agents are always available; agents in the user agents dir override them by name.",
-			`User agents live in ${path.join(getAgentDir(), "agents")}.`,
-			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
-		].join(" "),
+		description: baseSubagentDescription(),
+		promptSnippet: "Delegate tasks to specialized subagents (single, parallel, chain) or list them",
+		promptGuidelines: [
+			"Use scout for code reconnaissance, planner for implementation plans, researcher for evidence-gathering investigations, worker for edits, and reviewer for code review.",
+			'Project-local agents require agentScope: "both"; the default scope lists bundled and user agents only.',
+		],
 		parameters: SubagentParams,
+
+		prepareLoadout: () => {
+			try {
+				const description = buildSubagentDescription();
+				return description ? { descriptions: { subagent: description } } : undefined;
+			} catch {
+				return undefined;
+			}
+		},
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const agentScope: AgentScope = params.agentScope ?? "user";
@@ -609,7 +717,7 @@ export default function (pi: ExtensionAPI) {
 				});
 
 			if (modeCount !== 1) {
-				const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+				const available = formatAgentNames(sortAgentsByName(agents));
 				return {
 					content: [
 						{
@@ -823,7 +931,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+			const available = formatAgentNames(sortAgentsByName(agents));
 			return {
 				content: [{ type: "text", text: `Invalid parameters. Available agents: ${available}` }],
 				details: makeDetails("single")([]),
@@ -1143,6 +1251,58 @@ export default function (pi: ExtensionAPI) {
 
 			const text = result.content[0];
 			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+		},
+	});
+	pi.registerTool({
+		name: "subagent_list",
+		label: "Subagent List",
+		description: [
+			"List the discovered subagents with their source, model, and tools.",
+			"Spawns nothing and asks for no confirmation.",
+			`Project-local agents in ${CONFIG_DIR_NAME}/agents require agentScope: "both".`,
+		].join(" "),
+		promptSnippet: "List discovered subagents (source, model, tools) without spawning",
+		promptGuidelines: [
+			"Use subagent_list to discover which agents are available before dispatching a subagent.",
+			'Project-local agents require agentScope: "both"; the default scope lists bundled and user agents only.',
+		],
+		parameters: SubagentListParams,
+		outputSchema: SubagentListOutput,
+		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const agentScope: AgentScope = params.agentScope ?? "user";
+			const discovery = discoverAgents(ctx.cwd, agentScope);
+			const agents = sortAgentsByName(discovery.agents);
+			const { text: agentLines, remaining } = formatAgentList(agents, SUBAGENT_LIST_MAX_AGENTS);
+			const agentEntries = agents.map((a) => ({
+				name: a.name,
+				source: a.source,
+				description: a.description,
+				model: a.model ?? null,
+				tools: a.tools ?? [],
+			}));
+			const lines = [
+				`subagent_list (agentScope: ${agentScope})`,
+				`Agents: ${agents.length}`,
+				`Project agents dir: ${discovery.projectAgentsDir ?? "not found"}`,
+				agentLines,
+			];
+			if (remaining > 0) lines.push(`(+${remaining} more)`);
+			const details: SubagentListDetails = {
+				agentScope,
+				projectAgentsDir: discovery.projectAgentsDir,
+				agents: agentEntries,
+			};
+			return {
+				content: [{ type: "text" as const, text: lines.join("\n") }],
+				structuredContent: {
+					agentScope,
+					projectAgentsDir: discovery.projectAgentsDir,
+					agents: agentEntries,
+				},
+				details,
+			};
 		},
 	});
 }
