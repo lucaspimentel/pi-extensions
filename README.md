@@ -59,7 +59,7 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 ## Package prompts
 
 - **git-rebase** – `/git-rebase [base-branch]` rebases the current branch onto its parent branch via the local `git-rebase-parent` script (parent resolution: `--parent` flag, open PR base branch, then repo default branch), keeping conflicts in progress for the agent to resolve. Defined in `prompts/git-rebase.md`.
-- **git-clean-worktrees** – `/git-clean-worktrees [repo-or-filter]` cleans up worktrees and branches under `~/source/datadog/` that are already merged: verifies a clean tree, no unpushed commits, and a merged PR (squash-merge aware) before removing anything, and reports anything it keeps and why. Defined in `prompts/git-clean-worktrees.md`.
+- **git-clean-worktrees** – moved to the shared [agent-skills](https://github.com/lucaspimentel/agent-skills) repository as an explicitly invoked skill: `/skill:git-clean-worktrees [repository-path]` in pi, `/git-clean-worktrees [repository-path]` in Claude Code. The optional path defaults to the current directory. It inspects one repository, refreshes its actual default branch, proves every target is preserved, and then removes only the worktrees and branches in a plan you approve by digest. It no longer takes a substring filter, and the old prompt was deleted from this repo.
 
 Skills shared between pi and Claude Code live in the separate
 [agent-skills](https://github.com/lucaspimentel/agent-skills) repository.
