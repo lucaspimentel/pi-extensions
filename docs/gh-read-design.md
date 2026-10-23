@@ -47,10 +47,11 @@ the main session. Deliberately not tied to any one agent; agents opt in via
   string so the schema stays flat like `git_read`'s):
   - `pr view`, `pr diff`, `pr list`, `pr checks`, `issue view`, `issue list`,
     `auth status`, `run list`, `run view`
-- Eight narrowly scoped GitHub API operations share the same tool with
+- Nine narrowly scoped GitHub API operations share the same tool with
   structured parameters instead of an args array: `repo contents`,
   `repo tree`, `commit checks`, `advisory view`, `check annotations`,
-  `repo metadata`, `pr comments`, and `pr reviews` (see "GitHub API operations").
+  `repo metadata`, `pr comments`, `pr reviews`, and `issue comments` (see
+  "GitHub API operations").
   Mixing shapes is rejected in both directions: native subcommands reject
   structured fields, API operations reject `args`.
 - Command construction happens in validate.ts during validation: it emits the
@@ -167,9 +168,9 @@ Value validation (native commands):
 
 ## GitHub API operations
 
-The eight structured operations (`repo contents`, `repo tree`, `commit
+The nine structured operations (`repo contents`, `repo tree`, `commit
 checks`, `advisory view`, `check annotations`, `repo metadata`, `pr comments`,
-`pr reviews`) make read-only GET requests to api.github.com
+`pr reviews`, `issue comments`) make read-only GET requests to api.github.com
 ONLY, always inside `gh`, with a fixed tool-authored argv (see "API
 runner"). They name an explicit repository, so they are exempt from the
 worktree gate and work anywhere. Validation is complete at runtime (calls
@@ -358,6 +359,50 @@ empty or scalar output and display truncation. For example:
 {"subcommand":"pr comments","repo":"DataDog/dd-trace-dotnet","pr":9479,"jq":".[] | {author: .user.login, path, line, body, html_url}"}
 ```
 
+### issue comments
+
+Required explicit `repo` (`OWNER/REPO` on github.com) and `issue`
+(a positive safe-integer issue number, never coerced from a string, branch,
+or URL). Only `jq` and `continuation` are optional. `pr`, `args`, branch
+names, URLs, endpoint/page controls (`path`, `ref`, `page`, `per_page`), and
+any other unrelated structured field (including redirection-shaped names
+such as `2>&1`) are rejected before spawning. There is no worktree gate, no
+ref resolution, and no SHA pinning.
+
+Tool-authored GET
+`repos/{owner}/{repo}/issues/{issue}/comments?per_page=100&page=<n>`.
+Returns the verbatim REST conversation-comment array for the issue. Because
+GitHub models PRs as issues, the same endpoint also returns PR conversation
+comments; this is the CONVERSATION thread, distinct from the inline review
+comments and replies that `pr comments` returns from
+`/pulls/{pr}/comments`. Fields such as `id`, `user.login`, `created_at`,
+`updated_at`, `body`, `html_url`, and unknown nested members pass through
+without projection or thread reconstruction. `issue comments` never emits a
+`pr` metadata field and never requests a `/pulls/` path.
+
+It reuses the shared bounded discussion-read engine unchanged: array-body
+validation with objects/strings/invalid JSON as errors, at most 10 pages x
+100 items per invocation, strict tool-owned Link validation and request
+reconstruction, independent target-bound continuation, retained pages with
+the failed page as the retry position, nonerror budget/deadline stops,
+jq once on the newly fetched array, and the 50 KiB display cap. Every
+result carries a standing notice distinguishing conversation comments from
+inline review reads; the notice is initialized before continuation matching
+so it survives handler errors, jq-empty/scalar/error output, and display
+clipping. Issue metadata reports `repo`, `issue`, `source_complete`,
+`items_returned`, `pages_fetched`, and `resumed`; mutability is described as
+a mutable, offset-paged listing that may miss or duplicate items, unlike
+the review-specific resolved/outdated caveat that stays with the PR review
+operations.
+
+```json
+{"subcommand":"issue comments","repo":"DataDog/dd-trace-js","issue":10775,"jq":".[] | select(.user.login==\"lucaspimentel\") | {created: .created_at, body: (.body[:200])}"}
+```
+
+A structured issue body/metadata read (title, state, labels, body, author)
+is deliberately NOT added here; it is recorded as a separate follow-up in
+`TODO.md`.
+
 `check annotations` remains a single-page operation with its existing
 exactly-100-items incompleteness notice; it does not adopt PR pagination.
 
@@ -413,14 +458,19 @@ continuation stay outside filtered output.
 
 PR continuation payloads carry `v: 1`, `op` (`pr comments` or `pr reviews`),
 `repo`, numeric `pr`, `perPage: 100`, and `source: {page, done: false}`.
-Before any request, the decoder requires a non-array source object and a
-positive safe-integer page, then the handler matches operation/repo/PR
-exactly. Tokens are opaque bounded payloads, not signed credentials. They
-are not bound to jq, so a resumed batch may use a different filter.
-Existing commit-checks and CVE token formats remain unchanged.
+issue-comments payloads are the same shape with `op: "issue comments"` and a
+numeric `issue` instead of `pr`. Before any request, the decoder requires a
+non-array source object and a positive safe-integer page, then the handler
+matches operation/repo/target exactly (issue comment tokens also require a
+positive safe-integer issue; a legacy-v1 PR token never satisfies an issue
+invocation and vice versa). Tokens are opaque bounded payloads, not signed
+credentials. They are not bound to jq, so a resumed batch may use a
+different filter. Existing commit-checks, CVE, and PR token formats remain
+unchanged; the version is not bumped.
 
 PR metadata includes `repo`, `pr`, `source_complete`, `items_returned`
-(before jq), `pages_fetched`, and `resumed: true` on resumption. Incomplete
+(before jq), `pages_fetched`, and `resumed: true` on resumption. Issue
+comments metadata is identical with `issue` in place of `pr`. Incomplete
 reads include `continuation` plus `incomplete_reason` for nonerror stops or
 `source_error` for failures. HTTP, interruption, JSON, extraction, and
 invalid-Link failures preserve accepted items and set `isError`; no failed
@@ -604,7 +654,11 @@ Settled in the grill-me review:
   continuation rejected). PR coverage: `pr comments`/`pr reviews` require
   explicit repo and positive safe-integer pr, reject string/branch/URL PR
   selectors and unrelated fields, and validate operation/repo/PR-bound
-  continuations, including calls that bypass schema validation.
+  continuations, including calls that bypass schema validation. Issue
+  coverage: `issue comments` requires explicit repo and positive safe-integer
+  issue, rejects string/branch/URL selectors, `pr`, `args`, endpoint/page
+  controls, and redirection-shaped fields, and validates
+  operation/repo/issue-bound continuations, including schema-bypass calls.
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout
@@ -652,13 +706,22 @@ Settled in the grill-me review:
   verbatim arrays including replies and review states, independent bounded
   Link paging and target-bound resume, retained data/retry positions on
   later-page errors, jq once on the newly fetched array with metadata
-  preserved, and array-body validation/error passthrough. Existing
-  single-page annotations behavior remains a regression check.
+  preserved, and array-body validation/error passthrough. Issue coverage:
+  the exact issues-comments endpoint with no ref resolution or `/pulls/`
+  request, verbatim realistic conversation comments (user.login, created_at,
+  updated_at, body, html_url, unknown nested fields), literal v1 token
+  compatibility and cross-operation/cross-target rejection with zero
+  requests, the same bounded paging/retry/error/jq/display-cap matrix, and
+  the mandatory distinction/mutability notices surviving scalar, empty,
+  failed-jq, invalid-continuation, and clipped output. Existing single-page
+  annotations behavior remains a regression check.
 - `tests/gh-read-jq.test.mts`: REAL-jq coverage (required in CI): lexical
   security matrix (benign keywords, imports incl. interpolations, malformed
   constructs), preflight compile rejection, zero/multi-value output, env/
   $ENV isolation asserting exactly HOME+LC_ALL, HOME guard-file canaries,
-  startup module canary, runtime errors, and output-cap truncation.
+  startup module canary, runtime errors, output-cap truncation, and the exact
+  issue-comments example filter (author selection, `created_at` projection,
+  and 200-character body slicing with another author excluded).
 - `tests/gh-read-tool.test.mts`: registered-tool coverage through a capture
   stub and the spawn seams: schema shape without outputSchema, fail-closed
   validation errors with zero spawns, native path (gate + argv verbatim,
@@ -677,9 +740,16 @@ Settled in the grill-me review:
   PR coverage: both schema literals plus the numeric pr field, tool
   guidance distinguishing inline comments/replies, review bodies/verdicts,
   and conversation comments, and end-to-end worktree-free API routing.
-  Read-only/idempotent/open-world tool annotations remain unchanged.
-- `tests/guard-classes.test.mts`: built-in `gh_read` mapping and both PR
-  operations classify as `remote-read`; configured class overrides win.
+  Issue coverage: the `issue comments` schema literal plus the numeric issue
+  field, guidance distinguishing conversation comments from inline review
+  reads (endpoint named), fail-closed validation with zero spawns, exact
+  fixed GET argv outside a worktree with no git gate, `details.subcommand`,
+  issue metadata, raw REST fields passed through, and continuation resume
+  plus cross-operation rejection. Read-only/idempotent/open-world tool
+  annotations remain unchanged.
+- `tests/guard-classes.test.mts`: built-in `gh_read` mapping and every
+  discussion operation (`pr comments`, `pr reviews`, `issue comments`)
+  classify as `remote-read`; configured class overrides win.
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 
@@ -691,6 +761,11 @@ Settled in the grill-me review:
   comments` and review bodies/verdicts with `pr reviews`, using explicit
   `repo` + numeric `pr`, verbatim arrays, and independent bounded
   continuations without a worktree. No resolved/outdated state is claimed.
+- The same agent can fetch an issue's (or PR's) conversation comments with
+  `issue comments` using explicit `repo` + numeric `issue`, verbatim arrays,
+  and an independent bounded continuation, without a worktree and without
+  any `pr` metadata or `/pulls/` request; the result distinguishes itself
+  from inline PR review reads and never claims review-thread state.
 - The same agent can triage GitHub Actions runs: `run list` finds runs,
   `run view` (numeric run id, no interactive selection) shows a summary or,
   with `--log`/`--log-failed`, bounded first-and-last-50 KiB log output, and

@@ -619,6 +619,129 @@ test("execute api: continuation tokens cannot cross operations or targets", asyn
 	setApiSpawnOverride(null);
 });
 
+test("gh_read registers the issue comments literal, the numeric issue field, and conversation-vs-inline guidance", () => {
+	const tool = register();
+	const schemaText = JSON.stringify(tool.parameters);
+	assert.ok(schemaText.includes('"const":"issue comments"'), "schema literal 'issue comments'");
+	const schema = tool.parameters as { properties: Record<string, unknown> };
+	assert.equal((schema.properties["issue"] as { type?: string } | undefined)?.type, "number", "issue is a numeric schema field");
+	assert.ok(tool.description.includes("issue comments"));
+	assert.deepEqual(tool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true });
+	assert.ok(tool.promptGuidelines.some((line) => line.includes("issue comments") && line.includes("conversation")), "conversation-comment guidance");
+	assert.ok(tool.promptGuidelines.some((line) => line.includes("issue comments") && line.includes("'pr comments'")), "inline-review distinction guidance");
+	assert.ok(tool.promptGuidelines.some((line) => line.includes("repos/{owner}/{repo}/issues/{issue}/comments")), "endpoint guidance");
+});
+
+test("execute: rejected issue comments params fail closed with zero spawns", async () => {
+	const tool = register();
+	let spawns = 0;
+	setSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	setApiSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	for (const bad of [
+		{ subcommand: "issue comments", repo: "owner/repo" }, // missing issue
+		{ subcommand: "issue comments", repo: "owner/repo", issue: "9" }, // string issue never coerced
+		{ subcommand: "issue comments", repo: "owner/repo", issue: "https://github.com/owner/repo/issues/9" }, // URL never coerced
+		{ subcommand: "issue comments", repo: "owner/repo", issue: "main" }, // branch never coerced
+		{ subcommand: "issue comments", repo: "owner/repo", issue: 0 }, // below the positive range
+		{ subcommand: "issue comments", repo: "owner/repo", issue: 1.5 }, // fraction
+		{ subcommand: "issue comments", issue: 9 }, // missing repo
+		{ subcommand: "issue comments", repo: "owner/repo", issue: 9, pr: 9 }, // pr is not the issue target
+		{ subcommand: "issue comments", repo: "owner/repo", issue: 9, args: [] }, // structured ops reject args
+		{ subcommand: "issue comments", repo: "owner/repo", issue: 9, ref: "main" }, // unrelated structured field
+		{ subcommand: "issue comments", repo: "owner/repo", issue: 9, "2>&1": true }, // redirection-shaped field
+	]) {
+		const result = await tool.execute("id", bad, undefined, null, { cwd: "/repo" });
+		assert.equal(result.isError, true, JSON.stringify(bad));
+		assert.ok(result.content[0].text.startsWith("gh_read: "), JSON.stringify(bad));
+	}
+	assert.equal(spawns, 0, "no child process for rejected invocations");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
+test("execute api issue comments: tool-authored issues comments GET, no git gate, verbatim conversation array", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setSpawnOverride(() => {
+		throw new Error("no git gate or ref resolution may spawn on the API path");
+	});
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => {
+			httpOk(child, JSON.stringify([
+				{ id: 101, user: { login: "lucaspimentel" }, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-02T00:00:00Z", body: "conversation", html_url: "https://github.com/owner/repo/issues/9#issuecomment-101", unknown: { nested: true } },
+			]));
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "issue comments", repo: "owner/repo", issue: 9 }, undefined, null, { cwd: "/not-a-worktree" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(argsList.length, 1, "exactly one gh api child; no ref resolution");
+	assert.deepEqual(argsList[0], ["api", "--hostname", "github.com", "--method", "GET", "--header", "Accept: application/vnd.github+json", "--header", "X-GitHub-Api-Version: 2022-11-28", "--include", "repos/owner/repo/issues/9/comments?per_page=100&page=1"]);
+	assert.ok(!argsList[0]!.some((arg) => arg.includes("/pulls/")), "issue reads never hit the pulls endpoint");
+	assert.ok(result.content[0].text.includes('"login":"lucaspimentel"'), "raw REST fields pass through");
+	assert.ok(result.content[0].text.includes('"html_url"'));
+	assert.ok(result.content[0].text.includes('"unknown":{"nested":true}'), "unknown nested fields survive");
+	assert.equal(result.details["subcommand"], "issue comments");
+	assert.equal(result.details["issue"], 9);
+	assert.equal(result.details["pr"], undefined, "issue reads never emit pr metadata");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
+test("execute api issue comments: resume at the next batch and reject cross-operation tokens", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => {
+			if (argsList.length <= 10) {
+				httpOk(child, JSON.stringify([{ id: argsList.length, body: "page one" }]), `<https://api.github.com/repos/owner/repo/issues/9/comments?per_page=100&page=${argsList.length + 1}>; rel="next"`);
+			} else {
+				httpOk(child, JSON.stringify([{ id: 2, body: "page two" }]));
+			}
+		});
+		return child;
+	}) as never);
+	const first = await tool.execute("id", { subcommand: "issue comments", repo: "owner/repo", issue: 9 }, undefined, null, { cwd: "/w" });
+	assert.equal(first.isError, undefined, first.content[0].text);
+	const token = first.details["continuation"];
+	assert.ok(typeof token === "string", "an unfetched page yields a continuation token");
+	const second = await tool.execute("id", { subcommand: "issue comments", repo: "owner/repo", issue: 9, continuation: token as string }, undefined, null, { cwd: "/w" });
+	assert.equal(second.isError, undefined, second.content[0].text);
+	assert.equal(argsList.length, 11, "the resume fetched exactly one more batch");
+	assert.equal(argsList[10]![argsList[10]!.length - 1], "repos/owner/repo/issues/9/comments?per_page=100&page=11");
+	assert.ok(second.content[0].text.includes("page two"));
+	assert.ok(!second.content[0].text.includes("page one"), "resumes fetch only the next batch");
+	assert.equal(second.details["continuation"], undefined);
+
+	// Cross-operation and cross-target tokens are rejected before any request.
+	const issueToken = Buffer.from(JSON.stringify({ v: 1, op: "issue comments", repo: "owner/repo", issue: 9, perPage: 100, source: { page: 2, done: false } })).toString("base64url");
+	const prToken = Buffer.from(JSON.stringify({ v: 1, op: "pr comments", repo: "owner/repo", pr: 9, perPage: 100, source: { page: 2, done: false } })).toString("base64url");
+	const before = argsList.length;
+	for (const bad of [
+		{ subcommand: "pr comments", repo: "owner/repo", pr: 9, continuation: issueToken }, // issue token on a PR op
+		{ subcommand: "issue comments", repo: "owner/repo", issue: 10, continuation: issueToken }, // issue differs
+		{ subcommand: "issue comments", repo: "owner/repo", issue: 9, continuation: prToken }, // PR token on the issue op
+	]) {
+		const result = await tool.execute("id", bad, undefined, null, { cwd: "/w" });
+		assert.equal(result.isError, true, JSON.stringify(bad));
+		assert.ok(result.content[0].text.includes("continuation does not match"), JSON.stringify(bad));
+	}
+	assert.equal(argsList.length, before, "mismatched continuations are detected before any request");
+	setApiSpawnOverride(null);
+});
+
 test("execute api pr reviews: a later-page failure is an error that retains completed items and the retry position", async () => {
 	const tool = register();
 	setApiSpawnOverride(((command: string, args: string[]) => {

@@ -127,6 +127,11 @@ function prReviewsEndpoint(repo: string, pr: number, page: number): string {
 	return `repos/${owner}/${name}/pulls/${pr}/reviews?${buildQuery([["per_page", PAGE_SIZE], ["page", page]])}`;
 }
 
+function issueCommentsEndpoint(repo: string, issue: number, page: number): string {
+	const [owner, name] = splitRepo(repo);
+	return `repos/${owner}/${name}/issues/${issue}/comments?${buildQuery([["per_page", PAGE_SIZE], ["page", page]])}`;
+}
+
 function treeEndpoint(repo: string, treeSha: string, recursive: boolean): string {
 	const [owner, name] = splitRepo(repo);
 	if (!recursive) return `repos/${owner}/${name}/git/trees/${treeSha}`;
@@ -263,7 +268,27 @@ function decodePrReadContinuation(record: Record<string, unknown>): PrReadContin
 	return record as unknown as PrReadContinuation;
 }
 
-type ContinuationPayload = CommitChecksContinuation | AdvisoryContinuation | PrReadContinuation;
+interface IssueCommentsContinuation {
+	v: 1;
+	op: "issue comments";
+	repo: string;
+	issue: number;
+	perPage: number;
+	source: SourceState;
+}
+
+function decodeIssueCommentsContinuation(record: Record<string, unknown>): IssueCommentsContinuation | null {
+	if (record["v"] !== 1 || record["op"] !== "issue comments") return null;
+	if (typeof record["repo"] !== "string" || typeof record["issue"] !== "number" || !Number.isSafeInteger(record["issue"]) || record["issue"] < 1) return null;
+	if (record["perPage"] !== PAGE_SIZE) return null;
+	const source = record["source"];
+	if (typeof source !== "object" || source === null || Array.isArray(source)) return null;
+	const state = source as Record<string, unknown>;
+	if (typeof state["page"] !== "number" || !Number.isSafeInteger(state["page"]) || state["page"] < 1 || state["done"] !== false) return null;
+	return record as unknown as IssueCommentsContinuation;
+}
+
+type ContinuationPayload = CommitChecksContinuation | AdvisoryContinuation | PrReadContinuation | IssueCommentsContinuation;
 
 function encodeContinuation(payload: ContinuationPayload): { ok: true; token: string } | { ok: false; reason: string } {
 	const token = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
@@ -281,6 +306,7 @@ function decodeContinuation(token: string): ContinuationPayload | null {
 		if (record["v"] !== 1) return null;
 		if (record["op"] === "commit checks" || record["op"] === "advisory view") return parsed as ContinuationPayload;
 		if (record["op"] === "pr comments" || record["op"] === "pr reviews") return decodePrReadContinuation(record);
+		if (record["op"] === "issue comments") return decodeIssueCommentsContinuation(record);
 		return null;
 	} catch {
 		return null;
@@ -1085,26 +1111,52 @@ async function opAdvisoryView(invocation: ValidApiInvocation, requester: ApiRequ
 	return await renderData(invocation, summary, metadata, result.items, notices, false, requester, deps);
 }
 
-// ── Operations: PR inline comments and reviews ─────────────────────────────
+// ── Operations: PR inline comments and reviews, issue conversation comments ─
 
-async function opPrRead(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
-	const op = invocation.op as PrReadOperation;
+/**
+ * Shared bounded-pagination handler for the three discussion reads. The
+ * operation selects its endpoint, numeric target, target metadata field,
+ * summary label, notices, and continuation payload explicitly; nothing here
+ * infers the target from a shared field, so an issue read can never route to
+ * the PR endpoint.
+ */
+async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
+	const op = invocation.op as PrReadOperation | "issue comments";
+	const isIssue = op === "issue comments";
 	const repo = invocation.repo!;
-	const pr = invocation.pr!;
-	const endpoint = op === "pr comments" ? prCommentsEndpoint : prReviewsEndpoint;
-	const summary = `gh_read api: ${op} ${repo} PR ${pr}`;
-	const metadata: Array<[string, string | number | boolean | null]> = [["repo", repo], ["pr", pr]];
-	const notices = [
-		"PR comments/reviews are mutable reads, not commit-pinned or transactional snapshots; completion describes traversal, not historical completeness",
-		"REST responses do not provide resolved/outdated review-thread state",
-	];
+	const number = isIssue ? invocation.issue! : invocation.pr!;
+	const targetField = isIssue ? "issue" : "pr";
+	const targetLabel = isIssue ? "issue" : "PR";
+	const endpoint = op === "pr comments" ? prCommentsEndpoint : op === "pr reviews" ? prReviewsEndpoint : issueCommentsEndpoint;
+	const summary = `gh_read api: ${op} ${repo} ${targetLabel} ${number}`;
+	const metadata: Array<[string, string | number | boolean | null]> = [["repo", repo], [targetField, number]];
+	// The distinction and mutability notices are initialized before any
+	// continuation matching so they survive handler errors, jq-empty/scalar/
+	// error output, and display clipping.
+	const notices = isIssue
+		? [
+			"issue comments returns conversation comments for both issues and pull requests; inline PR review comments and replies require the 'pr comments' operation",
+			"issue comments are mutable reads, not commit-pinned or transactional snapshots; offset paging may miss or duplicate items, and completion describes the observed traversal, not a historical snapshot",
+		]
+		: [
+			"PR comments/reviews are mutable reads, not commit-pinned or transactional snapshots; completion describes traversal, not historical completeness",
+			"REST responses do not provide resolved/outdated review-thread state",
+		];
 	let page = 1;
 	if (invocation.continuation !== undefined) {
 		const payload = decodeContinuation(invocation.continuation);
-		if (payload === null || payload.op !== op || payload.repo !== repo || payload.pr !== pr) {
-			return renderResult(summary, metadata, "", { isError: true, notices: [...notices, "continuation does not match this invocation (operation, repo, PR, or page invariants differ)"] });
+		let matchedPage: number | null = null;
+		if (payload !== null && payload.op === op && payload.repo === repo) {
+			if (payload.op === "issue comments") {
+				if (payload.issue === number) matchedPage = payload.source.page;
+			} else if (payload.pr === number) {
+				matchedPage = payload.source.page;
+			}
 		}
-		page = payload.source.page;
+		if (matchedPage === null) {
+			return renderResult(summary, metadata, "", { isError: true, notices: [...notices, `continuation does not match this invocation (operation, repo, ${targetLabel}, or page invariants differ)`] });
+		}
+		page = matchedPage;
 		metadata.push(["resumed", true]);
 		notices.push("a resumed result contains only the newly fetched batch, not items returned by earlier invocations");
 	}
@@ -1121,7 +1173,7 @@ async function opPrRead(invocation: ValidApiInvocation, requester: ApiRequester,
 	};
 	const result = await fetchPagedSource(
 		pagedRequester,
-		(p) => ({ endpoint: endpoint(repo, pr, p), query: [["per_page", PAGE_SIZE], ["page", p]] }),
+		(p) => ({ endpoint: endpoint(repo, number, p), query: [["per_page", PAGE_SIZE], ["page", p]] }),
 		(body) => Array.isArray(body) ? body : `${op} response was not a JSON array`,
 		{ page, done: false },
 	);
@@ -1130,7 +1182,9 @@ async function opPrRead(invocation: ValidApiInvocation, requester: ApiRequester,
 	if (result.error !== undefined) metadata.push(["source_error", result.error.reason]);
 	if (result.stopReason !== undefined) metadata.push(["incomplete_reason", result.stopReason]);
 	if (!result.done) {
-		const encoded = encodeContinuation({ v: 1, op, repo, pr, perPage: PAGE_SIZE, source: { page: result.page, done: false } });
+		const encoded = isIssue
+			? encodeContinuation({ v: 1, op: "issue comments", repo, issue: number, perPage: PAGE_SIZE, source: { page: result.page, done: false } })
+			: encodeContinuation({ v: 1, op: op as PrReadOperation, repo, pr: number, perPage: PAGE_SIZE, source: { page: result.page, done: false } });
 		if (encoded.ok) metadata.push(["continuation", encoded.token]);
 		else {
 			isError = true;
@@ -1234,6 +1288,7 @@ async function dispatchOperation(
 			return await opRepoMetadata(invocation, requester, deps);
 		case "pr comments":
 		case "pr reviews":
-			return await opPrRead(invocation, requester, deps);
+		case "issue comments":
+			return await opDiscussionRead(invocation, requester, deps);
 	}
 }

@@ -184,3 +184,23 @@ test("real jq: expressions with env/$ENV see only the minimal tool environment",
 		assert.equal(JSON.parse(result.output), "HOME,LC_ALL", "jq children get exactly HOME and LC_ALL, no inherited secrets");
 	}
 });
+
+test("real jq: the issue-comments example filter selects by author, projects created_at, and slices the body", async () => {
+	const longBody = "x".repeat(250);
+	const document = JSON.stringify([
+		{ user: { login: "someone-else" }, created_at: "2026-01-01T00:00:00Z", body: "not selected" },
+		{ user: { login: "lucaspimentel" }, created_at: "2026-10-01T12:00:00Z", body: longBody },
+		{ user: { login: "lucaspimentel" }, created_at: "2026-10-02T12:00:00Z", body: "short" },
+	]);
+	const result = await runJq('.[] | select(.user.login=="lucaspimentel") | {created: .created_at, body: (.body[:200])}', document, { deadlineAt: DEADLINE });
+	assert.equal(result.kind, "result");
+	if (result.kind === "result") {
+		const values = result.output.trim().split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line));
+		assert.deepEqual(values, [
+			{ created: "2026-10-01T12:00:00Z", body: "x".repeat(200) },
+			{ created: "2026-10-02T12:00:00Z", body: "short" },
+		]);
+		assert.ok(!result.output.includes("not selected"), "other authors are excluded");
+		assert.ok(!result.output.includes("x".repeat(201)), "the body is sliced to 200 characters");
+	}
+});

@@ -4,10 +4,10 @@
  * Read-only GitHub access for agents: tool `gh_read` runs an allowlisted
  * set of read-only gh subcommands (pr view/diff/list/checks, issue
  * view/list, auth status, run list/view) as an argv-array child process,
- * never through a shell, plus eight narrowly scoped GitHub API operations
+ * never through a shell, plus nine narrowly scoped GitHub API operations
  * (repo contents, repo tree, commit checks, advisory view, check
- * annotations, repo metadata, pr comments, pr reviews) with tool-authored,
- * encoded requests against github.com only.
+ * annotations, repo metadata, pr comments, pr reviews, issue comments) with
+ * tool-authored, encoded requests against github.com only.
  *
  * Argument validation lives in validate.ts; the bounded, sanitized spawn
  * layer for native commands lives in spawn.ts; log-carrying invocations
@@ -49,6 +49,7 @@ const SUBCOMMAND_SCHEMAS = [
 	Type.Literal("repo metadata"),
 	Type.Literal("pr comments"),
 	Type.Literal("pr reviews"),
+	Type.Literal("issue comments"),
 ] as const;
 
 const ghReadParams = Type.Object({
@@ -64,7 +65,10 @@ const ghReadParams = Type.Object({
 		Type.String({ description: "API operations: exact OWNER/REPO on github.com, e.g. 'DataDog/dd-trace-dotnet'. No host prefix." }),
 	),
 	pr: Type.Optional(
-		Type.Number({ description: "pr comments/reviews: required pull request number, a safe integer >= 1. Never used with native subcommands; branches, strings, and URLs are not accepted." }),
+		Type.Number({ description: "pr comments/reviews: required pull request number, a safe integer >= 1. Never used with native subcommands or 'issue comments'; branches, strings, and URLs are not accepted." }),
+	),
+	issue: Type.Optional(
+		Type.Number({ description: "issue comments: required issue number, a safe integer >= 1. Never used with native subcommands or the PR operations; branches, strings, and URLs are not accepted. Conversation comments only; PR inline review comments/replies need 'pr comments'." }),
 	),
 	path: Type.Optional(
 		Type.String({ description: "repo contents/tree: repository-relative path. Empty string selects the repository root." }),
@@ -82,10 +86,10 @@ const ghReadParams = Type.Object({
 		Type.Boolean({ description: "repo tree: recurse (default true). False performs a shallow read without the recursive query parameter." }),
 	),
 	jq: Type.Optional(
-		Type.String({ description: "External jq filter applied once to JSON data (directory listings, trees, combined checks, advisory results, PR comment/review arrays). Never applied to file text or tool metadata. Module imports are rejected; jq must be installed." }),
+		Type.String({ description: "External jq filter applied once to JSON data (directory listings, trees, combined checks, advisory results, PR comment/review arrays, issue conversation-comment arrays). Never applied to file text or tool metadata. Module imports are rejected; jq must be installed." }),
 	),
 	continuation: Type.Optional(
-		Type.String({ description: "Opaque continuation token from a previous incomplete commit-checks, CVE, or PR comments/reviews result. Pass it back unchanged with the same subcommand and repo/ref, id/type, or repo/pr. PR comments and reviews page independently." }),
+		Type.String({ description: "Opaque continuation token from a previous incomplete commit-checks, CVE, PR comments/reviews, or issue-comments result. Pass it back unchanged with the same subcommand and repo/ref, id/type, repo/pr, or repo/issue. PR comments, PR reviews, and issue comments each page independently." }),
 	),
 	id: Type.Optional(
 		Type.String({ description: "advisory view: exact advisory identifier, CVE-YYYY-NNNN or GHSA-xxxx-xxxx-xxxx." }),
@@ -104,7 +108,7 @@ interface GhReadDetails {
 }
 
 const NATIVE_DESCRIPTION =
-	"Run a read-only gh command (pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view) for the current repository (or anywhere, for `auth status`), or a narrowly scoped GitHub API operation: 'repo contents' (decoded file text or directory entries at a pinned ref), 'repo tree' (recursive or shallow tree), 'commit checks' (check runs plus legacy statuses for a commit), 'advisory view' (exact CVE/GHSA lookup), or 'check annotations' (annotations of one check run), or 'repo metadata' (default branch, description, visibility, URLs, and other flat repository facts), or 'pr comments' (inline review comments and replies), or 'pr reviews' (review bodies and verdicts). The PR operations require repo + a positive safe-integer pr number, accept optional jq and continuation, and return verbatim arrays with independent bounded continuation paging, not resolved/outdated thread state. Native commands take flags in args; API operations take structured fields (repo, path, ref, jq, ...) and work outside a git worktree. Only allowlisted flags and fields are accepted; output is capped and nothing mutates.";
+	"Run a read-only gh command (pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view) for the current repository (or anywhere, for `auth status`), or a narrowly scoped GitHub API operation: 'repo contents' (decoded file text or directory entries at a pinned ref), 'repo tree' (recursive or shallow tree), 'commit checks' (check runs plus legacy statuses for a commit), 'advisory view' (exact CVE/GHSA lookup), or 'check annotations' (annotations of one check run), or 'repo metadata' (default branch, description, visibility, URLs, and other flat repository facts), or 'pr comments' (inline review comments and replies), or 'pr reviews' (review bodies and verdicts), or 'issue comments' (conversation comments on an issue or PR). The PR operations require repo + a positive safe-integer pr number; 'issue comments' requires repo + a positive safe-integer issue number and returns conversation comments only (inline PR review comments/replies need 'pr comments'). All three accept optional jq and continuation, and return verbatim arrays with independent bounded continuation paging, not resolved/outdated thread state. Native commands take flags in args; API operations take structured fields (repo, path, ref, jq, ...) and work outside a git worktree. Only allowlisted flags and fields are accepted; output is capped and nothing mutates.";
 
 export default function ghReadExtension(pi: ExtensionAPI): void {
 	pi.registerTool<typeof ghReadParams, GhReadDetails>({
@@ -112,7 +116,7 @@ export default function ghReadExtension(pi: ExtensionAPI): void {
 		label: "GitHub Read",
 		description: NATIVE_DESCRIPTION,
 		promptSnippet:
-			"Run read-only gh commands (pr/issue view, list, pr diff, pr checks, auth status, GitHub Actions run list/view with bounded log output) and scoped GitHub API reads (repo contents/tree, commit checks, advisories, check annotations, repo metadata, pr comments/reviews)",
+			"Run read-only gh commands (pr/issue view, list, pr diff, pr checks, auth status, GitHub Actions run list/view with bounded log output) and scoped GitHub API reads (repo contents/tree, commit checks, advisories, check annotations, repo metadata, pr comments/reviews, issue comments)",
 		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 		promptGuidelines: [
 			"Prefer gh_read over asking the user to paste PR descriptions, review comments, or issue bodies; native commands run in the session's repository, while scoped API operations name an explicit target and work outside a worktree.",
@@ -125,7 +129,8 @@ export default function ghReadExtension(pi: ExtensionAPI): void {
 			"Repository facts: 'repo metadata' needs only repo and returns the flat REST repository object (default branch, description, visibility, dates, URLs, license, language, archived/fork/template flags, topics, counts, and the authenticated token's permissions) as one unpaged request; narrow with jq, e.g. .default_branch.",
 			"PR discussions: 'pr view --comments' is for conversation comments, not inline review discussions. Use API operation 'pr comments' with repo + pr (positive safe-integer PR number, not a branch or URL) for the verbatim inline review-comment array, including replies linked by in_reply_to_id; use 'pr reviews' with the same fields for the verbatim review bodies/verdicts array. Both accept optional jq and continuation; neither provides resolved/outdated thread state.",
 			"PR comments and reviews page independently: return each continuation unchanged with the same subcommand + repo + pr. Each call returns only its newly fetched batch; jq applies once to that array. These are mutable, non-transactional listings, not SHA-pinned snapshots; do not infer a complete thread history or current approval verdict from a partial result.",
-			"API operations report target and source completeness; repo contents/tree and commit checks also report a resolved commit SHA. Pass continuation back with the same subcommand and repo/ref (commit checks), id/type (CVE), or repo/pr (PR comments/reviews) to fetch remaining pages.",
+			"Issue conversation comments: use API operation 'issue comments' with repo + issue (positive safe-integer issue number, not a branch or URL). For both issues and PRs this returns the conversation-comment array from repos/{owner}/{repo}/issues/{issue}/comments, not the inline review comments/replies that 'pr comments' returns. It accepts optional jq and continuation; return the continuation unchanged with the same subcommand + repo + issue. Each call returns only its newly fetched batch; the listing is mutable and offset-paged, so it may miss or duplicate items, and completion describes the observed traversal, not a historical snapshot. Never emits pr or review-thread state.",
+			"PR and issue comment reads page independently: return each continuation unchanged with the same subcommand + repo + pr (PR operations) or repo + issue (issue comments); a token from one target or operation is rejected by another. API operations report target and source completeness; repo contents/tree and commit checks also report a resolved commit SHA. Pass continuation back with the same subcommand and repo/ref (commit checks), id/type (CVE), repo/pr (PR comments/reviews), or repo/issue (issue comments) to fetch remaining pages.",
 		],
 		parameters: ghReadParams,
 		async execute(_id, params, signal, _onUpdate, ctx) {

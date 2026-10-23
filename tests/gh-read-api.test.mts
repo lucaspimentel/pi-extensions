@@ -292,6 +292,252 @@ for (const subcommand of ["pr comments", "pr reviews"] as const) {
 	});
 }
 
+// ── issue comments: conversation comments on issues and PRs ──────────────────
+
+const ISSUE_ENDPOINT = "repos/OWNER/REPO/issues/123/comments";
+const issueParams = { subcommand: "issue comments", repo: "OWNER/REPO", issue: 123 } as const;
+// Literal v1 fixtures: these exact strings must keep decoding, and the PR one
+// must never be accepted by the issue operation (or vice versa).
+const LITERAL_PR_TOKEN = "eyJ2IjoxLCJvcCI6InByIGNvbW1lbnRzIiwicmVwbyI6Ik9XTkVSL1JFUE8iLCJwciI6MTIzLCJwZXJQYWdlIjoxMDAsInNvdXJjZSI6eyJwYWdlIjoyLCJkb25lIjpmYWxzZX19";
+const LITERAL_ISSUE_TOKEN = "eyJ2IjoxLCJvcCI6Imlzc3VlIGNvbW1lbnRzIiwicmVwbyI6Ik9XTkVSL1JFUE8iLCJpc3N1ZSI6MTIzLCJwZXJQYWdlIjoxMDAsInNvdXJjZSI6eyJwYWdlIjoyLCJkb25lIjpmYWxzZX19";
+const issueToken = (overrides: Record<string, unknown> = {}) => Buffer.from(JSON.stringify({ v: 1, op: "issue comments", repo: issueParams.repo, issue: issueParams.issue, perPage: PAGE_SIZE, source: { page: 11, done: false }, ...overrides })).toString("base64url");
+const issueData = (result: ApiToolResult) => JSON.parse(result.content[0].text.split("\ndata:\n")[1]!);
+const issuePosition = (result: ApiToolResult) => JSON.parse(Buffer.from(result.details.continuation as string, "base64url").toString("utf8"));
+
+const SAMPLE_COMMENT = {
+	id: 42,
+	user: { login: "lucaspimentel", id: 7, type: "User" },
+	created_at: "2026-10-01T12:00:00Z",
+	updated_at: "2026-10-02T12:00:00Z",
+	body: "conversation comment",
+	html_url: "https://github.com/OWNER/REPO/issues/123#issuecomment-42",
+	unknown: { nested: [1, null] },
+};
+
+test("issue comments: empty and verbatim arrays from the issues endpoint without ref resolution", async () => {
+	for (const data of [[], [SAMPLE_COMMENT]]) {
+		const api = requester([() => response(JSON.stringify(data))]);
+		const result = await run(issueParams, api);
+		assert.equal(result.isError, undefined);
+		assert.deepEqual(api.requests, [`${ISSUE_ENDPOINT}?per_page=100&page=1`]);
+		assert.ok(result.content[0].text.endsWith(JSON.stringify(data)));
+		assert.equal(result.details.source_complete, true);
+		assert.equal(result.details.items_returned, data.length);
+		assert.equal(result.details.repo, "OWNER/REPO");
+		assert.equal(result.details.issue, 123);
+		assert.equal(result.details.pr, undefined, "issue reads never emit pr metadata");
+		assert.ok(!api.requests.some((path) => path.includes("/pulls/")));
+	}
+});
+
+test("issue comments: sequential pages preserve order and duplicates", async () => {
+	const item = { id: 1, body: "dup" };
+	const api = requester([
+		() => response(JSON.stringify([item]), linkHeader(2, ISSUE_ENDPOINT, "per_page=100")),
+		() => response(JSON.stringify([item])),
+	]);
+	const result = await run(issueParams, api);
+	assert.deepEqual(api.requests, [1, 2].map(page => `${ISSUE_ENDPOINT}?per_page=100&page=${page}`));
+	assert.ok(result.content[0].text.endsWith(JSON.stringify([item, item])));
+	assert.equal(result.details.pages_fetched, 2);
+	assert.equal(result.details.source_complete, true);
+});
+
+test("issue comments: ten-page bound, exact token shape, and resume returning only the new batch", async () => {
+	const api = requester(Array.from({ length: MAX_PAGES_PER_SOURCE }, (_, i) => () => response(JSON.stringify([{ id: i + 1 }]), linkHeader(i + 2, ISSUE_ENDPOINT, "per_page=100"))));
+	const first = await run(issueParams, api);
+	assert.equal(first.isError, undefined);
+	assert.equal(first.details.source_complete, false);
+	assert.equal(first.details.pages_fetched, 10);
+	assert.equal(first.details.items_returned, 10);
+	assert.match(first.details.incomplete_reason as string, /page limit/);
+	assert.deepEqual(issuePosition(first), { v: 1, op: "issue comments", repo: "OWNER/REPO", issue: 123, perPage: PAGE_SIZE, source: { page: 11, done: false } });
+	assert.equal(first.content[0].text.match(/^continuation:/gm)?.length, 1);
+	const next = requester([() => response('[{"id":11}]')]);
+	const resumed = await run({ ...issueParams, continuation: first.details.continuation }, next);
+	assert.deepEqual(next.requests, [`${ISSUE_ENDPOINT}?per_page=100&page=11`]);
+	assert.deepEqual(issueData(resumed), [{ id: 11 }]);
+	assert.equal(resumed.details.resumed, true);
+	assert.equal(resumed.details.source_complete, true);
+	assert.equal(resumed.details.continuation, undefined);
+	assert.match(resumed.content[0].text, /only the newly fetched batch/);
+});
+
+test("issue comments: literal v1 tokens resume; cross-operation tokens reject before any request", async () => {
+	const resumed = await run({ ...issueParams, continuation: LITERAL_ISSUE_TOKEN }, requester([() => response("[]")]));
+	assert.deepEqual(resumed.details.resumed, true);
+
+	// The issue operation rejects a PR token, and the PR operation rejects an issue token.
+	const issueApi = requester([]);
+	const crossIn = await run({ ...issueParams, continuation: LITERAL_PR_TOKEN }, issueApi);
+	assert.equal(crossIn.isError, true);
+	assert.equal(issueApi.requests.length, 0);
+	assert.match(crossIn.content[0].text, /continuation does not match this invocation/);
+	const prApi = requester([]);
+	const crossOut = await run({ subcommand: "pr comments", repo: "OWNER/REPO", pr: 123, continuation: LITERAL_ISSUE_TOKEN }, prApi);
+	assert.equal(crossOut.isError, true);
+	assert.equal(prApi.requests.length, 0);
+	assert.match(crossOut.content[0].text, /continuation does not match this invocation/);
+});
+
+test("issue comments: invalid token target and page invariants reject before any request", async () => {
+	const variants = [
+		{ op: "pr comments" }, { op: "issue comments " }, { op: 1 },
+		{ repo: "other/repo" }, { repo: "owner/repo" }, { repo: 123 },
+		{ issue: 124 }, { issue: "123" }, { issue: 0 }, { issue: -1 }, { issue: 1.5 }, { issue: Number.MAX_SAFE_INTEGER + 1 },
+		{ issue: undefined },
+		{ perPage: 99 }, { perPage: "100" },
+		{ source: null }, { source: [] }, { source: {} }, { source: { page: 1 } }, { source: { done: false } },
+		...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2", null, true].map(page => ({ source: { page, done: false } })),
+		{ source: { page: 2, done: true } }, { source: { page: 2, done: "false" } },
+	];
+	for (const variant of variants) {
+		const api = requester([]);
+		const result = await run({ ...issueParams, continuation: issueToken(variant) }, api);
+		assert.equal(result.isError, true, JSON.stringify(variant));
+		assert.equal(api.requests.length, 0, JSON.stringify(variant));
+	}
+});
+
+test("issue comments: unsafe next links never requested and accepted items survive", async () => {
+	for (const url of [
+		`https://evil.example/${ISSUE_ENDPOINT}?per_page=100&page=2`,
+		`https://api.github.com/${ISSUE_ENDPOINT.replace("123", "124")}?per_page=100&page=2`,
+		`https://api.github.com/${ISSUE_ENDPOINT}/extra?per_page=100&page=2`,
+		`https://api.github.com/${ISSUE_ENDPOINT}?per_page=50&page=2`,
+		`https://api.github.com/${ISSUE_ENDPOINT}?page=2`,
+		`https://api.github.com/${ISSUE_ENDPOINT}?per_page=100&page=2&extra=1`,
+		...[1, 3].map(page => `https://api.github.com/${ISSUE_ENDPOINT}?per_page=100&page=${page}`),
+	]) {
+		const api = requester([() => response('[{"id":1}]', `Link: <${url}>; rel="next"\r\n`)]);
+		const result = await run(issueParams, api);
+		assert.equal(result.isError, true, url);
+		assert.equal(api.requests.length, 1, url);
+		assert.equal(api.requests[0], `${ISSUE_ENDPOINT}?per_page=100&page=1`);
+		assert.deepEqual(issueData(result), [{ id: 1 }]);
+		assert.equal(issuePosition(result).source.page, 2);
+		assert.match(result.details.source_error as string, /next-link validation failed/);
+	}
+});
+
+test("issue comments: exactly 100 without next Link is complete; display clipping is separate", async () => {
+	for (const items of [Array.from({ length: 100 }, (_, id) => ({ id })), [{ body: "界🙂".repeat(API_DISPLAY_CAP) }]]) {
+		const result = await run(issueParams, requester([() => response(JSON.stringify(items))]));
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details.source_complete, true);
+		assert.equal(result.details.items_returned, items.length);
+		assert.equal(result.details.continuation, undefined, "clipping must not create a continuation");
+		assert.ok(Buffer.byteLength(result.content[0].text, "utf8") <= API_DISPLAY_CAP);
+		if (items.length === 1) {
+			assert.equal(result.details.output_truncated, true);
+			assert.match(result.content[0].text, /NOT complete JSON/);
+			assert.ok(!result.content[0].text.includes("\uFFFD"));
+			assert.ok(Buffer.byteLength(JSON.stringify(result.details)) < 1000, "no hidden full payload");
+		}
+	}
+});
+
+test("issue comments: budget and deadline stops retain partial batch without errors", async () => {
+	for (const stop of ["budget", "deadline"]) {
+		let now = 0;
+		const api = requester([() => {
+			now = 2;
+			return response('[{"id":1}]', linkHeader(2, ISSUE_ENDPOINT, "per_page=100"));
+		}]);
+		if (stop === "budget") api.budgetExhausted = () => api.requests.length > 0;
+		else api.deadline = () => 1;
+		const result = await run(issueParams, api, { clock: { now: () => now, setTimeout, clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout) } });
+		assert.equal(result.isError, undefined);
+		assert.deepEqual(issueData(result), [{ id: 1 }]);
+		assert.equal(result.details.source_complete, false);
+		assert.equal(result.details.pages_fetched, 1);
+		assert.equal(issuePosition(result).source.page, 2);
+		assert.match(result.details.incomplete_reason as string, stop === "budget" ? /budget/ : /deadline/);
+	}
+});
+
+test("issue comments: HTTP, interrupted, JSON and extraction failures retain retry positions", async () => {
+	for (const failure of [error("forbidden diagnostic", 403), error("not found diagnostic", 404), error("response interrupted", 200), response("invalid json"), response('{"not":"array"}')]) {
+		for (const partial of [false, true]) {
+			const api = requester([
+				...(partial ? [() => response('[{"id":1}]', linkHeader(2, ISSUE_ENDPOINT, "per_page=100"))] : []),
+				() => failure,
+			]);
+			const result = await run(issueParams, api);
+			assert.equal(result.isError, true);
+			assert.deepEqual(issueData(result), partial ? [{ id: 1 }] : []);
+			assert.equal(api.requests.length, partial ? 2 : 1, "no retry");
+			assert.equal(issuePosition(result).source.page, partial ? 2 : 1);
+			if (failure.kind === "error") {
+				assert.ok((result.details.source_error as string).includes(failure.reason));
+				assert.ok((result.details.source_error as string).includes(String(failure.httpStatus)));
+			}
+			const retry = requester([() => response("[]")]);
+			await run({ ...issueParams, continuation: result.details.continuation }, retry);
+			assert.deepEqual(retry.requests, [`${ISSUE_ENDPOINT}?per_page=100&page=${partial ? 2 : 1}`]);
+		}
+	}
+});
+
+test("issue comments: jq once on the assembled new array; counts and continuation stay unfiltered", async () => {
+	for (const partial of [false, true]) {
+		for (const output of ["1", ""]) {
+			const api = requester([
+				() => response('[{"id":1}]', linkHeader(2, ISSUE_ENDPOINT, "per_page=100")),
+				() => partial ? error("forbidden", 403) : response('[{"id":2}]'),
+			]);
+			let calls = 0;
+			const result = await run({ ...issueParams, jq: "length", ...(partial ? { continuation: issueToken({ source: { page: 1, done: false } }) } : {}) }, api, {
+				jqRun: async (expression, document) => {
+					calls++;
+					assert.equal(expression, "length");
+					assert.deepEqual(JSON.parse(document), partial ? [{ id: 1 }] : [{ id: 1 }, { id: 2 }]);
+					return { kind: "result", output, outputTruncated: false, outputBytes: output.length };
+				},
+			});
+			assert.equal(calls, 1);
+			assert.equal(result.details.items_returned, partial ? 1 : 2);
+			assert.equal(result.details.source_complete, !partial);
+			assert.equal(typeof result.details.continuation, partial ? "string" : "undefined");
+			assert.match(result.content[0].text, /conversation comments/);
+			assert.match(result.content[0].text, /'pr comments' operation/);
+			if (partial) assert.equal(result.details.resumed, true);
+		}
+	}
+	const api = requester([() => response('[{"id":1}]', linkHeader(2, ISSUE_ENDPOINT, "per_page=100")), () => error("forbidden", 403)]);
+	const failed = await run({ ...issueParams, jq: "bad" }, api, { jqRun: async () => ({ kind: "error", reason: "compile error" }) });
+	assert.equal(failed.isError, true);
+	assert.equal(failed.details.items_returned, 1);
+	assert.equal(failed.details.source_complete, false);
+	assert.equal(typeof failed.details.continuation, "string");
+	assert.match(failed.content[0].text, /jq filtering failed/);
+});
+
+test("issue comments: distinction and mutability notices survive scalar, empty, invalid-continuation, and clipped output", async () => {
+	const expectNotices = (result: ApiToolResult) => {
+		assert.match(result.content[0].text, /conversation comments for both issues and pull requests/);
+		assert.match(result.content[0].text, /inline PR review comments and replies require the 'pr comments' operation/);
+		assert.match(result.content[0].text, /offset paging may miss or duplicate items/);
+		assert.match(result.content[0].text, /observed traversal, not a historical snapshot/);
+		assert.ok(!/resolved\/outdated/.test(result.content[0].text), "review-only caveats stay out of issue reads");
+	};
+	// Scalar and empty data values from jq, still rendered with notices.
+	for (const output of ["42\n", ""]) {
+		const result = await run({ ...issueParams, jq: "length" }, requester([() => response("[]")]), {
+			jqRun: async () => ({ kind: "result", output, outputTruncated: false, outputBytes: output.length }),
+		});
+		expectNotices(result);
+	}
+	// Handler error from an invalid continuation still carries the notices.
+	const badContinuation = await run({ ...issueParams, continuation: issueToken({ issue: 999 }) }, requester([]));
+	assert.equal(badContinuation.isError, true);
+	expectNotices(badContinuation);
+	// A clipped 50 KiB result still carries the notices.
+	const clipped = await run(issueParams, requester([() => response(JSON.stringify([{ body: "界🙂".repeat(API_DISPLAY_CAP) }]))]));
+	assert.equal(clipped.details.output_truncated, true);
+	expectNotices(clipped);
+});
+
 // ── Contents: ref resolution and pinning ─────────────────────────────────────
 
 test("contents: omitted ref resolves default branch then a full SHA, and pins the read", async () => {

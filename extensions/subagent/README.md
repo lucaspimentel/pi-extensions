@@ -34,15 +34,19 @@ streaming, usage display, security model).
   `advisory view` (exact CVE/GHSA lookup), `check annotations` (one check
   run's annotations, still a single 100-item page), `repo metadata` (flat
   repository facts: default branch, description, visibility, URLs),
-  `pr comments` (inline review comments and replies), and `pr reviews`
-  (review bodies and verdicts) as structured API operations; all network
+  `pr comments` (inline review comments and replies), `pr reviews`
+  (review bodies and verdicts), and `issue comments` (conversation comments
+  on an issue or PR, from the issues endpoint, unlike inline review
+  comments) as structured API operations; all network
   reads (guard class `remote-read`), and the API operations work outside a
-  git worktree. Both PR API operations require explicit `repo` + a positive
-  safe-integer `pr` number, return verbatim arrays, and accept optional jq
-  and independent continuation tokens bound to the same operation/repo/PR.
+  git worktree. The PR API operations require explicit `repo` + a positive
+  safe-integer `pr` number and `issue comments` requires explicit `repo` +
+  a positive safe-integer `issue` number; all return verbatim arrays and
+  accept optional jq and independent continuation tokens bound to the same
+  operation/repo/target.
   They are mutable listings, not SHA-pinned snapshots, and provide no
-  resolved/outdated thread state. Native `pr view --comments` covers PR
-  conversation comments instead of inline discussions.
+  resolved/outdated thread state. Native `pr view --comments` and
+  `issue comments` cover conversation comments instead of inline discussions.
 - **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and
   `/implement-and-review` are renamed to `/scout-plan-implement`,
   `/scout-plan`, and `/implement-review`, so each name lists its chain's stages.

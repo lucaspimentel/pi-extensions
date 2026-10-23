@@ -463,11 +463,11 @@ function appendToolAuthoredTokens(subcommand: GhSubcommand, argv: string[]): str
 
 // ── Structured GitHub API operations ────────────────────────────────────────
 //
-// The eight API operations use structured parameters (never the legacy args
+// The nine API operations use structured parameters (never the legacy args
 // array, never gh api with caller flags). They target github.com only and
 // are exempt from the worktree gate; api-spawn.ts owns the transport.
 
-export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata", "pr comments", "pr reviews"] as const;
+export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata", "pr comments", "pr reviews", "issue comments"] as const;
 
 export type ApiOperation = (typeof API_OPERATIONS)[number];
 
@@ -499,6 +499,7 @@ const OPERATION_FIELDS: Record<ApiOperation, ReadonlySet<string>> = {
 	"repo metadata": new Set(["repo", "jq"]),
 	"pr comments": new Set(["repo", "pr", "continuation", "jq"]),
 	"pr reviews": new Set(["repo", "pr", "continuation", "jq"]),
+	"issue comments": new Set(["repo", "issue", "continuation", "jq"]),
 };
 
 export interface ValidApiInvocation {
@@ -527,6 +528,8 @@ export interface ValidApiInvocation {
 	checkRunId?: number;
 	/** PR comments/reviews: positive safe integer pull request number. */
 	pr?: number;
+	/** Issue comments: positive safe integer issue number. */
+	issue?: number;
 }
 
 function apiInvalid(reason: string): { ok: false; reason: string } {
@@ -726,6 +729,14 @@ export function validateApiInvocation(params: unknown): ValidApiInvocation | { o
 		const prError = checkLineNumber(rawPr, "pr");
 		if (prError !== null) return apiInvalid(prError);
 		result.pr = rawPr as number;
+	}
+
+	if (op === "issue comments") {
+		const rawIssue = record["issue"];
+		if (rawIssue === undefined) return apiInvalid("issue is required");
+		const issueError = checkLineNumber(rawIssue, "issue");
+		if (issueError !== null) return apiInvalid(issueError);
+		result.issue = rawIssue as number;
 	}
 
 	if (op === "check annotations") {

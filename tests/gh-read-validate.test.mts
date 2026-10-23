@@ -865,3 +865,60 @@ test("repo metadata: required repo, optional jq, no other fields", () => {
 	apiRejects({ subcommand: "repo metadata", repo: "o/r", jq: "" }, ["non-empty expression"]);
 	apiRejects({ subcommand: "repo metadata", repo: "o/r", jq: ".a\u0000b" }, ["control characters"]);
 });
+
+// ── issue comments (API operation) validation ────────────────────────────────
+
+test("issue comments: required exact repo and positive safe integer issue", () => {
+	for (const issue of [1, Number.MAX_SAFE_INTEGER]) {
+		assert.deepEqual(apiOk({ subcommand: "issue comments", repo: "OWNER/REPO", issue }), {
+			ok: true,
+			op: "issue comments",
+			repo: "OWNER/REPO",
+			issue,
+		});
+	}
+	for (const repo of [undefined, "", "owner", "o/r/x", "https://github.com/o/r", "github.com/o/r", 42, null]) {
+		apiRejects({ subcommand: "issue comments", repo, issue: 1 }, ["repo"]);
+	}
+	apiRejects({ subcommand: "issue comments", repo: "o/r" }, ["issue is required"]);
+	for (const issue of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, "1", "https://github.com/o/r/issues/1", "main", null, true, false, [1], { number: 1 }]) {
+		apiRejects({ subcommand: "issue comments", repo: "o/r", issue }, ["issue"]);
+	}
+});
+
+test("issue comments: continuation and jq transport validation", () => {
+	const base = { subcommand: "issue comments", repo: "o/r", issue: 1 };
+	const token = Buffer.from('{"v":1}').toString("base64url");
+	assert.equal(apiOk({ ...base, continuation: token, jq: "length" }).continuation, token);
+	for (const continuation of ["", "!", 1, null, "a".repeat(4097), Buffer.from('[]').toString("base64url"), Buffer.from('{"v":2}').toString("base64url"), Buffer.from('no json').toString("base64url")]) {
+		apiRejects({ ...base, continuation }, ["continuation"]);
+	}
+	for (const jq of ["", ".a\u0000b", ".\nb", 1, null, false]) apiRejects({ ...base, jq }, ["jq"]);
+});
+
+test("issue comments: unknown, mixed, and redirection-shaped fields rejected before target validation", () => {
+	for (const field of ["pr", "args", "path", "ref", "start_line", "end_line", "recursive", "id", "type", "check_run_id", "page", "per_page", "endpoint", "host", "2>&1", "redirect", "unknown"]) {
+		apiRejects({ subcommand: "issue comments", repo: "o/r", issue: 1, [field]: field === "args" ? [] : "x" }, [field]);
+	}
+	// issue is exclusive to this operation in both directions.
+	for (const unrelated of [
+		{ subcommand: "repo metadata", repo: "o/r" },
+		{ subcommand: "repo contents", repo: "o/r", path: "" },
+		{ subcommand: "repo tree", repo: "o/r" },
+		{ subcommand: "commit checks", repo: "o/r", ref: "main" },
+		{ subcommand: "advisory view", id: "CVE-2026-1234" },
+		{ subcommand: "check annotations", repo: "o/r", check_run_id: 1 },
+		{ subcommand: "pr comments", repo: "o/r", pr: 1 },
+		{ subcommand: "pr reviews", repo: "o/r", pr: 1 },
+	]) apiRejects({ ...unrelated, issue: 1 }, ["unknown field 'issue'"]);
+	for (const native of ["pr view", "issue view", "run list"]) {
+		const checked = validateToolParams({ subcommand: native, args: [], issue: 1 });
+		assert.equal(checked.ok, false);
+		if (!checked.ok) assert.ok(checked.reason.includes("unknown field 'issue'"));
+	}
+	// issue comments rejects a pr target rather than coercing it.
+	apiRejects({ subcommand: "issue comments", repo: "o/r", issue: 1, pr: 1 }, ["unknown field 'pr'"]);
+	// Bypassing the schema (direct structured params) still fails closed.
+	apiRejects({ subcommand: "issue comments", repo: "o/r", issue: "1" }, ["issue"]);
+	apiRejects({ subcommand: "issue comments", repo: "o/r", issue: 1, args: ["--json"] }, ["structured parameters, not an args array"]);
+});
