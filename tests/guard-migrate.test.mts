@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { userConfigPath, projectConfigPath, type GuardConfig } from "../extensions/guard/policy/config.ts";
+import { userConfigPath, projectConfigPath, loadProjectConfigRaw, type GuardConfig } from "../extensions/guard/policy/config.ts";
 import { computeMigration, looksLikeProjectCodeRunner } from "../extensions/guard/policy/migrate.ts";
 import { addToConfigScope } from "../extensions/guard/policy/suggest.ts";
 
@@ -246,6 +246,19 @@ test("migrate with no legacy configs finds nothing and patches nothing", () => {
 	assert.equal(report.user.changes, 0);
 	assert.equal(report.project.changes, 0);
 	assert.match(report.summary, /no legacy pi-tool-permissions config found/);
+});
+
+test("migration leaves discoveryPruneNames in place and re-adding them is idempotent", () => {
+	const home = makeTempDir("guard-mig-discovery-home-");
+	const cwd = makeTempDir("guard-mig-discovery-cwd-");
+	writeLegacy(home, cwd, { allow: ["host_bash"] }, {});
+	fs.writeFileSync(projectConfigPath(cwd), JSON.stringify({ discoveryPruneNames: ["huge", ".cargo"] }), "utf8");
+	// A legacy source never yields a discovery key; the preview still loads and
+	// the discovery list survives untouched.
+	computeMigration(home, cwd);
+	assert.equal(addToConfigScope("project", { discoveryPruneNames: ["huge", ".cargo"] }, { cwd, home }).added, 0);
+	assert.equal(addToConfigScope("project", { discoveryPruneNames: ["extra"] }, { cwd, home }).added, 1);
+	assert.deepEqual(loadProjectConfigRaw(cwd).discoveryPruneNames, ["huge", ".cargo", "extra"]);
 });
 
 // ── Runner ────────────────────────────────────────────────────────────────────

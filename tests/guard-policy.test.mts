@@ -25,8 +25,12 @@ import {
 	saveProjectConfig,
 	projectConfigPath,
 	userConfigPath,
+	discoveryCollisionWarnings,
+	discoveryNoticeText,
+	discoveryWeakeningSignature,
 	type GuardConfig,
 } from "../extensions/guard/policy/config.ts";
+import { DEFAULT_MASK_EXCEPTIONS, DEFAULT_MASK_PATTERNS } from "../extensions/guard/sandbox/spec.ts";
 import {
 	activeConstructReason,
 	decide,
@@ -918,6 +922,105 @@ test("workspace lock and ack; footer composes profile, sandbox, and lock", () =>
 	assert.equal(footerLabel(state), "yolo | reduced sandbox");
 	state.profile = "unrestricted";
 	assert.match(footerLabel(state), /unrestricted/);
+});
+
+// ── Discovery scan knobs ──────────────────────────────────────────────────────
+
+test("discovery prune names: coercion drops unsafe entries and keeps plain basenames", () => {
+	const notList = mergeConfig({ discoveryPruneNames: "nope" as unknown as string[] }, {}, "/w");
+	assert.deepEqual(notList.discoveryPruneNames, []);
+	assert.ok(notList.warnings.some((w) => w.includes("must be a list of strings")));
+	const items = ["", ".", "..", "a/b", "a\\b", "a\0b", "bad*", "bad?", "bad[", "bad{", "!x", 42 as unknown as string, "good", "other"];
+	const mixed = mergeConfig({ discoveryPruneNames: items }, {}, "/w");
+	assert.deepEqual(mixed.discoveryPruneNames, ["good", "other"]);
+	assert.ok(mixed.warnings.some((w) => w.includes("must be strings")));
+	assert.equal(mixed.warnings.filter((w) => w.includes("plain basename")).length, 11);
+});
+
+test("discovery scalars: boundaries, invalid values, and project-then-user fallback", () => {
+	const d = mergeConfig({}, {}, "/w");
+	assert.equal(d.discoveryMatchCap, 500);
+	assert.equal(d.discoveryTimeoutMs, 5000);
+	for (const bad of [0, -1, 1.5, 200001, "500", null, true, Number.NaN, Number.POSITIVE_INFINITY]) {
+		const m = mergeConfig({ discoveryMatchCap: bad as unknown as number }, {}, "/w");
+		assert.equal(m.discoveryMatchCap, 500, `cap ${String(bad)} must fall back`);
+		assert.equal(m.warnings.filter((w) => w.includes("discoveryMatchCap")).length, 1, `cap ${String(bad)} must warn once`);
+	}
+	for (const bad of [0, -1, 1.5, 600001, "500", null, true, Number.NaN, Number.POSITIVE_INFINITY]) {
+		const m = mergeConfig({ discoveryTimeoutMs: bad as unknown as number }, {}, "/w");
+		assert.equal(m.discoveryTimeoutMs, 5000, `timeout ${String(bad)} must fall back`);
+		assert.equal(m.warnings.filter((w) => w.includes("discoveryTimeoutMs")).length, 1, `timeout ${String(bad)} must warn once`);
+	}
+	assert.equal(mergeConfig({ discoveryMatchCap: 1 }, {}, "/w").discoveryMatchCap, 1);
+	assert.equal(mergeConfig({ discoveryMatchCap: 200000 }, {}, "/w").discoveryMatchCap, 200000);
+	assert.equal(mergeConfig({ discoveryTimeoutMs: 1 }, {}, "/w").discoveryTimeoutMs, 1);
+	assert.equal(mergeConfig({ discoveryTimeoutMs: 600000 }, {}, "/w").discoveryTimeoutMs, 600000);
+	// A valid project value wins; an invalid project value falls back to the
+	// valid user value with exactly one warning.
+	assert.equal(mergeConfig({ discoveryMatchCap: 900 }, { discoveryMatchCap: 700 }, "/w").discoveryMatchCap, 700);
+	const fallback = mergeConfig({ discoveryMatchCap: 900 }, { discoveryMatchCap: 0 }, "/w");
+	assert.equal(fallback.discoveryMatchCap, 900);
+	assert.equal(fallback.warnings.filter((w) => w.includes("discoveryMatchCap")).length, 1);
+});
+
+test("discovery prune names union, dedupe, sort, drop built-ins, and do not mutate inputs", () => {
+	const user: GuardConfig = { discoveryPruneNames: ["zeta", "bin", "alpha"] };
+	const project: GuardConfig = { discoveryPruneNames: ["beta", "zeta", "target", "bin"], discoveryMatchCap: 600 };
+	const userCopy = JSON.parse(JSON.stringify(user));
+	const projectCopy = JSON.parse(JSON.stringify(project));
+	const m = mergeConfig(user, project, "/w");
+	assert.deepEqual(m.discoveryPruneNames, ["alpha", "beta", "zeta"]);
+	assert.equal(m.discoveryMatchCap, 600);
+	assert.deepEqual(user, userCopy, "user config must not be mutated");
+	assert.deepEqual(project, projectCopy, "project config must not be mutated");
+	assert.deepEqual(mergeConfig({ discoveryPruneNames: ["bin", "obj", "target", "node_modules"] }, {}, "/w").discoveryPruneNames, []);
+});
+
+test("discovery collision warnings cover protected names and mask-pattern names", () => {
+	const warnings = discoveryCollisionWarnings(
+		["AGENTS.md", "CLAUDE.md", ".envrc", ".git", ".env", ".npmrc", "server.pem", "bin", "ordinary"],
+		DEFAULT_MASK_PATTERNS,
+		DEFAULT_MASK_EXCEPTIONS,
+	);
+	assert.equal(warnings.length, 7);
+	for (const n of ["AGENTS.md", ".git", ".env", ".npmrc", "server.pem"]) {
+		assert.ok(warnings.some((w) => w.includes(`"${n}"`)), `missing collision for ${n}`);
+	}
+	assert.ok(warnings.every((w) => w.includes("basename")));
+	assert.deepEqual(discoveryCollisionWarnings(["bin"], DEFAULT_MASK_PATTERNS, DEFAULT_MASK_EXCEPTIONS), []);
+});
+
+test("discovery weakening signature and notice text track only weakening settings", () => {
+	const baseCfg = mergeConfig({}, {}, "/w");
+	assert.equal(discoveryWeakeningSignature(baseCfg), null);
+	assert.equal(discoveryNoticeText(baseCfg), null);
+	const cap = mergeConfig({ discoveryMatchCap: 600 }, {}, "/w");
+	assert.ok(discoveryWeakeningSignature(cap));
+	assert.ok(discoveryNoticeText(cap)!.includes("discoveryMatchCap: 600 (default 500)"));
+	const timeout = mergeConfig({ discoveryTimeoutMs: 6000 }, {}, "/w");
+	assert.ok(discoveryWeakeningSignature(timeout));
+	assert.ok(discoveryNoticeText(timeout)!.includes("discoveryTimeoutMs: 6000 ms (default 5000)"));
+	const extras = mergeConfig({ discoveryPruneNames: ["zeta", "alpha"] }, {}, "/w");
+	assert.ok(discoveryWeakeningSignature(extras));
+	const text = discoveryNoticeText(extras)!;
+	assert.ok(text.includes("alpha, zeta"));
+	assert.ok(text.includes("are not masked"));
+	// A built-in duplicate is not a deviation.
+	assert.equal(discoveryWeakeningSignature(mergeConfig({ discoveryPruneNames: ["bin"] }, {}, "/w")), null);
+	assert.equal(discoveryNoticeText(mergeConfig({ discoveryPruneNames: ["bin"] }, {}, "/w")), null);
+	// A stricter-than-default setting alone stays silent.
+	const stricter = mergeConfig({ discoveryMatchCap: 100, discoveryTimeoutMs: 2000 }, {}, "/w");
+	assert.equal(discoveryWeakeningSignature(stricter), null);
+	assert.equal(discoveryNoticeText(stricter), null);
+	// Reordering or duplicating names cannot change the signature.
+	assert.equal(
+		discoveryWeakeningSignature(mergeConfig({ discoveryPruneNames: ["z", "a", "z"] }, {}, "/w")),
+		discoveryWeakeningSignature(mergeConfig({ discoveryPruneNames: ["a", "z"] }, {}, "/w")),
+	);
+	// Collision text rides along in the notice.
+	const collide = discoveryNoticeText(mergeConfig({ discoveryPruneNames: [".env"] }, {}, "/w"))!;
+	assert.ok(collide.includes("warning:"));
+	assert.ok(collide.includes("not masked"));
 });
 
 // ── Runner ────────────────────────────────────────────────────────────────────

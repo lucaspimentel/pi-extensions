@@ -536,6 +536,75 @@ test("harness: /guard list and reload report the effective policy", async () => 
 	});
 });
 
+test("harness: /guard list reports the discovery scan settings", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-harness-discovery-list-");
+		const ctx = harnessCtx(h, cwd);
+		for (const handler of h.handlers["session_start"] ?? []) await handler({}, ctx);
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("list", ctx);
+		const list = h.notifications.join("\n");
+		assert.ok(
+			list.includes("discovery scan: cap 500 (default 500), timeout 5000 ms (default 5000), pruned basenames: node_modules, bin, obj, target"),
+			list,
+		);
+	});
+});
+
+test("harness: the discovery weakening notice fires once per session and re-fires on a change", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-harness-discovery-notice-");
+		const ctx = harnessCtx(h, cwd);
+		const start = async () => { for (const handler of h.handlers["session_start"] ?? []) await handler({}, ctx); };
+		const noticeCount = () => h.notifications.filter((n) => /discovery settings differ/.test(n)).length;
+		await start();
+		assert.equal(noticeCount(), 0, "the defaults stay silent");
+		// Weaken the project config and reload.
+		fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+		fs.writeFileSync(projectConfigPath(cwd), JSON.stringify({ discoveryPruneNames: ["huge"], discoveryMatchCap: 2000 }), "utf8");
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("reload", ctx);
+		assert.equal(noticeCount(), 1, "a weakened config warns once");
+		// An identical reload is silent.
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("reload", ctx);
+		assert.equal(noticeCount(), 0, "an identical reload is silent");
+		// A changed weakening signature re-fires.
+		fs.writeFileSync(projectConfigPath(cwd), JSON.stringify({ discoveryPruneNames: ["huge"], discoveryMatchCap: 3000 }), "utf8");
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("reload", ctx);
+		assert.equal(noticeCount(), 1, "a changed signature re-fires");
+		// A new session warns again even with an unchanged weakened config.
+		h.notifications.length = 0;
+		await start();
+		assert.equal(noticeCount(), 1, "a fresh session resets the notice");
+	});
+});
+
+test("harness: a non-committing command does not consume the discovery notice", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-harness-discovery-noconsume-");
+		const ctx = harnessCtx(h, cwd);
+		const start = async () => { for (const handler of h.handlers["session_start"] ?? []) await handler({}, ctx); };
+		const noticeCount = () => h.notifications.filter((n) => /discovery settings differ/.test(n)).length;
+		await start();
+		fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+		fs.writeFileSync(projectConfigPath(cwd), JSON.stringify({ discoveryPruneNames: ["huge"] }), "utf8");
+		// A command that never commits (no runtime) must not consume the notice.
+		for (const shutdown of h.handlers["session_shutdown"] ?? []) await shutdown({}, {});
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("list", ctx);
+		assert.equal(noticeCount(), 0, "list never consumes the discovery notice");
+		// The next real session still fires it exactly once.
+		h.notifications.length = 0;
+		await start();
+		assert.equal(noticeCount(), 1);
+	});
+});
+
 test("registered python/node workers declare conservative capability metadata", () => {
 	const h = makeHarness();
 	for (const name of ["python", "node"]) {

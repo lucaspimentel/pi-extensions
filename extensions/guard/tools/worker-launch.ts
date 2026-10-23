@@ -16,6 +16,9 @@ export interface ControllerOptions {
 	detection?: SandboxDetection;
 	maskPatterns?: string[];
 	maskExceptions?: string[];
+	pruneNames?: string[];
+	discoveryMatchCap?: number;
+	discoveryTimeoutMs?: number;
 	protectedPaths?: string[];
 }
 
@@ -84,6 +87,9 @@ export function spawnWorker(kind: WorkerKind, options: ControllerOptions, deps: 
 		extraRwBinds: [[options.scratchDir, options.scratchDir]],
 		maskPatterns: options.maskPatterns,
 		maskExceptions: options.maskExceptions,
+		pruneNames: options.pruneNames,
+		discoveryMatchCap: options.discoveryMatchCap,
+		discoveryTimeoutMs: options.discoveryTimeoutMs,
 		protectedPaths: options.protectedPaths,
 		runtimeDir: options.runtimeDir,
 		rlimits: kind === "python" ? RLIMITS_PYTHON : RLIMITS_NODE,

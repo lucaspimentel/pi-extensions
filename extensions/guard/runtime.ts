@@ -198,7 +198,7 @@ export class GuardRuntime {
 		return JSON.stringify([config.hostBash, config.bashValidators, config.writeRoots, config.classifier, config.classifierEnvironment, config.classifierAllow, config.classifierSoftDeny, config.classifierHardDeny]);
 	}
 	private launchPolicyKey(policy: PolicyState, detection: SandboxDetection): string {
-		return JSON.stringify([realpathSync(policy.cwd), this.workerMode(policy, detection), this.workerMode(policy, detection) === "none" ? null : resolveWorktreeCommonDir(policy.cwd), policy.profile === "research", detection.mode, detection.bwrapPath, detection.launcherPath, this.roots(policy), policy.config.maskPatterns, policy.config.maskExceptions, policy.config.protectedPaths, policy.workspaceLocked]);
+		return JSON.stringify([realpathSync(policy.cwd), this.workerMode(policy, detection), this.workerMode(policy, detection) === "none" ? null : resolveWorktreeCommonDir(policy.cwd), policy.profile === "research", detection.mode, detection.bwrapPath, detection.launcherPath, this.roots(policy), policy.config.maskPatterns, policy.config.maskExceptions, policy.config.protectedPaths, policy.config.discoveryPruneNames, policy.config.discoveryMatchCap, policy.config.discoveryTimeoutMs, policy.workspaceLocked]);
 	}
 	private workerMode(policy: PolicyState, detection = this.detection): "overlay" | "ro" | "none" {
 		const mode = effectiveWorkspaceMode(policy);
@@ -208,7 +208,7 @@ export class GuardRuntime {
 		return filterMountableReadRoots(normalizeRootList(policy.config.readRoots, policy.cwd, homedir()), policy.cwd).mountable;
 	}
 	private auditOptions() {
-		return { fdPath: this.detection.fdPath, patterns: [...DEFAULT_MASK_PATTERNS, ...this.currentPolicy.config.maskPatterns], exceptions: [...DEFAULT_MASK_EXCEPTIONS, ...this.currentPolicy.config.maskExceptions], protectedPaths: this.currentPolicy.config.protectedPaths };
+		return { fdPath: this.detection.fdPath, patterns: [...DEFAULT_MASK_PATTERNS, ...this.currentPolicy.config.maskPatterns], exceptions: [...DEFAULT_MASK_EXCEPTIONS, ...this.currentPolicy.config.maskExceptions], protectedPaths: this.currentPolicy.config.protectedPaths, pruneNames: this.currentPolicy.config.discoveryPruneNames, cap: this.currentPolicy.config.discoveryMatchCap, timeoutMs: this.currentPolicy.config.discoveryTimeoutMs };
 	}
 	private snapshot(): ProtectedSnapshot {
 		const snapshot = snapshotProtected(this.currentPolicy.cwd, this.auditOptions());
@@ -269,7 +269,7 @@ export class GuardRuntime {
 		if (input.action === "status") {
 			const record = this.workers.get(kind);
 			if (record) return record.controller.status();
-			const options: ControllerOptions = { projectDir: ctx.policy.cwd, workspaceMode: this.workerMode(ctx.policy), runtimeDir: this.sessionDir, scratchDir: this.scratchDir, detection: ctx.detection, readRoots: this.roots(ctx.policy) };
+			const options: ControllerOptions = { projectDir: ctx.policy.cwd, workspaceMode: this.workerMode(ctx.policy), runtimeDir: this.sessionDir, scratchDir: this.scratchDir, detection: ctx.detection, readRoots: this.roots(ctx.policy), pruneNames: ctx.policy.config.discoveryPruneNames, discoveryMatchCap: ctx.policy.config.discoveryMatchCap, discoveryTimeoutMs: ctx.policy.config.discoveryTimeoutMs };
 			const controller = this.options.createWorker?.(kind, options) ?? (kind === "python" ? new PythonSessionController(options) : new NodeSessionController(options));
 			return controller.status();
 		}
@@ -304,7 +304,7 @@ export class GuardRuntime {
 		}
 		await ctx.revalidate();
 		if (!record) {
-			const options: ControllerOptions = { projectDir: ctx.policy.cwd, workspaceMode: mode, readRoots: this.roots(ctx.policy), runtimeDir: this.sessionDir, scratchDir: this.scratchDir, detection: ctx.detection, maskPatterns: ctx.policy.config.maskPatterns, maskExceptions: ctx.policy.config.maskExceptions, protectedPaths: ctx.policy.config.protectedPaths };
+			const options: ControllerOptions = { projectDir: ctx.policy.cwd, workspaceMode: mode, readRoots: this.roots(ctx.policy), runtimeDir: this.sessionDir, scratchDir: this.scratchDir, detection: ctx.detection, maskPatterns: ctx.policy.config.maskPatterns, maskExceptions: ctx.policy.config.maskExceptions, protectedPaths: ctx.policy.config.protectedPaths, pruneNames: ctx.policy.config.discoveryPruneNames, discoveryMatchCap: ctx.policy.config.discoveryMatchCap, discoveryTimeoutMs: ctx.policy.config.discoveryTimeoutMs };
 			const controller = this.options.createWorker?.(kind, options) ?? (kind === "python" ? new PythonSessionController(options) : new NodeSessionController(options));
 			record = { controller, fingerprint, sandboxed: mode !== "none" };
 			this.workers.set(kind, record);

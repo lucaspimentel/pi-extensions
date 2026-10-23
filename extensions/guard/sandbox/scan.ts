@@ -8,8 +8,10 @@
  * .git directory pruned while the .git entries themselves are still reported)
  * with a find fallback of identical semantics. Absolute paths, NUL-separated.
  *
- * A 5 s timeout or more than 500 classified matches fails the launch with an
- * actionable diagnostic: it never launches unmasked.
+ * The defaults (a 5 s timeout, a 500-match cap) are tunable per config
+ * (discoveryTimeoutMs, discoveryMatchCap); a scan that exceeds the effective
+ * timeout or an effective cap of classified matches fails the launch with an
+ * actionable diagnostic, so it never launches unmasked.
  */
 
 import { spawnSync } from "node:child_process";
@@ -19,12 +21,11 @@ import {
 	DEFAULT_MASK_EXCEPTIONS,
 	DEFAULT_MASK_PATTERNS,
 	PROTECTED_NESTED_NAMES,
+	SCAN_MATCH_CAP_DEFAULT,
 	SCAN_PRUNE_NAMES,
+	SCAN_TIMEOUT_MS_DEFAULT,
 	isMaskedName,
 } from "./spec.ts";
-
-const SCAN_TIMEOUT_MS = 5_000;
-const MATCH_CAP = 500;
 
 export interface ScanResult {
 	/** Absolute host paths of files to mask with /dev/null (workspace only). */
@@ -57,12 +58,22 @@ export interface ScanOptions {
 	cap?: number;
 	patterns?: readonly string[];
 	exceptions?: readonly string[];
+	/** Extra prune basenames; the built-in SCAN_PRUNE_NAMES are always included. */
+	pruneNames?: readonly string[];
+}
+
+/**
+ * The effective prune basenames: the built-in list first, then config extras,
+ * deduped. Extras are additive; a config value can never remove a built-in.
+ */
+export function effectivePruneNames(extra: readonly string[] = []): string[] {
+	return [...new Set([...SCAN_PRUNE_NAMES, ...extra])];
 }
 
 /** Build the fd argv: hidden, no ignore, prune build dirs and .git contents. */
-export function fdScanArgs(workspace: string): string[] {
+export function fdScanArgs(workspace: string, pruneNames: readonly string[] = effectivePruneNames()): string[] {
 	const args = ["--hidden", "--no-ignore", "--print0", "--absolute-path"];
-	for (const name of SCAN_PRUNE_NAMES) args.push("--exclude", name);
+	for (const name of pruneNames) args.push("--exclude", name);
 	// Prune the CONTENTS of every .git directory at any depth; the .git
 	// entries themselves are still listed and reported as protected.
 	args.push("--exclude", "**/.git/**");
@@ -85,10 +96,10 @@ export function escapeFindPath(p: string): string {
  * fd exempts the search root implicitly, and find does so through the
  * `! -path <workspace>` guard below.
  */
-export function findScanArgs(workspace: string): string[] {
-	const pruneNames = [...SCAN_PRUNE_NAMES, ".git"];
+export function findScanArgs(workspace: string, pruneNames: readonly string[] = effectivePruneNames()): string[] {
+	const names = [...new Set([...pruneNames, ".git"])];
 	const clauses: string[] = ["("];
-	pruneNames.forEach((n, i) => {
+	names.forEach((n, i) => {
 		if (i > 0) clauses.push("-o");
 		clauses.push("-name", n);
 	});
@@ -105,9 +116,10 @@ export function scanRawEntries(
 	options: ScanOptions = {},
 ): { entries: string[]; scanner: ScannerKind } {
 	const kind = options.scanner ?? (options.fdPath ? "fd" : "find");
-	const timeoutMs = options.timeoutMs ?? SCAN_TIMEOUT_MS;
+	const timeoutMs = options.timeoutMs ?? SCAN_TIMEOUT_MS_DEFAULT;
+	const pruneNames = effectivePruneNames(options.pruneNames);
 	const program = kind === "fd" ? (options.fdPath ?? "fd") : (options.fdPath ?? "/usr/bin/find");
-	const args = kind === "fd" ? fdScanArgs(workspace) : findScanArgs(workspace);
+	const args = kind === "fd" ? fdScanArgs(workspace, pruneNames) : findScanArgs(workspace, pruneNames);
 	const r = spawnSync(program, args, {
 		stdio: ["ignore", "pipe", "pipe"],
 		timeout: timeoutMs,
@@ -118,7 +130,7 @@ export function scanRawEntries(
 		const timedOut = (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
 		throw new ScanFailure(
 			timedOut
-				? `The workspace discovery scan timed out after ${timeoutMs} ms with ${kind}. ` +
+				? `The workspace discovery scan timed out after ${timeoutMs} ms (discoveryTimeoutMs; default ${SCAN_TIMEOUT_MS_DEFAULT}) with ${kind}. ` +
 					"The launch is refused rather than running with unmasked secrets. Prune large " +
 					"generated directories (node_modules, bin, obj, target) or raise the timeout."
 				: `The workspace discovery scan failed (${String(r.error)}). The launch is refused ` +
@@ -142,10 +154,10 @@ export function scanRawEntries(
 }
 
 /** True when any path component between workspace and entry is pruned. */
-function hasPrunedComponent(workspace: string, entry: string): boolean {
+function hasPrunedComponent(workspace: string, entry: string, pruneNames: readonly string[]): boolean {
 	const rel = path.relative(workspace, entry);
 	for (const part of rel.split(path.sep)) {
-		if (SCAN_PRUNE_NAMES.includes(part)) return true;
+		if (pruneNames.includes(part)) return true;
 	}
 	return false;
 }
@@ -162,10 +174,11 @@ export interface ClassifiedEntries {
 export function classifyEntries(
 	workspace: string,
 	entries: readonly string[],
-	options: { patterns?: readonly string[]; exceptions?: readonly string[] } = {},
+	options: { patterns?: readonly string[]; exceptions?: readonly string[]; pruneNames?: readonly string[] } = {},
 ): ClassifiedEntries {
 	const patterns = options.patterns ?? DEFAULT_MASK_PATTERNS;
 	const exceptions = options.exceptions ?? DEFAULT_MASK_EXCEPTIONS;
+	const pruneNames = effectivePruneNames(options.pruneNames);
 	const masks: string[] = [];
 	const nestedProtected: string[] = [];
 	for (const entry of entries) {
@@ -176,7 +189,7 @@ export function classifyEntries(
 		const name = parts[depth];
 		// Entries at or under pruned dirs (the prune roots themselves appear in
 		// find output) are irrelevant for masks and nested protection.
-		if (hasPrunedComponent(workspace, entry)) continue;
+		if (hasPrunedComponent(workspace, entry, pruneNames)) continue;
 		// The top-level .git entry is a whole-entry protected bind, not a
 		// nested discovery result.
 		if (depth === 0 && name === ".git") continue;
@@ -204,14 +217,14 @@ export function classifyEntries(
  * ScanFailure on timeout, scanner failure, or more than the match cap.
  */
 export function scanWorkspace(workspace: string, options: ScanOptions = {}): ScanResult {
-	const cap = options.cap ?? MATCH_CAP;
+	const cap = options.cap ?? SCAN_MATCH_CAP_DEFAULT;
 	const { entries, scanner } = scanRawEntries(workspace, options);
 	const classified = classifyEntries(workspace, entries, options);
 	const total = classified.masks.length + classified.nestedProtected.length;
 	if (total > cap) {
 		throw new ScanFailure(
 			`The workspace discovery scan found ${total} mask or protected-path matches, above ` +
-				`the hard cap of ${cap}. The launch is refused rather than running with an ` +
+				`the hard cap of ${cap} (discoveryMatchCap; default ${SCAN_MATCH_CAP_DEFAULT}). The launch is refused rather than running with an ` +
 				"unreviewed mount layout. Check for leaked credential files or an unusually " +
 				"deep tree of nested repos and instruction files.",
 		);

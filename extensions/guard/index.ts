@@ -15,8 +15,9 @@ import type { MountEntry } from "./sandbox/bwrap.ts";
 import { createShellRenderCall, nativeBashRenderResult } from "./tools/shell-render.ts";
 import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
 import { detectSandboxMode } from "./sandbox/detect.ts";
-import { PROTECTED_TOP_LEVEL } from "./sandbox/spec.ts";
-import { clearUserClassifierPin, loadConfig, loadUserConfigRaw, projectClassifierPin, resolvedClassifierConfig, setUserClassifierPin, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
+import { PROTECTED_TOP_LEVEL, SCAN_MATCH_CAP_DEFAULT, SCAN_TIMEOUT_MS_DEFAULT } from "./sandbox/spec.ts";
+import { effectivePruneNames } from "./sandbox/scan.ts";
+import { clearUserClassifierPin, discoveryCollisionWarningsFor, discoveryNoticeText, discoveryWeakeningSignature, loadConfig, loadUserConfigRaw, projectClassifierPin, resolvedClassifierConfig, setUserClassifierPin, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
 import { decide, explainHostShellCommand, pathInsideWriteRoots, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
 import { makeIsProtectedPath } from "./policy/protected.ts";
 import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
@@ -118,6 +119,9 @@ export default function guard(pi: ExtensionAPI) {
 	let lastCtx: ExtensionContext | null = null;
 	let debugEnabled = false;
 	let sessionReadRoots: string[] = [];
+	// Signature of the last discovery weakening notice shown this session; reset
+	// on a fresh session start, written only from publish().
+	let discoveryNoticeSignature: string | null = null;
 	let annotationSnapshot: Array<{ name: string; annotations?: ToolAnnotations }> | null = null;
 	const classifierCache = new Map<string, { verdict: "allow" | "soft_deny" | "hard_deny" | "no_match"; reason: string }>();
 
@@ -143,9 +147,27 @@ export default function guard(pi: ExtensionAPI) {
 	function emitProfile(ctx: ExtensionContext): void {
 		if (state && config) pi.events.emit("guard:profile", profileEventPayload(state, effectiveConfig(), ctx.cwd));
 	}
-	function publish(ctx: ExtensionContext): void { updateFooter(ctx); emitProfile(ctx); }
+	function publish(ctx: ExtensionContext): void {
+		updateFooter(ctx);
+		emitProfile(ctx);
+		if (config) maybeNotifyDiscovery(ctx, effectiveConfig());
+	}
 	function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" = "info"): void {
 		try { ctx.ui.notify(message, level); } catch { /* notification does not weaken enforcement */ }
+	}
+	/**
+	 * One warning per session about discovery settings that weaken the
+	 * fail-closed defaults (extra prune basenames, or a raised cap/timeout).
+	 * Best effort and never read by enforcement. Called only from publish(), so
+	 * a failed policy publication never consumes the signature; a stricter-than-
+	 * default setting yields a null signature and stays silent.
+	 */
+	function maybeNotifyDiscovery(ctx: ExtensionContext, cfg: ResolvedGuardConfig): void {
+		const signature = discoveryWeakeningSignature(cfg);
+		if (signature === discoveryNoticeSignature) return;
+		discoveryNoticeSignature = signature;
+		const text = discoveryNoticeText(cfg);
+		if (text) notify(ctx, text, "warning");
 	}
 	/**
 	 * Open one guard dialog selector. Presentation routing only: TUI hosts
@@ -313,6 +335,7 @@ export default function guard(pi: ExtensionAPI) {
 	}
 
 	async function startSession(ctx: ExtensionContext, fresh: boolean): Promise<void> {
+		if (fresh) discoveryNoticeSignature = null;
 		if (runtime) {
 			dialogs.invalidate("approval expired after a session replacement");
 			await runtime.dispose(fresh ? "session replacement" : "session tree/cwd replacement");
@@ -1178,6 +1201,8 @@ export default function guard(pi: ExtensionAPI) {
 			`unresolved teardown: ${runtime?.teardownFailure ?? "none"}`,
 			`protected paths (top level): ${[...PROTECTED_TOP_LEVEL, ...cfg.protectedPaths].join(", ")}`,
 			`mask exceptions: ${cfg.maskExceptions.join(", ") || "(none)"}`,
+			`discovery scan: cap ${cfg.discoveryMatchCap} (default ${SCAN_MATCH_CAP_DEFAULT}), timeout ${cfg.discoveryTimeoutMs} ms (default ${SCAN_TIMEOUT_MS_DEFAULT}), pruned basenames: ${effectivePruneNames(cfg.discoveryPruneNames).join(", ")}`,
+			...(discoveryCollisionWarningsFor(cfg).length ? [`discovery prune collisions: ${discoveryCollisionWarningsFor(cfg).join("; ")}`] : []),
 			`web_fetch allowlist: ${cfg.webFetchAllow.length} glob(s)`,
 			`host shell rules: ${cfg.hostBash.deny.length} deny, ${cfg.hostBash.ask.length} ask, ${cfg.hostBash.allow.length} allow`,
 			`read roots: ${cfg.readRoots.join(", ") || "(none)"}`,
@@ -1202,7 +1227,7 @@ export default function guard(pi: ExtensionAPI) {
 			const command = args.trim();
 			if (!command || command === "profile") { await pickProfile(ctx); return; }
 			if (command === "help") {
-				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy and shared scratch", "/guard reload            Reload guard.json", "/guard model             Pick the classifier model (saved to user config)", "/guard model clear       Remove the classifier pin (resume auto-select)", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python, node and write/edit; other non-owned tools remain observe-only (grep results are secret-filtered).", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects.", "Subagent children inherit this session's effective profile at each spawn and cannot leave it except for research (guard:subagent-snapshot-request)."].join("\n"));
+				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy, discovery scan settings and shared scratch", "/guard reload            Reload guard.json", "/guard model             Pick the classifier model (saved to user config)", "/guard model clear       Remove the classifier pin (resume auto-select)", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python, node and write/edit; other non-owned tools remain observe-only (grep results are secret-filtered).", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects.", "Subagent children inherit this session's effective profile at each spawn and cannot leave it except for research (guard:subagent-snapshot-request)."].join("\n"));
 				return;
 			}
 			if (command === "list") { showList(ctx); return; }

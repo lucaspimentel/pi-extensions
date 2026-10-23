@@ -129,6 +129,12 @@ export const SCAN_PRUNE_NAMES: readonly string[] = [
 	"target",
 ];
 
+/** Default maximum number of classified discovery matches before a launch is refused. */
+export const SCAN_MATCH_CAP_DEFAULT = 500;
+
+/** Default workspace discovery scan timeout in milliseconds. */
+export const SCAN_TIMEOUT_MS_DEFAULT = 5_000;
+
 /** Sandbox path where the compiled launcher is mounted read-only. */
 export const GUARD_LAUNCH_MOUNT = "/.guard/launch";
 
@@ -230,6 +236,12 @@ export interface LaunchSpec {
 	maskPatterns?: string[];
 	/** Mask exceptions; defaults to DEFAULT_MASK_EXCEPTIONS. */
 	maskExceptions?: string[];
+	/** Extra prune basenames added to the built-in scan prune list. */
+	pruneNames?: string[];
+	/** Discovery scan match cap override; defaults to SCAN_MATCH_CAP_DEFAULT. */
+	discoveryMatchCap?: number;
+	/** Discovery scan timeout override in ms; defaults to SCAN_TIMEOUT_MS_DEFAULT. */
+	discoveryTimeoutMs?: number;
 	/** Per-launch cache overlays (full mode only). Default: true. */
 	cacheOverlays?: boolean;
 }

@@ -248,6 +248,9 @@ export function spawnSandboxed(spec: LaunchSpec, options: SpawnOptions = {}): Sp
 		fdPath: detection.fdPath,
 		patterns: spec.maskPatterns,
 		exceptions: spec.maskExceptions,
+		pruneNames: spec.pruneNames,
+		cap: spec.discoveryMatchCap,
+		timeoutMs: spec.discoveryTimeoutMs,
 	});
 
 	// Effective workspace mode: overlay degrades to read-only in reduced mode.

@@ -28,7 +28,7 @@ import {
 } from "../extensions/guard/sandbox/detect.ts";
 import { sanitizeNugetConfig } from "../extensions/guard/sandbox/nuget.ts";
 import { verifyRuntimeDirPermissions } from "../extensions/guard/sandbox/run.ts";
-import { classifyEntries, findScanArgs, fdScanArgs, ScanFailure, scanRawEntries } from "../extensions/guard/sandbox/scan.ts";
+import { classifyEntries, effectivePruneNames, findScanArgs, fdScanArgs, ScanFailure, scanRawEntries, scanWorkspace } from "../extensions/guard/sandbox/scan.ts";
 import {
 	buildBwrapArgs,
 	buildOuterLauncherArgv,
@@ -45,6 +45,7 @@ import {
 	RESERVED_ENV_KEYS,
 	RLIMITS_PYTHON,
 	RLIMITS_SHELL,
+	SCAN_PRUNE_NAMES,
 	buildEnv,
 	isMaskedName,
 	nameMatchesPattern,
@@ -546,7 +547,84 @@ if (hasFd) {
 			assert.deepEqual(targetOnly.masks, [], `${kind}: a regular file named like a prune name must be dropped`);
 		}
 	});
+
+	test("an extra prune name drops matching files and directories for both scanners", () => {
+		const base = makeTempDir("guard-unit-extra-prune-");
+		const ws = path.join(base, "burst");
+		const write = (rel: string, content = "x") => {
+			const p = path.join(ws, rel);
+			fs.mkdirSync(path.dirname(p), { recursive: true });
+			fs.writeFileSync(p, content);
+		};
+		write(".env", "SECRET=1");
+		write("normal.txt");
+		write("sub/CLAUDE.md");
+		write("burst/deep.env", "DEEP=1");
+		write("nested/burst", "a regular file named like the extra");
+		const fd = scanRawEntries(ws, { scanner: "fd", fdPath: findFdScanner().path, pruneNames: ["burst"] });
+		const find = scanRawEntries(ws, { scanner: "find", pruneNames: ["burst"] });
+		const fdClass = classifyEntries(ws, fd.entries, { pruneNames: ["burst"] });
+		const findClass = classifyEntries(ws, find.entries, { pruneNames: ["burst"] });
+		assert.deepEqual(relPaths(ws, fdClass.masks), relPaths(ws, findClass.masks), "mask sets differ");
+		assert.deepEqual(relPaths(ws, fdClass.nestedProtected), relPaths(ws, findClass.nestedProtected), "nested sets differ");
+		// Workspace root basename equals the extra prune name: its contents are
+		// still discovered (root exemption), the nested dir/file are dropped.
+		assert.deepEqual(relPaths(ws, fdClass.masks), [".env"]);
+		assert.deepEqual(relPaths(ws, fdClass.nestedProtected), [path.join("sub", "CLAUDE.md")]);
+		for (const [kind, raw] of [["fd", fd], ["find", find]] as const) {
+			const named = classifyEntries(ws, raw.entries, { pruneNames: ["burst"], patterns: ["burst"], exceptions: [] });
+			assert.deepEqual(named.masks, [], `${kind}: a regular file named like the extra must be dropped`);
+		}
+	});
 }
+
+test("effectivePruneNames puts built-ins first and dedupes extras", () => {
+	assert.deepEqual(effectivePruneNames(), [...SCAN_PRUNE_NAMES]);
+	const eff = effectivePruneNames(["huge", "bin", "huge", ".cargo"]);
+	assert.deepEqual(eff, [...SCAN_PRUNE_NAMES, "huge", ".cargo"]);
+});
+
+test("real scanWorkspace enforces the match cap and honors a raised override", () => {
+	const ws = makeTempDir("guard-unit-cap-");
+	fs.writeFileSync(path.join(ws, ".env"), "x");
+	fs.writeFileSync(path.join(ws, "a.pem"), "x");
+	fs.writeFileSync(path.join(ws, "b.key"), "x");
+	fs.mkdirSync(path.join(ws, "sub"));
+	fs.writeFileSync(path.join(ws, "sub", "CLAUDE.md"), "x");
+	const N = 4; // 3 masks + 1 nested protected
+	const ok = scanWorkspace(ws, { scanner: "find", cap: N });
+	assert.equal(ok.masks.length + ok.nestedProtected.length, N);
+	assert.throws(
+		() => scanWorkspace(ws, { scanner: "find", cap: N - 1 }),
+		(err: unknown) => {
+			assert.ok(err instanceof ScanFailure);
+			assert.match((err as ScanFailure).diagnostic, /discoveryMatchCap/);
+			assert.match((err as ScanFailure).diagnostic, new RegExp(String(N - 1)));
+			return true;
+		},
+	);
+	const raised = scanWorkspace(ws, { scanner: "find", cap: 2000 });
+	assert.equal(raised.masks.length + raised.nestedProtected.length, N);
+});
+
+test("a timeout override is named in the failure and no partial scan is accepted", () => {
+	const ws = makeTempDir("guard-unit-timeout-");
+	const fake = path.join(makeTempDir("guard-unit-timeout-bin-"), "slow-fd");
+	fs.writeFileSync(fake, `#!${process.execPath}\nsetTimeout(() => {}, 60000);\n`, { mode: 0o755 });
+	const t0 = Date.now();
+	assert.throws(
+		() => scanRawEntries(ws, { scanner: "fd", fdPath: fake, timeoutMs: 200 }),
+		(err: unknown) => {
+			assert.ok(err instanceof ScanFailure);
+			assert.match((err as ScanFailure).diagnostic, /200/);
+			assert.match((err as ScanFailure).diagnostic, /discoveryTimeoutMs/);
+			return true;
+		},
+	);
+	// The scan aborted far before the scanner's 60 s sleep; no partial output
+	// is ever accepted.
+	assert.ok(Date.now() - t0 < 30_000);
+});
 
 // ── Read-root filter ──────────────────────────────────────────────────────────
 

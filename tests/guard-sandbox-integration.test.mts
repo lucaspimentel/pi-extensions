@@ -242,6 +242,35 @@ if (supported) {
 		assert.equal(r.effective.maskedFiles, 2);
 	});
 
+	test("launch discovery prunes extra basenames, leaving secrets under them unmasked", async () => {
+		const ws = makeWorkspace();
+		fs.mkdirSync(path.join(ws, "huge"), { recursive: true });
+		fs.writeFileSync(path.join(ws, "huge", ".env"), "PRUNED_TOKEN=1\n");
+		fs.writeFileSync(path.join(ws, "huge", "leak.secret"), "PRUNED_SECRET\n");
+		const r = await bash(ws, "cat .env 2>/dev/null; echo ---; cat huge/.env 2>/dev/null", {
+			pruneNames: ["huge"],
+			maskPatterns: [...DEFAULT_MASK_PATTERNS, "*.secret"],
+		});
+		assert.equal(r.code, 0, r.err);
+		// The top-level .env stays masked; the one under the pruned basename is
+		// not masked: pruning removes it from discovery, it does not hide it.
+		assert.doesNotMatch(r.out, /SECRET_TOKEN=1/);
+		assert.match(r.out, /PRUNED_TOKEN=1/);
+		assert.equal(r.effective.maskedFiles, 1);
+	});
+
+	test("a raised discovery match cap lets an over-default workspace launch", async () => {
+		const ws = makeWorkspace();
+		for (let i = 0; i < 520; i++) fs.writeFileSync(path.join(ws, `f-${i}.pem`), "x");
+		await assert.rejects(
+			runInSandbox({ workspace: ws, target: ["true"] }),
+			(err: unknown) => err instanceof Error && /discoveryMatchCap/.test((err as Error).message),
+		);
+		const r = await bash(ws, "true", { discoveryMatchCap: 1000 });
+		assert.equal(r.code, 0, r.err);
+		assert.ok(r.effective.maskedFiles >= 520, `expected masks, got ${r.effective.maskedFiles}`);
+	});
+
 	test("custom top-level protected entries are mounted read-only", async () => {
 		const ws = makeWorkspace();
 		fs.writeFileSync(path.join(ws, "custom-config"), "original");

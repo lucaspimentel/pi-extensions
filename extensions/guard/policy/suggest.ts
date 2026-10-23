@@ -122,6 +122,7 @@ const LIST_KEYS: readonly (keyof GuardConfig)[] = [
 	"protectedPaths",
 	"maskPatterns",
 	"maskExceptions",
+	"discoveryPruneNames",
 	"webFetchAllow",
 	"readRoots",
 	"writeRoots",

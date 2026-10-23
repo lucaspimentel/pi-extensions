@@ -18,7 +18,7 @@ import {
 	pupRunClass,
 	type ToolClass,
 } from "../extensions/guard/policy/classes.ts";
-import { suggestRule, suggestRemoteReadRule, readGrantSuggestion, addToConfigScope, effectiveAllowSuggestion } from "../extensions/guard/policy/suggest.ts";
+import { suggestRule, suggestRemoteReadRule, readGrantSuggestion, addToConfigScope, effectiveAllowSuggestion, countPatchChanges } from "../extensions/guard/policy/suggest.ts";
 import { decide, type GuardCall, type PolicyState } from "../extensions/guard/policy/decision.ts";
 import { parseRule, ruleMatches } from "../extensions/guard/policy/rules.ts";
 
@@ -466,6 +466,18 @@ test("addToConfigScope unions with dedupe, never removes, and is idempotent", ()
 	const rp = addToConfigScope("project", { readRoots: ["/tmp/p"] }, { home, cwd });
 	assert.ok(rp.path.endsWith(path.join(".pi", "guard.local.json")));
 	assert.deepEqual(loadProjectConfigRaw(cwd).readRoots, ["/tmp/p"]);
+});
+
+test("addToConfigScope and countPatchChanges handle discoveryPruneNames idempotently", () => {
+	const home = makeTempDir("guard-scope-discovery-home-");
+	const cwd = makeTempDir("guard-scope-discovery-cwd-");
+	const patch: Partial<GuardConfig> = { discoveryPruneNames: ["huge", ".cargo"] };
+	assert.equal(countPatchChanges("project", patch, { cwd, home }), 2);
+	const r1 = addToConfigScope("project", patch, { cwd, home });
+	assert.equal(r1.added, 2);
+	assert.deepEqual(loadProjectConfigRaw(cwd).discoveryPruneNames, ["huge", ".cargo"]);
+	assert.equal(countPatchChanges("project", patch, { cwd, home }), 0, "a re-run adds nothing");
+	assert.equal(addToConfigScope("project", patch, { cwd, home }).added, 0);
 });
 
 function saveSeed(home: string, cfg: GuardConfig): void {

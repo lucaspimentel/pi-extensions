@@ -5,11 +5,15 @@
  * built-in default. Corrupt or partially valid files fail safe: warn and use
  * defaults for the bad keys, never throw.
  *
- * Merge semantics (mirroring pi-tool-permissions): scalar keys project-wins;
- * list keys (protectedPaths, maskPatterns, maskExceptions, webFetchAllow,
+ * Merge semantics (mirroring pi-tool-permissions): scalar keys project-wins
+ * (discoveryMatchCap and discoveryTimeoutMs fall back project-valid, then
+ * user-valid, then the built-in default); list keys (protectedPaths,
+ * maskPatterns, maskExceptions, discoveryPruneNames, webFetchAllow,
  * classifierEnvironment, classifier NL lists, readRoots, writeRoots) unioned
- * with dedupe; hostBash rule lists unioned per slot (deny > ask > allow is
- * applied at decision time, not merge time).
+ * with dedupe; discoveryPruneNames additionally drops built-in duplicates and
+ * is sorted so reordering or duplication cannot change policy keys; hostBash
+ * rule lists unioned per slot (deny > ask > allow is applied at decision time,
+ * not merge time).
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -19,6 +23,14 @@ import { DEFAULT_BASH_VALIDATORS, BASH_VALIDATOR_NONE } from "./bashtier.ts";
 import { DEFAULT_CLASSIFIER } from "./classifier.ts";
 import { isToolClass, OWNED_EXECUTORS, TOOL_CLASSES } from "./classes.ts";
 import { compilePattern } from "./rules.ts";
+import {
+	DEFAULT_MASK_EXCEPTIONS,
+	DEFAULT_MASK_PATTERNS,
+	SCAN_MATCH_CAP_DEFAULT,
+	SCAN_PRUNE_NAMES,
+	SCAN_TIMEOUT_MS_DEFAULT,
+	isMaskedName,
+} from "../sandbox/spec.ts";
 
 export const USER_CONFIG_REL = "guard.json";
 export const PROJECT_CONFIG_REL = join(".pi", "guard.local.json");
@@ -39,6 +51,12 @@ export interface GuardConfig {
 	maskPatterns?: string[];
 	/** Mask exceptions (per-project opt-outs, e.g. ".env.local"). */
 	maskExceptions?: string[];
+	/** Extra prune basenames for the discovery scan (added to the built-in list). */
+	discoveryPruneNames?: string[];
+	/** Discovery scan match cap override (1..200000; default 500). */
+	discoveryMatchCap?: number;
+	/** Discovery scan timeout override in ms (1..600000; default 5000). */
+	discoveryTimeoutMs?: number;
 	/** web_fetch URL globs that are NOT exfil-capable (matched against the full URL). */
 	webFetchAllow?: string[];
 	/** HostBash(...) rules for the host shell tier. */
@@ -67,6 +85,9 @@ export interface ResolvedGuardConfig {
 	protectedPaths: string[];
 	maskPatterns: string[];
 	maskExceptions: string[];
+	discoveryPruneNames: string[];
+	discoveryMatchCap: number;
+	discoveryTimeoutMs: number;
 	webFetchAllow: string[];
 	hostBash: Required<HostBashRules>;
 	readRoots: string[];
@@ -188,6 +209,46 @@ function stringList(value: unknown, warnings: string[], label: string): string[]
 	return value as string[];
 }
 
+const DISCOVERY_MATCH_CAP_MAX = 200_000;
+const DISCOVERY_TIMEOUT_MS_MAX = 600_000;
+
+/**
+ * Coerce the extra discovery prune basenames. A prune name matches a basename
+ * at any depth, so a path, a NUL, or a glob/negation metacharacter would make
+ * the backend matchers (fd --exclude, find -name) behave unpredictably: such
+ * entries are warned about and dropped, never passed through.
+ */
+function coerceDiscoveryPruneNames(value: unknown, warnings: string[], scope: string): string[] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value)) {
+		warnings.push(`guard config: ${scope} discoveryPruneNames must be a list of strings; ignoring it`);
+		return [];
+	}
+	const out: string[] = [];
+	for (const item of value) {
+		if (typeof item !== "string") {
+			warnings.push(`guard config: ${scope} discoveryPruneNames entries must be strings; ignoring ${JSON.stringify(item)}`);
+			continue;
+		}
+		if (item === "" || item === "." || item === ".." || /[/\\\0*?\[\]{}]/.test(item) || item.startsWith("!")) {
+			warnings.push(`guard config: ${scope} discoveryPruneNames["${item}"] must be a plain basename (no path separators, NUL, glob or negation metacharacters); ignoring it`);
+			continue;
+		}
+		out.push(item);
+	}
+	return out;
+}
+
+/** Coerce a bounded integer; any non-integer, non-number, or out-of-range value is warned about and ignored. */
+function coerceIntInRange(value: unknown, min: number, max: number, warnings: string[], label: string): number | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+		warnings.push(`guard config: ${label} must be an integer between ${min} and ${max}; ignoring it`);
+		return undefined;
+	}
+	return value;
+}
+
 function coerceHostBash(raw: unknown, warnings: string[]): Required<HostBashRules> {
 	if (raw === undefined) return { allow: [], deny: [], ask: [] };
 	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -289,11 +350,34 @@ export function mergeConfig(
 	for (const [cmd, name] of Object.entries(bashValidators)) {
 		if (name === BASH_VALIDATOR_NONE) delete bashValidators[cmd];
 	}
+	// Discovery prune names: union across scopes, drop built-in duplicates (so a
+	// built-in repeated in a config is not a deviation), and sort so reordering
+	// or duplication cannot change policy keys or the weakening signature.
+	const builtinPrune = new Set<string>(SCAN_PRUNE_NAMES);
+	const discoveryPruneNames = dedupe([
+		...coerceDiscoveryPruneNames(user.discoveryPruneNames, warnings, "user"),
+		...coerceDiscoveryPruneNames(project.discoveryPruneNames, warnings, "project"),
+	])
+		.filter((name) => !builtinPrune.has(name))
+		.sort();
+	// Scalars: project-valid, then user-valid, then the built-in default; every
+	// rejected value warns once and falls through to the next scope.
+	const discoveryMatchCap =
+		coerceIntInRange(project.discoveryMatchCap, 1, DISCOVERY_MATCH_CAP_MAX, warnings, "discoveryMatchCap") ??
+		coerceIntInRange(user.discoveryMatchCap, 1, DISCOVERY_MATCH_CAP_MAX, warnings, "discoveryMatchCap") ??
+		SCAN_MATCH_CAP_DEFAULT;
+	const discoveryTimeoutMs =
+		coerceIntInRange(project.discoveryTimeoutMs, 1, DISCOVERY_TIMEOUT_MS_MAX, warnings, "discoveryTimeoutMs") ??
+		coerceIntInRange(user.discoveryTimeoutMs, 1, DISCOVERY_TIMEOUT_MS_MAX, warnings, "discoveryTimeoutMs") ??
+		SCAN_TIMEOUT_MS_DEFAULT;
 	return {
 		cycleShortcut,
 		protectedPaths: dedupe([...stringList(user.protectedPaths, warnings, "protectedPaths"), ...stringList(project.protectedPaths, warnings, "protectedPaths")]),
 		maskPatterns: dedupe([...stringList(user.maskPatterns, warnings, "maskPatterns"), ...stringList(project.maskPatterns, warnings, "maskPatterns")]),
 		maskExceptions: dedupe([...stringList(user.maskExceptions, warnings, "maskExceptions"), ...stringList(project.maskExceptions, warnings, "maskExceptions")]),
+		discoveryPruneNames,
+		discoveryMatchCap,
+		discoveryTimeoutMs,
 		webFetchAllow: dedupe([...stringList(user.webFetchAllow, warnings, "webFetchAllow"), ...stringList(project.webFetchAllow, warnings, "webFetchAllow")]),
 		hostBash: {
 			allow: dedupe([...coerceHostBash(user.hostBash, warnings).allow, ...coerceHostBash(project.hostBash, warnings).allow]),
@@ -323,6 +407,82 @@ export function resolvedClassifierConfig(cfg: ResolvedGuardConfig) {
 		soft_deny: dedupe([...DEFAULT_CLASSIFIER.soft_deny, ...cfg.classifierSoftDeny]),
 		hard_deny: dedupe([...DEFAULT_CLASSIFIER.hard_deny, ...cfg.classifierHardDeny]),
 	};
+}
+
+/** Names whose nested-protection discovery a prune name would silently drop. */
+const DISCOVERY_PROTECTED_COLLISIONS: readonly string[] = ["AGENTS.md", "CLAUDE.md", ".envrc", ".git"];
+
+/**
+ * Warnings for prune names that collide with protection discovery: a protected
+ * nested name, or a name the effective mask patterns would otherwise mask.
+ * Worded in basename terms because pruning matches basenames. Surfaced through
+ * the one-time weakening notice and /guard list, never through mergeConfig's
+ * warnings.
+ */
+export function discoveryCollisionWarnings(
+	pruneNames: readonly string[],
+	patterns: readonly string[],
+	exceptions: readonly string[],
+): string[] {
+	const warnings: string[] = [];
+	for (const name of pruneNames) {
+		if (DISCOVERY_PROTECTED_COLLISIONS.includes(name)) {
+			warnings.push(`discoveryPruneNames["${name}"] drops nested-protection discovery for every entry whose basename is "${name}" (basename matching); the prune name still applies`);
+			continue;
+		}
+		if (isMaskedName(name, patterns, exceptions)) {
+			warnings.push(`discoveryPruneNames["${name}"] matches the secret-mask patterns (basename matching); files with this basename are not discovered, so they are not masked`);
+		}
+	}
+	return warnings;
+}
+
+/** The effective pattern/exception sets a discovery collision check must use. */
+function effectiveMaskSets(cfg: ResolvedGuardConfig): { patterns: string[]; exceptions: string[] } {
+	return {
+		patterns: [...DEFAULT_MASK_PATTERNS, ...cfg.maskPatterns],
+		exceptions: [...DEFAULT_MASK_EXCEPTIONS, ...cfg.maskExceptions],
+	};
+}
+
+/** Collision warnings for a resolved config, using its effective mask sets. */
+export function discoveryCollisionWarningsFor(cfg: ResolvedGuardConfig): string[] {
+	const { patterns, exceptions } = effectiveMaskSets(cfg);
+	return discoveryCollisionWarnings([...cfg.discoveryPruneNames].sort(), patterns, exceptions);
+}
+
+/**
+ * A stable signature of the discovery settings that weaken the fail-closed
+ * defaults, or null when nothing is weakened (no extras, and cap and timeout at
+ * or below their defaults). Drives the one-time notice; never read by
+ * enforcement.
+ */
+export function discoveryWeakeningSignature(cfg: ResolvedGuardConfig): string | null {
+	const extras = [...cfg.discoveryPruneNames].sort();
+	const capDelta = Math.max(0, cfg.discoveryMatchCap - SCAN_MATCH_CAP_DEFAULT);
+	const timeoutDelta = Math.max(0, cfg.discoveryTimeoutMs - SCAN_TIMEOUT_MS_DEFAULT);
+	if (extras.length === 0 && capDelta === 0 && timeoutDelta === 0) return null;
+	return JSON.stringify([extras, capDelta, timeoutDelta]);
+}
+
+/**
+ * The one-time warning text for weakened discovery settings, or null when the
+ * settings are the built-in defaults. Names the extra prune basenames, the
+ * raised cap and timeout with their defaults, and any collision.
+ */
+export function discoveryNoticeText(cfg: ResolvedGuardConfig): string | null {
+	const extras = [...cfg.discoveryPruneNames].sort();
+	const capRaised = cfg.discoveryMatchCap > SCAN_MATCH_CAP_DEFAULT;
+	const timeoutRaised = cfg.discoveryTimeoutMs > SCAN_TIMEOUT_MS_DEFAULT;
+	if (extras.length === 0 && !capRaised && !timeoutRaised) return null;
+	const lines = ["guard: workspace discovery settings differ from the fail-closed defaults."];
+	if (extras.length) {
+		lines.push(`  extra prune basenames: ${extras.join(", ")} (entries with these basenames, files and directories, are not discovered at any depth; secrets under them are not masked)`);
+	}
+	if (capRaised) lines.push(`  discoveryMatchCap: ${cfg.discoveryMatchCap} (default ${SCAN_MATCH_CAP_DEFAULT})`);
+	if (timeoutRaised) lines.push(`  discoveryTimeoutMs: ${cfg.discoveryTimeoutMs} ms (default ${SCAN_TIMEOUT_MS_DEFAULT})`);
+	for (const warning of discoveryCollisionWarningsFor(cfg)) lines.push(`  warning: ${warning}`);
+	return lines.join("\n");
 }
 
 /** Load and merge both scopes; warnings go to console.warn. */

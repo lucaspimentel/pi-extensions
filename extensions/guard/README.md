@@ -417,13 +417,19 @@ adds a `tool_result` filter that drops matches from masked files.
 
 User scope `~/.pi/agent/guard.json`, project scope `<cwd>/.pi/guard.local.json`
 (machine-local). Keys: `cycleShortcut`, `protectedPaths`, `maskPatterns`,
-`maskExceptions`, `webFetchAllow` (URL globs or `/regex/`), `hostBash`
+`maskExceptions`, `discoveryPruneNames`, `discoveryMatchCap`,
+`discoveryTimeoutMs`, `webFetchAllow` (URL globs or `/regex/`), `hostBash`
 (`allow`/`ask`/`deny` lists of `HostBash(...)` / `Pwsh(...)` rules),
 `readRoots`, `writeRoots`, `toolClasses` (name/glob -> class),
 `bashValidators`, the `classifier` pin, and the `classifierEnvironment` /
 `classifierAllow` / `classifierSoftDeny` / `classifierHardDeny` lists.
-Scalars are project-wins; lists union with dedupe; a corrupt file is ignored
-with a warning and never discards the other scope.
+Scalars are project-wins with a fallback to the built-in default;
+`discoveryMatchCap` (integer 1..200000) and `discoveryTimeoutMs` ms (integer
+1..600000) fall back project-valid, then user-valid, then the defaults 500 and
+5000. Lists union with dedupe; `discoveryPruneNames` is additionally sorted and
+drops entries that duplicate a built-in prune name, so reordering or repetition
+cannot change policy keys. Invalid values are warned about and ignored; a
+corrupt file is ignored with a warning and never discards the other scope.
 
 ### /guard subcommands
 
@@ -431,7 +437,7 @@ with a warning and never discards the other scope.
 |---|---|
 | `/guard` | profile picker (all seven profiles) |
 | `/guard help` | usage |
-| `/guard list` | profile, holder, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, webFetchAllow count, host-shell rule counts, read/write roots, toolClasses count, classifier, debug state |
+| `/guard list` | profile, holder, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, discovery scan settings (cap, timeout, pruned basenames, collisions), webFetchAllow count, host-shell rule counts, read/write roots, toolClasses count, classifier, debug state |
 | `/guard reload` | reload guard.json, refresh sandbox detection, clear the annotation cache |
 | `/guard profile [name]` | set a profile directly (`unrestricted` included) |
 | `/guard model` / `/guard model clear` | pin the auto-mode classifier model to user config (picker over models with configured auth; `clear` resumes auto-select). A project-scope `classifier` pin in `.pi/guard.local.json` overrides the user pin and is a manual config edit |
@@ -607,11 +613,29 @@ closes that gap:
 
 Every launch scans the workspace once for mask matches and nested protected
 entries (fd when available, `find` fallback with identical semantics; hidden
-files included, ignore rules off because secrets are usually gitignored,
-`node_modules`/`bin`/`obj`/`target` and `.git` contents pruned while nested
-`.git` entries are still reported). A 5 s timeout or more than 500 classified
-matches fails the launch with an actionable diagnostic: it never launches
-unmasked.
+files included, ignore rules off because secrets are usually gitignored; the
+built-in prune basenames `node_modules`/`bin`/`obj`/`target` and `.git`
+contents are pruned while nested `.git` entries are still reported).
+
+Pruning matches basenames at any depth, for files and directories alike, and a
+matching directory's subtree is never descended into; the workspace root itself
+is exempt even when its own basename matches. Pruned entries remain mounted in
+the sandbox: pruning is discovery-only, so a secret under a pruned basename is
+**not** masked and stays readable inside the sandbox.
+
+The defaults are tunable per config: `discoveryPruneNames` adds extra prune
+basenames, `discoveryMatchCap` raises the 500-match cap, and
+`discoveryTimeoutMs` raises the 5000 ms timeout; both scanners read the same
+effective settings. A scan that exceeds the effective cap or timeout fails the
+launch with an actionable diagnostic, so the defaults stay fail-closed.
+Weakening values are reported once per session and listed by `/guard list`.
+
+A workspace such as `$HOME` typically trips the default cap or timeout. The
+pattern is a project-scope `guard.local.json` at the workspace root (for a
+`$HOME` session that is `~/.pi/guard.local.json`), which is read only when the
+session cwd is that directory, adding the big generated trees (for example
+`source`, `go`, `.cargo`, `.cache`, `.nvm`) to `discoveryPruneNames`.
+Credential-bearing trees (`.config`, `.local`, `.pi`, `.gnupg`) stay scanned.
 
 ### Kill-on-abort
 

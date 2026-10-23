@@ -312,7 +312,7 @@ function migrateScope(
 function countChanges(existing: GuardConfig, patch: GuardConfig): number {
 	let changes = 0;
 	const listKeys: readonly (keyof GuardConfig)[] = [
-		"protectedPaths", "maskPatterns", "maskExceptions", "webFetchAllow",
+		"protectedPaths", "maskPatterns", "maskExceptions", "discoveryPruneNames", "webFetchAllow",
 		"readRoots", "writeRoots",
 		"classifierEnvironment", "classifierAllow", "classifierSoftDeny", "classifierHardDeny",
 	];

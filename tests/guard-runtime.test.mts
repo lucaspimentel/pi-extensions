@@ -182,6 +182,31 @@ test("every worker execute refreshes mask mounts; reset/remount keep scratch", a
 	assert.equal(mounts.length, 3);
 });
 
+test("discovery setting changes remount live workers while canonical name reordering does not", async (t) => {
+	let disposals = 0;
+	let starts = 0;
+	const { runtime, cwd, policy } = setup(t, () => { starts++; return fakeWorker(undefined, async () => { disposals++; }); });
+	const execute = () => runtime.run(allow, (ctx) => runtime.worker("node", { code: "1" }, ctx));
+	const base = { discoveryMatchCap: 2000, discoveryTimeoutMs: 6000, discoveryPruneNames: ["huge", "alpha", "huge"] };
+	await execute();
+	assert.equal(starts, 1);
+	await runtime.transition({ ...policy, config: mergeConfig({ discoveryMatchCap: 2000 }, {}, cwd) });
+	assert.equal(disposals, 1, "a raised match cap disposes the live worker");
+	await execute();
+	assert.equal(starts, 2);
+	await runtime.transition({ ...runtime.policy, config: mergeConfig({ discoveryMatchCap: 2000, discoveryTimeoutMs: 6000 }, {}, cwd) });
+	assert.equal(disposals, 2, "a raised timeout disposes the live worker");
+	await execute();
+	assert.equal(starts, 3);
+	await runtime.transition({ ...runtime.policy, config: mergeConfig({ ...base, discoveryPruneNames: ["alpha", "huge"] }, {}, cwd) });
+	assert.equal(disposals, 3, "an effective extras change disposes the live worker");
+	await execute();
+	assert.equal(starts, 4);
+	// Reordering or duplicating the same names resolves identically: no remount.
+	await runtime.transition({ ...runtime.policy, config: mergeConfig({ ...base }, {}, cwd) });
+	assert.equal(disposals, 3, "canonical reordering/duplication must not dispose workers");
+});
+
 test("new protected entries between calls remount workers without quarantining authorized host changes", async (t) => {
 	let disposals = 0;
 	let starts = 0;

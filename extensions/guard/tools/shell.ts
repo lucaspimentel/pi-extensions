@@ -52,6 +52,7 @@ export function createGuardShellOperations(
 				readRoots: normalizeRootList(ctx.policy.config.readRoots, ctx.policy.cwd, homedir()),
 				extraRwBinds: [[ctx.scratchDir, ctx.scratchDir]],
 				maskPatterns: ctx.policy.config.maskPatterns, maskExceptions: ctx.policy.config.maskExceptions,
+				pruneNames: ctx.policy.config.discoveryPruneNames, discoveryMatchCap: ctx.policy.config.discoveryMatchCap, discoveryTimeoutMs: ctx.policy.config.discoveryTimeoutMs,
 				protectedPaths: ctx.policy.config.protectedPaths, rlimits: RLIMITS_SHELL,
 			};
 			ctx.assertCurrent();
