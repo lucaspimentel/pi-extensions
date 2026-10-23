@@ -477,6 +477,77 @@ test("find scan args prune build dirs and .git contents", () => {
 	assert.ok(fd.includes("--hidden") && fd.includes("--no-ignore") && fd.includes("--print0"));
 });
 
+test("find scan args exempt the workspace root from pruning", () => {
+	const args = findScanArgs("/x/bin");
+	assert.equal(args[0], "/x/bin");
+	assert.ok(args.includes("!") && args.includes("-path"));
+	assert.equal(args[args.indexOf("-path") + 1], "/x/bin");
+	// -path is a glob in GNU find: metacharacters in the workspace path must be
+	// backslash-escaped, or the root guard would fail to match the root and the
+	// root itself would be pruned.
+	const escaped = findScanArgs("/ws/a*b[1]");
+	assert.equal(escaped[escaped.indexOf("-path") + 1], "/ws/a\\*b\\[1\\]");
+});
+
+function makeRootPruneFixture(): string {
+	const base = makeTempDir("guard-unit-rootprune-");
+	const ws = path.join(base, "bin");
+	fs.mkdirSync(path.join(ws, "nested"), { recursive: true });
+	fs.writeFileSync(path.join(ws, ".env"), "SECRET=1");
+	fs.writeFileSync(path.join(ws, "normal.txt"), "x");
+	fs.writeFileSync(path.join(ws, "nested", "inner.txt"), "x");
+	return ws;
+}
+
+test("workspace root whose basename is a prune name is still scanned (find)", () => {
+	const ws = makeRootPruneFixture();
+	const { entries } = scanRawEntries(ws, { scanner: "find" });
+	const cls = classifyEntries(ws, entries);
+	assert.deepEqual(relPaths(ws, cls.masks), [".env"], "root contents must not be pruned");
+	assert.ok(entries.some((e) => e.endsWith("normal.txt")), "the root is descended into");
+	assert.ok(entries.some((e) => e.endsWith(path.join("nested", "inner.txt"))));
+});
+
+if (hasFd) {
+	test("workspace root whose basename is a prune name is still scanned (fd)", () => {
+		const ws = makeRootPruneFixture();
+		const { entries } = scanRawEntries(ws, { scanner: "fd", fdPath: findFdScanner().path });
+		const cls = classifyEntries(ws, entries);
+		assert.deepEqual(relPaths(ws, cls.masks), [".env"], "fd must exempt the search root");
+		assert.ok(entries.some((e) => e.endsWith("normal.txt")));
+		assert.ok(entries.some((e) => e.endsWith(path.join("nested", "inner.txt"))));
+	});
+
+	test("fd and find agree on nested prune basenames under a glob-metachar workspace", () => {
+		const base = makeTempDir("guard-unit-prune-parity-");
+		const ws = path.join(base, "ws[1]");
+		const write = (rel: string, content = "x") => {
+			const p = path.join(ws, rel);
+			fs.mkdirSync(path.dirname(p), { recursive: true });
+			fs.writeFileSync(p, content);
+		};
+		write(".env", "SECRET=1");
+		write("nested/inner.txt");
+		write("sub/CLAUDE.md");
+		write("bin/deep.env", "DEEP=1");
+		write("target", "prune-basename file");
+		const fd = scanRawEntries(ws, { scanner: "fd", fdPath: findFdScanner().path });
+		const find = scanRawEntries(ws, { scanner: "find" });
+		const fdClass = classifyEntries(ws, fd.entries);
+		const findClass = classifyEntries(ws, find.entries);
+		assert.deepEqual(relPaths(ws, fdClass.masks), relPaths(ws, findClass.masks), "mask sets differ between fd and find");
+		assert.deepEqual(relPaths(ws, fdClass.nestedProtected), relPaths(ws, findClass.nestedProtected), "nested sets differ between fd and find");
+		assert.deepEqual(relPaths(ws, fdClass.masks), [".env"], "a secret under a pruned basename is dropped");
+		assert.deepEqual(relPaths(ws, fdClass.nestedProtected), [path.join("sub", "CLAUDE.md")]);
+		// Basename pruning applies to regular files too: a file named like a
+		// prune name is dropped even when a mask pattern would otherwise match it.
+		for (const [kind, raw] of [["fd", fd], ["find", find]] as const) {
+			const targetOnly = classifyEntries(ws, raw.entries, { patterns: ["target"], exceptions: [] });
+			assert.deepEqual(targetOnly.masks, [], `${kind}: a regular file named like a prune name must be dropped`);
+		}
+	});
+}
+
 // ── Read-root filter ──────────────────────────────────────────────────────────
 
 test("read-root filter applies reserved, workspace, and nested dedupe rules", () => {

@@ -70,7 +70,21 @@ export function fdScanArgs(workspace: string): string[] {
 	return args;
 }
 
-/** Build the find argv with identical semantics to the fd scan. */
+/**
+ * Escape find glob metacharacters in a path operand so `-path` matches the
+ * literal path: GNU find treats the -path argument as a shell pattern, so an
+ * unescaped workspace path containing `*` or `[...]` would not match itself.
+ */
+export function escapeFindPath(p: string): string {
+	return p.replace(/[*?[\]\\]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * Build the find argv with identical semantics to the fd scan. The workspace
+ * root itself is never pruned, even when its basename matches a prune name:
+ * fd exempts the search root implicitly, and find does so through the
+ * `! -path <workspace>` guard below.
+ */
 export function findScanArgs(workspace: string): string[] {
 	const pruneNames = [...SCAN_PRUNE_NAMES, ".git"];
 	const clauses: string[] = ["("];
@@ -80,8 +94,9 @@ export function findScanArgs(workspace: string): string[] {
 	});
 	clauses.push(")");
 	// Print pruned entries themselves (including .git at any depth) but never
-	// descend into them; print everything else.
-	return [workspace, ...clauses, "-prune", "-print0", "-o", "-print0"];
+	// descend into them; print everything else. The root guard keeps the
+	// workspace itself out of the prune set.
+	return [workspace, ...clauses, "!", "-path", escapeFindPath(workspace), "-prune", "-print0", "-o", "-print0"];
 }
 
 /** Run the raw directory scan and return absolute entry paths. */

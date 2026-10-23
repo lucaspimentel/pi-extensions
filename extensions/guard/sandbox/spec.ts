@@ -116,7 +116,12 @@ export const PROTECTED_NESTED_NAMES: readonly string[] = [
 	".git",
 ];
 
-/** Directory names whose contents the discovery scan never descends into. */
+/**
+ * Prune basenames: entries whose basename matches one of these are dropped
+ * from discovery at any depth, for files and directories alike, and a
+ * matching directory's subtree is never descended into. The workspace root
+ * itself is exempt, even when its own basename matches.
+ */
 export const SCAN_PRUNE_NAMES: readonly string[] = [
 	"node_modules",
 	"bin",
