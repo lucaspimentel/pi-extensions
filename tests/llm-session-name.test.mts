@@ -1,11 +1,11 @@
 // Tests for the llm-session-name extension.
 //
-// Covers the pure helpers (sanitize, truncate, prompt build, config read,
-// recent-turns build) and drives the REAL default export with a mock pi/ctx
-// to verify: one title per session, regeneration cadence with provenance
-// tracking, manual /name locking, the /name-auto force command, fallback
-// naming on model failure, manual /name always winning, and /name-auto
-// outcome reporting (applied, unchanged, noop, failed with cause).
+// Covers the pure helpers (sanitize, truncate, prompt build, recent-turns
+// build) and drives the REAL default export with a mock pi/ctx to verify:
+// one automatic title on the session's first turn, provenance tracking and
+// manual /name locking, the /name-auto force command, fallback naming on
+// model failure, manual /name always winning, and /name-auto outcome
+// reporting (applied, unchanged, noop, failed with cause).
 //
 // Run: node tests/llm-session-name.test.mts
 import assert from "node:assert/strict";
@@ -24,7 +24,6 @@ const {
 	extractInitialPrompts,
 	deriveTitleSource,
 	readDiskSessionName,
-	readTurnInterval,
 } = mod;
 
 const msgEntry = (role: string, text: string) => ({
@@ -405,9 +404,9 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	assert.equal(pi.name(), "second title");
 }
 
-// 9. Regeneration cadence: nothing between cadence points; at the next one
-// (turn 11 for the default interval) the title regenerates from the current
-// title plus recent turns.
+// 9. The automatic title fires once, on turn 1: no number of later turns
+// regenerates it. /name-auto is the manual path that regenerates from the
+// current title plus recent turns.
 {
 	const pi = makePi();
 	mod.default(pi as any);
@@ -427,15 +426,16 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 			msgEntry("assistant", "ok"),
 		],
 	});
-	await handlers.turn_end({}, ctx); // turn 1: first title
+	await handlers.turn_end({}, ctx); // turn 1: the only automatic run
 	await waitFor(() => pi.name() === "first title");
 	assert.equal(pi.name(), "first title");
-	for (let t = 2; t <= 10; t++) await handlers.turn_end({}, ctx);
+	for (let t = 2; t <= 30; t++) await handlers.turn_end({}, ctx);
 	await waitFor(() => completeCalls.length === 1); // settle turn 1's run
-	assert.equal(completeCalls.length, 1, "no regeneration before the cadence point");
+	assert.equal(completeCalls.length, 1, "no automatic regeneration after the first turn");
 	assert.equal(pi.name(), "first title");
-	await handlers.turn_end({}, ctx); // turn 11: regeneration
-	await waitFor(() => completeCalls.length === 2);
+	assert.ok(commands["name-auto"], "/name-auto must be registered");
+	await commands["name-auto"].handler("", ctx);
+	assert.equal(completeCalls.length, 2, "/name-auto must regenerate");
 	assert.equal(pi.name(), "second title");
 	const sent = JSON.stringify(completeCalls[1]);
 	assert.ok(sent.includes("first title"), "regeneration prompt must include the current title");
@@ -447,8 +447,8 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	assert.ok(!anchorSection.includes("ack one"), "assistant messages are sampled, not treated as anchors");
 }
 
-// 10. Manual /name after a generated title locks the session: no further
-// regeneration at any later cadence point.
+// 10. Manual /name after a generated title locks the session: no automatic
+// regeneration can ever overwrite it.
 {
 	const pi = makePi();
 	mod.default(pi as any);
@@ -466,7 +466,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	pi.setSessionName("my manual name");
 	for (let t = 2; t <= 21; t++) await handlers.turn_end({}, ctx);
 	await waitFor(() => calls === 1); // settle turn 1's run
-	assert.equal(calls, 1, "manual rename must block all regeneration");
+	assert.equal(calls, 1, "manual rename must survive all later turns");
 	assert.equal(pi.name(), "my manual name");
 }
 
@@ -488,7 +488,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	pi.setSessionName("");
 	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
 	await waitFor(() => calls === 1); // settle
-	assert.equal(calls, 1, "a cleared name must block regeneration");
+	assert.equal(calls, 1, "a cleared name must survive all later turns");
 	assert.equal(pi.name(), "");
 }
 
@@ -516,9 +516,9 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	rmSync(dir, { recursive: true, force: true });
 }
 
-// 11a. External rename on disk (session-selector style: a different
-// SessionManager appends to the file while the live manager never sees it)
-// locks the session at the next cadence point instead of being overwritten.
+// 11a. External rename on disk before the first turn (session-selector
+// style: a different SessionManager appends to the file while the live
+// manager never sees it) locks the session instead of being overwritten.
 {
 	const dir = mkdtempSync(join(tmpdir(), "llm-session-name-"));
 	const file = join(dir, "session.jsonl");
@@ -535,21 +535,19 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 		entries: [msgEntry("user", "recent")],
 		sessionFile: file,
 	});
-	await handlers.turn_end({}, ctx); // turn 1: first title, persisted to disk
-	await waitFor(() => pi.name() === "t");
-	assert.equal(readDiskSessionName(file), "t");
 	// What the session selector's ctrl+r rename does: SessionManager.open()
 	// appends the rename to the file; the live pi never learns about it.
 	appendFileSync(file, `${JSON.stringify({ type: "session_info", name: "selector rename" })}\n`);
-	for (let t = 2; t <= 21; t++) await handlers.turn_end({}, ctx);
-	await waitFor(() => calls === 1); // settle turn 1's run
-	assert.equal(calls, 1, "an external disk rename must lock regeneration");
-	assert.equal(pi.name(), "t", "the extension must not write over the external rename");
+	await handlers.turn_end({}, ctx); // turn 1: the automatic attempt locks instead of titling
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(calls, 0, "an external disk rename must lock the first title");
+	assert.equal(pi.name(), undefined, "the extension must not title over the external rename");
+	assert.equal(pi.setCallCount(), 0, "the extension must not write over the external rename");
 	assert.equal(readDiskSessionName(file), "selector rename");
 	rmSync(dir, { recursive: true, force: true });
 }
 
-// 11b. With a disk-backed session and no external rename, cadence
+// 11b. With a disk-backed session and no external rename, /name-auto
 // regeneration still works: the disk comparison must not false-positive on
 // the extension's own synchronously persisted writes.
 {
@@ -571,8 +569,8 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	});
 	await handlers.turn_end({}, ctx); // turn 1
 	await waitFor(() => pi.name() === "first title");
-	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx); // turn 11: regen
-	await waitFor(() => calls === 2);
+	await commands["name-auto"].handler("", ctx);
+	assert.equal(calls, 2, "/name-auto must regenerate");
 	assert.equal(pi.name(), "second title");
 	assert.equal(readDiskSessionName(file), "second title");
 	rmSync(dir, { recursive: true, force: true });
@@ -627,8 +625,8 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	assert.equal(pi.setCallCount(), 1, "only the manual write must have happened");
 }
 
-// 12. /name-auto bypasses the manual lock, adopts the new title as
-// extension-owned, and periodic regeneration resumes.
+// 12. /name-auto bypasses the manual lock and adopts the new title as
+// extension-owned; later turns never regenerate automatically.
 {
 	const pi = makePi();
 	mod.default(pi as any);
@@ -646,7 +644,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	pi.setSessionName("manual");
 	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
 	await waitFor(() => calls === 1); // settle
-	assert.equal(calls, 1, "locked session must not regenerate on cadence");
+	assert.equal(calls, 1, "later turns must not regenerate automatically");
 	assert.ok(commands["name-auto"], "/name-auto must be registered");
 	await commands["name-auto"].handler("", ctx);
 	assert.equal(calls, 2, "/name-auto must force a regeneration");
@@ -655,15 +653,16 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 		ctx.notifies.some((n: { msg: string }) => n.msg.includes("forced title")),
 		"/name-auto must notify with the new title",
 	);
-	// Ownership resumed: the next cadence point regenerates again.
-	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, ctx);
-	await waitFor(() => calls === 3);
-	assert.equal(calls, 3);
+	// Ownership adopted by the forced run does not restart any automatic
+	// regeneration: later turns stay no-ops.
+	for (let t = 2; t <= 30; t++) await handlers.turn_end({}, ctx);
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(calls, 2, "later turns must not regenerate automatically");
 	assert.equal(pi.name(), "forced title");
 }
 
-// 13. Regeneration failure keeps the existing name and retries at the next
-// cadence point (no lock, no degradation).
+// 13. Regeneration failure keeps the existing name and does not lock the
+// session: a later /name-auto can still regenerate.
 {
 	const pi = makePi();
 	mod.default(pi as any);
@@ -673,21 +672,20 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 		complete: async () => {
 			calls++;
 			if (calls === 1) return textResponse("good title");
-			throw new Error("api down");
+			if (calls === 2) throw new Error("api down");
+			return textResponse("recovered title");
 		},
 		entries: [msgEntry("user", "recent stuff")],
 	});
 	await handlers.turn_end({}, ctx); // turn 1
 	await waitFor(() => pi.name() === "good title");
 	assert.equal(pi.name(), "good title");
-	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
-	await waitFor(() => calls === 2);
-	assert.equal(calls, 2, "regeneration must be attempted at the cadence point");
+	await commands["name-auto"].handler("", ctx);
+	assert.equal(calls, 2, "regeneration must be attempted");
 	assert.equal(pi.name(), "good title", "failed regeneration must keep the existing name");
-	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, ctx);
-	await waitFor(() => calls === 3);
+	await commands["name-auto"].handler("", ctx);
 	assert.equal(calls, 3, "a failed regeneration must not lock the session");
-	assert.equal(pi.name(), "good title");
+	assert.equal(pi.name(), "recovered title");
 }
 
 // 14. No thrash: an identical regenerated title must not call setSessionName.
@@ -706,8 +704,12 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	await handlers.turn_end({}, ctx);
 	await waitFor(() => pi.setCallCount() === 1);
 	assert.equal(pi.setCallCount(), 1);
-	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
-	await waitFor(() => calls === 2);
+	for (let t = 2; t <= 30; t++) await handlers.turn_end({}, ctx);
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(calls, 1, "later turns must not call the model");
+	assert.equal(pi.setCallCount(), 1);
+	assert.equal(pi.name(), "same title");
+	await commands["name-auto"].handler("", ctx);
 	assert.equal(calls, 2);
 	assert.equal(pi.setCallCount(), 1, "identical title must not re-set the session name");
 	assert.equal(pi.name(), "same title");
@@ -730,12 +732,13 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	});
 	await handlers.turn_end({}, ctx); // turn 1: first title
 	await waitFor(() => pi.setCallCount() === 1);
-	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx); // turn 11: identical regen
-	await waitFor(() => calls === 2);
+	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(calls, 1, "later turns must not call the model");
 	assert.equal(pi.name(), "same title");
 	assert.ok(commands["name-auto"], "/name-auto must be registered");
-	await commands["name-auto"].handler("", ctx); // forced regen: third model call
-	assert.equal(calls, 3, "/name-auto must run the model even when the title is unchanged");
+	await commands["name-auto"].handler("", ctx); // forced regen: second model call
+	assert.equal(calls, 2, "/name-auto must run the model even when the title is unchanged");
 	assert.equal(pi.setCallCount(), 1, "an unchanged title must not call setSessionName again");
 	assert.equal(pi.name(), "same title");
 	const toast = ctx.notifies.find((n: { msg: string }) => n.msg.includes("Title unchanged: same title"));
@@ -804,8 +807,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 }
 
 // 14f. /name-auto that regenerates the identical manual name reports
-// "unchanged" and still adopts the name as extension-owned, so cadence
-// regeneration resumes from it.
+// "unchanged" and still adopts the name as extension-owned.
 {
 	const pi = makePi("manual name");
 	mod.default(pi as any);
@@ -824,13 +826,18 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 		ctx.notifies.some((n: { msg: string }) => n.msg.includes("Title unchanged: manual name")),
 		"the unchanged manual name must be reported as a success",
 	);
-	// Ownership adopted: the next cadence point (turn 1, the first turn_end
-	// of this run's counter) regenerates without a lock. Only turn 1 is in
-	// range so the poll sees exactly one extra call.
-	for (let t = 1; t <= 10; t++) await handlers.turn_end({}, ctx);
+	// Ownership adopted: the session's one automatic attempt now regenerates
+	// (rather than locking as a pre-named session) and produces the same title,
+	// so nothing is written.
+	await handlers.turn_end({}, ctx);
 	await waitFor(() => calls === 2);
 	assert.equal(calls, 2, "ownership must be adopted after an unchanged forced regen");
 	assert.equal(pi.name(), "manual name");
+	assert.equal(pi.setCallCount(), 0, "an unchanged title must never be written");
+	// The automatic attempt is consumed: later turns never regenerate.
+	for (let t = 2; t <= 30; t++) await handlers.turn_end({}, ctx);
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(calls, 2, "the automatic attempt must not repeat");
 }
 
 // 14g. Failure reasons: an error response surfaces its (collapsed)
@@ -879,51 +886,6 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	);
 }
 
-// 15. Config reading and cadence honoring a configured interval.
-{
-	const dir = mkdtempSync(join(tmpdir(), "lsn-config-"));
-	const prevAgentDir = process.env.PI_CODING_AGENT_DIR;
-	try {
-		assert.equal(readTurnInterval(dir), 10, "missing config falls back to the default");
-		writeFileSync(join(dir, "llm-session-name.json"), JSON.stringify({ turnInterval: 3 }));
-		assert.equal(readTurnInterval(dir), 3);
-		writeFileSync(join(dir, "llm-session-name.json"), "{ not json");
-		assert.equal(readTurnInterval(dir), 10, "corrupt config falls back to the default");
-		writeFileSync(join(dir, "llm-session-name.json"), JSON.stringify({ turnInterval: 0 }));
-		assert.equal(readTurnInterval(dir), 10, "zero interval falls back to the default");
-		writeFileSync(join(dir, "llm-session-name.json"), JSON.stringify({ turnInterval: 2.5 }));
-		assert.equal(readTurnInterval(dir), 10, "non-integer interval falls back to the default");
-
-		// Cadence honors the configured interval: with turnInterval 3 the
-		// regeneration fires on turn 4.
-		writeFileSync(join(dir, "llm-session-name.json"), JSON.stringify({ turnInterval: 3 }));
-		process.env.PI_CODING_AGENT_DIR = dir;
-		const pi = makePi();
-		mod.default(pi as any);
-		await handlers.before_agent_start({ messageType: "user", prompt: "interval prompt" }, makeCtx());
-		let calls = 0;
-		const ctx = makeCtx({
-			complete: async () => {
-				calls++;
-				return textResponse(calls === 1 ? "t1" : "t2");
-			},
-			entries: [msgEntry("user", "recent")],
-		});
-		await handlers.turn_end({}, ctx);
-		await waitFor(() => calls === 1);
-		for (let t = 2; t <= 3; t++) await handlers.turn_end({}, ctx);
-		await waitFor(() => calls === 1); // settle
-		assert.equal(calls, 1);
-		await handlers.turn_end({}, ctx); // turn 4
-		await waitFor(() => calls === 2);
-		assert.equal(pi.name(), "t2");
-	} finally {
-		if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
-		rmSync(dir, { recursive: true, force: true });
-	}
-}
-
 // 16. Theme anchors come from the branch's original user messages, including
 // history from before /resume or /fork (not just prompts observed after
 // session_start). A branch without user messages falls back to the captured
@@ -953,8 +915,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 			msgEntry("user", "current subtask"),
 		],
 	});
-	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, resumedCtx);
-	await waitFor(() => completeCalls.length === 2);
+	await commands["name-auto"].handler("", resumedCtx);
 	assert.equal(completeCalls.length, 2);
 	const resumedSent = JSON.stringify(completeCalls[1]);
 	assert.ok(resumedSent.includes("pre-resume theme A"), "anchor from branch history before session_start");
@@ -964,17 +925,17 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 
 	// Branch without any user messages: fall back to the captured first prompt.
 	const fallbackCtx = makeCtx({ complete, entries: [msgEntry("assistant", "only assistant text")] });
-	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, fallbackCtx);
-	await waitFor(() => completeCalls.length === 3);
+	await commands["name-auto"].handler("", fallbackCtx);
 	assert.equal(completeCalls.length, 3);
 	const fallbackSent = JSON.stringify(completeCalls[2]);
 	assert.ok(fallbackSent.includes("post-resume prompt"), "anchor fallback uses the captured first prompt");
 	assert.ok(fallbackSent.includes("only assistant text"), "recent messages still sampled");
 }
 
-// 17. Fire-and-forget runs are guarded: a cadence point landing while a run
-// is still in flight is skipped (no overlapping model calls), and the next
-// cadence point regenerates normally once the run settles.
+// 17. Fire-and-forget runs are guarded: a forced /name-auto run already in
+// flight when the session's first turn arrives makes the automatic attempt be
+// skipped (no overlapping model calls). The automatic attempt is consumed and
+// is never retried on later turns.
 {
 	const pi = makePi();
 	mod.default(pi as any);
@@ -990,21 +951,23 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 		},
 		entries: [msgEntry("user", "recent")],
 	});
-	await handlers.turn_end({}, ctx); // turn 1: run starts, gated inside complete
-	await new Promise((r) => setTimeout(r, 20));
-	assert.equal(completeCalls.length, 1);
+	assert.ok(commands["name-auto"], "/name-auto must be registered");
+	const forced = commands["name-auto"].handler("", ctx); // in flight, gated inside complete
+	await waitFor(() => completeCalls.length === 1);
 
-	// Turns 2-11: turn 11 is a cadence point, but run 1 is still in flight.
-	for (let t = 2; t <= 11; t++) await handlers.turn_end({}, ctx);
-	assert.equal(completeCalls.length, 1, "in-flight cadence point must be skipped");
+	// The session's first turn lands while the forced run is still in flight.
+	await handlers.turn_end({}, ctx);
+	assert.equal(completeCalls.length, 1, "in-flight automatic attempt must be skipped");
 
 	release();
+	await forced;
 	await waitFor(() => pi.name() === "gated title");
+	assert.equal(pi.name(), "gated title");
 
-	// Next cadence point (turn 21) regenerates normally.
-	for (let t = 12; t <= 21; t++) await handlers.turn_end({}, ctx);
-	await waitFor(() => completeCalls.length === 2);
-	assert.equal(completeCalls.length, 2, "in-flight guard must clear after the run settles");
+	// The one automatic attempt was consumed: later turns never regenerate.
+	for (let t = 2; t <= 30; t++) await handlers.turn_end({}, ctx);
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(completeCalls.length, 1, "the automatic attempt must not be retried");
 }
 
 // 18. A rejecting complete mock never escapes the fire-and-forget run: the

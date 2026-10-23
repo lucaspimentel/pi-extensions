@@ -2,25 +2,25 @@
  * LLM Session Name Extension
  *
  * Generates a short session title from the first user prompt using the
- * session's active model, then keeps it fresh: the title regenerates from the
- * current title plus the session's original first two user prompts (theme
- * anchors, taken from branch history so they survive /resume and /fork) and
- * snippets of the last 10 user/assistant messages every `turnInterval` turns
- * (default 10). Each anchor is clipped to 1000 characters and each recent
- * message to 300 characters, independently. The interval is configurable via
- * <agentDir>/llm-session-name.json: {"turnInterval": N}. All names are set
- * via pi.setSessionName() so they show in the session selector and flow to
- * session_info_changed consumers (e.g. the herdr tab renamer). The very first
- * generation falls back to a truncated first prompt when the model call fails
- * (no model, no auth, API error, empty response); later regenerations keep
- * the existing name on failure.
+ * session's active model, once, on the session's first turn. The title is
+ * never regenerated automatically afterwards: /name-auto is the only way to
+ * regenerate it, from the current title plus the session's original first two
+ * user prompts (theme anchors, taken from branch history so they survive
+ * /resume and /fork) and snippets of the last 10 user/assistant messages.
+ * Each anchor is clipped to 1000 characters and each recent message to 300
+ * characters, independently. All names are set via pi.setSessionName() so
+ * they show in the session selector and flow to session_info_changed
+ * consumers (e.g. the herdr tab renamer). The automatic first generation
+ * falls back to a truncated first prompt when the model call fails (no model,
+ * no auth, API error, empty response); a regeneration keeps the existing name
+ * on failure.
  *
  * Title generation is fire-and-forget: turn_end is an actionable boundary
  * (pi awaits extension handlers before the next provider request), so the
  * title model call is never awaited there and never delays the agent loop.
- * A per-session in-flight guard skips cadence points that land while a run
- * is still pending; the generation counter discards runs that outlive their
- * session.
+ * A per-session in-flight guard skips the automatic first-turn run when a
+ * /name-auto run is still pending; the generation counter discards runs that
+ * outlive their session.
  *
  * Prompts are used as title sources only after skill-invocation serialization
  * is replaced: a <skill name="..." ...>...</skill> block carries the skill's
@@ -30,21 +30,20 @@
  * derivation applies to theme anchors and recent-turn samples.
  *
  * A manual /name rename always wins: the extension remembers the last title
- * it generated per session (lastGeneratedTitle). At a regeneration point, a
- * name that is set but does not match what we last generated is manual or
- * unattributable (restart, /resume, /fork), which locks the session against
- * regeneration. Clearing the name also locks. `/name-auto` forces one
- * regeneration that bypasses the lock; the new title is adopted as
- * extension-owned, so periodic regeneration resumes from it. The command
- * reports the outcome: applied, unchanged, nothing to title from, or a
- * failure with its cause.
+ * it generated per session (lastGeneratedTitle). When the automatic first
+ * turn runs, a name that is set but does not match what we last generated is
+ * manual or unattributable (restart, /resume, /fork), which locks the session
+ * so it is never titled. Clearing the name also locks. `/name-auto` forces one
+ * regeneration that bypasses the lock, and the new title is adopted as
+ * extension-owned. The command reports the outcome: applied, unchanged,
+ * nothing to title from, or a failure with its cause.
  *
  * Renames that bypass the live session manager are also honored. The live
  * getSessionName() reads an in-memory entry list that is loaded once when
  * the session opens and never refreshed, so a rename written by another
  * SessionManager instance (the session selector's ctrl+r rename, /name from
  * a second pi process on the same session file) stays invisible until the
- * session is resumed. To catch those, each cadence point also reads the
+ * session is resumed. To catch those, every title attempt also reads the
  * last session_info entry from the session file on disk: the live manager
  * persists every append synchronously, so disk and live only diverge when
  * someone else renamed the session. A divergence locks the session, and is
@@ -57,9 +56,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -72,8 +69,6 @@ const PROMPT_SAMPLE_LENGTH = 2000;
 // default keeps thinking on). A tight cap therefore returns no text and
 // reads as a title-generation failure; sanitizeTitle clips the answer.
 const MAX_TOKENS = 2048;
-const DEFAULT_TURN_INTERVAL = 10;
-const CONFIG_FILE = "llm-session-name.json";
 const RECENT_MESSAGE_COUNT = 10;
 const RECENT_MESSAGE_SAMPLE_LENGTH = 300;
 const INITIAL_PROMPT_COUNT = 2;
@@ -173,8 +168,9 @@ export const buildRegenerationPrompt = (
  * entry, normalized the way SessionManager normalizes names (newline runs
  * collapsed to spaces, trimmed; empty means no name). Returns undefined when
  * the file is missing, unreadable, or has no session_info entry, so callers
- * can fail open. Reads the whole file; called only at cadence points (once
- * per turnInterval turns) and after title model awaits.
+ * can fail open. Reads the whole file; called on every applyTitle attempt
+ * (the automatic first-turn run and each /name-auto) and after title model
+ * awaits.
  */
 export const readDiskSessionName = (sessionFile: string | undefined | null): string | undefined => {
 	if (!sessionFile) return undefined;
@@ -211,24 +207,6 @@ const externallyRenamed = (ctx: ExtensionContext, liveName: string): boolean => 
 	const sessionFile = (ctx.sessionManager as { getSessionFile?: () => string | undefined }).getSessionFile?.();
 	const disk = readDiskSessionName(sessionFile);
 	return disk !== undefined && disk !== liveName;
-};
-
-/**
- * Read the regeneration cadence from <agentDir>/llm-session-name.json
- * ({"turnInterval": N}). Missing, corrupt, or invalid values (non-integers,
- * below 1) fall back to DEFAULT_TURN_INTERVAL.
- */
-export const readTurnInterval = (agentDir: string = getAgentDir()): number => {
-	try {
-		const parsed = JSON.parse(readFileSync(join(agentDir, CONFIG_FILE), "utf8")) as {
-			turnInterval?: unknown;
-		} | null;
-		const value = parsed?.turnInterval;
-		if (typeof value === "number" && Number.isInteger(value) && value >= 1) return value;
-	} catch {
-		// Missing or corrupt config: use the default.
-	}
-	return DEFAULT_TURN_INTERVAL;
 };
 
 // ── Session entry helpers ────────────────────────────────────────────────────
@@ -316,7 +294,7 @@ type TitleGeneration = { ok: true; title: string } | { ok: false; reason: string
  * ownership ("unchanged" skips the redundant setSessionName); "noop" covers
  * nothing to work from and internal skips (locked, renamed, stale runner);
  * "failed" carries a user-facing cause. Only user-invoked callers
- * (/name-auto) surface the outcome; the turn_end cadence ignores it.
+ * (/name-auto) surface the outcome; the automatic first-turn run ignores it.
  */
 type TitleOutcome =
 	| { status: "applied"; title: string }
@@ -349,9 +327,9 @@ export default function (pi: ExtensionAPI) {
 	// First prompt of the current session, keyed by session id. Cleared on
 	// session_start so entries cannot accumulate across replacements.
 	const firstPromptBySession = new Map<string, string>();
-	// Turn counter per session, reset on session_start. Cadence points are the
-	// first turn, then every turnInterval turns (1, 1+N, 1+2N, ...).
-	const turnCountBySession = new Map<string, number>();
+	// Sessions whose single automatic first-turn title run has been attempted,
+	// reset on session_start.
+	const autoTitleFired = new Set<string>();
 	// The last name this extension set for a session. Absent means we never
 	// titled it; present but different from pi.getSessionName() means someone
 	// renamed it manually. Cleared on session_start (a name inherited by
@@ -362,11 +340,11 @@ export default function (pi: ExtensionAPI) {
 	const manualLock = new Set<string>();
 	// Sessions with a title run currently in flight. Title runs are
 	// fire-and-forget (turn_end is an actionable boundary; awaiting the model
-	// call would delay the next provider request), so two cadence points could
-	// overlap on very fast turns; skip the later one (the next cadence point
-	// picks it up) rather than racing two runs on setSessionName. Cleared on
-	// session_start. Staleness across session replacement is already handled
-	// by the generation counter inside applyTitle.
+	// call would delay the next provider request), so a /name-auto run can
+	// still be pending when the session's first turn arrives; skip the
+	// automatic attempt rather than racing two runs on setSessionName. Cleared
+	// on session_start. Staleness across session replacement is already
+	// handled by the generation counter inside applyTitle.
 	const titleRunsInFlight = new Set<string>();
 
 	async function generateTitle(ctx: ExtensionContext, prompt: string): Promise<TitleGeneration> {
@@ -519,8 +497,8 @@ export default function (pi: ExtensionAPI) {
 		// No thrash: never fire a redundant session_info_changed (and tab
 		// rename) when the generated title matches the current name. This is
 		// still a success for the caller (reported as "unchanged"), and the
-		// ownership bookkeeping below still runs so cadence regeneration
-		// resumes from this title.
+		// ownership bookkeeping below still runs so a later /name-auto resumes
+		// from this title.
 		if (title === current) {
 			lastGeneratedTitle.set(sessionId, title);
 			return { status: "unchanged", title };
@@ -548,16 +526,17 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_end", (_event, ctx) => {
-		// Turn counting and the cadence check are synchronous: turn_end is an
-		// actionable boundary (pi awaits handlers before the next provider
-		// request), so the title model call must never be awaited here. The run
-		// is fire-and-forget; the generation guard discards runs that outlive
-		// the session, and titleRunsInFlight skips overlapping cadence points.
+		// The automatic title fires once, on the session's first turn; later
+		// turns never regenerate (use /name-auto). Everything here is
+		// synchronous: turn_end is an actionable boundary (pi awaits handlers
+		// before the next provider request), so the title model call must never
+		// be awaited here. The run is fire-and-forget; the generation guard
+		// discards runs that outlive the session, and titleRunsInFlight skips
+		// the attempt when a /name-auto run is still pending.
 		try {
 			const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral";
-			const count = (turnCountBySession.get(sessionId) ?? 0) + 1;
-			turnCountBySession.set(sessionId, count);
-			if ((count - 1) % readTurnInterval() !== 0) return;
+			if (autoTitleFired.has(sessionId)) return;
+			autoTitleFired.add(sessionId);
 			if (titleRunsInFlight.has(sessionId)) return;
 			titleRunsInFlight.add(sessionId);
 			void applyTitle(ctx, sessionId, false)
@@ -573,8 +552,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("name-auto", {
 		description: "Regenerate the session title now (works even after a manual /name)",
 		handler: async (_args, ctx) => {
+			const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral";
+			// Mark the forced run in flight: the session's automatic first-turn
+			// attempt may land while this run awaits the model, and must be
+			// skipped rather than racing it on setSessionName.
+			titleRunsInFlight.add(sessionId);
 			try {
-				const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral";
 				manualLock.delete(sessionId);
 				const outcome = await applyTitle(ctx, sessionId, true);
 				switch (outcome.status) {
@@ -601,13 +584,15 @@ export default function (pi: ExtensionAPI) {
 				}
 			} catch {
 				ctx.ui.notify("Could not regenerate the session title.", "error");
+			} finally {
+				titleRunsInFlight.delete(sessionId);
 			}
 		},
 	});
 
 	pi.on("session_start", () => {
 		firstPromptBySession.clear();
-		turnCountBySession.clear();
+		autoTitleFired.clear();
 		lastGeneratedTitle.clear();
 		manualLock.clear();
 		titleRunsInFlight.clear();
