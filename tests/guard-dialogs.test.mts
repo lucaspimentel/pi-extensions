@@ -1012,7 +1012,7 @@ test("a successful save completes and cancels other pending dialogs instead of i
 		const other = tool.execute("id", { command: "echo $GUARD_DIALOGS_UNSET" }, undefined, undefined, ctx);
 		void other.catch(() => {});
 		await tick();
-		owned.pressDown(); // highlight "Save allow for project"
+		owned.pressDown(); owned.pressDown(); // highlight "Save allow for project"
 		owned.pressEnter();
 		await owned.waitForOverlays(2);
 		owned.pressEnter(); // submit the prefilled exact-rule bundle unchanged
@@ -1848,6 +1848,7 @@ test("an explicit ask rule offers deny saves but never allow saves", async () =>
 		assert.match(menu, /Save deny for project/, "explicit ask permits deny saves");
 		assert.match(menu, /Save deny for user/);
 		assert.doesNotMatch(menu, /Save allow for/, "explicit ask never offers allow saves");
+		assert.doesNotMatch(menu, /Allow for this session/, "explicit ask never offers a session grant either");
 		owned.pressEsc();
 		await assert.rejects(pending, /denied/, "selector cancellation denies");
 		assert.equal(h.steering.length, 0, "selector cancellation skips steering");
@@ -1869,7 +1870,7 @@ test("a compound allow bundle saves per-step rules and runs the original command
 		assert.match(menu, /Breakdown:/, "the reliable breakdown is rendered");
 		assert.match(menu, /\[✓\] echo one/, "the tier-allowed step is shown");
 		assert.match(menu, / » \[\?\] touch compound-marker/, "the prompting step is shown");
-		owned.pressDown(); // "Save allow for project"
+		owned.pressDown(); owned.pressDown(); // "Save allow for project"
 		owned.pressEnter();
 		await owned.waitForOverlays(2);
 		owned.pressEnter(); // submit the prefilled bundle unchanged
@@ -1881,6 +1882,9 @@ test("a compound allow bundle saves per-step rules and runs the original command
 		assert.equal(result.structuredContent.exit_code, 0, "the original compound command ran unchanged");
 		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
 		assert.deepEqual(saved.hostBash?.allow, ["HostBash(touch compound-marker)"], "only the step lacking permission was saved");
+		// No session state reaches disk: the file contains exactly the reviewed patch
+		// under exactly the expected top-level keys.
+		assert.deepEqual(saved, { hostBash: { allow: ["HostBash(touch compound-marker)"] } });
 	});
 });
 
@@ -1899,7 +1903,7 @@ test("a saved deny commits the rule, then delivers steering once", async () => {
 		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "curl https://guard-deny.example" }, undefined, undefined, ctx);
 		void pending.catch(() => {});
 		await owned.waitForOverlays(1);
-		for (let i = 0; i < 5; i++) owned.pressDown(); // "Save deny for user"
+		for (let i = 0; i < 6; i++) owned.pressDown(); // "Save deny for user"
 		owned.pressEnter();
 		// The step picker opens with nothing preselected, even for one step.
 		await owned.waitForOverlays(2);

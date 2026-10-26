@@ -735,7 +735,7 @@ test("explicit asks offer once/deny only; fallback saves exact effective rules",
 		assert.doesNotMatch(overlays[0].text, /Save allow for/, "explicit ask never offers allow saves");
 		assert.match(overlays[3].text, /Confirm deny save \(project\)/);
 		assert.deepEqual(JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")).hostBash.deny, ["HostBash(/^echo asked$/)"]);
-		const saveOverlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]); // "Save allow for project"
+		const saveOverlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2]); // "Save allow for project"
 		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
 		assert.equal(saveOverlays[0].kind, "selector");
 		assert.equal(result.structuredContent.exit_code, 0);
@@ -787,7 +787,7 @@ test("accepting a save while sandbox work runs waits for teardown before writing
 		const executing = worker.execute("id", { code: `import time\nopen(${JSON.stringify(marker)}, 'w').write('ready')\ntime.sleep(2)` }, undefined, undefined, ctx);
 		for (let i = 0; i < 300 && !fs.existsSync(marker); i++) await new Promise((resolve) => setTimeout(resolve, 10));
 		assert.equal(fs.existsSync(marker), true);
-		installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]); // "Save allow for project"
+		installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2]); // "Save allow for project"
 		const saved = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
 		await executing;
 		assert.equal(saved.structuredContent.exit_code, 0);
@@ -805,7 +805,7 @@ test("project rule saving does not quarantine guard's own newly created config w
 		await h.handlers.session_start[0]({}, ctx);
 		const worker = h.registeredTools.get("python")!;
 		assert.equal((await worker.execute("id", { code: "1 + 1" }, undefined, undefined, ctx)).structuredContent.status, "ok");
-		installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]); // "Save allow for project"
+		installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2]); // "Save allow for project"
 		await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
 		assert.equal((await worker.execute("id", { code: "2 + 2" }, undefined, undefined, ctx)).structuredContent.status, "ok");
 		assert.equal(fs.existsSync(projectConfigPath(cwd)), true);
@@ -1146,7 +1146,7 @@ test("per-step allow save: partial commit re-prompts with the saved step allowed
 		await h.handlers.session_start[0]({}, ctx);
 		// Default picker action toggles the highlighted (preselected) first step
 		// off, so only the second prompting step is saved.
-		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1, 0]);
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2, 0]);
 		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, undefined, undefined, ctx);
 		assert.equal(result.structuredContent.exit_code, 0, "the compound command executed after the second dialog");
 		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "picker", "editor", "preview", "selector"], "a fresh approval dialog followed the partial save");
@@ -1172,7 +1172,7 @@ test("per-step allow save: full coverage commits once, executes, and omits the s
 		const cwd = makeTempDir("guard-perstep-full-");
 		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
-		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]); // "Save allow for project"
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2]); // "Save allow for project"
 		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
 		assert.equal(result.structuredContent.exit_code, 0, "the call executed without a further prompt");
 		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "editor", "preview"], "a single prompting step skips the picker and no second dialog opens");
@@ -1190,7 +1190,7 @@ test("per-step allow save: picker esc returns to the menu; Allow once then execu
 		const cwd = makeTempDir("guard-perstep-picker-esc-");
 		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
-		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1, 0], { picker: (c) => c.handleInput("\x1b") });
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2, 0], { picker: (c) => c.handleInput("\x1b") });
 		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, undefined, undefined, ctx);
 		assert.equal(result.structuredContent.exit_code, 0, "Allow once executed after returning to the menu");
 		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "picker", "selector"], "the menu was reopened after the picker esc");
@@ -1205,7 +1205,7 @@ test("per-step allow save: editor cancellation mid-loop allows once and saves no
 		const cwd = makeTempDir("guard-perstep-editor-esc-");
 		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
-		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1], { editor: (c) => c.handleInput("\x1b") });
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2], { editor: (c) => c.handleInput("\x1b") });
 		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, undefined, undefined, ctx);
 		assert.equal(result.structuredContent.exit_code, 0, "the documented allow-once fallback still applies");
 		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "picker", "editor"]);
@@ -1222,12 +1222,14 @@ test("per-step allow save: cancellation after the commit keeps the rule but neve
 		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
 		const abort = new AbortController();
-		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1], {
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2], {
 			// Answer the first menu, then abort during the fresh dialog's selector:
 			// the saved rule persists, but the call never executes and no
 			// authorization is carried across.
 			selector: (component, index) => {
 				if (index === 0) {
+					// Two downs: "Allow once" -> "Allow for this session" -> "Save allow for project".
+					component.handleInput("\u001b[B");
 					component.handleInput("\u001b[B");
 					component.handleInput("\r");
 					return;
@@ -1252,9 +1254,11 @@ test("per-step allow save: an external policy change between iterations expires 
 		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
 		let secondSelector = false;
-		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1], {
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2], {
 			selector: (component, index) => {
 				if (index === 0) {
+					// Two downs: "Allow once" -> "Allow for this session" -> "Save allow for project".
+					component.handleInput("\u001b[B");
 					component.handleInput("\u001b[B");
 					component.handleInput("\r");
 					return;
@@ -1290,9 +1294,9 @@ test("initial selector esc denies without saving or executing; deny saves now an
 		}
 		h.notifications.length = 0;
 		{
-			// Deny save: menu downs 4 to "Save deny for project", default picker
+			// Deny save: menu downs 5 to "Save deny for project", default picker
 			// and editor/preview actions, no steering input.
-			installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [4]);
+			installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [5]);
 			await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx), /denied/);
 			const denyNotices = h.notifications.filter((n) => /saved \d+ deny rule/.test(n));
 			assert.equal(denyNotices.length, 1, "the previously silent deny save now announces itself");
@@ -1301,6 +1305,262 @@ test("initial selector esc denies without saving or executing; deny saves now an
 			const cfg = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { deny?: string[] } };
 			assert.deepEqual(cfg.hostBash?.deny, ["HostBash(/^echo \\$GUARD_HARNESS_UNSET$/)"]);
 		}
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+// ── Session host-shell rules ("Allow for this session") ──────────────────────
+
+test("session allow grants memory-only rules, runs matching commands without a dialog, and writes no config", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-session-allow-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		// Owned stages, so the session action is offered; menu downs 1 selects it.
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]);
+		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
+		assert.equal(result.structuredContent.exit_code, 0, "the granted call still executes");
+		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "editor", "preview"], "a single prompting step skips the picker");
+		assert.match(overlays[0].text, /Allow for this session/, "the session action is offered");
+		assert.match(overlays[2].text, /Confirm allow for this session\?/);
+		assert.match(overlays[2].text, /Destination: this session only/);
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false, "no project config was written");
+		assert.equal(fs.existsSync(userConfigPath(process.env.HOME!)), false, "no user config was written");
+		const notices = h.notifications.filter((n) => /granted for this session/.test(n));
+		assert.equal(notices.length, 1, "the grant is announced");
+		assert.match(notices[0], /memory only, nothing was written to the config/);
+		// The same command now runs with no dialog at all.
+		const again = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
+		assert.equal(again.structuredContent.exit_code, 0);
+		assert.equal(overlays.length, 3, "no further dialog opened");
+		// /guard list reports the session rules separately from the persistent ones.
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("list", ctx);
+		const list = h.notifications.join("\n");
+		assert.match(list, /host shell rules: 0 deny, 0 ask, 0 allow/, "persistent rules stay zero");
+		assert.match(list, new RegExp(`session host-shell rules \\(this session only, never written to config\\): 1 allow @ ${cwd}`));
+		assert.match(list, /session rules in force here: HostBash\(echo \$GUARD_HARNESS_UNSET\)/);
+		// Child isolation: the subagent handshake still carries the profile only, never
+		// the parent's session grants.
+		h.emitted.length = 0;
+		h.eventListeners["guard:subagent-snapshot-request"][0]({ id: "sub-1", cwd });
+		const ack = h.emitted.find(([name]) => name === "guard:subagent-snapshot-ack")![1] as Record<string, unknown>;
+		assert.deepEqual(Object.keys(ack).sort(), ["id", "ok", "profile", "version"], "the snapshot payload has no rule field");
+		assert.equal(ack.ok, true);
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("session allow survives tree navigation, reloads, and profile changes, and is discarded by a fresh session", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-session-lifetime-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]);
+		await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_SESSION_KEEP" }, undefined, undefined, ctx);
+		assert.equal(overlays.length, 3);
+		const runSilently = async (label: string) => {
+			const before = overlays.length;
+			const run = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_SESSION_KEEP" }, undefined, undefined, ctx);
+			assert.equal(run.structuredContent.exit_code, 0, label);
+			assert.equal(overlays.length, before, `${label}: no dialog`);
+		};
+		await h.handlers.session_tree[0]({}, ctx);
+		await runSilently("after a tree replacement");
+		await h.commandHandlers.get("guard")!("reload", ctx);
+		await runSilently("after a config reload");
+		await h.commandHandlers.get("guard")!("profile auto", ctx);
+		await h.commandHandlers.get("guard")!("profile default", ctx);
+		await runSilently("after profile changes");
+		// A fresh session start clears the grants: the command prompts again and the
+		// session action is gone from the menu.
+		await h.handlers.session_start[0]({}, ctx);
+		const afterFresh = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [], { selector: (component: any) => component.handleInput("\x1b") });
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_SESSION_KEEP" }, undefined, undefined, ctx), /denied/);
+		// The rejected call proves the rules are gone; the action itself stays
+		// available, since eligibility is about creating a grant, not about having one.
+		assert.match(afterFresh[0].text, /Save allow for project/, "persistent saves are offered again");
+		assert.match(afterFresh[0].text, /Allow for this session/, "a new session grant can still be created");
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("list", ctx);
+		assert.match(h.notifications.join("\n"), /session host-shell rules \(this session only, never written to config\): \(none\)/);
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("session allow is scoped to the granting workspace and its descendants; another workspace stays dormant", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const parent = makeTempDir("guard-session-scope-");
+		const origin = path.join(parent, "origin");
+		const descendant = path.join(origin, "nested");
+		const other = path.join(parent, "other");
+		for (const dir of [origin, descendant, other]) fs.mkdirSync(dir, { recursive: true });
+		const ctx = harnessCtx(h, origin);
+		await h.handlers.session_start[0]({}, ctx);
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]);
+		await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_SCOPE_PROBE" }, undefined, undefined, ctx);
+		assert.equal(overlays.length, 3);
+		// A descendant workspace keeps the grant active (session_tree reloads the
+		// config for the new cwd and rebuilds the runtime policy).
+		ctx.cwd = descendant;
+		await h.handlers.session_tree[0]({}, ctx);
+		const inDescendant = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_SCOPE_PROBE" }, undefined, undefined, ctx);
+		assert.equal(inDescendant.structuredContent.exit_code, 0);
+		assert.equal(overlays.length, 3, "a descendant runs silently");
+		// A sibling workspace is out of scope: the command prompts again and the
+		// session action is no longer eligible there (the current policy allows it,
+		// so no allow plan exists).
+		ctx.cwd = other;
+		await h.handlers.session_tree[0]({}, ctx);
+		const sibling = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [], { selector: (component: any) => component.handleInput("\x1b") });
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_SCOPE_PROBE" }, undefined, undefined, ctx), /denied/);
+		assert.match(sibling[0].text, /Why: /, "the sibling command prompts: the origin grant is dormant here");
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("list", ctx);
+		const list = h.notifications.join("\n");
+		assert.match(list, /dormant/, "the out-of-scope record is reported as dormant");
+		assert.doesNotMatch(list, /session rules in force here/, "no session rule applies in the sibling workspace");
+		// Returning to the granting workspace reactivates the record.
+		ctx.cwd = origin;
+		await h.handlers.session_tree[0]({}, ctx);
+		const back = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_SCOPE_PROBE" }, undefined, undefined, ctx);
+		assert.equal(back.structuredContent.exit_code, 0);
+		assert.equal(overlays.length, 3, "the origin runs silently again");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("session rules never leak into a persistent save", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-session-noleak-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const sessionOverlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1]); // "Allow for this session"
+		await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_SESSION_ONE" }, undefined, undefined, ctx);
+		assert.equal(sessionOverlays.length, 3);
+		// Byte-level isolation: neither scope wrote anything for the session grant.
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false, "the project config is untouched by the session grant");
+		assert.equal(fs.existsSync(userConfigPath(process.env.HOME!)), false, "the user config is untouched by the session grant");
+		// A later persistent allow save for a different command writes only its own
+		// reviewed rules, never the session grant.
+		installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2]); // "Save allow for project"
+		await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_PERSIST_TWO" }, undefined, undefined, ctx);
+		const saved = savedRules(cwd);
+		assert.deepEqual(saved, ["HostBash(echo $GUARD_PERSIST_TWO)"], "only the reviewed persistent rule was written");
+		assert.ok(!saved.some((rule) => rule.includes("GUARD_SESSION_ONE")), "the session rule is absent from disk");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("the session action is hidden when the granting workspace identity cannot be resolved", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = path.join(makeTempDir("guard-session-unresolved-"), "gone");
+		fs.mkdirSync(cwd);
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		// The workspace no longer resolves, so no session grant could be installed: the
+		// action is hidden before the dialog rather than offered and then failed.
+		fs.rmdirSync(cwd);
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [], { selector: (component: any) => component.handleInput("\x1b") });
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_UNRESOLVED" }, undefined, undefined, ctx), /denied/);
+		assert.match(overlays[0].text, /Save allow for project/, "persistent allow saves stay offered");
+		assert.doesNotMatch(overlays[0].text, /Allow for this session/, "the session action is hidden");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("session allow fails closed when the workspace identity disappears before the commit", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-session-vanish-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1], {
+			// Remove the workspace while the editor is open: the commit-time identity
+			// re-resolution must fail closed, granting and executing nothing.
+			editor: (component: any) => {
+				fs.rmdirSync(cwd);
+				component.handleInput("\r");
+			},
+		});
+		await assert.rejects(
+			h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_SESSION_VANISH" }, undefined, undefined, ctx),
+			/workspace identity could not be resolved/,
+		);
+		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "editor", "preview"], "the interaction completed before the commit failed");
+		assert.equal(h.notifications.some((n) => /granted for this session/.test(n)), false, "no grant was announced");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("aborting a session grant after its commit keeps the rules but never executes the stale call", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-session-abort-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const abort = new AbortController();
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1], {
+			// The first menu grants the session rules for a compound command with a
+			// partial selection (second step only); the fresh dialog that follows is
+			// aborted, so the committed grant persists but nothing executes.
+			selector: (component: any, index: number) => {
+				if (index === 0) {
+					component.handleInput("\u001b[B"); // "Allow for this session"
+					component.handleInput("\r");
+					return;
+				}
+				abort.abort();
+			},
+			picker: (component: any) => {
+				// Deselect the preselected first step so only the second is granted.
+				component.handleInput(" ");
+				component.handleInput("\r");
+			},
+		});
+		await assert.rejects(
+			h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, abort.signal, undefined, ctx),
+			/abort|cancel|expired/,
+		);
+		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "picker", "editor", "preview", "selector"], "the grant committed, then the fresh dialog opened before the abort");
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false, "nothing was written to disk");
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("list", ctx);
+		assert.match(h.notifications.join("\n"), /session rules in force here: HostBash\(echo \$GUARD_SECOND_UNSET\)/, "the partial grant persists for the session");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("session allow: a partial grant re-prompts and the second dialog completes the call", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-session-partial-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		// First menu: "Allow for this session". The picker's default action toggles
+		// the preselected first step off, so only the second prompting step is
+		// granted; the fresh dialog then answers "Allow once" (index 0).
+		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [1, 0]);
+		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: COMPOUND }, undefined, undefined, ctx);
+		assert.equal(result.structuredContent.exit_code, 0, "the compound command executed after the second dialog");
+		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "picker", "editor", "preview", "selector"], "a fresh approval dialog followed the partial grant");
+		assert.ok(overlays[4].text.includes("» [?] echo $GUARD_HARNESS_UNSET"), "the unselected step still prompts in the fresh breakdown", overlays[4].text);
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false, "the grant stayed in memory");
+		const notices = h.notifications.filter((n) => /granted for this session/.test(n));
+		assert.equal(notices.length, 1, "exactly one grant notification");
+		assert.match(notices[0], /; 1 step\(s\) still prompt/);
+		// Exactly the selected step's rule was granted, and it applies on its own.
+		h.notifications.length = 0;
+		await h.commandHandlers.get("guard")!("list", ctx);
+		assert.match(h.notifications.join("\n"), /session rules in force here: HostBash\(echo \$GUARD_SECOND_UNSET\)/);
+		const standalone = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_SECOND_UNSET" }, undefined, undefined, ctx);
+		assert.equal(standalone.structuredContent.exit_code, 0, "the granted step runs on its own");
+		assert.equal(overlays.length, 5, "the granted rule needs no dialog");
 		await h.handlers.session_shutdown[0]({}, ctx);
 	});
 });

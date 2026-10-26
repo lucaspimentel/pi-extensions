@@ -176,7 +176,23 @@ Registration details:
   extensions using the unsafe `ui.custom` path are not fixed by this.
 - An explicit HostBash/Pwsh **ask-rule match** offers allow once, deny once
   (with optional steering), and supported deny saves; saving cannot override
-  the ask and no allow save is offered.
+  the ask, and neither an allow save nor a session grant is offered.
+- **Allow for this session** (capable TUI hosts, eligible allow plans only,
+  and only when the workspace's canonical identity resolves): the same
+  per-step picker, rule editor, validation, and preview as a persistent allow
+  save, but the reviewed rules are installed in memory alone. Nothing is
+  written to the config, and the grant is bound to the granting workspace and
+  its descendants: it applies there and stays dormant elsewhere in the
+  session, so navigating back reactivates it. Grants survive compaction,
+  tree navigation, `/guard reload`, and profile changes, are never inherited
+  by subagent children, and are discarded by a fresh session or restart.
+  Matching rules authorize their steps independently, including outside the
+  original sequence. `/guard list` reports each record with its workspace and
+  its active/dormant state (there is no revocation command; a fresh session
+  is the way to clear them). Cancellation matches a persistent save: picker
+  esc or an empty selection returns to the action menu, and editor/preview
+  cancellation grants nothing and approves the current call once, while
+  abort, staleness, or an unresolvable workspace identity fails closed.
 - Approval prompts use the pi-tool-permissions prompt format: a friendly
   header ("Allow Bash?", or "Allow Bash subcommand?" for a multi-step
   breakdown), the full command (truncated at 200 characters) or the code for
@@ -227,9 +243,9 @@ Registration details:
   denies without steering. Once handed to the SDK, existing SDK semantics
   apply: input hooks may delay dispatch beyond a later abort, and guard
   claims no post-dispatch cancellation.
-- In RPC mode persistent saves are deferred: once actions, session read
-  grants, and signal-aware native steering input remain, and no native
-  editor is ever invoked.
+- In RPC mode persistent saves and session command grants are deferred:
+  once actions, session read grants, and signal-aware native steering input
+  remain, and no native editor is ever invoked.
 - A fallback prompt (capability-limited hosts) offers allow once or deny
   once; existing ask/deny rules are never removed.
 - If policy changes while a dialog is open, the approval is stale: nothing
@@ -467,7 +483,7 @@ corrupt file is ignored with a warning and never discards the other scope.
 |---|---|
 | `/guard` | profile picker (all seven profiles) |
 | `/guard help` | usage |
-| `/guard list` | profile, holder, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, discovery scan settings (cap, timeout, pruned basenames, collisions), webFetchAllow count, host-shell rule counts, read/write roots, toolClasses count, classifier, debug state |
+| `/guard list` | profile, holder, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, discovery scan settings (cap, timeout, pruned basenames, collisions), webFetchAllow count, persistent host-shell rule counts, session host-shell grants (workspace, active/dormant) and the session rules in force for the current workspace, read/write roots, toolClasses count, classifier, debug state |
 | `/guard reload` | reload guard.json, refresh sandbox detection, clear the annotation cache |
 | `/guard profile [name]` | set a profile directly (`unrestricted` included) |
 | `/guard model` / `/guard model clear` | pin the auto-mode classifier model to user config (picker over models with configured auth; `clear` resumes auto-select). A project-scope `classifier` pin in `.pi/guard.local.json` overrides the user pin and is a manual config edit |
@@ -713,7 +729,11 @@ process tree down, and `kill(-pid)` on the returned child's pid works too.
   `tests/guard-runtime.test.mts` (queue, transitions, locks, dialogs), and
   `tests/guard-harness.test.mts` (extension entry point with a fake pi API).
   The dialog/save/explanation surfaces have their own suites
-  (`tests/guard-{dialogs,ask-overlay,ask-inline,ask-components,explain,save,prompt-flow,render-call,shell-hints,subagent}.test.mts`);
+  (`tests/guard-{dialogs,ask-overlay,ask-inline,ask-components,explain,save,session-shell-rules,prompt-flow,render-call,shell-hints,subagent}.test.mts`);
+  `tests/guard-session-shell-rules.test.mts` covers the memory-only session
+  grant store on its own (workspace/descendant scope, symlink containment,
+  dedupe, dormant reactivation), while the harness and dialog suites cover
+  the approval wiring, disk isolation, and lifecycle;
   the script wires all of them, together with the read-only git/gh tool
   suites, in one run.
   The sandbox and worker integration suites drive the real sandbox (escape

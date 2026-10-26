@@ -11,9 +11,10 @@
  *
  * Typed outcomes distinguish explicit user denial, initial-selector
  * cancellation, ordinary save cancellation, once approval, reviewed
- * persistent saves, root grant/no-grant. Owner invalidation never appears
- * here: it propagates as a thrown error through the dialog signal, never as
- * an ordinary cancellation result.
+ * persistent saves, reviewed memory-only session grants, root
+ * grant/no-grant. Owner invalidation never appears here: it propagates as a
+ * thrown error through the dialog signal, never as an ordinary cancellation
+ * result.
  */
 
 import type { ConfigScope, SuggestedPatch } from "./policy/suggest.ts";
@@ -43,6 +44,7 @@ export type ExecutionFlowOutcome =
 	| { kind: "allow-once" }
 	| { kind: "deny-once"; explicit: boolean; steering: SteeringText }
 	| { kind: "save-allow"; scope: ConfigScope; planKind: "whole-call" | "per-step"; rules: string[]; selectedOccurrenceIds: readonly number[]; patch: SuggestedPatch; previewText: string }
+	| { kind: "session-allow"; planKind: "whole-call" | "per-step"; rules: string[]; selectedOccurrenceIds: readonly number[]; previewText: string }
 	| { kind: "save-deny"; scope: ConfigScope; rules: string[]; patch: SuggestedPatch; steering: SteeringText; previewText: string };
 
 export type ReadFlowOutcome =
@@ -58,6 +60,7 @@ export type DestinationFor = (scope: ConfigScope) => string;
 type EditorLoopResult = { kind: "ok"; rules: string[]; text: string } | { kind: "cancelled" };
 
 const ALLOW_EDITOR_CONSEQUENCE = "cancelling or empty submission approves the current call once without saving";
+const SESSION_EDITOR_CONSEQUENCE = "cancelling or empty submission approves the current call once without granting";
 const DENY_EDITOR_CONSEQUENCE = "cancelling or empty submission denies the current call once without saving";
 const ROOT_EDITOR_CONSEQUENCE = "cancelling or empty submission grants nothing";
 
@@ -243,6 +246,14 @@ export interface ExecutionPromptDeps {
 	explanation: HostShellExplanation | null;
 	allowPlan: AllowSavePlan | null;
 	denySaveSupported: boolean;
+	/**
+	 * Offer "Allow for this session" (memory-only rules): eligible allow plan,
+	 * owned editor stages, and a workspace whose canonical identity resolved.
+	 * Omitted/false hosts never see the action.
+	 */
+	sessionAllowSupported?: boolean;
+	/** Display-only label for the session grant's workspace scope. */
+	sessionScopeLabel?: string;
 	shell: "host-bash" | "pwsh";
 	scopes: readonly ConfigScope[];
 	parseRules(text: string): { ok: true; rules: string[] } | { ok: false; error: string };
@@ -266,9 +277,11 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 	const { io, signal } = deps;
 	const editorAvailable = typeof io.editor === "function";
 	const title = executionPromptTitle(deps);
+	const sessionLabel = deps.sessionScopeLabel ?? "this workspace";
 	for (;;) {
 		const options = [
 			"Allow once",
+			...(deps.allowPlan && editorAvailable && deps.sessionAllowSupported ? ["Allow for this session"] : []),
 			...(deps.allowPlan && editorAvailable ? deps.scopes.map((scope) => `Save allow for ${scope}`) : []),
 			"Deny once",
 			...(deps.denySaveSupported && editorAvailable ? deps.scopes.map((scope) => `Save deny for ${scope}`) : []),
@@ -280,9 +293,16 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 		if (answer === "Deny once") {
 			return { kind: "deny-once", explicit: true, steering: await collectSteering(io, signal, `denied: ${deps.command || deps.toolName}`) };
 		}
-		if (answer.startsWith("Save allow for ")) {
-			const scope = answer.slice("Save allow for ".length) as ConfigScope;
-			if (!deps.allowPlan) throw new Error("guard: no validated allow plan; save-allow must not be offered");
+		if (answer === "Allow for this session" || answer.startsWith("Save allow for ")) {
+			// Hiding an action is not an authorization check: reject an answer the
+			// caller never offered (a forged or scripted action string).
+			const session = answer === "Allow for this session";
+			if (!deps.allowPlan) throw new Error("guard: no validated allow plan; allow saving must not be offered");
+			if (!editorAvailable) throw new Error("guard: the editor stage is unavailable; allow saving must not be offered");
+			if (session && !deps.sessionAllowSupported) throw new Error("guard: session allow was not offered");
+			const scope = session ? undefined : answer.slice("Save allow for ".length) as ConfigScope;
+			// One label names the chosen destination in every stage of the flow.
+			const target = session ? "this session" : scope!;
 			const plan = deps.allowPlan;
 			const prompting = (deps.explanation?.steps ?? []).filter((step) => step.decision.action !== "allow");
 			// Per-step plans offer step selection (the deny picker component) when
@@ -301,7 +321,9 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 						selectable: step.decision.action !== "allow",
 					}));
 					const picked = await io.picker(
-						`Select the steps to allow (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nEach selected step gets an exact allow rule that also authorizes matching commands outside this sequence; deselect steps to narrow the save`,
+						session
+							? `Select the steps to allow (${target})\nFull command:\n  ${truncateCommand(deps.command)}\nEach selected step gets an allow rule that also authorizes matching commands outside this sequence; deselect steps to narrow the grant`
+							: `Select the steps to allow (${target})\nFull command:\n  ${truncateCommand(deps.command)}\nEach selected step gets an exact allow rule that also authorizes matching commands outside this sequence; deselect steps to narrow the save`,
 						pickerSteps,
 						signal,
 						{ preselectedOccurrenceIds: prompting.map((step) => step.occurrenceId), requireSelection: false },
@@ -330,10 +352,10 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 				? selected.map((id) => stepById.get(id)?.allowSubject).filter((value): value is string => value !== undefined)
 				: [deps.command];
 			const noteFor = (text: string): string | undefined => notExactNoteFor(text, allowReferences);
-			const baseTitle = `Edit the allow rules to save (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;
+			const baseTitle = `Edit the allow rules to ${session ? "grant" : "save"} (${target})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;
 			const runEditor = (): Promise<EditorLoopResult> => editorSaveLoop(io, signal, {
 				title: baseTitle,
-				consequence: ALLOW_EDITOR_CONSEQUENCE,
+				consequence: session ? SESSION_EDITOR_CONSEQUENCE : ALLOW_EDITOR_CONSEQUENCE,
 				prefill,
 				noteFor,
 				parse: deps.parseRules,
@@ -346,20 +368,21 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 			const buildPreview = (rules: string[]): string => {
 				const note = notExactNoteFor(rules.join("\n"), allowReferences);
 				const lines = [
-					`Confirm allow save (${scope})?`,
-					"Rules to save:",
+					session ? "Confirm allow for this session?" : `Confirm allow save (${scope})?`,
+					session ? "Rules to grant:" : "Rules to save:",
 					...rules,
 					...(note ? [note] : []),
-					`Destination: ${deps.destination(scope)}`,
+					session ? "Destination: this session only (memory; nothing is written to the config)" : `Destination: ${deps.destination(scope!)}`,
 				];
+				if (session) lines.push(`Lifetime: this session only; the rules apply in ${sessionLabel} and its subdirectories, and are discarded when the session ends`);
 				if (plan.kind === "per-step") {
 					lines.push("Effect: each rule permits its matching step independently, including outside this sequence; together they allow the selected steps");
-					if (coversPrompting) lines.push("The call executes without a further prompt after this save");
-					else lines.push("The call still prompts for the unselected steps; a fresh approval dialog follows the commit");
+					if (coversPrompting) lines.push(session ? "The call executes without a further prompt after this grant" : "The call executes without a further prompt after this save");
+					else lines.push(session ? "The call still prompts for the unselected steps; a fresh approval dialog follows the grant" : "The call still prompts for the unselected steps; a fresh approval dialog follows the commit");
 				} else {
 					lines.push("Effect: the rule permits the exact current command");
 				}
-				lines.push("Cancelling here approves the current call once without saving");
+				lines.push(session ? "Cancelling here approves the current call once without granting" : "Cancelling here approves the current call once without saving");
 				return lines.join("\n");
 			};
 			const preview = await previewLoop(io, signal, {
@@ -369,9 +392,16 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 			});
 			// Ordinary editor/preview cancellation saves nothing and approves once.
 			if (preview.kind === "cancelled") return { kind: "allow-once" };
+			if (session) return {
+				kind: "session-allow",
+				planKind: plan.kind,
+				rules: preview.rules,
+				selectedOccurrenceIds: plan.kind === "per-step" ? selected : [],
+				previewText: preview.previewText,
+			};
 			return {
 				kind: "save-allow",
-				scope,
+				scope: scope!,
 				planKind: plan.kind,
 				rules: preview.rules,
 				selectedOccurrenceIds: plan.kind === "per-step" ? selected : [],

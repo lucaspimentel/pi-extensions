@@ -330,6 +330,17 @@ test("inheritance contract round-trips every profile", () => {
 	}
 });
 
+test("the inheritance contract carries the profile only, never session grants", () => {
+	const raw = serializeInheritance("trusted", "nonce-2");
+	const parsed = parseInheritance(raw);
+	assert.equal(parsed.ok, true);
+	if (!parsed.ok) return;
+	assert.deepEqual(Object.keys(parsed.contract).sort(), ["nonce", "profile", "version"], "no rule or root field can be smuggled into the child contract");
+	// Exact serialized bytes: a new field cannot be added to the child payload
+	// without failing this assertion.
+	assert.equal(raw, JSON.stringify({ version: INHERITANCE_VERSION, profile: "trusted", nonce: "nonce-2" }));
+});
+
 test("inheritance contract distinguishes an absent variable from an invalid one", () => {
 	const absent = parseInheritance(undefined);
 	assert.equal(absent.ok, false);

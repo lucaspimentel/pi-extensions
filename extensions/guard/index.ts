@@ -29,6 +29,7 @@ import { runExecutionPrompt, runReadGrantPrompt, runWriteEditPrompt, type Prompt
 import { createGuardEditorStage, createGuardPickerStage } from "./ask-components.ts";
 import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, releaseResearchHold, requestResearchHold, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
 import { constraintFromParse, INHERIT_ENV, INHERITANCE_VERSION, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
+import { resolveWorkspaceScope, scopeContains, SessionShellRuleStore, type SessionShellScope } from "./session-shell-rules.ts";
 import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
 import { modelLabel, pickableModels } from "../shared/model-selection.ts";
 
@@ -118,6 +119,12 @@ export default function guard(pi: ExtensionAPI) {
 	const dialogs = new DialogGate();
 	let lastCtx: ExtensionContext | null = null;
 	let debugEnabled = false;
+	// Session-scoped host-shell allow rules ("Allow for this session"):
+	// reviewed rules held in memory only, bound to the granting workspace and
+	// its descendants, never written to config and never inherited by child
+	// agents. A fresh session start clears them; tree navigation, compaction,
+	// config reloads, and profile changes preserve them.
+	const sessionShellRules = new SessionShellRuleStore();
 	let sessionReadRoots: string[] = [];
 	// Signature of the last discovery weakening notice shown this session; reset
 	// on a fresh session start, written only from publish().
@@ -131,7 +138,11 @@ export default function guard(pi: ExtensionAPI) {
 	}
 	function effectiveConfig(): ResolvedGuardConfig {
 		if (!config) throw new Error("guard session state not initialized");
-		return { ...config, readRoots: [...new Set([...config.readRoots, ...sessionReadRoots])] };
+		// `config.cwd` is the loaded workspace and is kept equal to the session cwd
+		// by startSession (a tree/cwd replacement reloads the config before the
+		// runtime is rebuilt), so this overlay matches the ctx.cwd used everywhere
+		// else; a divergence would drop a grant rather than apply it elsewhere.
+		return overlaySessionPolicy(config, config.cwd);
 	}
 	function policyFor(ctx: ExtensionContext): PolicyState {
 		if (!state || !runtime) throw new Error("guard session state not initialized");
@@ -239,11 +250,24 @@ export default function guard(pi: ExtensionAPI) {
 	function announceSave(ctx: ExtensionContext, scope: "project" | "user", intent: "allow" | "deny", count: number, freshExplanation?: HostShellExplanation): void {
 		let message = `guard: saved ${count} ${intent} rule(s) for ${scope} (${configDestination(ctx, scope)})`;
 		if (intent === "allow" && freshExplanation && freshExplanation.decision.action !== "allow") {
-			const still = freshExplanation.breakdown.available
-				? freshExplanation.steps.filter((step) => step.decision.action === "prompt" || step.decision.action === "classify").length
-				: 0;
-			message += `; ${still} step(s) still prompt`;
+			message += `; ${stillPromptingCount(freshExplanation)} step(s) still prompt`;
 		}
+		notify(ctx, message);
+	}
+	/** Prompting/classify steps left after an allow commit, for the save notice (0 on an unavailable breakdown). */
+	function stillPromptingCount(explanation: HostShellExplanation): number {
+		return explanation.breakdown.available
+			? explanation.steps.filter((step) => step.decision.action === "prompt" || step.decision.action === "classify").length
+			: 0;
+	}
+	/**
+	 * One info notification after a session grant commit: the memory-only
+	 * lifetime, the workspace scope, and (for a partial grant) how many steps
+	 * still prompt. Best effort only, like announceSave.
+	 */
+	function announceSessionAllow(ctx: ExtensionContext, scope: SessionShellScope, count: number, freshExplanation?: HostShellExplanation): void {
+		let message = `guard: ${count} allow rule(s) granted for this session (${scope.workspace} and its subdirectories; memory only, nothing was written to the config)`;
+		if (freshExplanation && freshExplanation.decision.action !== "allow") message += `; ${stillPromptingCount(freshExplanation)} step(s) still prompt`;
 		notify(ctx, message);
 	}
 	function classifierModel(ctx: ExtensionContext): Model<Api> | undefined {
@@ -283,10 +307,27 @@ export default function guard(pi: ExtensionAPI) {
 		const { warnings: _warnings, ...policy } = cfg as ResolvedGuardConfig & { warnings?: string[] };
 		return JSON.stringify(policy);
 	}
-	/** The effective policy state for a freshly loaded config, including session read roots. */
-	function policyWithSessionRoots(ctx: ExtensionContext, cfg: ResolvedGuardConfig): PolicyState {
+	/**
+	 * One derived config for policy construction: session read roots plus the
+	 * session host-shell allow rules applicable to `cwd`, merged on top of a
+	 * disk-loaded config. Never stored, never persisted, and never part of a
+	 * configSignature; every policy construction path (effectiveConfig, fresh
+	 * disk validation, transition, and runtime creation) goes through this one
+	 * helper so no path can silently drop a grant or emit one to disk.
+	 */
+	function overlaySessionPolicy(cfg: ResolvedGuardConfig, cwd: string): ResolvedGuardConfig {
+		const readRoots = [...new Set([...cfg.readRoots, ...sessionReadRoots])];
+		const allow = sessionShellRules.rulesFor(cwd);
+		return {
+			...cfg,
+			readRoots,
+			hostBash: allow.length === 0 ? cfg.hostBash : { ...cfg.hostBash, allow: dedupe([...cfg.hostBash.allow, ...allow]) },
+		};
+	}
+	/** The effective policy state for a freshly loaded config, including the session overlays. */
+	function policyWithSessionOverlays(ctx: ExtensionContext, cfg: ResolvedGuardConfig): PolicyState {
 		if (!state || !runtime) throw new Error("guard session state not initialized");
-		return toPolicyState(state, { ...cfg, readRoots: [...new Set([...cfg.readRoots, ...sessionReadRoots])] }, ctx.cwd, ctx.hasUI);
+		return toPolicyState(state, overlaySessionPolicy(cfg, ctx.cwd), ctx.cwd, ctx.hasUI);
 	}
 	/**
 	 * Deliver post-denial steering through the existing SDK handoff. The
@@ -315,7 +356,7 @@ export default function guard(pi: ExtensionAPI) {
 		const rt = runtime;
 		const baseState = state;
 		let committedConfig = cfg;
-		const policy = toPolicyState(next, { ...cfg, readRoots: [...new Set([...cfg.readRoots, ...sessionReadRoots])] }, ctx.cwd, ctx.hasUI);
+		const policy = toPolicyState(next, overlaySessionPolicy(cfg, ctx.cwd), ctx.cwd, ctx.hasUI);
 		await rt.transition(policy, next.sandbox ?? detectSandboxMode(), () => {
 			state = { ...next, workspaceLocked: rt.policy.workspaceLocked, workspaceLockReason: rt.policy.workspaceLocked ? state?.workspaceLockReason ?? next.workspaceLockReason : null };
 			config = committedConfig;
@@ -330,7 +371,7 @@ export default function guard(pi: ExtensionAPI) {
 			// policy assignment. Never a general cancellation framework.
 			commandGuard?.check();
 			committedConfig = persistence.beforeCommit();
-			return toPolicyState(next, { ...committedConfig, readRoots: [...new Set([...committedConfig.readRoots, ...sessionReadRoots])] }, ctx.cwd, ctx.hasUI);
+			return toPolicyState(next, overlaySessionPolicy(committedConfig, ctx.cwd), ctx.cwd, ctx.hasUI);
 		} } : commandGuard ? { expectedEpoch: commandGuard.epoch, beforeCommit: commandGuard.check } : undefined);
 	}
 
@@ -344,6 +385,7 @@ export default function guard(pi: ExtensionAPI) {
 		if (fresh || !state || !config) {
 			config = loadConfig(ctx.cwd);
 			sessionReadRoots = [];
+			sessionShellRules.reset();
 			state = createSessionState({ config, sandbox: detectSandboxMode(), cwd: ctx.cwd, interactive: ctx.hasUI, inherited: inheritedConstraint });
 		} else if (config.cwd !== ctx.cwd) {
 			config = loadConfig(ctx.cwd);
@@ -544,6 +586,12 @@ export default function guard(pi: ExtensionAPI) {
 		const ownedStages = ownedStagesFor(ctx);
 		const allowPlan = shellCall && explanation && ownedStages ? planAllowSave(shellCall, policy, explanation) : null;
 		const denySaveSupported = shellCall !== null && ownedStages;
+		// Eligibility for "Allow for this session": an eligible allow plan (which
+		// itself requires the owned stages and rejects explicit asks) plus a
+		// workspace whose canonical identity resolves. An unresolvable identity
+		// fails closed here, before any dialog, so the action is never offered and
+		// then failed.
+		const sessionAllowSupported = allowPlan !== null && resolveWorkspaceScope(ctx.cwd) !== null;
 		const commandText = shellCall ? shellCall.command : typeof input.code === "string" ? input.code : "";
 		// The gate holds the UI lease only across pre-display validation, the
 		// complete interaction, and post-answer validation. Persistence and
@@ -562,6 +610,8 @@ export default function guard(pi: ExtensionAPI) {
 				explanation,
 				allowPlan,
 				denySaveSupported,
+				sessionAllowSupported,
+				sessionScopeLabel: ctx.cwd,
 				shell: shellCall?.shell ?? "host-bash",
 				scopes: ["project", "user"],
 				parseRules: (text) => parseShellRuleLines(text, shellCall?.shell ?? "host-bash"),
@@ -599,7 +649,7 @@ export default function guard(pi: ExtensionAPI) {
 			// Re-read current config and revalidate the ACTUAL reviewed patch
 			// (never a regenerated suggestion) against the latest effective policy.
 			const diskConfig = loadConfig(ctx.cwd);
-			const latestCheck = validateReviewed(policyWithSessionRoots(ctx, diskConfig));
+			const latestCheck = validateReviewed(policyWithSessionOverlays(ctx, diskConfig));
 			if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the selected steps (${latestCheck.error}); nothing saved or executed`);
 			const target = { ...diskConfig, hostBash: { ...diskConfig.hostBash, allow: dedupe([...diskConfig.hostBash.allow, ...outcome.rules]) } };
 			let owningEpoch = epoch;
@@ -607,7 +657,7 @@ export default function guard(pi: ExtensionAPI) {
 				assertCallActive(signal);
 				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or executed");
 				const fresh = loadConfig(ctx.cwd);
-				const freshCheck = validateReviewed(policyWithSessionRoots(ctx, fresh));
+				const freshCheck = validateReviewed(policyWithSessionOverlays(ctx, fresh));
 				if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the selected steps (${freshCheck.error}); nothing saved`);
 				// Record the owning commit epoch synchronously (no await between the
 				// final checks and the write) for the steering/execution ownership checks.
@@ -638,10 +688,81 @@ export default function guard(pi: ExtensionAPI) {
 			if (freshDecision.action === "deny") throw new Error(`guard: ${withCodemodeOrigin(freshDecision, nested).reason}`);
 			continue;
 		}
+		if (outcome.kind === "session-allow") {
+			if (!shellCall) throw new Error("guard: only host-shell calls support rule grants");
+			// Re-resolve the granting workspace at commit time; an unresolvable
+			// identity fails closed (nothing granted, nothing executed).
+			const scope = resolveWorkspaceScope(ctx.cwd);
+			if (!scope) throw new Error("guard: the workspace identity could not be resolved; nothing granted or executed");
+			// The captured workspace is the grant's scope for the rest of this branch;
+			// the commit barrier re-resolves it and rejects any change, so validation
+			// and installation can never describe different directories.
+			const sameWorkspace = (): boolean => {
+				const current = resolveWorkspaceScope(ctx.cwd);
+				return current !== null && current.real.some((root) => scope.real.includes(root));
+			};
+			const validateReviewed = (candidate: PolicyState) => outcome.planKind === "per-step"
+				? validateShellAllowSave(shellCall, candidate, outcome.rules, outcome.selectedOccurrenceIds)
+				: validateShellSave(shellCall, candidate, "allow", outcome.rules);
+			// Same three checkpoints as a persistent allow save: the in-dialog
+			// validation (through the dep above), the latest effective policy, and the
+			// fresh re-read inside the commit barrier. The candidate policy includes
+			// the session rules already installed for this workspace, and the reviewed
+			// rules may not lean on them: the plan and the picker only ever select
+			// steps the plan-time policy still prompts for, that same policy snapshot
+			// validated the editor submission in-dialog, and the store is add-only
+			// within a session, so the commit candidate is a monotone superset. A
+			// concurrent grant that did install itself re-enters through the latest
+			// and fresh revalidation, and any transition that raced this one is
+			// rejected by the expected-epoch barrier. No disk config is derived,
+			// written, or compared here.
+			const diskConfig = loadConfig(ctx.cwd);
+			const latestCheck = validateReviewed(policyWithSessionOverlays(ctx, diskConfig));
+			if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the selected steps (${latestCheck.error}); nothing granted or executed`);
+			if (!sameWorkspace()) throw new Error("guard: the workspace changed while waiting; nothing granted or executed");
+			let owningEpoch = epoch;
+			await transition({ ...state! }, diskConfig, ctx, { epoch, beforeCommit: () => {
+				assertCallActive(signal);
+				if (!sameWorkspace()) throw new Error("guard: the workspace changed while waiting; nothing granted or executed");
+				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing granted or executed");
+				const fresh = loadConfig(ctx.cwd);
+				const freshCheck = validateReviewed(policyWithSessionOverlays(ctx, fresh));
+				if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the selected steps (${freshCheck.error}); nothing granted`);
+				// Record the owning commit epoch, then install the reviewed rules at the
+				// successful commit boundary (no await between the final checks and the
+				// mutation). The transition derives its post-commit policy afterwards,
+				// so the just-granted rules are already in force for the re-decision.
+				owningEpoch = rt.epoch;
+				sessionShellRules.add(scope, outcome.rules);
+				return fresh;
+			} });
+			// Committed: announce the grant, then re-decide the ORIGINAL call (never an
+			// extracted remainder) against the post-commit policy. A partial grant
+			// still prompting continues the loop with a fresh breakdown; full
+			// coverage executes without a further prompt.
+			const freshPolicy = policyFor(ctx);
+			const freshExplanation = explainHostShellCommand(shellCall, freshPolicy);
+			announceSessionAllow(ctx, scope, outcome.rules.length, freshExplanation);
+			// The granted rules stay installed through any failure below, but
+			// execution never proceeds on a stale owner.
+			assertCallActive(signal);
+			if (rt !== runtime || rt.teardownFailure || rt.epoch !== owningEpoch || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
+				throw new Error("guard: approval expired after a policy change");
+			}
+			rt.assertAvailable();
+			const freshDecision = await decisionFor(name, input, ctx, freshPolicy);
+			assertCallActive(signal);
+			if (rt !== runtime || rt.teardownFailure || rt.epoch !== owningEpoch || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
+				throw new Error("guard: approval expired after a policy change");
+			}
+			if (freshDecision.action === "allow") return rt.epoch;
+			if (freshDecision.action === "deny") throw new Error(`guard: ${withCodemodeOrigin(freshDecision, nested).reason}`);
+			continue;
+		}
 		if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
 		// save-deny: the steering was collected inside the flow before the commit.
 		const diskConfig = loadConfig(ctx.cwd);
-		const latestCheck = validateShellSave(shellCall, policyWithSessionRoots(ctx, diskConfig), "deny", outcome.rules);
+		const latestCheck = validateShellSave(shellCall, policyWithSessionOverlays(ctx, diskConfig), "deny", outcome.rules);
 		if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer deny the complete call (${latestCheck.error}); nothing saved`);
 		const target = { ...diskConfig, hostBash: { ...diskConfig.hostBash, deny: dedupe([...diskConfig.hostBash.deny, ...outcome.rules]) } };
 		let owningEpoch = epoch;
@@ -649,7 +770,7 @@ export default function guard(pi: ExtensionAPI) {
 			assertCallActive(signal);
 			if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or executed");
 			const fresh = loadConfig(ctx.cwd);
-			const freshCheck = validateShellSave(shellCall, policyWithSessionRoots(ctx, fresh), "deny", outcome.rules);
+			const freshCheck = validateShellSave(shellCall, policyWithSessionOverlays(ctx, fresh), "deny", outcome.rules);
 			if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer deny the complete call (${freshCheck.error}); nothing saved`);
 			owningEpoch = rt.epoch;
 			addToConfigScope(outcome.scope, { hostBash: { deny: outcome.rules } }, { cwd: ctx.cwd });
@@ -1237,7 +1358,9 @@ export default function guard(pi: ExtensionAPI) {
 			`discovery scan: cap ${cfg.discoveryMatchCap} (default ${SCAN_MATCH_CAP_DEFAULT}), timeout ${cfg.discoveryTimeoutMs} ms (default ${SCAN_TIMEOUT_MS_DEFAULT}), pruned basenames: ${effectivePruneNames(cfg.discoveryPruneNames).join(", ")}`,
 			...(discoveryCollisionWarningsFor(cfg).length ? [`discovery prune collisions: ${discoveryCollisionWarningsFor(cfg).join("; ")}`] : []),
 			`web_fetch allowlist: ${cfg.webFetchAllow.length} glob(s)`,
-			`host shell rules: ${cfg.hostBash.deny.length} deny, ${cfg.hostBash.ask.length} ask, ${cfg.hostBash.allow.length} allow`,
+			`host shell rules: ${config.hostBash.deny.length} deny, ${config.hostBash.ask.length} ask, ${config.hostBash.allow.length} allow`,
+			`session host-shell rules (this session only, never written to config): ${sessionShellRules.list().map((grant) => `${grant.rules.length} allow @ ${grant.scope.workspace}${scopeContains(grant.scope, ctx.cwd) ? "" : " (dormant)"}`).join("; ") || "(none)"}`,
+			...(sessionShellRules.list().some((grant) => scopeContains(grant.scope, ctx.cwd)) ? [`session rules in force here: ${sessionShellRules.rulesFor(ctx.cwd).join(", ")}`] : []),
 			`read roots: ${cfg.readRoots.join(", ") || "(none)"}`,
 			`write roots: ${cfg.writeRoots.join(", ") || "(none)"}`,
 			`toolClasses overrides: ${Object.keys(cfg.toolClasses).length}`,
@@ -1260,7 +1383,8 @@ export default function guard(pi: ExtensionAPI) {
 			const command = args.trim();
 			if (!command || command === "profile") { await pickProfile(ctx); return; }
 			if (command === "help") {
-				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy, discovery scan settings and shared scratch", "/guard reload            Reload guard.json", "/guard model             Pick the classifier model (saved to user config)", "/guard model clear       Remove the classifier pin (resume auto-select)", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python, node and write/edit; other non-owned tools remain observe-only (grep results are secret-filtered).", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects.", "Subagent children inherit this session's effective profile at each spawn and cannot leave it except for research (guard:subagent-snapshot-request)."].join("\n"));
+				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy, discovery scan settings and shared scratch", "/guard reload            Reload guard.json", "/guard model             Pick the classifier model (saved to user config)", "/guard model clear       Remove the classifier pin (resume auto-select)", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python, node and write/edit; other non-owned tools remain observe-only (grep results are secret-filtered).",
+				"Approval prompts: Allow once, Allow for this session (memory-only rules for this workspace and its subdirectories, never written to config), and project/user saves. /guard list shows the session records.", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects.", "Subagent children inherit this session's effective profile at each spawn and cannot leave it except for research (guard:subagent-snapshot-request)."].join("\n"));
 				return;
 			}
 			if (command === "list") { showList(ctx); return; }

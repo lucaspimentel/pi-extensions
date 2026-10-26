@@ -493,6 +493,118 @@ test("the preview advisory is order-independent and counts every non-exact rule"
 	}
 });
 
+// ── Session allow flow ──────────────────────────────────────────────────────
+
+test("the session allow action follows Allow once when supported and is hidden otherwise", async () => {
+	const real = realDeps();
+	{
+		const { io, calls } = makeIO({ select: [undefined] });
+		await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan, sessionAllowSupported: true, sessionScopeLabel: "/home/user/proj" }));
+		const options = calls.select[0].split("\n@@")[1].split("|");
+		assert.deepEqual(options, ["Allow once", "Allow for this session", "Save allow for project", "Save allow for user", "Deny once", "Save deny for project", "Save deny for user"]);
+	}
+	{
+		// Unsupported (no owned stages, or no resolvable workspace scope): hidden.
+		const { io, calls } = makeIO({ select: [undefined] });
+		await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan }));
+		assert.doesNotMatch(calls.select[0], /Allow for this session/);
+	}
+	{
+		// No eligible allow plan (for example an explicit ask rule): hidden.
+		const { io, calls } = makeIO({ select: [undefined] });
+		await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: null, sessionAllowSupported: true }));
+		assert.doesNotMatch(calls.select[0], /Allow for this session/);
+	}
+	{
+		// A capability-limited host without the editor never sees it either.
+		const { io, calls } = ioWithoutStages({ select: [undefined] });
+		await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan, sessionAllowSupported: true }));
+		assert.deepEqual(calls.select[0].split("\n@@")[1].split("|"), ["Allow once", "Deny once"]);
+	}
+});
+
+test("session allow reuses the per-step picker/editor/preview and returns reviewed rules without a scope", async () => {
+	const real = realDeps(compoundCommand);
+	const rules = planRules(real.allowPlan!);
+	const { io, calls } = makeIO({ select: ["Allow for this session", "Confirm"], picker: [[0, 2]], editor: [rules.join("\n")] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({
+		io,
+		command: compoundCommand,
+		decision: real.explanation.decision,
+		explanation: real.explanation,
+		allowPlan: real.allowPlan,
+		sessionAllowSupported: true,
+		sessionScopeLabel: "/home/user/proj",
+	}));
+	assert.equal(outcome.kind, "session-allow");
+	assert.ok(outcome.kind === "session-allow");
+	assert.equal(outcome.planKind, "per-step");
+	assert.deepEqual(outcome.selectedOccurrenceIds, [0, 2]);
+	assert.deepEqual(outcome.rules, rules);
+	assert.ok(!("scope" in outcome), "a session outcome never carries a config scope");
+	assert.ok(!("patch" in outcome), "a session outcome never carries a config patch");
+	assert.match(calls.picker[0], /Select the steps to allow \(this session\)/);
+	assert.match(calls.editor[0], /Edit the allow rules to grant \(this session\)/);
+	assert.match(calls.editor[0], /approves the current call once without granting/);
+	const preview = calls.select[1].split("\n@@")[0];
+	assert.match(preview, /Confirm allow for this session\?/);
+	assert.match(preview, /Destination: this session only/);
+	assert.match(preview, /Lifetime: this session only/);
+	assert.match(preview, /\/home\/user\/proj and its subdirectories/);
+	assert.match(preview, /each rule permits its matching step independently/);
+	assert.match(preview, /Cancelling here approves the current call once without granting/);
+	assert.doesNotMatch(preview, /guard\.local\.json/, "no config destination is ever named");
+});
+
+test("session allow cancels like a persistent save: picker esc returns to the menu, editor/preview cancellation approves once", async () => {
+	const real = realDeps(compoundCommand);
+	{
+		const { io, calls } = makeIO({ select: ["Allow for this session", "Allow once"], picker: [undefined] });
+		const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: compoundCommand, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan, sessionAllowSupported: true }));
+		assert.deepEqual(outcome, { kind: "allow-once" });
+		assert.equal(calls.select.length, 2, "the menu was reopened after the picker esc");
+	}
+	{
+		const { io, calls } = makeIO({ select: ["Allow for this session", "Allow once"], picker: [[]] });
+		const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: compoundCommand, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan, sessionAllowSupported: true }));
+		assert.deepEqual(outcome, { kind: "allow-once" });
+		assert.equal(calls.select.length, 2, "an empty selection returns to the menu");
+		assert.equal(calls.editor.length, 0, "an empty selection opens no editor");
+	}
+	{
+		const { io } = makeIO({ select: ["Allow for this session"], editor: [undefined] });
+		assert.deepEqual(await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan, sessionAllowSupported: true })), { kind: "allow-once" });
+	}
+	{
+		const { io } = makeIO({ select: ["Allow for this session", "Cancel save"], editor: [planRules(real.allowPlan!).join("\n")] });
+		assert.deepEqual(await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan, sessionAllowSupported: true })), { kind: "allow-once" });
+	}
+});
+
+test("a whole-call session allow keeps the whole-call rule and preview", async () => {
+	const real = realDeps("echo $(compute)");
+	assert.ok(real.allowPlan && real.allowPlan.kind === "whole-call");
+	const rules = real.allowPlan.rules;
+	const { io, calls } = makeIO({ select: ["Allow for this session", "Confirm"], editor: [rules.join("\n")] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: real.call.command, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan, sessionAllowSupported: true }));
+	assert.ok(outcome.kind === "session-allow");
+	assert.equal(outcome.planKind, "whole-call");
+	assert.deepEqual(outcome.selectedOccurrenceIds, []);
+	assert.equal(calls.picker.length, 0);
+	const preview = calls.select[1].split("\n@@")[0];
+	assert.match(preview, /Effect: the rule permits the exact current command/);
+	assert.match(preview, /Destination: this session only/);
+});
+
+test("a forged session allow answer without support is rejected, never approved", async () => {
+	const real = realDeps();
+	const { io } = makeIO({ select: ["Allow for this session"] });
+	await assert.rejects(
+		runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan, sessionAllowSupported: false })),
+		/session allow was not offered/,
+	);
+});
+
 // ── Deny save flow ──────────────────────────────────────────────────────────
 
 test("save deny: the reliable breakdown opens a picker with nothing preselected", async () => {
