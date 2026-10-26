@@ -410,10 +410,12 @@ RPC session command grants are deferred; step 6 remains unauthorized.**
   ("grant" versus "save") differs.
 - **Session-scoped allow grants (2026-10-26).** The session action routes
   through the same picker, prefill, parser, validation loop, advisory, and
-  confirm/edit/cancel preview as a project/user allow save; only the
-  destination differs. The reviewed rules are installed in memory at the
-  commit boundary and never serialized: no config file, session entry,
-  environment variable, or child-inheritance payload carries them, and
+  confirm/edit/cancel preview as a project/user allow save; the destination
+  and the wording differ (the session path says grant where a save says save,
+  including the preview's cancelling action). The reviewed rules are
+  installed in memory at the commit boundary and never serialized: no config
+  file, session entry, environment variable, or child-inheritance payload
+  carries them, and
   `config`, its signature, and every persistence target stay disk-only.
   Lifetime is the session: compaction, tree navigation (including a cwd
   change), `/guard reload`, and profile changes preserve the records; a fresh

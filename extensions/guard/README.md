@@ -180,7 +180,9 @@ Registration details:
 - **Allow for this session** (capable TUI hosts, eligible allow plans only,
   and only when the workspace's canonical identity resolves): the same
   per-step picker, rule editor, validation, and preview as a persistent allow
-  save, but the reviewed rules are installed in memory alone. Nothing is
+  save, but the reviewed rules are installed in memory alone and the grant is
+  worded as one (the preview's cancelling action reads **Cancel grant**
+  instead of **Cancel save**). Nothing is
   written to the config, and the grant is bound to the granting workspace and
   its descendants: it applies there and stays dormant elsewhere in the
   session, so navigating back reactivates it. Grants survive compaction,

@@ -212,7 +212,12 @@ async function editorSaveLoop(
 	}
 }
 
-/** One preview round-trip: Confirm, Edit (re-run the editor loop), or Cancel save. */
+/**
+ * One preview round-trip: Confirm, Edit (re-run the editor loop), or the
+ * third action, which cancels. That action is labelled "Cancel save" by
+ * default; a caller whose destination is not a config write (the session
+ * grant path) passes its own label through `cancelActionLabel`.
+ */
 async function previewLoop(
 	io: PromptFlowIO,
 	signal: AbortSignal,
@@ -220,17 +225,20 @@ async function previewLoop(
 		previewText: string;
 		runEditor: () => Promise<EditorLoopResult>;
 		buildPreview: (rules: string[]) => string;
+		/** Display label for the cancelling action; defaults to "Cancel save". */
+		cancelActionLabel?: string;
 	},
 ): Promise<{ kind: "confirm"; rules: string[]; previewText: string } | { kind: "cancelled" }> {
+	const cancelLabel = options.cancelActionLabel ?? "Cancel save";
 	let loop = await options.runEditor();
 	while (loop.kind === "ok") {
-		const answer = await io.select(options.buildPreview(loop.rules), ["Confirm", "Edit", "Cancel save"], signal);
+		const answer = await io.select(options.buildPreview(loop.rules), ["Confirm", "Edit", cancelLabel], signal);
 		if (answer === "Confirm") return { kind: "confirm", rules: loop.rules, previewText: options.buildPreview(loop.rules) };
 		if (answer === "Edit") {
 			loop = await options.runEditor();
 			continue;
 		}
-		// "Cancel save" or a cancelled preview dialog: an ordinary cancellation.
+		// The cancelling action or a cancelled preview dialog: an ordinary cancellation.
 		return { kind: "cancelled" };
 	}
 	return { kind: "cancelled" };
@@ -389,6 +397,9 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 				previewText: "",
 				runEditor,
 				buildPreview,
+				// A session grant writes no config, so its third action is named for
+				// what it does here; the persistent allow save keeps the default.
+				cancelActionLabel: session ? "Cancel grant" : undefined,
 			});
 			// Ordinary editor/preview cancellation saves nothing and approves once.
 			if (preview.kind === "cancelled") return { kind: "allow-once" };

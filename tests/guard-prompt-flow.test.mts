@@ -305,8 +305,9 @@ test("save allow: preview cancel saves nothing and approves once; Edit returns t
 	const real = realDeps();
 	const rules = planRules(real.allowPlan!);
 	{
-		const { io } = makeIO({ select: ["Save allow for project", "Cancel save"], editor: [rules.join("\n")] });
+		const { io, calls } = makeIO({ select: ["Save allow for project", "Cancel save"], editor: [rules.join("\n")] });
 		assert.deepEqual(await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan })), { kind: "allow-once" });
+		assert.equal(calls.select[1].split("\n@@")[1], "Confirm|Edit|Cancel save", "a persistent allow save keeps the default cancelling label");
 	}
 	{
 		const { io, calls } = makeIO({ select: ["Save allow for project", "Edit", "Confirm"], editor: [rules.join("\n"), rules.join("\n")] });
@@ -554,6 +555,7 @@ test("session allow reuses the per-step picker/editor/preview and returns review
 	assert.match(preview, /each rule permits its matching step independently/);
 	assert.match(preview, /Cancelling here approves the current call once without granting/);
 	assert.doesNotMatch(preview, /guard\.local\.json/, "no config destination is ever named");
+	assert.equal(calls.select[1].split("\n@@")[1], "Confirm|Edit|Cancel grant", "the session preview never offers Cancel save");
 });
 
 test("session allow cancels like a persistent save: picker esc returns to the menu, editor/preview cancellation approves once", async () => {
@@ -576,8 +578,9 @@ test("session allow cancels like a persistent save: picker esc returns to the me
 		assert.deepEqual(await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan, sessionAllowSupported: true })), { kind: "allow-once" });
 	}
 	{
-		const { io } = makeIO({ select: ["Allow for this session", "Cancel save"], editor: [planRules(real.allowPlan!).join("\n")] });
+		const { io, calls } = makeIO({ select: ["Allow for this session", "Cancel grant"], editor: [planRules(real.allowPlan!).join("\n")] });
 		assert.deepEqual(await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan, sessionAllowSupported: true })), { kind: "allow-once" });
+		assert.equal(calls.select[1].split("\n@@")[1], "Confirm|Edit|Cancel grant", "the session preview's cancelling action is named for what it does");
 	}
 });
 
@@ -682,9 +685,10 @@ test("save deny: manually entered whole-call rules must deny the complete call",
 });
 
 test("save deny: preview cancel denies once with steering offered", async () => {
-	const { io } = makeIO({ select: ["Save deny for project", "Cancel save"], picker: [[0]], editor: ["HostBash(/^echo a$/)"], input: [undefined] });
+	const { io, calls } = makeIO({ select: ["Save deny for project", "Cancel save"], picker: [[0]], editor: ["HostBash(/^echo a$/)"], input: [undefined] });
 	const outcome = await runExecutionPrompt(baseExecutionDeps({ io }));
 	assert.deepEqual(outcome, { kind: "deny-once", explicit: true, steering: undefined });
+	assert.equal(calls.select[1].split("\n@@")[1], "Confirm|Edit|Cancel save", "a deny save keeps the default cancelling label");
 });
 
 // ── Read grant flow ─────────────────────────────────────────────────────────
@@ -753,8 +757,9 @@ test("read grant: root save confirm, unrelated-root loop, empty submission, and 
 		assert.deepEqual(await runReadGrantPrompt(readDeps({ io })), { kind: "no-grant" }, "an empty root submission grants nothing");
 	}
 	{
-		const { io } = makeIO({ select: ["Save for project", "Cancel save"], editor: ["/home/user/shared"] });
+		const { io, calls } = makeIO({ select: ["Save for project", "Cancel save"], editor: ["/home/user/shared"] });
 		assert.deepEqual(await runReadGrantPrompt(readDeps({ io })), { kind: "no-grant" }, "cancelling the root save grants nothing and is not an explicit denial");
+		assert.equal(calls.select[1].split("\n@@")[1], "Confirm|Edit|Cancel save", "the read-root preview is untouched by the session label");
 	}
 });
 
