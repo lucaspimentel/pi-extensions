@@ -13,6 +13,7 @@ Expand the allowlist in `extensions/gh-read/` and update [`docs/gh-read-design.m
 - [ ] Commit details and base/head comparisons without fetching locally.
 - [ ] Releases via `gh release list` and `gh release view`, plus tag listing: versions, release notes, and asset metadata only.
 - [ ] Search via `gh search code`, `gh search prs`, `gh search issues`, and `gh search repos`.
+- [ ] Structured job-metadata read (`repos/{owner}/{repo}/actions/jobs/{id}`): name, status, conclusion, steps, and run_id. Deliberately not bundled with `job logs`, which stays a single request returning only the log text; a pre-flight on the job object would add a request per call and reintroduce metadata the log operation does not need.
 
 ### Safety and validation (follow-up operations)
 

@@ -6,6 +6,11 @@ extensions/shared/bounded-spawn.ts, guard classification, agent rollout, and
 tests. The git-read extraction regression guard held: tests/git-read-*.test.mts
 passed unmodified after the refactor.
 
+Addition: `job logs` (see "job logs"). Design settled in a grill-me review on
+2026-10-26; NOT yet implemented. It is the first API operation whose response
+body is text rather than JSON, and the first to use a windowed retention mode
+in the API runner.
+
 ## Problem
 
 Read-only agents (the `reviewer`/`scout`/`planner` subagents in
@@ -47,11 +52,11 @@ the main session. Deliberately not tied to any one agent; agents opt in via
   string so the schema stays flat like `git_read`'s):
   - `pr view`, `pr diff`, `pr list`, `pr checks`, `issue view`, `issue list`,
     `auth status`, `run list`, `run view`
-- Nine narrowly scoped GitHub API operations share the same tool with
+- Ten narrowly scoped GitHub API operations share the same tool with
   structured parameters instead of an args array: `repo contents`,
   `repo tree`, `commit checks`, `advisory view`, `check annotations`,
-  `repo metadata`, `pr comments`, `pr reviews`, and `issue comments` (see
-  "GitHub API operations").
+  `repo metadata`, `pr comments`, `pr reviews`, `issue comments`, and
+  `job logs` (see "GitHub API operations").
   Mixing shapes is rejected in both directions: native subcommands reject
   structured fields, API operations reject `args`.
 - Command construction happens in validate.ts during validation: it emits the
@@ -168,11 +173,12 @@ Value validation (native commands):
 
 ## GitHub API operations
 
-The nine structured operations (`repo contents`, `repo tree`, `commit
+The ten structured operations (`repo contents`, `repo tree`, `commit
 checks`, `advisory view`, `check annotations`, `repo metadata`, `pr comments`,
-`pr reviews`, `issue comments`) make read-only GET requests to api.github.com
-ONLY, always inside `gh`, with a fixed tool-authored argv (see "API
-runner"). They name an explicit repository, so they are exempt from the
+`pr reviews`, `issue comments`, `job logs`) make read-only GET requests to
+api.github.com ONLY, always inside `gh`, with a fixed tool-authored argv (see
+"API runner"). All but `job logs` return JSON; `job logs` returns a job's log
+as text. They name an explicit repository, so they are exempt from the
 worktree gate and work anywhere. Validation is complete at runtime (calls
 that bypass schema validation still get checked): unknown or mixed fields,
 wrong types, missing required fields, unsafe integers, and malformed
@@ -406,6 +412,87 @@ is deliberately NOT added here; it is recorded as a separate follow-up in
 `check annotations` remains a single-page operation with its existing
 exactly-100-items incompleteness notice; it does not adopt PR pagination.
 
+### job logs
+
+Required explicit `repo` (`OWNER/REPO` on github.com) and `job_id`. `job_id`
+is a digits string, because job ids are int64 and may exceed 2^53; a JSON
+number is also accepted when it is a safe integer and is normalized to its
+string form, while a number beyond 2^53 is rejected naming the string form,
+so an id can never be silently rounded onto a different job. Only those two
+fields are accepted: `args`, `jq`, `continuation`, URLs, branches, `ref`,
+line ranges, and any other structured field are rejected before spawning.
+There is no worktree gate and no rev resolution.
+
+Tool-authored GET `repos/{owner}/{repo}/actions/jobs/{job_id}/logs`. This is
+the first API operation whose response body is TEXT, not JSON: `gh` follows
+the redirect to a signed blob host internally and the printed stream has only
+the final response block, whose body the tool never parses as JSON and never
+filters with jq. The body is the raw job log, timestamps plus content and
+BOM-prefixed on the first line, with no job/step prefixes, unlike
+`gh run view --log`.
+
+Settled in the grill-me review (2026-10-26):
+
+- Input surface is `{repo, job_id}` only, as above.
+- Worktree-gate EXEMPT, like the other nine API operations and unlike
+  `run view --log`, because the target repository is explicit and the common
+  case is debugging CI from a directory that is not a checkout.
+- Retention is the first 50 KiB plus the last 50 KiB of the response BODY
+  (header block excluded), reported with the exact existing notice
+  `[gh_read: <N> bytes omitted, showing first and last 50 KiB]`, where N
+  counts discarded body bytes. UTF-8-safe edge trimming applies (at most 3
+  bytes per window edge, not counted), matching log-spawn's hygiene. There is
+  no ceiling and no poisoning: the cumulative 8 MiB budget never fails this
+  operation, because only 100 KiB is retained and the child stays bounded by
+  the shared 30 s deadline and continuous draining.
+- The window is selected by bytes, not lines; the middle is dropped, never
+  re-ordered or re-wrapped, and no line range is offered.
+- Decoding stays STRICT, unchanged from the other API bodies: a malformed
+  UTF-8 window rejects the response with `response body contained malformed
+  UTF-8`. Bytes dropped from the middle are never decoded, so only the
+  retained window can fail the read.
+- The result is the text plus metadata `repo`, `job_id`, `http_status`,
+  `body_bytes`, `retained_bytes`, `omitted_bytes`, and `windowed`, and a
+  standing notice marking the text as one job's log with raw runner
+  timestamps (`run view --log` prefixes each line with job and step names
+  instead). An empty 200 body is a successful empty result with a
+  `no log output for this job` notice, not an error.
+- A deadline expiry, cancellation, or interrupted response is
+  `isError: true` with the error text AND the retained window still in the
+  content, so a timed-out large log still yields its head and tail. HTTP
+  errors pass through verbatim with no shape matching and no extra request.
+  An IN-PROGRESS job's logs endpoint redirects to a signed blob that does not
+  exist yet, surfacing as gh exit 1, HTTP 404, stderr `gh: HTTP 404`, and an
+  Azure `BlobNotFound` XML body; a nonexistent job id gives gh exit 1, HTTP
+  404, stderr `gh: Not Found (HTTP 404)`, and a GitHub JSON body. Both are
+  404s, so the description states that a job's logs exist only once the job
+  completes and the tool does not sniff the body to tell them apart.
+- Guidance: `job logs` is the way to read one job's log from a job id;
+  `run view -j <job id> --log` remains available but downloads the whole
+  run's log ZIP and prefixes lines with job/step names. Run-level text logs
+  are impossible through the API (`/actions/runs/{id}/logs` returns a ZIP,
+  verified), so `run view --log` stays the run-level path.
+
+```json
+{"subcommand":"job logs","repo":"DataDog/datadog-lambda-extension","job_id":"121616708699"}
+```
+
+Verified shapes (2026-10-26, gh 2.102.x): a completed job returns 200
+`text/plain` with a BOM-prefixed first line (63,437 bytes for the example
+above); an in-progress job and a nonexistent job id both return the 404s
+described above; `/actions/runs/{id}/logs` returns a ZIP (197,959 bytes for
+that same 11-job run), which is why only the job-scoped endpoint is exposed.
+
+Not verified: a completed job with a zero-byte log body. The empty-body rule
+above is a documented default; skipped and in-progress jobs 404 instead, so
+the case looks unreachable in practice. Also not encoded as behavior: the
+Azure blob host receives no credentials from the tool, since `gh` owns the
+redirect and `--hostname github.com` is fixed.
+
+Out of scope here: a JSON job-metadata operation on `actions/jobs/{id}`
+(name, status, conclusion, steps, run_id) is recorded as a follow-up in
+`TODO.md` rather than bundled, so this operation costs exactly one request.
+
 ### API runner (api-spawn.ts)
 
 A dedicated runner per invocation, separate from the native executor
@@ -426,6 +513,17 @@ bytes were dropped mid-stream is rejected as interrupted even when the
 retained prefix would parse. Malformed UTF-8 bodies reject the response
 instead of silently substituting replacement characters. Spawn function
 and clock are injectable seams; tests run network-free.
+
+One per-operation retention mode was added for `job logs`: the default
+"full" mode above is unchanged for the other nine operations, while
+"window" mode keeps the first 50 KiB and last 50 KiB of the response BODY,
+still counts every byte for the omission metadata, never poisons on growth
+past the 8 MiB budget, and carries the retained window on the error path so a
+deadline or interrupt can return it. The header/body split, the 64 KiB
+header block, the 16 KiB stderr cap, the strict UTF-8 decode, and the shared
+30 s deadline apply to both modes. The nine existing operations must remain
+byte-identical; their budget and poison tests are re-pinned against the
+unchanged "full" mode.
 
 ### External jq filtering (jq.ts)
 
@@ -494,6 +592,17 @@ guidance. Source completeness and display clipping are distinct facts. No
 hidden full payload is retained in details or on disk. Native command
 result conventions are unchanged.
 
+The text-mode exception is `job logs`: its result is raw log text rendered
+through the window described under "job logs" rather than the JSON pipeline,
+so jq, continuation, and the 50 KiB "NOT complete JSON" prefix preview do not
+apply. Its display bound is the 100 KiB window plus metadata and notices.
+Metadata is `repo`, `job_id`, `http_status`, `body_bytes`, `retained_bytes`,
+`omitted_bytes`, and `windowed`; a windowed read also carries the exact
+omission notice in the text, and every read carries the standing one-job
+format notice. Failures still set `isError: true`, and a timeout or an
+interrupted read keeps the retained window in the content instead of
+dropping it.
+
 ## Worktree enforcement
 
 Same gate as `git_read`: before any read, run
@@ -511,7 +620,10 @@ repository context, so it is useful precisely where the other eight are not:
 outside any worktree. The other eight keep the gate unchanged, including
 `run view --log`: the dual-window log runner reuses the identical
 worktreeCheckPassed gate even though `run view` accepts `-R` (settled
-one-simple-contract rule).
+one-simple-contract rule). Separately, the ten API operations are exempt as a
+class, as documented under "GitHub API operations"; `job logs` inherits that
+exemption even though it returns log text, so a CI log can be read from a
+directory that is not a checkout while `run view --log` still cannot.
 
 ## Trust model for env and config
 
@@ -587,6 +699,12 @@ cap, and the log runner deliberately does NOT use `boundedExec` (different
 bounds) while reusing its `OUTPUT_CAP`/`KILL_ESCALATION_MS` constants.
 Non-log invocations keep the 15 s / 50 KiB contract unchanged.
 
+`job logs` deliberately does NOT use this runner: it is an API operation
+using the API runner's windowed mode, gate-exempt, and `isError: true` on a
+failed read, while `run view --log` stays native, gated, and reports failures
+as text with no `isError`. The window size and the omission notice string are
+shared; the two paths are otherwise separate.
+
 Failure contract mirrors `git_read` exactly, with `gh_read:`/`gh` prefixes:
 never throws; `ok` true only for exit 0 without timeout or spawn error;
 truncation noted inline; exit-code and timeout messages name what happened.
@@ -659,6 +777,11 @@ Settled in the grill-me review:
   issue, rejects string/branch/URL selectors, `pr`, `args`, endpoint/page
   controls, and redirection-shaped fields, and validates
   operation/repo/issue-bound continuations, including schema-bypass calls.
+  Job-logs coverage: `job logs` requires an explicit repo and a digits-string
+  `job_id` (a safe-integer number is accepted and normalized; a number beyond
+  2^53 is rejected with the pass-it-as-a-string message), and rejects `args`,
+  URLs, branches, jq, continuation, and unknown fields, including
+  schema-bypass calls.
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout
@@ -682,6 +805,10 @@ Settled in the grill-me review:
   mid-response overflow (kill, poison, later stops), up-front budget
   stops, header/stderr caps, deadline SIGTERM->SIGKILL escalation and
   reaping, pre-spawn deadline/cancellation refusals, and spawn errors.
+  Windowed-mode coverage: head+tail retention with the exact omission count,
+  body-only byte accounting (the header block is excluded), no poisoning on
+  growth past the 8 MiB budget, the retained window returned on the deadline
+  and interrupted paths, and strict UTF-8 rejection of a malformed window.
 - `tests/gh-read-api.test.mts`: orchestration with a scripted requester
   seam: ref resolution and pinning (default branch, explicit refs, 40-hex
   fast path), text files with CRLF/EOF-preserving line ranges, binary/
@@ -714,7 +841,13 @@ Settled in the grill-me review:
   requests, the same bounded paging/retry/error/jq/display-cap matrix, and
   the mandatory distinction/mutability notices surviving scalar, empty,
   failed-jq, invalid-continuation, and clipped output. Existing single-page
-  annotations behavior remains a regression check.
+  annotations behavior remains a regression check. Job-logs orchestration:
+  the text body rendered with the standing one-job notice and the
+  raw-timestamp warning, windowing at exactly 100 KiB and the 100 KiB + 1
+  boundary with N = 1, empty-body success with the no-log-output notice,
+  `isError: true` with the retained window on timeout/interrupt, 404/403
+  passthrough with no shape matching and no extra request, and jq/continuation
+  rejection with zero requests.
 - `tests/gh-read-jq.test.mts`: REAL-jq coverage (required in CI): lexical
   security matrix (benign keywords, imports incl. interpolations, malformed
   constructs), preflight compile rejection, zero/multi-value output, env/
@@ -746,7 +879,13 @@ Settled in the grill-me review:
   fixed GET argv outside a worktree with no git gate, `details.subcommand`,
   issue metadata, raw REST fields passed through, and continuation resume
   plus cross-operation rejection. Read-only/idempotent/open-world tool
-  annotations remain unchanged.
+  annotations remain unchanged. Job-logs routing: the `job logs` schema
+  literal plus a `job_id` field accepting digits strings and safe numbers,
+  the tool-authored `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` GET
+  with no git-gate spawn even outside a worktree, `details.subcommand`,
+  guidance stating that logs exist only once the job completes and preferring
+  `job logs` over `run view -j --log`, and fail-closed validation with zero
+  spawns.
 - `tests/guard-classes.test.mts`: built-in `gh_read` mapping and every
   discussion operation (`pr comments`, `pr reviews`, `issue comments`)
   classify as `remote-read`; configured class overrides win.
@@ -771,6 +910,10 @@ Settled in the grill-me review:
   with `--log`/`--log-failed`, bounded first-and-last-50 KiB log output, and
   `check annotations` fetches one check run's annotations with an explicit
   incompleteness notice at a full page.
+- The same agent can read one job's log from a CI failure with `job logs`,
+  using an explicit `repo` + `job_id` and no worktree, receiving either the
+  full text, a first-and-last-50 KiB window with an exact omitted-byte count,
+  or an error carrying the retained window when the read times out.
 - Non-allowlisted subcommands (including every write verb: `pr create`,
   `pr merge`, `issue close`, `gh api`), unknown flags, and unsafe values are
   rejected with clear errors naming the allowed set, verified by tests.
@@ -793,6 +936,13 @@ Settled in the grill-me review:
   pair: `gh run watch`, `gh run rerun`, `gh run download`, and
   `--exit-status` remain excluded. Expand the allowlist only on demonstrated
   need, one design-review cycle per addition.
+- No run-level or all-jobs log reads: `/actions/runs/{id}/logs` returns a ZIP
+  (verified), so `job logs` is job-scoped only and `run view --log` stays the
+  run-level path. No step filtering (there is no per-step log endpoint), no
+  jq over log text, no line ranges, and no URL or branch `job_id` selectors.
+- No job-metadata operation (`actions/jobs/{id}`) in this change: it is
+  recorded in `TODO.md` as its own follow-up, so `job logs` never grows a
+  second request for name, status, or conclusion.
 - No GraphQL review-thread reads or resolved/outdated thread state in the
   REST PR operations; that is a separate future design cycle.
 - No URL arguments, no `--template`, no `--web` forms.
