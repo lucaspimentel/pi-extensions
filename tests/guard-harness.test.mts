@@ -527,7 +527,7 @@ test("harness: /guard list and reload report the effective policy", async () => 
 		assert.match(list, /profile \(this session\): default/);
 		assert.match(list, new RegExp(`sandbox: ${sandboxMode}`));
 		assert.match(list, /workspace: unlocked/);
-		assert.match(list, /host shell rules: 0 deny, 0 ask, 0 allow/);
+		assert.match(list, /persistent host-shell rules: 0 deny, 0 ask, 0 allow/);
 		assert.match(list, /toolClasses overrides: 0/);
 		assert.match(list, /debug: off/);
 		h.notifications.length = 0;
@@ -1309,7 +1309,7 @@ test("initial selector esc denies without saving or executing; deny saves now an
 	});
 });
 
-// ── Session host-shell rules ("Allow for this session") ──────────────────────
+// ── Session host-shell grants ("Allow for this session") ──────────────────────
 
 test("session allow grants memory-only rules, runs matching commands without a dialog, and writes no config", async () => {
 	await withTempHome(async () => {
@@ -1338,8 +1338,8 @@ test("session allow grants memory-only rules, runs matching commands without a d
 		h.notifications.length = 0;
 		await h.commandHandlers.get("guard")!("list", ctx);
 		const list = h.notifications.join("\n");
-		assert.match(list, /host shell rules: 0 deny, 0 ask, 0 allow/, "persistent rules stay zero");
-		assert.match(list, new RegExp(`session host-shell rules \\(this session only, never written to config\\): 1 allow @ ${cwd}`));
+		assert.match(list, /persistent host-shell rules: 0 deny, 0 ask, 0 allow/, "persistent rules stay zero");
+		assert.match(list, new RegExp(`session host-shell grants \\(this session only, never written to config\\): 1 allow @ ${cwd}`));
 		assert.match(list, /session rules in force here: HostBash\(echo \$GUARD_HARNESS_UNSET\)/);
 		// Child isolation: the subagent handshake still carries the profile only, never
 		// the parent's session grants.
@@ -1385,7 +1385,7 @@ test("session allow survives tree navigation, reloads, and profile changes, and 
 		assert.match(afterFresh[0].text, /Allow for this session/, "a new session grant can still be created");
 		h.notifications.length = 0;
 		await h.commandHandlers.get("guard")!("list", ctx);
-		assert.match(h.notifications.join("\n"), /session host-shell rules \(this session only, never written to config\): \(none\)/);
+		assert.match(h.notifications.join("\n"), /session host-shell grants \(this session only, never written to config\): \(none\)/);
 		await h.handlers.session_shutdown[0]({}, ctx);
 	});
 });
