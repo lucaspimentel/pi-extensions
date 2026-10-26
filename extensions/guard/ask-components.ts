@@ -59,10 +59,17 @@ function editorThemeFrom(theme: GuardAskTheme): EditorTheme {
 export interface GuardEditorStageOptions {
 	/** Full dialog title (may be multi-line; wrapped into the top budget). */
 	title: string;
-	/** Initial text (e.g. the exact suggestion rules or the suggested root). */
+	/** Initial text (e.g. the suggested rules or the suggested root). */
 	prefill?: string;
 	/** Hint line under the editor. */
 	hint?: string;
+	/**
+	 * Live advisory line under the editor, recomputed from the current editor
+	 * text on every render. Purely presentational: it may be absent, it is
+	 * dropped when the row budget cannot hold it, and it never affects
+	 * validation or submission. A thrown error is treated as no note.
+	 */
+	noteFor?: (text: string) => string | undefined;
 }
 
 export type GuardEditorStage = (ui: GuardAskUI, signal: AbortSignal, options: GuardEditorStageOptions) => Promise<string | undefined>;
@@ -101,6 +108,17 @@ function buildEditorStage(
 			const pad = Math.max(0, Math.floor((width - visibleWidth(line)) / 2));
 			return " ".repeat(pad) + theme.fg("dim", line);
 		});
+	const noteLinesOf = (width: number, text: string): string[] => {
+		if (!options.noteFor) return [];
+		let note: string | undefined;
+		try {
+			note = options.noteFor(text);
+		} catch {
+			note = undefined;
+		}
+		if (!note) return [];
+		return wrapTextWithAnsi(note, textContentWidth(width)).map((line) => theme.fg("dim", line));
+	};
 	const blockedLines = (width: number, rows: number): string[] => {
 		const message = "guard: terminal too short for this dialog; enlarge the terminal or press esc to cancel";
 		return wrapTextWithAnsi(message, Math.max(1, width))
@@ -119,11 +137,21 @@ function buildEditorStage(
 			if (title.length + editorLines.length + hints.length > rows || title.length + 1 >= rows) {
 				return blockedLines(width, rows);
 			}
-			return [...title.map((line) => paddedLine(theme.fg("accent", theme.bold(line)), width)), ...editorLines, ...hints];
+			// The advisory is best-effort chrome: shown only when the remaining
+			// row budget holds it, and deliberately excluded from the fit checks
+			// here and in handleInput so a dropped note can never disable
+			// submission.
+			const note = noteLinesOf(width, editor.getText());
+			const body = title.length + editorLines.length + note.length + hints.length <= rows
+				? [...editorLines, ...note]
+				: editorLines;
+			return [...title.map((line) => paddedLine(theme.fg("accent", theme.bold(line)), width)), ...body, ...hints];
 		},
 		handleInput: (data: string): void => {
 			// Recompute the fit from the live dimensions; never trust a
-			// cached flag from a previous paint.
+			// cached flag from a previous paint. Advisory rows are excluded on
+			// purpose: the note must never turn a valid submission into a
+			// blocked stage, so it degrades by being dropped instead.
 			const width = (tui as unknown as { terminal?: { columns?: number } }).terminal?.columns ?? 80;
 			const fits = titleLines(width).length + editor.render(width).length + hintLinesOf(width).length <= ctx.rowsFor();
 			if (!fits) {

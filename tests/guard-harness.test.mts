@@ -680,7 +680,7 @@ test("explicit asks offer once/deny only; fallback saves exact effective rules",
 		assert.equal(result.structuredContent.exit_code, 0);
 		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8"));
 		assert.deepEqual(saved.hostBash.ask, ["HostBash(echo asked)"]);
-		assert.deepEqual(saved.hostBash.allow, ["HostBash(/^echo \\$GUARD_HARNESS_UNSET$/)"]);
+		assert.deepEqual(saved.hostBash.allow, ["HostBash(echo $GUARD_HARNESS_UNSET)"]);
 		await h.handlers.session_shutdown[0]({}, ctx);
 	});
 });
@@ -1092,7 +1092,7 @@ test("per-step allow save: partial commit re-prompts with the saved step allowed
 		assert.match(overlays[1].text, /Select the steps to allow \(project\)/, "the picker opened over the breakdown steps");
 		assert.match(overlays[1].text, /◉ echo \$GUARD_HARNESS_UNSET/, "prompting steps start preselected");
 		const saved = savedRules(cwd);
-		assert.deepEqual(saved, ["HostBash(/^echo \\$GUARD_SECOND_UNSET$/)"], "exactly the selected step's rule was saved");
+		assert.deepEqual(saved, ["HostBash(echo $GUARD_SECOND_UNSET)"], "exactly the selected step's rule was saved");
 		// The fresh dialog recomputes the breakdown: the saved step is allowed context.
 		assert.ok(overlays[4].text.includes("[✓] echo $GUARD_SECOND_UNSET"), "the saved step now shows as allowed", overlays[4].text);
 		assert.ok(overlays[4].text.includes("» [?] echo $GUARD_HARNESS_UNSET"), "the unselected step still prompts");
@@ -1115,7 +1115,7 @@ test("per-step allow save: full coverage commits once, executes, and omits the s
 		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
 		assert.equal(result.structuredContent.exit_code, 0, "the call executed without a further prompt");
 		assert.deepEqual(overlays.map((o) => o.kind), ["selector", "editor", "preview"], "a single prompting step skips the picker and no second dialog opens");
-		assert.deepEqual(savedRules(cwd), ["HostBash(/^echo \\$GUARD_HARNESS_UNSET$/)"]);
+		assert.deepEqual(savedRules(cwd), ["HostBash(echo $GUARD_HARNESS_UNSET)"]);
 		const saveNotices = h.notifications.filter((n) => /saved \d+ allow rule/.test(n));
 		assert.equal(saveNotices.length, 1);
 		assert.doesNotMatch(saveNotices[0], /still prompt/);
@@ -1179,7 +1179,7 @@ test("per-step allow save: cancellation after the commit keeps the rule but neve
 			/abort|cancel|expired/,
 		);
 		assert.ok(overlays.length >= 5, "the fresh dialog opened before the cancellation");
-		assert.deepEqual(savedRules(cwd), ["HostBash(/^echo \\$GUARD_SECOND_UNSET$/)"], "the committed rule persists");
+		assert.deepEqual(savedRules(cwd), ["HostBash(echo $GUARD_SECOND_UNSET)"], "the committed rule persists");
 		await h.handlers.session_shutdown[0]({}, ctx);
 	});
 });
@@ -1208,7 +1208,7 @@ test("per-step allow save: an external policy change between iterations expires 
 			/expired|research/,
 		);
 		assert.equal(secondSelector, true, "the fresh dialog opened before the external change");
-		assert.deepEqual(savedRules(cwd), ["HostBash(/^echo \\$GUARD_SECOND_UNSET$/)"], "the first save persists");
+		assert.deepEqual(savedRules(cwd), ["HostBash(echo $GUARD_SECOND_UNSET)"], "the first save persists");
 		assert.equal(overlays.filter((o) => o.kind === "preview").length, 1, "no further save was committed");
 		await h.handlers.session_shutdown[0]({}, ctx);
 	});

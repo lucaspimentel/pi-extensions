@@ -148,6 +148,44 @@ test("editor: a terminal too short for the editor blocks submission but keeps es
 	assert.equal(await promise, undefined);
 });
 
+const ADVISORY = "Note: this rule is not limited to the exact command shown; it may match other commands and combinations.";
+
+test("editor: the advisory follows the live editor text and clears again", async () => {
+	const host = makeFakeHost();
+	const promise = editorStage(host.ui as never, new AbortController().signal, {
+		title: "guard: save allow rule",
+		prefill: "HostBash(git log)",
+		noteFor: (text) => (text.includes("*") ? ADVISORY : undefined),
+	});
+	const overlay = host.overlays[0].component;
+	assert.ok(!strip(overlay.render(80)).join("\n").includes("not limited to the exact command shown"), "no advisory for the exact prefill");
+	overlay.handleInput("*");
+	assert.ok(strip(overlay.render(80)).join("\n").includes("not limited to the exact command shown"), "the advisory appears after widening the rule");
+	overlay.handleInput("\x7f"); // backspace
+	assert.ok(!strip(overlay.render(80)).join("\n").includes("not limited to the exact command shown"), "the advisory clears when the rule narrows again");
+	overlay.handleInput(ENTER);
+	assert.equal(await promise, "HostBash(git log)", "the text survives the advisory appearing and clearing");
+});
+
+test("editor: a tight row budget drops the advisory instead of blocking submission", async () => {
+	// Baseline: the note-less layout at a comfortable budget.
+	const base = makeFakeHost(64);
+	const basePromise = editorStage(base.ui as never, new AbortController().signal, { title: "t", prefill: "HostBash(ls)" });
+	const baseRows = strip(base.overlays[0].component.render(80)).length;
+	base.overlays[0].component.handleInput(ESC);
+	assert.equal(await basePromise, undefined);
+	// A budget that holds the note-less layout but not the advisory: the
+	// advisory is dropped and submission still works.
+	const host = makeFakeHost(baseRows + 1);
+	const promise = editorStage(host.ui as never, new AbortController().signal, { title: "t", prefill: "HostBash(ls)", noteFor: () => ADVISORY });
+	const overlay = host.overlays[0].component;
+	const rendered = strip(overlay.render(80)).join("\n");
+	assert.ok(!rendered.includes("too short"), "the advisory never triggers the blocked state");
+	assert.ok(!rendered.includes("not limited to the exact command shown"), "the advisory was dropped for want of rows");
+	overlay.handleInput(ENTER);
+	assert.equal(await promise, "HostBash(ls)", "submission still works with the advisory dropped");
+});
+
 // ── Picker stage ─────────────────────────────────────────────────────────────
 
 const steps: GuardPickerStep[] = [

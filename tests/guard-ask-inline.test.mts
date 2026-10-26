@@ -217,6 +217,19 @@ test("the editor stage mounts inline and honors the row budget", async () => {
 	assert.equal(await promise, "Bash(git *)", "enter submits the editor text inline");
 });
 
+test("the editor advisory never breaks the inline row budget", async () => {
+	const host = makeInlineHost(24); // budget = 16
+	const advisory = "Note: this rule is not limited to the exact command shown; it may match other commands and combinations.";
+	const { promise } = openStage(host.ui, (ui, signal) => (editorStage as (ui: unknown, signal: AbortSignal, options: { title: string; prefill: string; noteFor?: (text: string) => string | undefined }) => Promise<string | undefined>)(ui, signal, { title: "guard: edit rules", prefill: "Bash(git *)", noteFor: () => advisory }));
+	await tick();
+	const lines = host.inlineComponent()!.render(80);
+	const text = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+	assert.ok(lines.length <= inlineRowBudget(24), `editor render ${lines.length} exceeds the budget`);
+	assert.ok(!text.includes("too short"), "the advisory must not push the inline editor into the blocked state");
+	host.inlineComponent()!.handleInput(ENTER);
+	assert.equal(await promise, "Bash(git *)", "the text is submitted with the advisory present or dropped");
+});
+
 test("the picker stage mounts inline and cancels through esc", async () => {
 	const steps: GuardPickerStep[] = [
 		{ occurrenceId: 0, label: "git status", detail: "allowed by default" },

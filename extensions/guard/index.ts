@@ -220,7 +220,7 @@ export default function guard(pi: ExtensionAPI) {
 		const owned = ownedStagesFor(ctx);
 		return {
 			select: (title, options, signal) => gatedSelect(ctx, title, options, signal),
-			editor: owned ? (title, prefill, signal) => editorStage(ctx.ui, signal, { title, prefill }) : undefined,
+			editor: owned ? (title, prefill, signal, noteFor) => editorStage(ctx.ui, signal, { title, prefill, noteFor }) : undefined,
 			picker: owned ? (title, steps, signal, options) => pickerStage(ctx.ui, signal, { title, steps, preselectedOccurrenceIds: options?.preselectedOccurrenceIds, requireSelection: options?.requireSelection }) : undefined,
 			inputText: (title, signal) => ctx.ui.input(title, undefined, { signal }),
 			notify: (message, level) => notify(ctx, message, level),

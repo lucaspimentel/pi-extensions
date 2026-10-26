@@ -52,7 +52,9 @@ function writeRootSuggestion(path: string, cwd: string): string {
  * there is nothing worth saving (e.g. a prompt on a remote write has no
  * allow-shaped home). Pure: returns data, never writes.
  *
- * - host shell: an anchored regex of the complete escaped command;
+ * - host shell: the glob-form rule for the complete command, in the call's
+ *   shell namespace (a command carrying `*` or `?`, or one that both starts
+ *   and ends with `/`, matches more than the command);
  * - web_fetch: `https://<host>/*`, for webFetchAllow;
  * - local read outside the roots: the grant directory, for readRoots;
  * - write outside the roots: the directory, for writeRoots;
@@ -63,9 +65,8 @@ export function suggestRule(call: GuardCall, policy: PolicyState): SuggestedPatc
 	switch (call.kind) {
 		case "host-shell": {
 			if (!call.command.trim() || /[\r\n]/.test(call.command)) return null;
-			const exact = call.command.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 			const shell = call.shell === "pwsh" ? "Pwsh" : "HostBash";
-			return { hostBash: { allow: [`${shell}(/^${exact}$/)`] } };
+			return { hostBash: { allow: [`${shell}(${call.command})`] } };
 		}
 		case "web-fetch": {
 			const host = urlHost(call.url);

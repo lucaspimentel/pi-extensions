@@ -40,8 +40,10 @@ function makeIO(script: { select?: (string | undefined)[]; editor?: (string | un
 			calls.select.push(`${title}\n@@${options.join("|")}`);
 			return script.select?.shift();
 		},
-		editor: async (title, prefill) => {
-			calls.editor.push(`${title}\n@@prefill:${prefill}`);
+		editor: async (title, prefill, _signal, noteFor) => {
+			// The note parts come before @@prefill so existing endsWith/includes
+			// assertions on the prefill keep working.
+			calls.editor.push(`${title}\n@@noteFor:${noteFor ? "present" : "absent"}\n@@note:${noteFor?.(prefill) ?? "none"}\n@@prefill:${prefill}`);
 			return script.editor?.shift();
 		},
 		picker: async (title, steps, _signal, options) => {
@@ -253,9 +255,12 @@ test("save allow: editor with the bundle prefill, preview, confirm", async () =>
 	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: [undefined] });
 	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan }));
 	assert.equal(outcome.kind, "allow-once", "ordinary editor cancellation approves once without saving");
-	// The editor opened with the exact bundle prefill and the cancellation consequence.
-	assert.match(calls.editor[0], /@@prefill:HostBash\(\/\^curl https/);
+	// The editor opened with the glob bundle prefill and the cancellation consequence.
+	assert.match(calls.editor[0], /@@prefill:HostBash\(curl https/);
 	assert.match(calls.editor[0], /approves the current call once without saving/);
+	// A faithful exact glob shows no advisory, and the callback is wired through.
+	assert.match(calls.editor[0], /@@noteFor:present/);
+	assert.match(calls.editor[0], /@@note:none/);
 });
 
 test("save allow: confirm returns the reviewed patch for the chosen scope", async () => {
@@ -345,9 +350,9 @@ test("per-step plan with multiple prompting steps opens the picker with promptin
 	const parsed = JSON.parse(options.replace("options:", ""));
 	assert.deepEqual(parsed, { preselectedOccurrenceIds: [0, 2], requireSelection: false });
 	assert.deepEqual(selectable.replace("selectable:", "").split("|"), ["yes", "no", "yes"], "the tier-allowed step is unselectable context");
-	// The editor prefill carries only the prompting steps' exact rules.
-	assert.ok(calls.editor[0].includes("@@prefill:HostBash(/^curl https:"), calls.editor[0]);
-	assert.ok(!calls.editor[0].includes("echo ok$)"), "no rule is prefilled for the already-allowed step");
+	// The editor prefill carries only the prompting steps' glob rules.
+	assert.ok(calls.editor[0].includes("@@prefill:HostBash(curl https:"), calls.editor[0]);
+	assert.ok(!calls.editor[0].includes("prefill:HostBash(echo ok)"), "no rule is prefilled for the already-allowed step");
 });
 
 test("picker esc returns to the action menu with nothing granted or edited", async () => {
@@ -409,7 +414,7 @@ test("the per-step preview discloses partial saves and full coverage distinctly"
 	}
 });
 
-test("a whole-call plan (unreliable breakdown) never opens the picker and keeps the exact-rule editor", async () => {
+test("a whole-call plan (unreliable breakdown) never opens the picker and keeps the whole-call rule editor", async () => {
 	const real = realDeps("echo $(compute)");
 	assert.ok(real.allowPlan && real.allowPlan.kind === "whole-call");
 	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: [real.allowPlan.rules.join("\n")] });
@@ -418,9 +423,74 @@ test("a whole-call plan (unreliable breakdown) never opens the picker and keeps 
 	assert.equal(outcome.planKind, "whole-call");
 	assert.deepEqual(outcome.selectedOccurrenceIds, []);
 	assert.equal(calls.picker.length, 0, "no picker on the whole-call path");
-	assert.match(calls.editor[0], /@@prefill:HostBash\(\/\^echo/);
+	assert.match(calls.editor[0], /@@prefill:HostBash\(echo/);
 	const preview = calls.select[1].split("\n@@")[0];
 	assert.match(preview, /Effect: the rule permits the exact current command/);
+});
+
+test("save allow: a whole-call pwsh suggestion keeps the Pwsh namespace", async () => {
+	const command = "Get-Thing *.txt";
+	const policy = makePolicy();
+	const call = shellCall(command, "pwsh");
+	const explanation = explainHostShellCommand(call, policy);
+	const allowPlan = planAllowSave(call, policy, explanation);
+	assert.ok(allowPlan);
+	assert.equal(allowPlan.kind, "whole-call", "pwsh breakdowns are unavailable, so the whole-call path is used");
+	assert.deepEqual(planRules(allowPlan), ["Pwsh(Get-Thing *.txt)"]);
+	const rules = planRules(allowPlan);
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: [rules.join("\n")] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({
+		io,
+		command,
+		shell: "pwsh",
+		decision: explanation.decision,
+		explanation,
+		allowPlan,
+		parseRules: (text) => parseShellRuleLines(text, "pwsh"),
+		validateRules: (intent, list) => validateShellSave(call, policy, intent, list),
+		validateAllowSave: (list, ids) => validateShellAllowSave(call, policy, list, ids),
+		denyRulesFor: (ids) => planDenyRules(call, explanation, ids),
+	}));
+	assert.equal(outcome.kind, "save-allow");
+	assert.ok(calls.editor[0].includes("@@prefill:Pwsh(Get-Thing *.txt)"), calls.editor[0]);
+	assert.ok(!calls.editor[0].includes("HostBash("), calls.editor[0]);
+	// The wildcard makes the prefilled rule wider than the command, so the
+	// advisory appears (it never blocks the save).
+	assert.match(calls.editor[0], /@@note:Note: this rule is not limited to the exact command shown/);
+});
+
+test("save allow: a broadened glob shows the advisory in the editor and the preview", async () => {
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: ["HostBash(curl https://example.com/*)"] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: "curl https://example.com/*" }));
+	assert.equal(outcome.kind, "save-allow");
+	assert.match(calls.editor[0], /@@noteFor:present/);
+	assert.match(calls.editor[0], /@@note:Note: this rule is not limited to the exact command shown/);
+	const preview = calls.select[1].split("\n@@")[0];
+	assert.match(preview, /Note: this rule is not limited to the exact command shown/);
+	assert.ok(preview.includes("Rules to save:"), preview);
+	assert.equal(calls.notify.length, 0, "the advisory never notifies and never blocks");
+});
+
+test("save allow: the preview advisory follows the final edited rules, not the prefill", async () => {
+	const real = realDeps();
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: ["HostBash(curl *)"] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, allowPlan: real.allowPlan }));
+	assert.equal(outcome.kind, "save-allow");
+	assert.deepEqual(outcome.rules, ["HostBash(curl *)"]);
+	assert.match(calls.editor[0], /@@note:none/, "the exact prefill itself is not flagged");
+	const preview = calls.select[1].split("\n@@")[0];
+	assert.match(preview, /Note: this rule is not limited to the exact command shown/);
+	assert.ok(!preview.includes("HostBash(curl https"), "the preview shows the edited rule, not the prefill");
+});
+
+test("the preview advisory is order-independent and counts every non-exact rule", async () => {
+	for (const order of [["HostBash(curl *)", "HostBash(echo *)"], ["HostBash(echo *)", "HostBash(curl *)"]]) {
+		const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], picker: [[0, 1, 2]], editor: [order.join("\n")] });
+		const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: compoundCommand }));
+		assert.equal(outcome.kind, "save-allow");
+		const preview = calls.select[1].split("\n@@")[0];
+		assert.match(preview, /Note: 2 of these rules are not limited to the exact command shown/);
+	}
 });
 
 // ── Deny save flow ──────────────────────────────────────────────────────────
@@ -431,6 +501,22 @@ test("save deny: the reliable breakdown opens a picker with nothing preselected"
 	assert.deepEqual(outcome, { kind: "deny-once", explicit: true, steering: undefined }, "picker cancellation denies once and still offers steering");
 	assert.equal(calls.input.length, 1, "steering input was offered after the save cancellation");
 	assert.ok(calls.picker[0].includes("curl https://example.com"));
+});
+
+test("save deny: a faithful deny prefill is silent; a hand-edited broad deny gets the advisory", async () => {
+	{
+		const { io, calls } = makeIO({ select: ["Save deny for project", "Confirm"], picker: [[1]], editor: [undefined] });
+		const outcome = await runExecutionPrompt(baseExecutionDeps({ io }));
+		assert.deepEqual(outcome, { kind: "deny-once", explicit: true, steering: undefined });
+		assert.match(calls.editor[0], /@@note:none/, "the anchored exact deny prefill is never flagged");
+	}
+	{
+		const { io, calls } = makeIO({ select: ["Save deny for project", "Confirm"], picker: [[1]], editor: ["HostBash(curl*)"] });
+		const outcome = await runExecutionPrompt(baseExecutionDeps({ io }));
+		assert.equal(outcome.kind, "save-deny");
+		const preview = calls.select[1].split("\n@@")[0];
+		assert.match(preview, /Note: this rule is not limited to the exact command shown/);
+	}
 });
 
 test("save deny: picker selection prefills exact deny rules for the selected steps", async () => {
@@ -540,6 +626,7 @@ test("read grant: root save confirm, unrelated-root loop, empty submission, and 
 		assert.ok(preview.includes("Root: /home/user/shared"));
 		assert.ok(preview.includes("Destination: /home/user/proj/.pi/guard.local.json"));
 		assert.ok(preview.includes("discards worker state"));
+		assert.match(calls.editor[0], /@@noteFor:absent/, "read-root saves never carry the shell advisory");
 	}
 	{
 		const { io, calls } = makeIO({ select: ["Save for user", "Confirm"], editor: ["/somewhere/else", "/home/user/shared/sub"] });

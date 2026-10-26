@@ -180,7 +180,9 @@ Registration details:
 - **Persistent saves** (capable TUI hosts only; capability gaps are detected
   before the dialog and keep once actions): every save opens an editor (one
   complete rule expression per line, original shell namespace enforced;
-  glob/regex/tool-wide broadening allowed with review) and then a separate
+  glob/regex/tool-wide broadening allowed with review; allow prefills are
+  globs of the step or command subject and deny prefills stay anchored
+  exact) and then a separate
   **Confirm/Edit/Cancel save** preview showing the final entries, the exact
   destination file, and the validated effect on the current call (for rule
   saves: each rule permits/blocks its matching command independently,
@@ -193,10 +195,15 @@ Registration details:
   failures never grant authority. For compound commands a reliable
   breakdown opens a per-step allow picker (prompting steps preselected and
   selectable, allowed steps unselectable context; esc or confirming zero
-  selections returns to the action menu) and prefills exact rules for the
+  selections returns to the action menu) and prefills glob rules for the
   selected steps only; per-step validation requires every selected step to
   resolve allow, and a partial save opens a fresh approval dialog after the
-  commit. Unreliable breakdowns keep the whole-call exact suggestion path.
+  commit. Unreliable breakdowns keep the whole-call suggestion path. A rule
+  that is not the exact rendering of its subject (a glob carrying `*` or
+  `?`, a bare tool-wide rule, or a differing hand-written regex) shows a
+  non-blocking neutral advisory under the editor and in the preview; it is
+  dropped from the live editor when the rows do not fit, never blocks a
+  save, and never appears for `webFetchAllow`, `readRoots`, or `writeRoots`.
   Every rule-save commit (allow and deny) emits one info notification
   naming the scope, destination, and rule count. Deny saves use a checkbox
   picker of the parsed steps (nothing preselected, duplicates keep distinct

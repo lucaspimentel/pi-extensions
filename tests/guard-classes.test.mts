@@ -352,25 +352,30 @@ test("isToolClass validates class names", () => {
 
 // ── suggestRule ───────────────────────────────────────────────────────────────
 
-test("suggestRule: host shell suggests exact escaped commands, never prefixes", () => {
+test("suggestRule: host shell suggests glob commands, never prefixes", () => {
 	const policy = makePolicy();
 	const two = suggestRule({ kind: "host-shell", shell: "host-bash", command: "cargo test --release foo" }, policy);
-	assert.deepEqual(two, { hostBash: { allow: ["HostBash(/^cargo test --release foo$/)"] } });
+	assert.deepEqual(two, { hostBash: { allow: ["HostBash(cargo test --release foo)"] } });
 	const one = suggestRule({ kind: "host-shell", shell: "host-bash", command: "make" }, policy);
-	assert.deepEqual(one, { hostBash: { allow: ["HostBash(/^make$/)"] } });
+	assert.deepEqual(one, { hostBash: { allow: ["HostBash(make)"] } });
 	const pwsh = suggestRule({ kind: "host-shell", shell: "pwsh", command: "Get-Content x.txt" }, policy);
-	assert.deepEqual(pwsh, { hostBash: { allow: ["Pwsh(/^Get-Content x\\.txt$/)"] } });
+	assert.deepEqual(pwsh, { hostBash: { allow: ["Pwsh(Get-Content x.txt)"] } });
 	assert.equal(suggestRule({ kind: "host-shell", shell: "host-bash", command: "" }, policy), null);
+	assert.equal(suggestRule({ kind: "host-shell", shell: "host-bash", command: "echo a\necho b" }, policy), null);
 });
 
-test("exact host suggestions escape wildcard, regex and dollar metacharacters", () => {
+test("glob host suggestions stay anchored and do not grow prefixes", () => {
 	const command = "echo 'x*?[]()$|/\\\\foo' > result.txt";
 	const policy = makePolicy();
 	const patch = effectiveAllowSuggestion({ kind: "host-shell", shell: "host-bash", command }, policy);
 	assert.ok(patch);
+	assert.equal(patch.hostBash!.allow![0], `HostBash(${command})`, "the glob is emitted verbatim");
 	const parsed = parseRule(patch.hostBash!.allow![0])!;
 	assert.equal(ruleMatches(parsed, "HostBash", { command }, policy.cwd), true);
-	assert.equal(ruleMatches(parsed, "HostBash", { command: command + " extra" }, policy.cwd), false);
+	assert.equal(ruleMatches(parsed, "HostBash", { command: command + " extra" }, policy.cwd), false, "the glob stays anchored");
+	// `*` and `?` are glob syntax again: the rule also matches variants where
+	// they stand for other text.
+	assert.equal(ruleMatches(parsed, "HostBash", { command: command.replace("*?", "AB") }, policy.cwd), true);
 	const config = mergeConfig({ hostBash: { deny: ["HostBash(echo *)"] } }, patch, policy.cwd);
 	assert.equal(decide({ ...policy, config }, { kind: "host-shell", shell: "host-bash", command }).action, "deny");
 	assert.equal(effectiveAllowSuggestion({ kind: "host-shell", shell: "host-bash", command }, { ...policy, config }), null);

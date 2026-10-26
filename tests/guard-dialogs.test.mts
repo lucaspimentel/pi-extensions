@@ -1874,7 +1874,7 @@ test("a compound allow bundle saves per-step rules and runs the original command
 		const result = await pending;
 		assert.equal(result.structuredContent.exit_code, 0, "the original compound command ran unchanged");
 		const saved = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8")) as { hostBash?: { allow?: string[] } };
-		assert.deepEqual(saved.hostBash?.allow, ["HostBash(/^touch compound-marker$/)"], "only the step lacking permission was saved");
+		assert.deepEqual(saved.hostBash?.allow, ["HostBash(touch compound-marker)"], "only the step lacking permission was saved");
 	});
 });
 

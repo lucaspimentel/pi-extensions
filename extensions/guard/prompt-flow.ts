@@ -17,15 +17,19 @@
  */
 
 import type { ConfigScope, SuggestedPatch } from "./policy/suggest.ts";
-import type { AllowSavePlan } from "./policy/save.ts";
+import { notExactShellRules, type AllowSavePlan } from "./policy/save.ts";
 import type { Decision, GuardCall, HostShellExplanation } from "./policy/decision.ts";
 import type { GuardPickerStep } from "./ask-components.ts";
 
 /** Injected UI surface. Every method takes the stage's dialog signal. */
 export interface PromptFlowIO {
 	select(title: string, options: string[], signal: AbortSignal): Promise<string | undefined>;
-	/** Owned editor stage; omitted when the host lacks the capabilities. */
-	editor?(title: string, prefill: string, signal: AbortSignal): Promise<string | undefined>;
+	/**
+	 * Owned editor stage; omitted when the host lacks the capabilities. The
+	 * optional noteFor callback supplies a live advisory line for the current
+	 * editor text; it is display-only and the stage may drop it.
+	 */
+	editor?(title: string, prefill: string, signal: AbortSignal, noteFor?: (text: string) => string | undefined): Promise<string | undefined>;
 	/** Owned checkbox picker stage; omitted when the host lacks the capabilities. */
 	picker?(title: string, steps: readonly GuardPickerStep[], signal: AbortSignal, options?: { preselectedOccurrenceIds?: readonly number[]; requireSelection?: boolean }): Promise<number[] | undefined>;
 	/** Signal-aware native text input (steering; capability-limited fallback). */
@@ -56,6 +60,20 @@ type EditorLoopResult = { kind: "ok"; rules: string[]; text: string } | { kind: 
 const ALLOW_EDITOR_CONSEQUENCE = "cancelling or empty submission approves the current call once without saving";
 const DENY_EDITOR_CONSEQUENCE = "cancelling or empty submission denies the current call once without saving";
 const ROOT_EDITOR_CONSEQUENCE = "cancelling or empty submission grants nothing";
+
+/**
+ * The non-blocking advisory line for a rule set, or undefined when every rule
+ * is the exact rendering of one of the reference subjects. Neutral wording on
+ * purpose: a hand-edited rule may be narrower or wider than the subject, so
+ * the note never claims proven broadening. Display-only.
+ */
+function notExactNoteFor(text: string, references: readonly string[]): string | undefined {
+	const count = notExactShellRules(text, references).length;
+	if (count === 0) return undefined;
+	return count === 1
+		? "Note: this rule is not limited to the exact command shown; it may match other commands and combinations."
+		: `Note: ${count} of these rules are not limited to the exact command shown; they may match other commands and combinations.`;
+}
 
 /** Display names for the tools guard prompts for (OwnedExecutors plus pwsh routing). */
 const TOOL_LABELS: Record<string, string> = { bash: "Bash", host_bash: "Bash", pwsh: "Pwsh", python: "Python", node: "Node" };
@@ -164,6 +182,8 @@ async function editorSaveLoop(
 		title: string;
 		consequence: string;
 		prefill: string;
+		/** Optional live advisory for the current editor text (display-only). */
+		noteFor?: (text: string) => string | undefined;
 		parse: (text: string) => { ok: true; rules: string[] } | { ok: false; error: string };
 		validate: (rules: string[]) => { ok: true } | { ok: false; error: string };
 	},
@@ -171,7 +191,7 @@ async function editorSaveLoop(
 	if (!io.editor) throw new Error("guard: the editor stage is unavailable; save actions must not be offered");
 	let text = options.prefill;
 	for (;;) {
-		const submitted = await io.editor(`${options.title}\n${options.consequence}`, text, signal);
+		const submitted = await io.editor(`${options.title}\n${options.consequence}`, text, signal, options.noteFor);
 		if (submitted === undefined || submitted.trim() === "") return { kind: "cancelled" };
 		const parsed = options.parse(submitted);
 		if (!parsed.ok) {
@@ -301,11 +321,21 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 			const prefill = plan.kind === "per-step"
 				? plan.perStep.filter((entry) => selected.includes(entry.occurrenceId)).map((entry) => entry.rule).join("\n")
 				: plan.rules.join("\n");
+			// The advisory compares each rule with the subjects this save was
+			// planned from: the selected steps' evaluator allow subjects (a
+			// redirect-requiring step keeps its verbatim subject), or the whole
+			// command on the unreliable-breakdown path.
+			const stepById = new Map((deps.explanation?.steps ?? []).map((step) => [step.occurrenceId, step]));
+			const allowReferences: string[] = plan.kind === "per-step"
+				? selected.map((id) => stepById.get(id)?.allowSubject).filter((value): value is string => value !== undefined)
+				: [deps.command];
+			const noteFor = (text: string): string | undefined => notExactNoteFor(text, allowReferences);
 			const baseTitle = `Edit the allow rules to save (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;
 			const runEditor = (): Promise<EditorLoopResult> => editorSaveLoop(io, signal, {
 				title: baseTitle,
 				consequence: ALLOW_EDITOR_CONSEQUENCE,
 				prefill,
+				noteFor,
 				parse: deps.parseRules,
 				validate: plan.kind === "per-step"
 					? (rules) => deps.validateAllowSave(rules, selected)
@@ -314,10 +344,12 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 			const coversPrompting = plan.kind === "per-step" && prompting.length > 0
 				&& prompting.every((step) => selected.includes(step.occurrenceId));
 			const buildPreview = (rules: string[]): string => {
+				const note = notExactNoteFor(rules.join("\n"), allowReferences);
 				const lines = [
 					`Confirm allow save (${scope})?`,
 					"Rules to save:",
 					...rules,
+					...(note ? [note] : []),
 					`Destination: ${deps.destination(scope)}`,
 				];
 				if (plan.kind === "per-step") {
@@ -352,6 +384,10 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 			// Reliable compound breakdown: a multi-select with nothing preselected.
 			// Unreliable parsing: a blank manual editor.
 			let prefill = "";
+			// Deny rules match each step's normalized subject (never the
+			// redirect-stripped allow subject); manual entry on an unreliable
+			// breakdown compares against the whole command.
+			let denyReferences: string[] = [deps.command];
 			if (deps.explanation?.breakdown.available && deps.explanation.steps.length > 0 && io.picker) {
 				const pickerSteps: GuardPickerStep[] = deps.explanation.steps.map((step) => ({
 					occurrenceId: step.occurrenceId,
@@ -368,23 +404,32 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 					return { kind: "deny-once", explicit: true, steering: await collectSteering(io, signal, `denied: ${deps.command || deps.toolName}`) };
 				}
 				prefill = deps.denyRulesFor(selected).join("\n");
+				denyReferences = deps.explanation.steps
+					.filter((step) => selected.includes(step.occurrenceId))
+					.map((step) => step.subject);
 			}
+			const noteFor = (text: string): string | undefined => notExactNoteFor(text, denyReferences);
 			const baseTitle = `Edit the deny rules to save (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;
 			const runEditor = (): Promise<EditorLoopResult> => editorSaveLoop(io, signal, {
 				title: baseTitle,
 				consequence: DENY_EDITOR_CONSEQUENCE,
 				prefill,
+				noteFor,
 				parse: deps.parseRules,
 				validate: (rules) => deps.validateRules("deny", rules),
 			});
-			const buildPreview = (rules: string[]): string => [
-				`Confirm deny save (${scope})?`,
-				"Rules to save:",
-				...rules,
-				`Destination: ${deps.destination(scope)}`,
-				"Effect: each rule denies matching commands independently, including outside this sequence; the current call is denied",
-				"Cancelling here denies the current call once without saving",
-			].join("\n");
+			const buildPreview = (rules: string[]): string => {
+				const note = notExactNoteFor(rules.join("\n"), denyReferences);
+				return [
+					`Confirm deny save (${scope})?`,
+					"Rules to save:",
+					...rules,
+					...(note ? [note] : []),
+					`Destination: ${deps.destination(scope)}`,
+					"Effect: each rule denies matching commands independently, including outside this sequence; the current call is denied",
+					"Cancelling here denies the current call once without saving",
+				].join("\n");
+			};
 			const preview = await previewLoop(io, signal, { previewText: "", runEditor, buildPreview });
 			// Ordinary cancellation of a deny save: deny once, steering still offered.
 			if (preview.kind === "cancelled") {

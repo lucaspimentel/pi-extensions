@@ -5,9 +5,12 @@
  * runtime/queue access. Parsing and validation operate on the exact
  * evaluation subjects from decision.ts so suggestions anchor to what the
  * evaluator matched, and edited patches are validated as complete
- * hypothetical merges against the whole original call. Allow saves use
- * per-step validation when the breakdown is reliable; the whole-call exact
- * suggestion survives only for unreliable breakdowns.
+ * hypothetical merges against the whole original call. Allow prefills are
+ * glob-form rules for those subjects (a subject containing `*` or `?`, or
+ * one that both starts and ends with `/`, broadens the rule by the existing
+ * grammar); deny prefills stay anchored exact. Allow saves use per-step
+ * validation when the breakdown is reliable; the whole-call suggestion
+ * survives only for unreliable breakdowns.
  */
 
 import type { GuardCall, HostShellExplanation, PolicyState } from "./decision.ts";
@@ -24,19 +27,59 @@ export function ruleToolForNamespace(shell: "host-bash" | "pwsh"): "HostBash" | 
 	return shell === "pwsh" ? "Pwsh" : "HostBash";
 }
 
-/** Escape a subject into an anchored exact pattern (same form as suggestRule). */
+/** Escape a subject into an anchored exact pattern (the deny-prefill form). */
 export function escapeExactPattern(subject: string): string {
 	return subject.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 }
 
-/** The anchored exact allow rule for one step's plain-allow matching subject. */
-export function exactAllowRule(shell: "host-bash" | "pwsh", allowSubject: string): string {
-	return `${ruleToolForNamespace(shell)}(/^${escapeExactPattern(allowSubject)}$/)`;
+/**
+ * The glob-form allow rule for one step's plain-allow matching subject.
+ * The subject is emitted verbatim: an ordinary command compiles to the same
+ * anchored match as the old escaped `/^...$/` form, while a subject carrying
+ * `*` or `?`, or one that both starts and ends with `/` (parsed as a regex),
+ * matches more than the subject.
+ */
+export function globAllowRule(shell: "host-bash" | "pwsh", allowSubject: string): string {
+	return `${ruleToolForNamespace(shell)}(${allowSubject})`;
 }
 
 /** The anchored exact deny rule for one step's deny/ask matching subject. */
 export function exactDenyRule(shell: "host-bash" | "pwsh", subject: string): string {
 	return `${ruleToolForNamespace(shell)}(/^${escapeExactPattern(subject)}$/)`;
+}
+
+/** True when one rule line is provably limited to one of the reference subjects. */
+function shellRuleLineIsExact(line: string, references: readonly string[]): boolean {
+	let parsed: ReturnType<typeof parseRule>;
+	try {
+		parsed = parseRule(line);
+	} catch {
+		return false; // an uncompilable regex body is never exact
+	}
+	if (!parsed || parsed.pattern === undefined) return false; // not a rule, or a bare tool-wide rule
+	const pattern = parsed.pattern;
+	if (pattern.length >= 2 && pattern.startsWith("/") && pattern.endsWith("/")) {
+		// Compare the original body text, never RegExp.source: the anchored
+		// exact form escapes '/' and compilePattern does not.
+		const body = pattern.slice(1, -1);
+		return references.some((reference) => body === `^${escapeExactPattern(reference)}$`);
+	}
+	return !pattern.includes("*") && !pattern.includes("?");
+}
+
+/**
+ * The shell-rule lines that are not provably limited to one of the given
+ * reference subjects: a `/regex/` body that is not the anchored escaped form
+ * of any reference, a glob carrying `*` or `?`, a bare tool-wide rule, or an
+ * unparseable line. Display-only and total: pure, never throws, never mutates
+ * an input, and never consulted by a validator, plan builder, or commit path.
+ */
+export function notExactShellRules(text: string, references: readonly string[]): string[] {
+	const flagged: string[] = [];
+	for (const line of text.split(/\r?\n/).map((value) => value.trim()).filter((value) => value.length > 0)) {
+		if (!shellRuleLineIsExact(line, references)) flagged.push(line);
+	}
+	return flagged;
 }
 
 export type ParseResult = { ok: true; rules: string[] } | { ok: false; error: string };
@@ -162,9 +205,9 @@ export function validateShellAllowSave(
 }
 
 /**
- * An allow-save plan: either the provably effective whole-call exact rule
- * (kept ONLY for unreliable breakdowns) or a per-step mapping from prompting
- * step occurrence IDs to their exact allow rules (reliable breakdowns).
+ * An allow-save plan: either the provably effective whole-call rule (kept
+ * ONLY for unreliable breakdowns) or a per-step mapping from prompting step
+ * occurrence IDs to their glob-form allow rules (reliable breakdowns).
  */
 export type AllowSavePlan =
 	| { kind: "whole-call"; rules: string[]; patch: SuggestedPatch }
@@ -172,13 +215,14 @@ export type AllowSavePlan =
 
 /**
  * Plan the allow-save offer for a prompt. Explicit ask prohibitions apply.
- * A reliable breakdown plans per-step rules for every step lacking effective
- * permission (anchored to each evaluator allow subject; a redirect-requiring
- * step's verbatim subject makes its pattern redirect-aware); the whole-call
- * exact suggestion is retired on this path, and a per-step validation failure
- * plans nothing rather than falling back to a guessed whole-call rule. An
- * unavailable breakdown keeps the existing whole-call exact suggestion when
- * it provably authorizes the entire call, and plans nothing otherwise.
+ * A reliable breakdown plans per-step glob rules for every step lacking
+ * effective permission (anchored to each evaluator allow subject; a
+ * redirect-requiring step's verbatim subject makes its pattern
+ * redirect-aware); the whole-call suggestion is retired on this path, and a
+ * per-step validation failure plans nothing rather than falling back to a
+ * guessed whole-call rule. An unavailable breakdown keeps the existing
+ * whole-call suggestion when it provably authorizes the entire call, and
+ * plans nothing otherwise.
  */
 export function planAllowSave(
 	call: Extract<GuardCall, { kind: "host-shell" }>,
@@ -193,7 +237,7 @@ export function planAllowSave(
 	}
 	const perStep = explanation.steps
 		.filter((step) => step.decision.action !== "allow")
-		.map((step) => ({ occurrenceId: step.occurrenceId, rule: exactAllowRule(call.shell, step.allowSubject) }));
+		.map((step) => ({ occurrenceId: step.occurrenceId, rule: globAllowRule(call.shell, step.allowSubject) }));
 	if (perStep.length === 0) return null;
 	const validation = validateShellAllowSave(call, policy, perStep.map((entry) => entry.rule), perStep.map((entry) => entry.occurrenceId));
 	if (!validation.ok) return null;

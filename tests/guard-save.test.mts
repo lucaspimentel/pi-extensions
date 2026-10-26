@@ -14,8 +14,9 @@ import {
 	type PolicyState,
 } from "../extensions/guard/policy/decision.ts";
 import {
-	exactAllowRule,
+	globAllowRule,
 	exactDenyRule,
+	notExactShellRules,
 	parseReadRootInput,
 	parseShellRuleLine,
 	parseShellRuleLines,
@@ -24,6 +25,7 @@ import {
 	validateShellAllowSave,
 	validateShellSave,
 } from "../extensions/guard/policy/save.ts";
+import { compilePattern, parseRule } from "../extensions/guard/policy/rules.ts";
 
 function makeConfig(overrides: Partial<GuardConfig> = {}, cwd = "/home/user/proj"): ReturnType<typeof mergeConfig> {
 	return mergeConfig(overrides, {}, cwd);
@@ -86,7 +88,7 @@ test("tool-wide broadening (bare tool rule) parses and is reviewed via preview",
 test("allow validation requires the whole call to become deterministically allowed", () => {
 	const policy = makePolicy();
 	const call = shellCall("echo a && curl https://example.com");
-	const bundle = [exactAllowRule("host-bash", "curl https://example.com")];
+	const bundle = [globAllowRule("host-bash", "curl https://example.com")];
 	assert.deepEqual(validateShellSave(call, policy, "allow", bundle), { ok: true });
 	// A partial bundle (missing the curl step) must fail.
 	assert.equal(validateShellSave(call, policy, "allow", []).ok, false);
@@ -98,7 +100,7 @@ test("allow validation requires the whole call to become deterministically allow
 test("explicit ask rules still prohibit allow-saving through validation", () => {
 	const policy = makePolicy({ config: makeConfig({ hostBash: { ask: ["HostBash(curl*)"] } }) });
 	const call = shellCall("echo a && curl https://example.com");
-	const result = validateShellSave(call, policy, "allow", [exactAllowRule("host-bash", "curl https://example.com")]);
+	const result = validateShellSave(call, policy, "allow", [globAllowRule("host-bash", "curl https://example.com")]);
 	assert.equal(result.ok, false, "the ask rule still matches first, so the merge does not allow");
 });
 
@@ -116,7 +118,7 @@ test("existing entries are preserved: validation merges additively", () => {
 	const policy = makePolicy({ config: makeConfig({ hostBash: { allow: ["HostBash(echo a)"] } }) });
 	const call = shellCall("echo a && curl https://example.com");
 	// With the pre-existing allow rule, only the curl step needs a rule.
-	assert.deepEqual(validateShellSave(call, policy, "allow", [exactAllowRule("host-bash", "curl https://example.com")]), { ok: true });
+	assert.deepEqual(validateShellSave(call, policy, "allow", [globAllowRule("host-bash", "curl https://example.com")]), { ok: true });
 });
 
 // ── Allow plans ─────────────────────────────────────────────────────────────
@@ -129,10 +131,10 @@ test("a reliable breakdown plans per-step rules, even for a single-command promp
 	assert.ok(plan);
 	assert.equal(plan.kind, "per-step");
 	assert.ok(plan.kind === "per-step");
-	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: "HostBash(/^curl https:\\/\\/example\\.com$/)" }]);
+	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: "HostBash(curl https://example.com)" }]);
 });
 
-test("an unreliable breakdown keeps the whole-call exact suggestion when it provably works", () => {
+test("an unreliable breakdown keeps the whole-call suggestion when it provably works", () => {
 	const policy = makePolicy();
 	const call = shellCall("echo $(compute)");
 	const explanation = explainHostShellCommand(call, policy);
@@ -141,7 +143,7 @@ test("an unreliable breakdown keeps the whole-call exact suggestion when it prov
 	assert.ok(plan);
 	assert.equal(plan.kind, "whole-call");
 	assert.ok(plan.kind === "whole-call");
-	assert.deepEqual(plan.rules, ["HostBash(/^echo \\$\\(compute\\)$/)"]);
+	assert.deepEqual(plan.rules, ["HostBash(echo $(compute))"]);
 });
 
 test("a whole-call suggestion for a compound command is retired on a reliable breakdown", () => {
@@ -153,7 +155,7 @@ test("a whole-call suggestion for a compound command is retired on a reliable br
 	assert.equal(plan.kind, "per-step");
 	if (plan.kind !== "per-step") return;
 	// Only the step lacking effective permission gets a rule; echo a is tier-allowed.
-	assert.deepEqual(plan.perStep, [{ occurrenceId: 1, rule: "HostBash(/^curl https:\\/\\/example\\.com$/)" }]);
+	assert.deepEqual(plan.perStep, [{ occurrenceId: 1, rule: "HostBash(curl https://example.com)" }]);
 	// The full prefill validates per-step over all prompting occurrence IDs.
 	assert.deepEqual(validateShellAllowSave(call, policy, plan.perStep.map((entry) => entry.rule), plan.perStep.map((entry) => entry.occurrenceId)), { ok: true });
 });
@@ -190,7 +192,7 @@ test("redirect steps produce redirect-aware (verbatim) per-step rules that valid
 	assert.ok(plan);
 	assert.equal(plan.kind, "per-step");
 	if (plan.kind !== "per-step") return;
-	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: "HostBash(/^echo hi > \\/tmp\\/out\\.txt$/)" }]);
+	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: "HostBash(echo hi > /tmp/out.txt)" }]);
 	assert.ok(plan.perStep[0].rule.includes(">"), "the pattern contains '>' so it is redirect-aware");
 	assert.deepEqual(validateShellAllowSave(call, policy, plan.perStep.map((entry) => entry.rule), plan.perStep.map((entry) => entry.occurrenceId)), { ok: true });
 });
@@ -200,14 +202,14 @@ test("redirect steps produce redirect-aware (verbatim) per-step rules that valid
 test("per-step validation accepts the exact prefill for all prompting steps", () => {
 	const policy = makePolicy();
 	const call = shellCall("echo a && curl https://example.com");
-	assert.deepEqual(validateShellAllowSave(call, policy, [exactAllowRule("host-bash", "curl https://example.com")], [1]), { ok: true });
+	assert.deepEqual(validateShellAllowSave(call, policy, [globAllowRule("host-bash", "curl https://example.com")], [1]), { ok: true });
 });
 
 test("a selection missing a prompting step still validates; the whole call need not allow", () => {
 	const policy = makePolicy();
 	const call = shellCall("echo a && curl https://example.com");
 	// Only the tier-allowed echo step is selected; the curl step still prompts.
-	assert.deepEqual(validateShellAllowSave(call, policy, [exactAllowRule("host-bash", "echo a")], [0]), { ok: true });
+	assert.deepEqual(validateShellAllowSave(call, policy, [globAllowRule("host-bash", "echo a")], [0]), { ok: true });
 });
 
 test("a rule that does not match its selected step fails with the step name", () => {
@@ -225,15 +227,15 @@ test("a redirect-requiring step validates only with the verbatim (redirect-aware
 	const explanation = explainHostShellCommand(call, policy);
 	const step = explanation.steps[0];
 	assert.equal(step.requiresRedirectAwareAllow, true);
-	assert.deepEqual(validateShellAllowSave(call, policy, [exactAllowRule("host-bash", step.allowSubject)], [0]), { ok: true });
-	const stripped = validateShellAllowSave(call, policy, [exactAllowRule("host-bash", "echo x")], [0]);
+	assert.deepEqual(validateShellAllowSave(call, policy, [globAllowRule("host-bash", step.allowSubject)], [0]), { ok: true });
+	const stripped = validateShellAllowSave(call, policy, [globAllowRule("host-bash", "echo x")], [0]);
 	assert.equal(stripped.ok, false, "the redirect-stripped subject cannot authorize a file redirect");
 });
 
 test("defensive preconditions: empty, unknown, and duplicated selections fail closed", () => {
 	const policy = makePolicy();
 	const call = shellCall("echo a && curl https://example.com");
-	const rule = exactAllowRule("host-bash", "curl https://example.com");
+	const rule = globAllowRule("host-bash", "curl https://example.com");
 	const empty = validateShellAllowSave(call, policy, [rule], []);
 	assert.equal(empty.ok, false);
 	assert.ok(!empty.ok);
@@ -251,7 +253,7 @@ test("defensive preconditions: empty, unknown, and duplicated selections fail cl
 test("a preexisting deny rule matched by the merged evaluation fails the aggregate check", () => {
 	const policy = makePolicy({ config: makeConfig({ hostBash: { deny: ["HostBash(curl*)"] } }) });
 	const call = shellCall("echo a && curl https://example.com");
-	const result = validateShellAllowSave(call, policy, [exactAllowRule("host-bash", "curl https://example.com")], [1]);
+	const result = validateShellAllowSave(call, policy, [globAllowRule("host-bash", "curl https://example.com")], [1]);
 	assert.equal(result.ok, false, "deny rules take precedence over the merged allow rule");
 });
 
@@ -261,7 +263,7 @@ test("occurrence IDs are identical across the original and merged evaluations", 
 	const original = explainHostShellCommand(call, policy);
 	const merged = explainHostShellCommand(call, {
 		...policy,
-		config: { ...policy.config, hostBash: { ...policy.config.hostBash, allow: [exactAllowRule("host-bash", "curl https://example.com")] } },
+		config: { ...policy.config, hostBash: { ...policy.config.hostBash, allow: [globAllowRule("host-bash", "curl https://example.com")] } },
 	});
 	assert.deepEqual(merged.steps.map((step) => step.occurrenceId), original.steps.map((step) => step.occurrenceId));
 	assert.deepEqual(original.steps.map((step) => step.occurrenceId), [0, 1, 2], "duplicate command text keeps distinct sequential IDs");
@@ -320,9 +322,89 @@ test("read-root input rejects multiple lines and multiple tokens", () => {
 	assert.equal(empty.ok, false);
 });
 
-test("exact rule helpers escape regex metacharacters", () => {
-	assert.equal(exactAllowRule("host-bash", "echo a.b(c)"), "HostBash(/^echo a\\.b\\(c\\)$/)");
+test("allow prefills are glob-form and deny prefills stay anchored exact", () => {
+	assert.equal(globAllowRule("host-bash", "echo a.b(c)"), "HostBash(echo a.b(c))");
+	assert.equal(globAllowRule("pwsh", "Get-Child*"), "Pwsh(Get-Child*)");
 	assert.equal(exactDenyRule("pwsh", "Get-Child*"), "Pwsh(/^Get-Child\\*$/)");
+});
+
+// ── The not-exact advisory predicate ───────────────────────────────────────
+
+test("notExactShellRules stays silent for faithful globs, faithful deny prefills, and slash-bearing references", () => {
+	assert.deepEqual(notExactShellRules("HostBash(curl https://example.com)", ["curl https://example.com"]), []);
+	assert.deepEqual(notExactShellRules("HostBash(echo a.b(c))", ["echo a.b(c)"]), []);
+	assert.deepEqual(notExactShellRules(exactDenyRule("host-bash", "curl https://example.com"), ["curl https://example.com"]), []);
+	assert.deepEqual(notExactShellRules(exactDenyRule("pwsh", "Get-Content x"), ["Get-Content x"]), []);
+	// The anchored exact form escapes '/' and compilePattern does not: compare
+	// the body text, never RegExp.source.
+	assert.deepEqual(notExactShellRules("HostBash(/^cd \\/tmp\\/$/)", ["cd /tmp/"]), []);
+	assert.deepEqual(notExactShellRules("", ["echo a"]), []);
+	assert.deepEqual(notExactShellRules("  \n\t\n", ["echo a"]), []);
+	// A reference list that rules never have to match still never flags a
+	// metacharacter-free glob.
+	assert.deepEqual(notExactShellRules("HostBash(echo a)", ["echo b"]), []);
+});
+
+test("notExactShellRules flags wildcards, bare tool rules, and deviating or malformed regex lines", () => {
+	assert.deepEqual(notExactShellRules("HostBash(Get-Child*)", ["Get-Child"]), ["HostBash(Get-Child*)"]);
+	assert.deepEqual(notExactShellRules("HostBash(find . -name \"*.ts\")", ["find . -name \"*.ts\""]), ["HostBash(find . -name \"*.ts\")"]);
+	assert.deepEqual(notExactShellRules("HostBash(rm foo?.txt)", ["rm foo?.txt"]), ["HostBash(rm foo?.txt)"]);
+	assert.deepEqual(notExactShellRules("HostBash", ["echo a"]), ["HostBash"]);
+	assert.deepEqual(notExactShellRules("HostBash(/^curl https:/)", ["curl https://example.com"]), ["HostBash(/^curl https:/)"]);
+	assert.deepEqual(notExactShellRules("not a rule", ["echo a"]), ["not a rule"]);
+	// An uncompilable regex body must not throw.
+	assert.deepEqual(notExactShellRules("HostBash(/(/)", ["/(/"]), ["HostBash(/(/)"]);
+	// Reordering a mixed bundle never changes which lines are flagged.
+	const faithful = "HostBash(echo a)";
+	const broader = "HostBash(git *)";
+	assert.deepEqual(notExactShellRules(`${faithful}\n${broader}`, ["echo a", "git status"]), [broader]);
+	assert.deepEqual(notExactShellRules(`${broader}\n${faithful}`, ["echo a", "git status"]), [broader]);
+});
+
+test("a regex-shaped subject is emitted verbatim, validates, and broadens", () => {
+	const policy = makePolicy();
+	const call = shellCall("/tmp/");
+	assert.equal(globAllowRule("host-bash", "/tmp/"), "HostBash(/tmp/)");
+	// compilePattern treats a pattern that starts and ends with '/' as an
+	// UNANCHORED regex, so the rule matches far more than the subject.
+	assert.equal(parseRule("HostBash(/tmp/)")?.regex?.test("/tmp/"), true);
+	assert.equal(compilePattern("/tmp/").test("rm -rf /var/tmp"), true);
+	// Validation accepts it because the rule still matches the subject.
+	assert.deepEqual(validateShellAllowSave(call, policy, [globAllowRule("host-bash", "/tmp/")], [0]), { ok: true });
+	// The advisory flags it, and the invalid-regex sibling is rejected on the
+	// save path rather than thrown.
+	assert.deepEqual(notExactShellRules("HostBash(/tmp/)", ["/tmp/"]), ["HostBash(/tmp/)"]);
+	const bad = parseShellRuleLines("HostBash(/(/)", "host-bash");
+	assert.equal(bad.ok, false);
+	if (!bad.ok) assert.match(bad.error, /does not compile/);
+});
+
+test("redirect steps keep the allow-subject versus deny-subject distinction", () => {
+	const policy = makePolicy();
+	const call = shellCall("curl https://example.com 2>&1 && touch b");
+	const explanation = explainHostShellCommand(call, policy);
+	const plan = planAllowSave(call, policy, explanation);
+	assert.ok(plan);
+	assert.equal(plan.kind, "per-step");
+	if (plan.kind !== "per-step") return;
+	const curlStep = explanation.steps.find((step) => step.subject.startsWith("curl "))!;
+	// A harmless trailing redirect is stripped from the allow subject but kept
+	// in the deny subject.
+	assert.equal(plan.perStep[0].rule, "HostBash(curl https://example.com)");
+	assert.equal(globAllowRule("host-bash", curlStep.allowSubject), plan.perStep[0].rule);
+	assert.deepEqual(planDenyRules(call, explanation, [curlStep.occurrenceId]), [exactDenyRule("host-bash", "curl https://example.com 2>&1")]);
+	assert.deepEqual(validateShellAllowSave(call, policy, plan.perStep.map((entry) => entry.rule), plan.perStep.map((entry) => entry.occurrenceId)), { ok: true });
+});
+
+test("a broadened glob prefill still validates per-step", () => {
+	const policy = makePolicy();
+	const call = shellCall("curl https://example.com/*");
+	const plan = planAllowSave(call, policy, explainHostShellCommand(call, policy));
+	assert.ok(plan);
+	assert.equal(plan.kind, "per-step");
+	if (plan.kind !== "per-step") return;
+	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: "HostBash(curl https://example.com/*)" }]);
+	assert.deepEqual(validateShellAllowSave(call, policy, plan.perStep.map((entry) => entry.rule), plan.perStep.map((entry) => entry.occurrenceId)), { ok: true });
 });
 
 // ── Edited read-root validation (runtime.ts, real filesystem) ────────────────
