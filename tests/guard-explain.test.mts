@@ -316,6 +316,30 @@ test("early-return profiles and workspace lock record an unavailable breakdown w
 	assert.equal(unrestricted.breakdown.available, false);
 });
 
+test("degraded research host_bash takes the read-only tier, with parity and no pwsh tier", () => {
+	const policy = makePolicy({ profile: "research", sandboxMode: "degraded" });
+	for (const [command, action] of [["ls -la", "allow"], ["ls -la && pwd", "deny"], ["curl example.com", "deny"], ["", "deny"], ["   ", "deny"]] as const) {
+		const call = shellCall(command, "host-bash");
+		const explained = explainHostShellCommand(call, policy);
+		assert.equal(explained.decision.action, action, `${command}: ${explained.decision.reason}`);
+		assert.deepEqual(explained.decision, decideHostShellCommand(call, policy), `decideHostShellCommand parity: ${command}`);
+		assert.deepEqual(explained.decision, decide(policy, call), `decide parity: ${command}`);
+		// The tier judges the whole command, so no per-step approvals are fabricated.
+		assert.equal(explained.steps.length, 0, `${command}: no fabricated steps`);
+		assert.equal(explained.breakdown.available, false, `${command}: breakdown unavailable`);
+		assert.match(explained.breakdown.reason ?? "", /whole-command read-only-tier check/, `${command}: breakdown explains the tier`);
+	}
+	assert.match(explainHostShellCommand(shellCall("ls -la", "host-bash"), policy).decision.reason, / \(degraded research\)$/, "the tier reason is preserved verbatim");
+	// pwsh never acquires the tier, in degraded mode or out of it.
+	assert.equal(explainHostShellCommand(shellCall("ls -la", "pwsh"), policy).decision.action, "deny");
+	// A real sandbox keeps research absolute.
+	for (const sandboxMode of ["full", "reduced"] as const) {
+		const strict = makePolicy({ profile: "research", sandboxMode });
+		assert.equal(decide(strict, shellCall("ls -la", "host-bash")).action, "deny", sandboxMode);
+		assert.equal(explainHostShellCommand(shellCall("ls -la", "host-bash"), strict).steps.length, 0, sandboxMode);
+	}
+});
+
 test("single commands with comment collapsing project the effective command", () => {
 	const policy = makePolicy();
 	const explained = explainHostShellCommand(shellCall("# just a comment\necho hi"), policy);

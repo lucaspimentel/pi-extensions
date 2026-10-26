@@ -101,19 +101,43 @@ function test(name: string, fn: () => void | Promise<void>) {
 	tests.push({ name, fn });
 }
 
-test("raw bash honors deny/ask while unrestricted ignores rules", () => {
+test("raw bash is sandbox-only; host_bash honors deny/ask while unrestricted ignores rules", () => {
 	const config = makeConfig({ hostBash: { deny: ["HostBash(rm *)"], ask: ["HostBash(git push *)"] } });
 	for (const [command, expected] of [["rm x", "deny"], ["git push", "prompt"]]) {
-		const call: GuardCall = { kind: "sandboxed-exec", tool: "bash", command };
-		assert.equal(decide(makePolicy({ profile: "yolo", config }), call).action, expected);
-		assert.equal(decide(makePolicy({ profile: "unrestricted", config }), call).action, "allow");
+		const hostShell: GuardCall = { kind: "host-shell", shell: "host-bash", command };
+		assert.equal(decide(makePolicy({ profile: "yolo", config }), hostShell).action, expected);
+		assert.equal(decide(makePolicy({ profile: "unrestricted", config }), hostShell).action, "allow");
+		// Neither raw profile can reach host execution by naming bash, so a rule
+		// cannot be dodged with the other tool either.
+		const sandboxed: GuardCall = { kind: "sandboxed-exec", tool: "bash", command };
+		assert.equal(decide(makePolicy({ profile: "yolo", config }), sandboxed).action, "deny");
+		assert.equal(decide(makePolicy({ profile: "unrestricted", config }), sandboxed).action, "deny");
+	}
+});
+
+test("bash is sandbox-only: the unlocked raw profiles and degraded mode deny it by name", () => {
+	for (const [profile, reason] of [
+		["yolo", "bash is sandbox-only; in yolo it would run on the host: use host_bash (same permissions here) instead"],
+		["unrestricted", "bash is sandbox-only; in unrestricted it would run on the host: use host_bash (same permissions here) instead"],
+	] as const) {
+		const d = decide(makePolicy({ profile }), { kind: "sandboxed-exec", tool: "bash", command: "ls" });
+		assert.equal(d.action, "deny", profile);
+		assert.equal(d.reason, reason, profile);
+	}
+	// Degraded mode has no sandbox at all, so every profile gets the degraded
+	// reason, research included: there bash is replaced by the tier-checked
+	// host_bash rather than running on the host itself.
+	for (const profile of ALL_PROFILES) {
+		const d = decide(makePolicy({ profile, sandboxMode: "degraded" }), { kind: "sandboxed-exec", tool: "bash", command: "ls" });
+		assert.equal(d.action, "deny", profile);
+		assert.equal(d.reason, "bash is sandbox-only and this host has no sandbox (degraded mode): use host_bash instead", profile);
 	}
 });
 
 test("raw yolo cannot hide denied or asked subcommands behind an innocent prefix", () => {
 	const policy = makePolicy({ profile: "yolo", config: makeConfig({ hostBash: { deny: ["HostBash(rm *)"], ask: ["HostBash(git push *)"] } }) });
-	assert.equal(decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "echo x; rm x" }).action, "deny");
-	const ask = decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "echo x; git push" });
+	assert.equal(decide(policy, { kind: "host-shell", shell: "host-bash", command: "echo x; rm x" }).action, "deny");
+	const ask = decide(policy, { kind: "host-shell", shell: "host-bash", command: "echo x; git push" });
 	assert.equal(ask.action, "prompt");
 	assert.equal(ask.provenance, "explicit-ask");
 });
@@ -131,6 +155,25 @@ test("workspace locks deny every host/raw route and force ro even in unrestricte
 		assert.equal(effectiveWorkspaceMode(policy), "ro");
 		assert.equal(decide(policy, { kind: "host-shell", shell: "host-bash", command: "ls" }).action, "deny");
 		assert.equal(decide({ ...policy, sandboxMode: "degraded" }, { kind: "sandboxed-exec", tool: "bash", command: "ls" }).action, "deny");
+		// Degraded research is the one host_bash exception; the lock outranks it.
+		const lockedDegraded = decide({ ...policy, sandboxMode: "degraded" }, { kind: "host-shell", shell: "host-bash", command: "ls" });
+		assert.equal(lockedDegraded.action, "deny");
+		assert.match(lockedDegraded.reason, /workspace locked/);
+	}
+});
+
+test("a locked raw profile keeps read-only sandboxed bash and denies the host shell", () => {
+	for (const profile of ["yolo", "unrestricted"] as const) {
+		for (const sandboxMode of ["full", "reduced"] as const) {
+			const policy = makePolicy({ profile, sandboxMode, workspaceLocked: true });
+			assert.equal(effectiveWorkspaceMode(policy), "ro");
+			assert.equal(
+				decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "ls" }).action,
+				"allow",
+				`${profile}/${sandboxMode}: a locked session falls back into the read-only sandbox, never onto the host`,
+			);
+			assert.equal(decide(policy, { kind: "host-shell", shell: "host-bash", command: "ls" }).action, "deny");
+		}
 	}
 });
 
@@ -348,13 +391,33 @@ test("other remote reads are always allowed; remote writes follow their cell; me
 	}
 });
 
-test("sandboxed exec is always allowed with a sandbox and never routed to the host", () => {
-	for (const profile of ALL_PROFILES) {
+test("sandboxed exec is allowed with a sandbox; the raw profiles deny bash instead of routing it", () => {
+	// Every profile that actually gets the kernel sandbox runs sandboxed bash
+	// ungated. yolo/unrestricted are excluded: they have no sandbox, and their
+	// bash calls are denied by the sandbox-only rule above.
+	for (const profile of ["research", "default", "allow-edits", "auto", "trusted"] as const) {
 		const d = decide(makePolicy({ profile }), { kind: "sandboxed-exec", tool: "bash", command: "cargo build --release" });
-		assert.equal(d.action, "allow", `${profile}: sandboxed bash must never be gated or routed to the host`);
+		assert.equal(d.action, "allow", `${profile}: sandboxed bash must never be gated`);
 	}
 	const python = decide(makePolicy({ profile: "research" }), { kind: "sandboxed-exec", tool: "python", command: undefined });
 	assert.equal(python.action, "allow");
+});
+
+test("workers stay raw in the unlocked raw profiles and unavailable in degraded mode", () => {
+	for (const profile of ["yolo", "unrestricted"] as const) {
+		for (const tool of ["python", "node"] as const) {
+			const d = decide(makePolicy({ profile }), { kind: "sandboxed-exec", tool, command: undefined });
+			assert.equal(d.action, "allow", `${profile}/${tool}`);
+			assert.match(d.reason, /no sandbox or resource limits/, `${profile}/${tool}`);
+		}
+	}
+	for (const profile of ALL_PROFILES) {
+		for (const tool of ["python", "node"] as const) {
+			const d = decide(makePolicy({ profile, sandboxMode: "degraded" }), { kind: "sandboxed-exec", tool, command: undefined });
+			assert.equal(d.action, "deny", `${profile}/${tool}`);
+			assert.equal(d.reason, "persistent workers unavailable in degraded mode", `${profile}/${tool}`);
+		}
+	}
 });
 
 test("effective workspace mode: overlay degrades to ro without a full sandbox; yolo/unrestricted are none", () => {
@@ -380,36 +443,49 @@ test("research is absolute: matching allow and ask rules still deny", () => {
 	assert.equal(decide(policy, { kind: "host-shell", shell: "pwsh", command: "Get-Process" }).action, "deny");
 });
 
-test("degraded research allows only read-only-tier commands, even with an allow rule", () => {
+test("degraded research allows only read-only-tier commands through host_bash, even with an allow rule", () => {
 	const policy = makePolicy({
 		profile: "research",
 		sandboxMode: "degraded",
 		config: makeConfig({ hostBash: { allow: ["HostBash(git push*)"] } }),
 	});
+	const hostShell = (command: string) => decide(policy, { kind: "host-shell", shell: "host-bash", command });
 	assert.equal(
-		decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "ls -la" }).action,
+		hostShell("ls -la").action,
 		"allow",
 		"tier-proven read-only commands run",
 	);
 	assert.equal(
-		decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "ls -la && pwd" }).action,
+		hostShell("ls -la && pwd").action,
 		"deny",
 		"compounds are not tier-proven in degraded research (active-construct screen; previously the `&&` slipped through as a cwd-relative path token)",
 	);
 	assert.equal(
-		decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "git push origin" }).action,
+		hostShell("git push origin").action,
 		"deny",
 		"allow rules never widen the degraded research set",
 	);
+	assert.equal(hostShell("curl example.com").action, "deny");
 	assert.equal(
-		decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "curl example.com" }).action,
-		"deny",
-	);
-	assert.equal(
-		decide(policy, { kind: "sandboxed-exec", tool: "bash", command: "cat .env" }).action,
+		hostShell("cat .env").action,
 		"deny",
 		"masked file argument is not proven read-only",
 	);
+	assert.match(hostShell("ls -la").reason, / \(degraded research\)$/, "the tier reason is preserved verbatim");
+	// Nothing to prove read-only.
+	for (const command of ["", "   "]) {
+		assert.equal(hostShell(command).action, "deny");
+		assert.equal(hostShell(command).reason, "degraded research: no command to prove read-only");
+	}
+	// research ignores rules entirely, deny and ask included.
+	const ruled = makePolicy({
+		profile: "research",
+		sandboxMode: "degraded",
+		config: makeConfig({ hostBash: { deny: ["HostBash(ls *)"], ask: ["HostBash(ls *)"] } }),
+	});
+	assert.equal(decide(ruled, { kind: "host-shell", shell: "host-bash", command: "ls -la" }).action, "allow");
+	// pwsh never acquires the tier.
+	assert.equal(decide(policy, { kind: "host-shell", shell: "pwsh", command: "ls -la" }).action, "deny");
 });
 
 test("host deny > ask > allow in default", () => {
@@ -485,7 +561,7 @@ test("host tier fail-closed screen: the five verified bypasses and their variant
 		assert.doesNotMatch(decision.reason, /tightened tier/, `${command}: must not tier-allow`);
 		const degraded = decide(
 			makePolicy({ profile: "research", sandboxMode: "degraded" }),
-			{ kind: "sandboxed-exec", tool: "bash", command },
+			{ kind: "host-shell", shell: "host-bash", command },
 		);
 		assert.equal(degraded.action, "deny", `${command}: degraded research must deny`);
 	}
@@ -630,18 +706,25 @@ test("compound host commands aggregate to the worst subcommand", () => {
 	assert.equal(ambiguousDeny.action, "deny", "deny rules win even on an ambiguous split");
 });
 
-test("degraded sandboxed bash follows the host-shell row outside research", () => {
+test("degraded mode: bash is denied everywhere, host_bash takes the host-shell row", () => {
+	// bash never runs on the host any more, so a degraded bash call is denied
+	// by name rather than following the host-shell row.
 	assert.equal(
 		decide(makePolicy({ profile: "default", sandboxMode: "degraded" }), { kind: "sandboxed-exec", tool: "bash", command: "ls" }).action,
+		"deny",
+	);
+	// host_bash carries the row instead: tier/allow-rule first, else the cell.
+	assert.equal(
+		decide(makePolicy({ profile: "default", sandboxMode: "degraded" }), { kind: "host-shell", shell: "host-bash", command: "ls" }).action,
 		"allow",
 		"read-only command: tier-approved even on the host",
 	);
 	assert.equal(
-		decide(makePolicy({ profile: "default", sandboxMode: "degraded" }), { kind: "sandboxed-exec", tool: "bash", command: "curl example.com" }).action,
+		decide(makePolicy({ profile: "default", sandboxMode: "degraded" }), { kind: "host-shell", shell: "host-bash", command: "curl example.com" }).action,
 		"prompt",
 	);
 	assert.equal(
-		decide(makePolicy({ profile: "trusted", sandboxMode: "degraded" }), { kind: "sandboxed-exec", tool: "bash", command: "curl example.com" }).action,
+		decide(makePolicy({ profile: "trusted", sandboxMode: "degraded" }), { kind: "host-shell", shell: "host-bash", command: "curl example.com" }).action,
 		"allow",
 		"trusted cell allows",
 	);

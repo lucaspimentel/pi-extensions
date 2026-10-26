@@ -16,9 +16,9 @@
  *     cell (then the classifier in auto).
  *
  * Host-shell per profile:
- *   research     absolute: rules ignored, deny (degraded sandboxed bash:
- *                only tier-proven read-only commands, allow rules never
- *                widen that set).
+ *   research     absolute: rules ignored, deny (degraded host_bash: only
+ *                tier-proven read-only commands, allow rules never widen
+ *                that set).
  *   default/auto/trusted  deny > ask > tier > redirect-aware allow rules >
  *                cell. A top-level file redirect (outside the writeRoots
  *                exemptions) is allowed ONLY by a redirect-aware rule (one
@@ -313,11 +313,11 @@ function hostTierAllowReason(cmd: string, config: ResolvedGuardConfig): string |
 }
 
 /**
- * The tier for SANDBOXED bash running in degraded mode (research): the
- * tightened host tier applies (host vetoes included: degraded execution is
- * host execution, so env/printenv, $ expansion, and secret-mask file
- * arguments are not proven read-only). Allow rules never widen this set.
- * Returns an allow reason or null.
+ * The tier for host_bash in degraded mode (research): the tightened host tier
+ * applies (host vetoes included: degraded execution is host execution, so
+ * env/printenv, $ expansion, and secret-mask file arguments are not proven
+ * read-only). Allow rules never widen this set. Returns an allow reason or
+ * null.
  */
 function degradedResearchTierReason(cmd: string, config: ResolvedGuardConfig): string | null {
 	const tier = hostTierAllowReason(cmd, config);
@@ -448,7 +448,22 @@ function evaluateHostShell(
 	const shell = call.shell;
 	if (policy.workspaceLocked) return { decision: { action: "deny", reason: "workspace locked: host execution is unavailable until /guard ack" }, steps: [], breakdown: { available: false, reason: "the workspace is locked; host execution is unavailable" } };
 	if (profile === "unrestricted") return { decision: { action: "allow", reason: "host shell: unrestricted profile allows everything" }, steps: [], breakdown: { available: false, reason: "the unrestricted profile allows everything; no breakdown is needed" } };
-	if (profile === "research") return { decision: { action: "deny", reason: "host shell: denied in research (rules are ignored)" }, steps: [], breakdown: { available: false, reason: "research denies host execution regardless of steps" } };
+	if (profile === "research") {
+		// Degraded mode is the one place research has no sandbox at all, so
+		// host_bash takes the whole-command read-only tier there (the same rule
+		// set that used to run as the degraded "sandboxed" bash). Allow rules
+		// never widen it, and no per-step breakdown is fabricated: the tier
+		// judges the whole command.
+		if (policy.sandboxMode === "degraded" && shell === "host-bash") {
+			const degradedResearchBreakdown: BreakdownReliability = { available: false, reason: "degraded research runs a whole-command read-only-tier check" };
+			const cmd = call.command ?? "";
+			if (cmd.trim() === "") return { decision: { action: "deny", reason: "degraded research: no command to prove read-only" }, steps: [], breakdown: degradedResearchBreakdown };
+			const tier = degradedResearchTierReason(stripTimeoutPrefix(stripLineContinuations(cmd).trim()), config);
+			if (tier !== null) return { decision: { action: "allow", reason: tier }, steps: [], breakdown: degradedResearchBreakdown };
+			return { decision: { action: "deny", reason: "degraded research: only read-only-tier commands run on the host" }, steps: [], breakdown: degradedResearchBreakdown };
+		}
+		return { decision: { action: "deny", reason: "host shell: denied in research (rules are ignored)" }, steps: [], breakdown: { available: false, reason: "research denies host execution regardless of steps" } };
+	}
 
 	const cmd = stripLineContinuations(call.command);
 	const rawDeny = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
@@ -522,7 +537,9 @@ function evaluateHostShell(
  * Decide a host shell call (host_bash or pwsh), splitting compounds so each
  * subcommand is evaluated independently. Aggregation: deny > prompt >
  * classify > allow, attributed to the worst subcommand. Per profile:
- *   research     absolute deny (rules ignored).
+ *   research     absolute deny (rules ignored); degraded mode is the one
+ *                exception, where host_bash takes the whole-command
+ *                read-only tier and allow rules never widen it.
  *   yolo         deny rules block, ask rules prompt, everything else allows.
  *   unrestricted allow, rules ignored.
  *   otherwise    evaluateHostShellSub per subcommand.
@@ -640,20 +657,15 @@ export function isExfilCapableFetch(url: string, config: ResolvedGuardConfig): b
 }
 
 /**
- * Degraded sandboxed exec (the sandbox IS host execution). research: only
- * commands the read-only tier or validators prove read-only are allowed, and
- * allow rules never widen that set. Other profiles: the host-shell row.
+ * Whether a `bash` call would run on the host instead of inside the sandbox:
+ * degraded mode has no sandbox at all, and the unlocked raw profiles (yolo,
+ * unrestricted) run everything raw. The workspace lock forces the sandbox
+ * back on, so a locked raw session keeps its read-only sandboxed bash. Both
+ * the decision layer (the bash ban) and the execution layer (executeShell)
+ * must use this predicate, so the two can never drift apart.
  */
-function decideDegradedSandboxedExec(call: Extract<GuardCall, { kind: "sandboxed-exec" }>, policy: PolicyState): Decision {
-	const { profile, config } = policy;
-	if (profile === "research") {
-		const cmd = call.command ?? "";
-		if (cmd.trim() === "") return { action: "deny", reason: "degraded research: no command to prove read-only" };
-		const tier = degradedResearchTierReason(stripTimeoutPrefix(stripLineContinuations(cmd).trim()), config);
-		if (tier !== null) return { action: "allow", reason: tier };
-		return { action: "deny", reason: "degraded research: only read-only-tier commands run on the host" };
-	}
-	return decideHostShellCommand({ kind: "host-shell", shell: "host-bash", command: call.command ?? "" }, policy);
+export function bashRunsOnHost(policy: PolicyState): boolean {
+	return policy.sandboxMode === "degraded" || (!policy.workspaceLocked && (policy.profile === "yolo" || policy.profile === "unrestricted"));
 }
 
 /**
@@ -668,14 +680,19 @@ export function decide(policy: PolicyState, call: GuardCall): Decision {
 
 	switch (call.kind) {
 		case "sandboxed-exec": {
-			// Degraded mode: the sandbox is unavailable, so sandboxed bash IS
-			// host execution and follows the host-shell row (research: tier only).
-			if (policy.sandboxMode === "degraded") {
-				if (call.tool !== "bash") return { action: "deny", reason: "persistent workers unavailable in degraded mode" };
-				return decideDegradedSandboxedExec(call, policy);
+			// bash is sandbox-only: wherever the sandbox is unavailable and a
+			// bash call would run on the host (degraded mode, or the unlocked raw
+			// profiles), deny it and name the explicit host tool rather than
+			// silently switching where the command runs.
+			if (call.tool === "bash" && bashRunsOnHost(policy)) {
+				return { action: "deny", reason: policy.sandboxMode === "degraded"
+					? "bash is sandbox-only and this host has no sandbox (degraded mode): use host_bash instead"
+					: `bash is sandbox-only; in ${profile} it would run on the host: use host_bash (same permissions here) instead` };
 			}
+			// Degraded mode has no sandbox at all, so the workers are unavailable.
+			if (policy.sandboxMode === "degraded") return { action: "deny", reason: "persistent workers unavailable in degraded mode" };
+			// The unlocked raw profiles run python/node without a sandbox.
 			if ((profile === "yolo" || profile === "unrestricted") && !policy.workspaceLocked) {
-				if (call.tool === "bash") return decideHostShellCommand({ kind: "host-shell", shell: "host-bash", command: call.command ?? "" }, policy);
 				return { action: "allow", reason: `${call.tool}: raw execution in ${profile}, no sandbox or resource limits` };
 			}
 			return cellAction(sandboxedExecCell(profile), "sandboxed execution (kernel-enforced sandbox)");

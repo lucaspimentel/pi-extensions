@@ -1,5 +1,5 @@
 /** Guard owns four executors and enforces write/edit; other non-owned tool decisions remain observe-only. */
-import { createBashTool, ExtensionSelectorComponent, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type ToolAnnotations, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { createBashTool, ExtensionSelectorComponent, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type ToolAnnotations, type ToolLoadoutChanges, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -10,7 +10,7 @@ import { GuardRuntime, validateReadGrant, validateReadRootSave } from "./runtime
 import { DialogGate } from "./dialogs.ts";
 import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
 import { FAILURE_STATUSES as NODE_FAILURES } from "./tools/node/session.ts";
-import { createGuardShellOperations, SANDBOX_FAILURE_HINT, SHELL_SANDBOX_FAILURE_HINT, sandboxFailureHint } from "./tools/shell.ts";
+import { BASH_PROMPT_SNIPPET, HOST_BASH_PROMPT_SNIPPET, SANDBOX_FAILURE_HINT, SANDBOX_TOOL_GUIDELINES, SHELL_SANDBOX_FAILURE_HINT, bashToolDescription, createGuardShellOperations, hostBashToolDescription, sandboxFailureHint, workerToolDescription, type SandboxPaths } from "./tools/shell.ts";
 import type { MountEntry } from "./sandbox/bwrap.ts";
 import { createShellRenderCall, nativeBashRenderResult } from "./tools/shell-render.ts";
 import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
@@ -18,7 +18,7 @@ import { detectSandboxMode } from "./sandbox/detect.ts";
 import { PROTECTED_TOP_LEVEL, SCAN_MATCH_CAP_DEFAULT, SCAN_TIMEOUT_MS_DEFAULT } from "./sandbox/spec.ts";
 import { effectivePruneNames } from "./sandbox/scan.ts";
 import { clearUserClassifierPin, discoveryCollisionWarningsFor, discoveryNoticeText, discoveryWeakeningSignature, loadConfig, loadUserConfigRaw, projectClassifierPin, resolvedClassifierConfig, setUserClassifierPin, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
-import { decide, explainHostShellCommand, pathInsideWriteRoots, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
+import { bashRunsOnHost, decide, explainHostShellCommand, pathInsideWriteRoots, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
 import { makeIsProtectedPath } from "./policy/protected.ts";
 import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
 import { computeMigration } from "./policy/migrate.ts";
@@ -530,7 +530,11 @@ export default function guard(pi: ExtensionAPI) {
 			if (!ctx.hasUI) throw new Error(`guard: headless prompts deny${originSuffix(nested)}`);
 		const policy = policyFor(ctx);
 		const mapped = mappedCall(name, input).call;
-		// Raw/degraded bash is a host shell for routing and saving, too.
+		// bash is sandbox-only now (sandboxed profiles allow, host-execution
+		// routes deny), so a prompting bash call no longer exists and this
+		// projection is unreachable. Kept defensive: if a future cell ever makes
+		// sandboxed bash prompt, the dialog and its save plans still need the
+		// host-shell shape.
 		const call: GuardCall = mapped.kind === "sandboxed-exec" && name === "bash" ? { kind: "host-shell", shell: "host-bash", command: String(input.command ?? "") } : mapped;
 		const shellCall = call.kind === "host-shell" ? call : null;
 		const explanation = shellCall ? explainHostShellCommand(shellCall, policy) : null;
@@ -672,7 +676,9 @@ export default function guard(pi: ExtensionAPI) {
 			const decision = await decisionFor(name, input, ctx, policy);
 			return decision.action !== "deny";
 		}, async (execution) => {
-			const host = name === "host_bash" || execution.policy.sandboxMode === "degraded" || (!execution.policy.workspaceLocked && (execution.policy.profile === "yolo" || execution.policy.profile === "unrestricted"));
+			// One predicate for both layers: the bash ban in decide() uses the
+			// same helper, so routing and authorization cannot drift.
+			const host = name === "host_bash" || bashRunsOnHost(execution.policy);
 			let mountedPaths: MountEntry[] | undefined;
 			const tool = createBashTool(ctx.cwd, { operations: createGuardShellOperations(execution, host, (paths) => { mountedPaths = paths; }), exposeSessionEnvironment: false });
 			const run = () => tool.execute(id, input, execution.signal, onUpdate);
@@ -688,11 +694,37 @@ export default function guard(pi: ExtensionAPI) {
 		return appendWarnings(outcome.result, outcome.warnings);
 	}
 	const bash = createBashTool(process.cwd(), { exposeSessionEnvironment: false });
+	/**
+	 * Live sandbox locations for the descriptions below. Read from the current
+	 * runtime at call time, never from the registration-time null, so a session
+	 * replacement or cwd change cannot leave a stale workspace or scratch path
+	 * in the prompt.
+	 */
+	const sandboxPaths = (): SandboxPaths | undefined => {
+		const rt = runtime;
+		return rt === null ? undefined : { workspace: rt.policy.cwd, scratch: rt.scratchDir, home: homedir() };
+	};
+	/**
+	 * The loadout hook shared by all four executors: pi re-runs it on every
+	 * request and falls back to the registration-time description when it
+	 * throws, which is why the static text below must stay usable before the
+	 * runtime exists.
+	 */
+	const prepareSandboxDescriptions = (): ToolLoadoutChanges => {
+		const paths = sandboxPaths();
+		return { descriptions: {
+			bash: bashToolDescription(bash.description, paths),
+			host_bash: hostBashToolDescription(bash.description, paths),
+			python: workerToolDescription("python", paths),
+			node: workerToolDescription("node", paths),
+		} };
+	};
 	for (const name of ["bash", "host_bash"] as const) pi.registerTool({
 		...bash, name, label: name,
-		description: name === "bash"
-			? `Sandboxed: no network, no host credentials, and only the workspace, granted read roots, and toolchain dirs are visible. ${bash.description} Guard sandboxed except in raw profiles: no network and no host credentials, so commands that need either (gh, curl, ssh, git push/fetch, package installs) fail here; use host_bash for those. Only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted: other host paths (for example ~/.pi or other repositories) are not visible, and commands that need them fail; use host_bash for those. Shared real-path scratch. For persistent sandbox read access outside the mounts, request a grant with the request_read_access tool.`
-			: `${bash.description} Runs on the host with full network access and host credentials; use it for network or auth commands (gh, curl, ssh, git push/fetch, package installs), and for host paths outside the sandbox mounts (for example ~/.pi or other repositories). Subject to HostBash rules and guard profile.`,
+		description: name === "bash" ? bashToolDescription(bash.description) : hostBashToolDescription(bash.description),
+		promptSnippet: name === "bash" ? BASH_PROMPT_SNIPPET : HOST_BASH_PROMPT_SNIPPET,
+		promptGuidelines: [...SANDBOX_TOOL_GUIDELINES],
+		prepareLoadout: prepareSandboxDescriptions,
 		renderCall: createShellRenderCall(name),
 		// The wrapped tool definition carries no renderers; without this, host_bash has no
 		// built-in renderer fallback and its results never show the Elapsed/Took line.
@@ -706,7 +738,8 @@ export default function guard(pi: ExtensionAPI) {
 		// and open-world (raw profiles expose the host; sandboxed profiles
 		// constrain it at execution time, which annotations do not describe).
 		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-		description: `Persistent ${name} interpreter managed by guard. Sandboxed workers use throwaway workspace overlays, no network and shared real-path scratch. action=reset discards state, not scratch; action=status never starts a worker. Raw profiles expose the host. Unavailable in degraded mode.`,
+		description: workerToolDescription(name),
+		prepareLoadout: prepareSandboxDescriptions,
 		execute: async (id, input, signal, _onUpdate, ctx) => {
 			const rt = runtime;
 			if (!rt) throw new Error("guard session state not initialized");

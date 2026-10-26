@@ -471,8 +471,11 @@ for (const kind of ["profile", "migrate"] as const) {
 		await selector.waitFor(1);
 		assert.match(selector.opened[0], kind === "profile" ? /Guard profile/ : /migration/, "the dialog opened");
 		assert.deepEqual(log, ["visible:false", "open"], "the spinner is hidden while the dialog is open");
-		// Allowed executor work stays independent of the pending dialog.
-		const allowed = await h.registeredTools.get("bash")!.execute("id", { command: "echo ok" }, undefined, undefined, ctx);
+		// Allowed executor work stays independent of the pending dialog. On a host
+		// with no sandbox, bash is denied by design, so the allowed executor is
+		// the host shell there instead.
+		const executor = sandboxMode === "degraded" ? "host_bash" : "bash";
+		const allowed = await h.registeredTools.get(executor)!.execute("id", { command: "echo ok" }, undefined, undefined, ctx);
 		assert.match(String(allowed.structuredContent.output), /ok/, "allowed executor work does not wait for the command dialog");
 		owner.abort();
 		await command;
@@ -1038,7 +1041,10 @@ test("allowed executor work proceeds while another call awaits a dialog", async 
 		const pending = h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx);
 		void pending.catch(() => {});
 		await selector.waitFor(1);
-		const allowed = await h.registeredTools.get("bash")!.execute("id", { command: "echo ok" }, undefined, undefined, ctx);
+		// bash is sandbox-only; a host with no sandbox uses the host shell for
+		// this "some other call is allowed" role instead.
+		const executor = sandboxMode === "degraded" ? "host_bash" : "bash";
+		const allowed = await h.registeredTools.get(executor)!.execute("id", { command: "echo ok" }, undefined, undefined, ctx);
 		assert.match(String(allowed.structuredContent.output), /ok/, "allowed work does not wait for the pending dialog");
 		selector.answer("Deny once");
 		await assert.rejects(pending, /denied/);

@@ -184,7 +184,70 @@ export const SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; protect
  * for persistent read access (the tool opens the guard read-grant dialog for
  * an absolute path; sandboxed bash has no way to trigger one itself).
  */
-export const SHELL_SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted (protected paths are read-only). Use host_bash if host access is required. For persistent sandbox read access, request a grant with the request_read_access tool. Sandbox launch failures never fall back to host execution.";
+export const SHELL_SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted (protected paths are read-only, and the sandbox /tmp is a private tmpfs, not the host /tmp). Use host_bash if host access is required. For persistent sandbox read access, request a grant with the request_read_access tool. Sandbox launch failures never fall back to host execution.";
+
+/** Live session locations substituted into the boundary prose. */
+export interface SandboxPaths {
+	/** The workspace root (the sandbox's writable project mount). */
+	workspace: string;
+	/** This session's scratch directory: the one shared temp location. */
+	scratch: string;
+	/** The host home directory (used to name `~/.pi`). */
+	home: string;
+}
+
+/**
+ * The sandbox filesystem boundary as prose, naming the real workspace and
+ * scratch paths when a runtime exists and generic phrases before it does.
+ * Shared by every sandboxed tool description, so the boundary is described
+ * in exactly one place. Read roots are deliberately described as a category
+ * rather than enumerated: their list changes when a grant lands, and the
+ * description must not churn the request's tools payload for it.
+ */
+export function sandboxBoundaryText(paths?: SandboxPaths): string {
+	const workspace = paths === undefined ? "the current workspace" : paths.workspace;
+	const scratch = paths === undefined ? "the per-session scratch directory" : paths.scratch;
+	const homePi = paths === undefined ? "~/.pi" : `${paths.home}/.pi`;
+	return `Visible: the workspace ${workspace}, the session scratch directory ${scratch}, read roots you were granted, and standard toolchain directories (protected paths are read-only; the sandbox /tmp is a private tmpfs, not the host /tmp). Everything else on the host is absent, including ${homePi} and other repositories.`;
+}
+
+/** The tool-choice rule, stated once and reused by every sandboxed tool. */
+export const SANDBOX_TOOL_ROUTING = "Decide the tool before writing the command: network or credentials (gh, curl, ssh, git push/fetch, package installs), or any host path outside those mounts (for example a /tmp handoff file), needs host_bash, or the read tool when you only need to read it.";
+
+/** Why bash cannot be the host escape, and what always can. */
+export const BASH_SANDBOX_NOTE = "bash runs in the sandbox only and is unavailable on a host without one (degraded mode): use host_bash there, limited to read-only-tier commands in the research profile.";
+
+/** The host-side temp file a truncated bash result points at. */
+export const TRUNCATED_OUTPUT_NOTE = "When a result is truncated, full_output_path is a host temp file: read it with read or host_bash.";
+
+/** How to make a host path visible to sandboxed commands persistently. */
+export const READ_GRANT_NOTE = "For persistent sandbox read access outside the mounts, request a grant with the request_read_access tool.";
+
+/** Two routing bullets appended to the system prompt while a shell tool is active. */
+export const SANDBOX_TOOL_GUIDELINES: readonly string[] = [
+	"Decide the shell tool before writing the command: `bash` is sandboxed (workspace, session scratch, granted read roots, and toolchain dirs only; no network, no host credentials; the sandbox `/tmp` is not the host `/tmp`); use `host_bash` for network, credentials, or any host path outside those mounts, including the host `/tmp`.",
+	"To read a host file outside the sandbox mounts (for example a handoff file in `/tmp`), use the `read` tool or `host_bash`; `bash` cannot see it. Use `request_read_access` only when the path must become visible to sandboxed commands.",
+];
+
+export const BASH_PROMPT_SNIPPET = "Run a shell command in the guard sandbox (workspace and session scratch only; no network)";
+export const HOST_BASH_PROMPT_SNIPPET = "Run a shell command on the host (network, credentials, host paths outside the sandbox)";
+
+/** The model-facing description of the sandboxed shell tool. */
+export function bashToolDescription(native: string, paths?: SandboxPaths): string {
+	return `Sandboxed shell: no network, no host credentials. ${sandboxBoundaryText(paths)} ${SANDBOX_TOOL_ROUTING} ${BASH_SANDBOX_NOTE} ${TRUNCATED_OUTPUT_NOTE} ${native} ${READ_GRANT_NOTE}`;
+}
+
+/** The model-facing description of the host shell tool. */
+export function hostBashToolDescription(native: string, paths?: SandboxPaths): string {
+	const hostTmp = "the host /tmp";
+	const homePi = paths === undefined ? "~/.pi" : `${paths.home}/.pi`;
+	return `Host shell: runs on the host with full network access and host credentials. ${native} Use it for network or auth commands (gh, curl, ssh, git push/fetch, package installs), for host paths outside the sandbox mounts (${hostTmp}, ${homePi}, other repositories), and as the only shell in yolo, unrestricted, and degraded mode (in degraded research only read-only-tier commands run). Subject to HostBash rules and guard profile.`;
+}
+
+/** The model-facing description of the persistent interpreter workers. */
+export function workerToolDescription(name: "python" | "node", paths?: SandboxPaths): string {
+	return `Persistent ${name} interpreter managed by guard: sandboxed workers use throwaway workspace overlays (workspace writes never reach the host), no network, and no host credentials. ${sandboxBoundaryText(paths)} Host files outside those mounts (including the host /tmp) are not visible to workers: use host_bash or the read tool for them. ${READ_GRANT_NOTE} action=reset discards state, not scratch; action=status never starts a worker. Raw profiles expose the host. Unavailable in degraded mode.`;
+}
 
 /** Characters that make a path token a glob. */
 const GLOB_CHARS = "*?[";
@@ -267,8 +330,9 @@ export function unmountedPathCandidates(
  * The failure hint for one sandboxed shell result. Host-bound commands get a
  * targeted directive naming the detected command so the model re-runs it with
  * host_bash instead of retrying in the sandbox; commands that mention
- * unmounted paths get a conditional path hint; everything else keeps the
- * generic shell hint.
+ * unmounted paths get a path hint that states the invisibility, directs the
+ * action at host_bash or the read tool, and still hedges causation; everything
+ * else keeps the generic shell hint.
  */
 export function sandboxFailureHint(command: string, mountedPaths?: readonly MountEntry[], home?: string): string {
 	const reason = hostBoundCommandReason(command);
@@ -277,7 +341,7 @@ export function sandboxFailureHint(command: string, mountedPaths?: readonly Moun
 	}
 	const paths = mountedPaths === undefined ? [] : unmountedPathCandidates(command, mountedPaths, home);
 	if (paths.length > 0) {
-		return `Guard sandbox: this command mentions path(s) that may not be visible in the sandbox: ${paths.join(", ")}. If it failed because it needs them, re-run with host_bash (not bash); other causes are possible. ${SHELL_SANDBOX_FAILURE_HINT}`;
+		return `Guard sandbox: this command mentions path(s) that are not visible in this sandbox: ${paths.join(", ")}. If the command needs them, use host_bash (or the read tool to read them); do not retry with bash. Other causes are possible. ${SHELL_SANDBOX_FAILURE_HINT}`;
 	}
 	return SHELL_SANDBOX_FAILURE_HINT;
 }

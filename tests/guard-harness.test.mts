@@ -30,7 +30,7 @@ interface Harness {
 	status: Map<string, string | undefined>;
 	commandHandlers: Map<string, (args: string, ctx: unknown) => Promise<void>>;
 	tools: Array<{ name: string; annotations?: Record<string, boolean> }>;
-	registeredTools: Map<string, { execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined> }>;
+	registeredTools: Map<string, { execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined>; description?: string; promptSnippet?: string; promptGuidelines?: readonly string[]; prepareLoadout?: () => { descriptions?: Record<string, string> } | undefined }>;
 	steering: Array<{ text: string; deliverAs?: string }>;
 }
 
@@ -55,7 +55,7 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 			(h.handlers[event] ??= []).push(handler);
 			return () => {};
 		},
-		registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined> }) => h.registeredTools.set(tool.name, tool),
+		registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined>; description?: string; promptSnippet?: string; promptGuidelines?: readonly string[]; prepareLoadout?: () => { descriptions?: Record<string, string> } | undefined }) => h.registeredTools.set(tool.name, tool),
 		registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
 			h.commands.push({ name });
 			h.commandHandlers.set(name, options.handler);
@@ -237,13 +237,15 @@ test("harness: tool_call observer records decisions and never blocks", async () 
 		const observers = h.handlers["tool_call"] ?? [];
 		assert.equal(observers.length, 1, "exactly one observe hook");
 
-		// Sandboxed bash allows and emits a decision.
-		const result = await observers[0]({ toolName: "bash", input: { command: "ls" }, toolCallId: "call-1" }, ctx);
-		assert.equal(result, undefined, "the observer must never return a block");
+		// Sandboxed bash allows and emits a decision; a host with no sandbox
+		// denies the same call by name (bash is sandbox-only).
+		const result = await observers[0]({ toolName: "bash", input: { command: "ls" }, toolCallId: "call-1" }, ctx) as { block?: boolean } | undefined;
+		if (sandboxMode === "degraded") assert.equal(result?.block, true, "degraded bash is denied by name");
+		else assert.equal(result, undefined, "the observer must never return a block");
 		const decisions = h.emitted.filter(([c]) => c === "guard:decision");
 		assert.equal(decisions.length, 1);
 		const payload = decisions[0][1] as { action: string; class: string; call: { kind: string }; reason: string; fromCodemode: boolean };
-		assert.equal(payload.action, "allow");
+		assert.equal(payload.action, sandboxMode === "degraded" ? "deny" : "allow");
 		assert.equal(payload.class, "sandboxed-exec");
 		assert.equal(payload.call.kind, "sandboxed-exec");
 		assert.equal(payload.fromCodemode, false, "a top-level call is not labeled");
@@ -325,8 +327,11 @@ test("harness: tool_call observer errors never break the call", async () => {
 		for (const handler of h.handlers["session_start"] ?? []) await handler({}, ctx);
 		await h.commandHandlers.get("guard")!("debug on", ctx);
 		(ctx.ui as { notify: (m: string) => void }).notify = () => { throw new Error("ui gone"); };
-		const result = await observers[0]({ toolName: "bash", input: { command: "ls" } }, ctx);
-		assert.equal(result, undefined);
+		const result = await observers[0]({ toolName: "bash", input: { command: "ls" } }, ctx) as { block?: boolean } | undefined;
+		// Nothing escapes the hook: in degraded mode the call is denied by name,
+		// never a thrown notify failure.
+		if (sandboxMode === "degraded") assert.equal(result?.block, true);
+		else assert.equal(result, undefined);
 	});
 });
 
@@ -395,7 +400,7 @@ test("harness: /guard debug on produces observe notifications", async () => {
 		h.notifications.length = 0;
 		await observers[0]({ toolName: "bash", input: { command: "ls" } }, ctx);
 		assert.equal(h.notifications.length, 1);
-		assert.match(h.notifications[0], /\[guard enforce\] bash: allow \(/);
+		assert.match(h.notifications[0], new RegExp(`\\[guard enforce\\] bash: ${sandboxMode === "degraded" ? "deny" : "allow"} \\(`));
 		await handler!("debug off", ctx);
 		h.notifications.length = 0;
 		await observers[0]({ toolName: "bash", input: { command: "ls" } }, ctx);
@@ -605,6 +610,46 @@ test("harness: a non-committing command does not consume the discovery notice", 
 	});
 });
 
+test("registered executors share one loadout hook, distinct snippets, and the routing guidelines", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-loadout-");
+		const ctx = harnessCtx(h, cwd);
+		const bash = h.registeredTools.get("bash")!;
+		const hostBash = h.registeredTools.get("host_bash")!;
+		assert.equal(bash.promptSnippet, "Run a shell command in the guard sandbox (workspace and session scratch only; no network)");
+		assert.equal(hostBash.promptSnippet, "Run a shell command on the host (network, credentials, host paths outside the sandbox)");
+		for (const name of ["bash", "host_bash"]) {
+			const tool = h.registeredTools.get(name)!;
+			assert.equal(tool.promptGuidelines?.length, 2, name);
+			assert.match(tool.promptGuidelines![0], /Decide the shell tool before writing the command/);
+			assert.match(tool.promptGuidelines![1], /use the `read` tool or `host_bash`/);
+		}
+		// The same hook instance is attached to every executor, so one request
+		// cannot see two different boundary statements.
+		const hooks = ["bash", "host_bash", "python", "node"].map((name) => h.registeredTools.get(name)!.prepareLoadout);
+		for (const hook of hooks) assert.equal(hook, hooks[0], "one loadout hook for all four executors");
+		// The registration-time text is a usable, path-free fallback.
+		assert.match(bash.description ?? "", /^Sandboxed shell: no network, no host credentials\./);
+		assert.match(bash.description ?? "", /the workspace the current workspace/);
+		assert.match(hostBash.description ?? "", /^Host shell: runs on the host/);
+		assert.match(h.registeredTools.get("python")!.description ?? "", /^Persistent python interpreter managed by guard/);
+		// After session_start the hook substitutes the live paths.
+		for (const handler of h.handlers["session_start"] ?? []) await handler({}, ctx);
+		const live = bash.prepareLoadout!().descriptions!;
+		assert.deepEqual(Object.keys(live).sort(), ["bash", "host_bash", "node", "python"]);
+		assert.ok(live.bash.includes(cwd), "the live workspace path is substituted");
+		assert.match(live.bash, /session-[^/]+\/scratch/, "the live session scratch path is substituted");
+		assert.doesNotMatch(live.bash, /the workspace the current workspace/, "no fallback phrase survives initialization");
+		assert.match(live.python, /^Persistent python interpreter managed by guard/);
+		assert.ok(live.python.includes(cwd), "workers name the workspace too");
+		// A read grant cannot churn the payload: read roots stay a category.
+		assert.match(live.bash, /read roots you were granted/);
+		assert.doesNotMatch(live.bash, /\/secret-read-root/, "no read-root paths appear");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
 test("registered python/node workers declare conservative capability metadata", () => {
 	const h = makeHarness();
 	for (const name of ["python", "node"]) {
@@ -630,7 +675,7 @@ test("registered tools own all five names and reject calls before session initia
 	await assert.rejects(h.registeredTools.get("request_read_access")!.execute("id", { path: "/tmp/x" }, undefined, undefined, ctx), /not initialized/);
 });
 
-test("registered raw bash honors rules and fixed identities; unrestricted alone skips rules", async () => {
+test("registered raw bash is denied by name; host_bash honors rules and fixed identities", async () => {
 	await withTempHome(async () => {
 		const h = makeHarness();
 		const cwd = makeTempDir("guard-raw-rules-");
@@ -639,14 +684,30 @@ test("registered raw bash honors rules and fixed identities; unrestricted alone 
 		const ctx = harnessCtx(h, cwd);
 		await h.handlers.session_start[0]({}, ctx);
 		await h.commandHandlers.get("guard")!("profile yolo", ctx);
-		for (const name of ["bash", "host_bash"]) {
-			await assert.rejects(h.registeredTools.get(name)!.execute("id", { command: "echo blocked" }, undefined, undefined, ctx), /deny rule/);
-			const block = await h.handlers.tool_call[0]({ toolName: name, input: { command: "echo blocked" } }, ctx) as { block: boolean };
-			assert.equal(block.block, true);
-			await assert.rejects(h.registeredTools.get(name)!.execute("id", { command: "echo asked" }, undefined, undefined, ctx), /denied/);
+		// bash never runs on the host, so both the execute path and the tool_call
+		// interception deny it by name, and the misleading toolClasses entry
+		// cannot reclassify it.
+		const sandboxOnly = sandboxMode === "degraded"
+			? "bash is sandbox-only and this host has no sandbox (degraded mode): use host_bash instead"
+			: "bash is sandbox-only; in yolo it would run on the host: use host_bash (same permissions here) instead";
+		for (const command of ["echo blocked", "echo asked"]) {
+			await assert.rejects(
+				h.registeredTools.get("bash")!.execute("id", { command }, undefined, undefined, ctx),
+				(err: Error) => err.message.includes(sandboxOnly),
+				`${command}: the sandbox-only reason is reported`,
+			);
 		}
+		const bashBlock = await h.handlers.tool_call[0]({ toolName: "bash", input: { command: "echo blocked" } }, ctx) as { block: boolean; reason: string };
+		assert.equal(bashBlock.block, true);
+		assert.equal(bashBlock.reason, sandboxOnly);
+		// host_bash keeps the rule semantics.
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo blocked" }, undefined, undefined, ctx), /deny rule/);
+		const hostBlock = await h.handlers.tool_call[0]({ toolName: "host_bash", input: { command: "echo blocked" } }, ctx) as { block: boolean };
+		assert.equal(hostBlock.block, true);
+		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx), /denied/);
+		// unrestricted skips the rules for the host shell.
 		await h.commandHandlers.get("guard")!("profile unrestricted", ctx);
-		const result = await h.registeredTools.get("bash")!.execute("id", { command: "echo blocked" }, undefined, undefined, ctx);
+		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo blocked" }, undefined, undefined, ctx);
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.exit_code, 0);
 		assert.match(result.structuredContent.output, /blocked/);

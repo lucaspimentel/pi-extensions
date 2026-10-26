@@ -25,8 +25,8 @@ transitions; `tools/` holds the tool implementations.
 
 | Tool | Implementation |
 |---|---|
-| `bash` | `createBashTool()` with sandboxed `BashOperations` (`tools/shell.ts`); one bwrap process per call, no persistent shell. Yolo/unrestricted run it on the host, honoring HostBash deny/ask rules (unrestricted ignores rules unless the workspace is locked). |
-| `host_bash` | The only sandbox escape: argv-array host exec with `HostBash(...)` rules and the tightened read-only tier. |
+| `bash` | `createBashTool()` with sandboxed `BashOperations` (`tools/shell.ts`); one bwrap process per call, no persistent shell, and **always sandboxed**: the unlocked raw profiles (yolo, unrestricted) and a host with no sandbox (degraded mode) deny a `bash` call by name and point at `host_bash` instead of silently running it on the host. A workspace lock forces the read-only sandbox back on, so a locked raw profile keeps sandboxed `bash`. |
+| `host_bash` | The only sandbox escape: argv-array host exec with `HostBash(...)` rules and the tightened read-only tier. It is the shell for yolo, unrestricted, and degraded mode; in degraded mode the research profile restricts it to the read-only tier (allow rules never widen that set). |
 | `python` / `node` | Ports of the old controllers (`tools/python/`, `tools/node/`) onto the shared sandbox: persistent worker, fd-3 JSON protocol, bounded output/timeouts, no code replay. Every sandboxed profile uses a worker-lifetime workspace overlay; reduced mode or a workspace lock degrades to read-only; yolo/unrestricted run the worker raw (full env and filesystem, no launcher, no rlimits). |
 | `pwsh` | Not registered by guard. The standalone `pwsh` extension was removed; pi's built-in `powershell` tool is opt-in (`defaultTools`) and, when enabled, is classified as a host shell on the pwsh tier (`Pwsh(...)` rules, no read-only tier). |
 | `request_read_access` | Model-callable read-access request (registered by `index.ts`, not an owned executor and never routed through the execution queue). Opens the same guard read-grant dialog the python/node workers use, for an absolute host path outside the sandbox mounts: a session grant or a persistent read root saved to the guard config. One guard-internal `decisionFor` self-check runs first (deny refuses with the cause; an allow still opens the dialog, which is the consent surface; classifier failures fail closed), the entry itself rejects relative paths, and non-interactive contexts refuse with an actionable diagnostic. It mutates guard authorization state (persistent saves write guard.json; applying a grant stops interpreter workers) and never re-runs anything: no code is executed or replayed, and the caller must re-run the read itself after a grant. |
@@ -51,10 +51,14 @@ Registration details:
   `host_bash` instead of retrying in the sandbox. When the failed command
   mentions path arguments that are not visible in the effective bwrap mounts
   (advisory token scan over the parsed mount table, fail open), the hint
-  names them conditionally ("may not be visible"); a mention never blocks
+  names them as not visible in this sandbox and directs the model to
+  `host_bash` or the `read` tool ("do not retry with bash") while still
+  hedging causation ("Other causes are possible"): a mention never blocks
   execution, opens a dialog, or claims to be the cause. The `bash` and
   `host_bash` descriptions state the same routing rules up front, including
-  the filesystem boundary. The bash failure hint points at the
+  the filesystem boundary, the real workspace and session scratch paths, and
+  the private sandbox `/tmp`; the two shells carry distinct tool-list
+  snippets and share two routing guidelines. The bash failure hint points at the
   `request_read_access` tool for persistent read access: the tool opens the
   guard read-grant dialog for an absolute path (the worker `permission_needed`
   path shares the same dialog through the shared `requestReadGrant` helper),
@@ -85,6 +89,13 @@ Registration details:
   it is mounted writable and persists across reset, crash, and policy-driven
   restarts. Session, cwd, `/tree` replacement, and shutdown remove it. Logs
   and quarantine are separate and never mounted writable.
+- The tool descriptions are rebuilt on every request from the session's real
+  workspace and scratch paths, so the boundary text names where the model can
+  actually write. Granted read roots stay a category ("read roots you were
+  granted") and are never enumerated, so a grant cannot change the request
+  payload. The sandbox `/tmp` is a private tmpfs: the host `/tmp` is not
+  visible, and a truncated bash result's `full_output_path` is a host temp
+  file to read with `read` or `host_bash`.
 - The pre/post protected-path audit runs around every sandboxed execution
   (bash process and worker execute/teardown). Created/replaced/missing
   protected entries are quarantined and notified without failing an otherwise
@@ -304,7 +315,8 @@ filter stays observe-only:
 | web_fetch outside webFetchAllow | prompt | prompt | prompt | classify | allow | allow | allow |
 | Other remote reads | allow | allow | allow | allow | allow | allow | allow |
 | Remote writes | deny | prompt | prompt | classify | allow | allow | allow |
-| Sandboxed exec (bash/python/node) | allow | allow | allow | allow | allow | allow | allow |
+| Sandboxed exec: bash | allow | allow | allow | allow | allow | deny (no sandbox) | deny (no sandbox) |
+| Sandboxed exec: python/node | allow | allow | allow | allow | allow | allow (raw) | allow (raw) |
 | Meta (codemode, subagent, ...) | allow | allow | allow | allow | allow | allow | allow |
 
 - **ctrl+alt+g** cycles research -> default -> allow-edits -> auto ->
@@ -318,16 +330,23 @@ filter stays observe-only:
   writes: they always prompt.
 - **unrestricted is never in the cycle**; it is reachable only with
   `/guard profile unrestricted`. Cycling from unrestricted goes to research.
+- In `yolo` and `unrestricted` the workers run raw but `bash` does not: it is
+  denied by name, so a shell command on the host is always an explicit
+  `host_bash` call. A workspace lock forces the read-only sandbox back on for
+  `bash` even in those profiles.
 - While plan holds research (the `guard:research-request` /
   `guard:research-release` / `guard:research-ack` handshake), every profile
   change is blocked except staying in research; releasing restores the
-  pre-hold profile.
+  pre-hold profile. (Historical: `/plan` was retired 2026-10-26 in favor of
+  the agent-skills `plan` skill, so nothing in the registered extension set
+  emits a hold request; guard keeps the machinery and its tests, see TODO.md.)
 
 ### Host-shell precedence
 
 - **research:** absolute. HostBash/Pwsh rules are ignored; host shells deny.
-  In degraded mode, sandboxed bash runs only commands the read-only tier
-  proves read-only; allow rules never widen that set.
+  Degraded mode is the one exception: there is no sandbox at all, so
+  `host_bash` runs only commands the read-only tier proves read-only, and
+  allow rules never widen that set (`bash` is denied by name there).
 - **default / auto / trusted:** deny rules > ask rules > the tightened
   read-only tier (host vetoes first: `env`/`printenv` as the command, any `$`
   outside single quotes, the active-construct screen (command/process
@@ -379,9 +398,13 @@ Object.prototype names such as `constructor` or `__proto__` are ordinary
 custom tools (classification and planning follow the normal
 annotation/configuration/fallback rules; no name is reserved).
 
-### Planning eligibility
+### Planning eligibility (historical)
 
-While `/plan` holds the research profile, plan.ts filters the CURRENTLY
+(Historical: `/plan` was retired 2026-10-26 in favor of the agent-skills
+`plan` skill, so `isPlanningToolAllowed` and this filter have no registered
+consumer left; see TODO.md.)
+
+While `/plan` held the research profile, plan.ts filtered the CURRENTLY
 ACTIVE tool set through `isPlanningToolAllowed` (`policy/classes.ts`) with a
 fresh `pi.getAllTools()` annotation lookup at planning entry:
 
@@ -503,10 +526,13 @@ removed.
   pi-tool-permissions and the herdr ask-user bridge.
 - `guard:research-request` / `guard:research-release` (in) and
   `guard:research-ack` / `guard:research-release-ack` (out): the plan.ts
-  handshake, wired in step 4. `/plan` requests the hold before narrowing
-  (write/edit/`host_bash`) and refuses to start without an acknowledgment;
-  every exit path releases it, and guard acks only after the transition
-  (teardown included) completes.
+  handshake, wired in step 4. (Historical: plan.ts was retired 2026-10-26 in
+  favor of the agent-skills `plan` skill, so nothing in the registered
+  extension set emits a hold request; guard keeps the channels, the
+  transition gating, and their tests, see TODO.md.) `/plan` requested the
+  hold before narrowing (write/edit/`host_bash`) and refused to start without
+  an acknowledgment; every exit path released it, and guard acks only after
+  the transition (teardown included) completes.
 
 ## Shared sandbox library (`sandbox/`)
 
@@ -532,7 +558,7 @@ process (reset with `resetSandboxDetection()` for tests).
 |---|---|---|
 | `full` | Linux, bwrap present, the compiled launcher works | Overlays, seccomp, rlimits through the launcher |
 | `reduced` | bwrap works but the launcher is unavailable (no compiler, no libseccomp, compile or probe failure, unusable cache dir) | bwrap namespaces only: no seccomp, no overlays. Overlay requests degrade to read-only. Rlimits via `prlimit` when present. The diagnostic is reported. |
-| `degraded` | not Linux, no bwrap, or the bwrap namespace probe fails | `spawnSandboxed` refuses (throws); the caller runs host execution |
+| `degraded` | not Linux, no bwrap, or the bwrap namespace probe fails | `spawnSandboxed` refuses (throws). `bash` is denied by name (it is sandbox-only), python/node are unavailable, and `host_bash` is the host shell; in the research profile `host_bash` is limited to the read-only tier |
 
 Fail closed: every missing requirement reports the lower mode with an
 actionable diagnostic. Nothing here ever widens what the sandbox can see.

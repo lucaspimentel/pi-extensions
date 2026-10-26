@@ -13,7 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { isPathVisible, mountTable, type MountEntry } from "../extensions/guard/sandbox/bwrap.ts";
-import { SHELL_SANDBOX_FAILURE_HINT, sandboxFailureHint, unmountedPathCandidates } from "../extensions/guard/tools/shell.ts";
+import { SHELL_SANDBOX_FAILURE_HINT, bashToolDescription, hostBashToolDescription, sandboxBoundaryText, sandboxFailureHint, unmountedPathCandidates, workerToolDescription } from "../extensions/guard/tools/shell.ts";
 
 const HOME = os.homedir();
 
@@ -177,11 +177,12 @@ test("sandboxFailureHint: host-bound commands keep the existing targeted directi
 	assert.match(sandboxFailureHint("git push origin main", fakeMounts(), HOME), /'git push'/);
 });
 
-test("sandboxFailureHint: unmounted paths get the conditional hint naming the read-access tool", () => {
+test("sandboxFailureHint: unmounted paths name the invisibility, direct the action, and keep the causation hedge", () => {
 	const hint = sandboxFailureHint(`ls ${HOME}/.pi/agent/agents/ 2>/dev/null`, fakeMounts(), HOME);
 	assert.match(hint, new RegExp(`${HOME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\/\\.pi\\/agent\\/agents`));
-	assert.match(hint, /may not be visible/);
-	assert.match(hint, /other causes are possible/);
+	assert.match(hint, /are not visible in this sandbox/);
+	assert.match(hint, /If the command needs them, use host_bash \(or the read tool to read them\); do not retry with bash\./);
+	assert.match(hint, /Other causes are possible/, "the hint still never claims the path caused the failure");
 	assert.match(hint, /request_read_access/, "the appended shell explanation names the tool");
 	assert.ok(hint.includes(SHELL_SANDBOX_FAILURE_HINT), "the stable shell explanation is appended");
 });
@@ -194,6 +195,7 @@ test("sandboxFailureHint: no path mention keeps the generic shell hint", () => {
 test("SHELL_SANDBOX_FAILURE_HINT states the boundary and points at the read-access tool", () => {
 	assert.match(SHELL_SANDBOX_FAILURE_HINT, /host_bash/);
 	assert.match(SHELL_SANDBOX_FAILURE_HINT, /request a grant with the request_read_access tool/);
+	assert.match(SHELL_SANDBOX_FAILURE_HINT, /the sandbox \/tmp is a private tmpfs, not the host \/tmp/);
 	assert.match(SHELL_SANDBOX_FAILURE_HINT, /never fall back to host execution/);
 	assert.doesNotMatch(SHELL_SANDBOX_FAILURE_HINT, /readRoots/, "the manual config-editing sentence is replaced by the tool");
 });
@@ -202,6 +204,66 @@ test("sandboxFailureHint remains advisory for path-mentioning commands that woul
 	// echo merely mentions the path; the hint must stay conditional and no
 	// execution path may block or reroute on it (asserted by composition only).
 	const hint = sandboxFailureHint("echo /opt/unmounted/path", fakeMounts(), HOME);
-	assert.match(hint, /may not be visible/);
-	assert.match(hint, /other causes are possible/);
+	assert.match(hint, /are not visible in this sandbox/);
+	assert.match(hint, /Other causes are possible/);
+});
+
+// ── Tool descriptions ───────────────────────────────────────────────────────
+
+const LIVE_PATHS = { workspace: "/home/user/proj", scratch: "/tmp/pi-guard-1000/session-x/scratch", home: "/home/user" };
+
+test("bash and host_bash descriptions name the live paths and the private /tmp", () => {
+	const bash = bashToolDescription("NATIVE", LIVE_PATHS);
+	assert.match(bash, /^Sandboxed shell: no network, no host credentials\./);
+	assert.ok(bash.includes(`the workspace ${LIVE_PATHS.workspace}`), "the workspace path is named");
+	assert.ok(bash.includes(LIVE_PATHS.scratch), "the session scratch path is named");
+	assert.match(bash, /the sandbox \/tmp is a private tmpfs, not the host \/tmp/);
+	assert.match(bash, /including \/home\/user\/\.pi and other repositories/);
+	assert.match(bash, /bash runs in the sandbox only and is unavailable on a host without one \(degraded mode\)/);
+	assert.match(bash, /full_output_path is a host temp file/);
+	assert.ok(bash.includes("NATIVE"), "the native description survives verbatim");
+	assert.match(bash, /request a grant with the request_read_access tool\.$/);
+
+	const host = hostBashToolDescription("NATIVE", LIVE_PATHS);
+	assert.match(host, /^Host shell: runs on the host with full network access and host credentials\. NATIVE/);
+	assert.match(host, /the host \/tmp, \/home\/user\/\.pi, other repositories/);
+	assert.match(host, /as the only shell in yolo, unrestricted, and degraded mode/);
+	assert.match(host, /in degraded research only read-only-tier commands run/);
+	assert.match(host, /Subject to HostBash rules and guard profile\.$/);
+});
+
+test("descriptions fall back to generic phrases before the runtime exists", () => {
+	const bash = bashToolDescription("NATIVE");
+	assert.match(bash, /the workspace the current workspace, the session scratch directory the per-session scratch directory/);
+	assert.match(bash, /including ~\/\.pi and other repositories/);
+	assert.doesNotMatch(bash, /undefined/);
+	const host = hostBashToolDescription("NATIVE");
+	assert.match(host, /~\/\.pi, other repositories/);
+	assert.doesNotMatch(host, /undefined/);
+	const worker = workerToolDescription("node");
+	assert.match(worker, /~\/\.pi/);
+	assert.doesNotMatch(worker, /undefined/);
+});
+
+test("worker descriptions share the boundary text and keep their own semantics", () => {
+	for (const name of ["python", "node"] as const) {
+		const text = workerToolDescription(name, LIVE_PATHS);
+		assert.match(text, new RegExp(`^Persistent ${name} interpreter managed by guard`));
+		assert.ok(text.includes(sandboxBoundaryText(LIVE_PATHS)), `${name}: shares the boundary text`);
+		assert.match(text, /throwaway workspace overlays \(workspace writes never reach the host\)/);
+		assert.match(text, /Host files outside those mounts \(including the host \/tmp\) are not visible to workers/);
+		assert.match(text, /request_read_access/);
+		assert.match(text, /action=reset discards state, not scratch; action=status never starts a worker\./);
+		assert.match(text, /Raw profiles expose the host\. Unavailable in degraded mode\./);
+		assert.doesNotMatch(text, /sandbox-only/, `${name}: the bash-only restriction is not attached to workers`);
+	}
+});
+
+test("boundary text never enumerates read roots", () => {
+	const first = bashToolDescription("NATIVE", LIVE_PATHS);
+	assert.match(first, /read roots you were granted/);
+	assert.doesNotMatch(first, /\/secret\/root|\/opt\/granted/, "granted read roots must never be enumerated");
+	// Identical inputs are byte-identical, so a grant cannot churn the payload.
+	assert.equal(bashToolDescription("NATIVE", LIVE_PATHS), first);
+	assert.equal(workerToolDescription("python", LIVE_PATHS), workerToolDescription("python", LIVE_PATHS));
 });

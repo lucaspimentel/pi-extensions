@@ -636,12 +636,19 @@ test("a child in research keeps sandboxed work usable and denies host shells hea
 				dialogs++;
 				return options[0];
 			};
-			// Host shells deny in research without any dialog.
-			await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo blocked" }, undefined, undefined, ctx), /denied|research/);
+			// Host shells deny in research without any dialog. Degraded mode is the
+			// one exception: research host_bash there is judged by the read-only
+			// tier, so only a command the tier cannot prove is denied.
+			const detection = await import("../extensions/guard/sandbox/detect.ts");
+			const degraded = detection.detectSandboxMode().mode === "degraded";
+			if (degraded) {
+				await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo a && echo b" }, undefined, undefined, ctx), /degraded research/);
+			} else {
+				await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo blocked" }, undefined, undefined, ctx), /denied|research/);
+			}
 			assert.equal(dialogs, 0, "no dialog is opened in a headless child");
 			// Sandboxed bash stays allowed in research (full mode only).
-			const detection = await import("../extensions/guard/sandbox/detect.ts");
-			if (detection.detectSandboxMode().mode !== "degraded") {
+			if (!degraded) {
 				const result = await h.registeredTools.get("bash")!.execute("id", { command: "echo usable" }, undefined, undefined, ctx);
 				assert.match(String(result.content?.[0]?.text ?? ""), /usable/);
 			} else {

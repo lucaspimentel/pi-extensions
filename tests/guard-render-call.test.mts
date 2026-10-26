@@ -127,18 +127,23 @@ test("both guard shell tools are registered with native call and result renderer
 		const expected = (nativeRenderResult(result, { expanded: false, isPartial: false }, themeStub, context()).render(120) as string[]).map((line) => stripAnsi(line).trimEnd());
 		assert.deepEqual(lines, expected, `${tool.name}: result rendering must be native`);
 	}
-	// The guard-specific description markers must survive untouched.
-	assert.match(bash.description, /^Sandboxed: /);
-	assert.match(bash.description, /Guard sandboxed except in raw profiles/);
-	assert.match(bash.description, /no network and no host credentials/);
-	assert.match(bash.description, /use host_bash for those/);
+	// The registered text is the static fallback (no runtime exists at
+	// registration time); the per-request loadout hook substitutes the live
+	// workspace and scratch paths, which the harness suite covers.
+	assert.match(bash.description, /^Sandboxed shell: no network, no host credentials\./);
+	assert.match(bash.description, /no network, no host credentials/);
+	assert.match(bash.description, /read roots you were granted/);
+	// Filesystem-boundary statements.
+	assert.match(bash.description, /Everything else on the host is absent/);
+	assert.match(bash.description, /the sandbox \/tmp is a private tmpfs, not the host \/tmp/);
+	assert.match(bash.description, /full_output_path is a host temp file/);
+	assert.match(bash.description, /bash runs in the sandbox only/);
+	assert.match(hostBash.description, /^Host shell: runs on the host with full network access and host credentials\./);
 	assert.match(hostBash.description, /full network access and host credentials/);
 	assert.match(hostBash.description, /Subject to HostBash rules and guard profile/);
-	// Filesystem-boundary statements.
-	assert.match(bash.description, /configured read roots/);
-	assert.match(bash.description, /are not visible/);
 	assert.match(bash.description, /~\/\.pi/);
 	assert.match(hostBash.description, /host paths outside the sandbox mounts/);
+	assert.match(hostBash.description, /as the only shell in yolo, unrestricted, and degraded mode/);
 });
 
 // ── Header layout ────────────────────────────────────────────────────────────
