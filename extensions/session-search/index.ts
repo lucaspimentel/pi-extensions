@@ -5,8 +5,15 @@
  *
  * Surfaces:
  *   - Tool `session_search`: ranked session hits (path, date, cwd, name,
- *     snippets with origin labels, score). The agent can then read a hit's
- *     session file directly for the deep dive.
+ *     snippets with origin labels, score). To dig into a hit, the agent calls
+ *     `session_excerpt` (below) rather than reading the session JSONL: the file
+ *     opens with metadata and a ~90KB system-prompt message, and its toolResult
+ *     lines can reach hundreds of KB, so a raw read is truncated before it
+ *     reaches the conversation.
+ *   - Tool `session_excerpt`: one session file, one bounded transcript excerpt,
+ *     anchored on a query's matches (or on the tail when there is no query, or
+ *     the query matched nothing in that session). Returns the flat envelope in
+ *     `structuredContent`/`details.result`.
  *   - Command `/session-search <query>`: same search interactively; with a UI,
  *     arrow-select a session to copy its path.
  *   - `/session-search rebuild`: force a full re-parse (normally refresh is
@@ -18,14 +25,14 @@
  * one-time full parse; later calls are stat-only. Deleted sessions are pruned.
  */
 
-import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { parseSession } from "./parse.ts";
 import { indexPath, loadIndex, refreshIndex, saveIndex, sessionsDir, type SessionIndex } from "./store.ts";
 import { formatHits, formatHit, searchSessions, type SearchFilters, type SearchHit } from "./search.ts";
-import { extractWindowContext } from "./context.ts";
+import { buildExcerpt, excerptText, excerptToolResult } from "./excerpt.ts";
+import { excerptOutputSchema, type ExcerptEnvelope } from "./schema.ts";
 
 // --------------------------- index management ---------------------------
 
@@ -73,6 +80,18 @@ function copyToClipboard(text: string): boolean {
 
 // --------------------------- tool parameters ---------------------------
 
+const excerptParams = Type.Object({
+	path: Type.String({
+		description: "Absolute path of the session file, taken from a session_search hit.",
+	}),
+	query: Type.Optional(
+		Type.String({
+			description:
+				"Query locating the window (same syntax as session_search; the one that produced the hit). Omitted, or matching nothing in this session, returns the tail of the session instead.",
+		}),
+	),
+});
+
 const searchParams = Type.Object({
 	query: Type.String({ description: "Search terms (AND, case-insensitive). Prefix with / for regex mode, e.g. '/fake-intake \\d+'." }),
 	cwd: Type.Optional(Type.String({ description: "Filter: session cwd must contain this substring (e.g. 'serverless-components')." })),
@@ -93,12 +112,16 @@ interface SearchDetails {
 	hits: Array<{ path: string; score: number; tier: string; isSubagent: boolean }>;
 }
 
+interface ExcerptDetails {
+	result: ExcerptEnvelope;
+}
+
 export default function sessionSearchExtension(pi: ExtensionAPI): void {
 	pi.registerTool<typeof searchParams, SearchDetails>({
 		name: "session_search",
 		label: "Session Search",
 		description:
-			"Search the user's past pi coding sessions across all projects by keyword. Returns ranked hits with session path, date, project cwd, name, and labeled snippets (user message / assistant text / summary). Excludes the current session from results. Use it to recall past work: the user often half-remembers a session by keywords from what was said or built, not by project or date. After finding a hit, read the session file at `path` directly for the full transcript.",
+			"Search the user's past pi coding sessions across all projects by keyword. Returns ranked hits with session path, date, project cwd, name, and labeled snippets (user message / assistant text / summary). Excludes the current session from results. Use it to recall past work: the user often half-remembers a session by keywords from what was said or built, not by project or date. After finding a hit, call session_excerpt with the hit's `path` (and the same query) to read the transcript around the match.",
 		promptSnippet: "Search past pi sessions by keyword across all projects",
 		// Conservative capability hints: read-only queries over a closed domain
 		// (local session files). The search maintains its own on-disk index; the
@@ -107,7 +130,8 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use session_search when the user references past work ('that time we...', 'the session where...') without naming the project or date. The current session is always excluded from results.",
 			"Searches globally across all projects by default; pass cwd to narrow to a project, since/until to bound dates, in to restrict to user/assistant/summary text.",
-			"To dig into a hit, read the session file at its `path`; it is JSONL (one JSON object per line).",
+			"To dig into a hit, call session_excerpt with its `path` (and the query you searched for) instead of reading the session file: session JSONL opens with a ~90KB role:\"system\" message holding the full system prompt and tool schemas, so a raw read is truncated before the conversation.",
+			"If you need more than the excerpt caps give (16KB total, 2KB per message), read the JSONL with an offset past its header lines, keep the limit small, and expect toolResult lines in the hundreds of KB.",
 		],
 		parameters: searchParams,
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -129,6 +153,30 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 					hits: hits.map((h) => ({ path: h.path, score: h.score, tier: h.tier, isSubagent: h.isSubagent })),
 				},
 			};
+		},
+	});
+
+	pi.registerTool<typeof excerptParams, ExcerptDetails>({
+		name: "session_excerpt",
+		label: "Session Excerpt",
+		description:
+			"Load a bounded transcript excerpt from one past session file, given a `path` from a session_search hit. With a `query`, the window is centered on that query's matches inside the session; with no query, or a query that matches nothing in it, the excerpt is the tail (last 10 messages). Entries are capped at 2KB each and 16KB total, tool results and injected boilerplate are excluded, and the result reports how the window was chosen, how many messages it holds, and whether a cap truncated it. Prefer this over reading the session JSONL directly: those files open with a ~90KB system-prompt message and contain toolResult lines of hundreds of KB.",
+		promptSnippet: "Load a transcript excerpt around a session hit",
+		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+		promptGuidelines: [
+			"Call session_excerpt with a session_search hit's `path` (and the query that found it) to recall what was actually said; the path must be a session file inside the sessions directory, and the active session's own file is allowed.",
+			"If you need more than the excerpt caps give, read the JSONL with an offset past its header lines, keep the limit small, and expect toolResult lines in the hundreds of KB.",
+		],
+		parameters: excerptParams,
+		outputSchema: excerptOutputSchema,
+		async execute(_id, params, signal, _onUpdate, ctx) {
+			const envelope = buildExcerpt({
+				path: params.path,
+				query: params.query,
+				activeSessionPath: ctx.sessionManager.getSessionFile() ?? undefined,
+				signal,
+			});
+			return excerptToolResult(envelope);
 		},
 	});
 
@@ -210,27 +258,30 @@ export default function sessionSearchExtension(pi: ExtensionAPI): void {
 					return;
 				}
 				if (action === "Load context into session") {
-					let content: string;
-					try {
-						content = readFileSync(hit.path, "utf8");
-					} catch (err) {
-						ctx.ui.notify(`Could not read session file: ${err instanceof Error ? err.message : String(err)}`, "warning");
+					// Same selection, caps, and validation as the session_excerpt tool:
+					// re-match the command's query inside this one session and anchor there.
+					const envelope = buildExcerpt({
+						path: hit.path,
+						query: input,
+						activeSessionPath: currentSessionPath,
+						signal: ctx.signal,
+					});
+					if (!envelope.ok || envelope.messageCount === 0) {
+						ctx.ui.notify(
+							envelope.ok
+								? "No indexable content found around the match in that session."
+								: `Could not load context: ${envelope.error?.message ?? envelope.error?.kind}`,
+							"warning",
+						);
 						continue;
 					}
-					const anchorTs = hit.snippets[0]?.ts ?? hit.started;
-					const excerpt = extractWindowContext(content, anchorTs, hit.snippets.map((s) => s.ts));
-					if (!excerpt) {
-						ctx.ui.notify("No indexable content found around the match in that session.", "warning");
-						continue;
-					}
-					const header = `Context from session "${hit.name ?? hit.sessionId}" (${hit.cwd}, ${hit.lastActivity.slice(0, 10)}), loaded by /session-search. Transcript excerpt around the matched entry:`;
 					try {
 						pi.sendMessage(
 							{
 								customType: "session-search-context",
-								content: `${header}\n\n${excerpt}`,
+								content: excerptText(envelope, { source: "loaded by /session-search" }),
 								display: true,
-								details: { path: hit.path, anchorTs },
+								details: { path: hit.path, anchored: envelope.anchored },
 							},
 							{ triggerTurn: true },
 						);

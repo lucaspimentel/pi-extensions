@@ -13,8 +13,13 @@ branch dupes, tool-result noise).
 
 - **Tool `session_search`** (model-facing): ranked hits with session path,
   date, project cwd, name, and snippets labeled by origin (user message /
-  assistant text / summary). The agent can then read the hit's session file
-  directly for the full transcript (JSONL, one JSON object per line).
+  assistant text / summary).
+- **Tool `session_excerpt`** (model-facing): the transcript excerpt around a
+  hit, so the agent never has to parse session JSONL. Session files open with
+  metadata and a ~90KB `role:"system"` message holding the full system prompt
+  and every tool schema, and their `toolResult` lines can reach hundreds of KB,
+  against the `read` tool's 50KB output cap: a raw read returns the header and
+  never reaches the conversation. See "Excerpts" below.
 - **Command `/session-search <query>`**: same search interactively; with a UI,
   arrow-select a session to preview its full card (all snippets, name, dates,
   path), then **Resume session**, **Copy path**, **Load context into
@@ -25,16 +30,51 @@ branch dupes, tool-result noise).
   no model turn. Offered for non-subagent hits only; cancel or error falls back
   to the list. After a successful switch the previous session stays resumable
   via `/resume`, and the resumed session becomes the one excluded from search.
-- **Load context into session**: extracts a transcript excerpt (±5 user/assistant
-  messages around the matched entry, plus summaries; per-message cap 2KB, total
-  cap 16KB; tool results excluded) and injects it into the current session as a
-  `session-search-context` message, triggering a model turn so the agent picks
-  up the context immediately. Note: the injected message is itself a
+- **Load context into session**: extracts a transcript excerpt and injects it
+  into the current session as a `session-search-context` message, triggering a
+  model turn so the agent picks up the context immediately. Runs the same
+  excerpt flow as the `session_excerpt` tool (see "Excerpts"), anchored on the
+  query that produced the hit. Note: the injected message is itself a
   custom_message, so future refreshes index it as a summary of the session that
   loaded it.
 - **`/session-search rebuild`**: force a full re-parse (normally refresh is
   lazy and incremental).
 - **`/session-search help`**: usage.
+
+## Excerpts
+
+The `session_excerpt` tool (and the TUI action above) reads exactly one session
+file and returns a bounded excerpt:
+
+- **Anchor**: with a `query`, the file is parsed and the query is re-matched
+  inside that single session; the matched entries' timestamps anchor the window
+  (symmetric ±5 messages around the first match, widened to cover the rest).
+  Without a query, or when the query matches nothing in that session, the
+  excerpt is the **tail**: the last 10 indexable entries, labeled as a tail (or
+  as a missed query) in both the header text and the envelope.
+- **Content**: user and assistant text plus summaries (compaction and
+  custom messages), rendered as `[HH:MM:SS] role: text`. Tool results, system
+  messages, tool-call-only messages, and blocklisted injected boilerplate are
+  excluded.
+- **Caps** (fixed, no parameters): 2KB per message and 16KB total, enforced by
+  UTF-8 byte length; when the budget is tight, entries farthest from the anchor
+  are dropped, but anchor entries and the window center always survive.
+- **Path validation**: the path must resolve inside the sessions directory,
+  must be an existing regular `*.jsonl` file, and must carry a `session` header.
+  Canonical (symlink-resolved) containment is checked too, so a symlink inside
+  the tree cannot escape it; a symlinked sessions root itself is fine. Reading
+  the currently active session's own file is allowed and flagged `selfSession`.
+- **Result**: the rendered text plus one flat envelope as both
+  `structuredContent` and `details.result`:
+  `{ ok, path, sessionId, name?, cwd, started, selfSession, anchored, messageCount,
+  truncated, body, error? }`. `anchored` is `{ ts }`, `{ tail: true }`, or
+  `{ queryMissed: true }` and is only meaningful when `ok` is true.
+- **Failures** are results, never throws: `isError: true` with
+  `error.kind` in `outside_sessions` (outside the tree, including symlink
+  escapes), `unreadable` (missing, not a regular file, read error), or
+  `not_a_session` (not `*.jsonl`, or no session header). A cancelled call
+  reports `cancelled`. A valid session with nothing indexable is a *success*
+  with `messageCount: 0` and an empty body.
 
 ## Query syntax
 
@@ -57,8 +97,14 @@ their source: `compaction`, `idle-summary`, etc.
 
 ## Index
 
-`~/.pi/agent/session-search-index.jsonl`, one line per session (override with
-`SESSION_SEARCH_INDEX_FILE`). Refresh happens lazily on every use: stat all
+The sessions directory follows pi's own resolution, shared by the search and the
+excerpt tool: an explicit home argument, else `PI_CODING_AGENT_DIR` +
+`/sessions` when that variable is set, else `~/.pi/agent/sessions` (pi's
+`join(getAgentDir(), "sessions")`).
+
+The index lives at `~/.pi/agent/session-search-index.jsonl`, one line per
+session (override with `SESSION_SEARCH_INDEX_FILE`); it deliberately does not
+move with `PI_CODING_AGENT_DIR`. Refresh happens lazily on every use: stat all
 session files (~ms for ~700 files), re-parse only files whose `(mtime, size)`
 changed, prune deleted ones, and persist only when something changed. The
 first-ever search blocks for the one-time full parse (~1-2s for 205MB);
@@ -84,9 +130,14 @@ starting with `<skill`, `<system`, `<extension`, ... — see the data-driven
 
 - `parse.ts` - pure parser: session JSONL -> `SessionSummary` (no pi imports)
 - `search.ts` - query parsing, AND/regex matching, ranking, snippets
-- `store.ts` - index load/save + incremental refresh
-- `context.ts` - windowed transcript extraction for "Load context into session"
-- `index.ts` - extension factory: registers the tool and `/session-search`
+- `store.ts` - index load/save + incremental refresh, sessions-directory
+  resolution
+- `context.ts` - pure window selection: anchored windows and tails, with the
+  caps, used by both the tool and the TUI action
+- `excerpt.ts` - single-file orchestration: path validation, read, envelope and
+  tool-result construction
+- `schema.ts` - the flat excerpt output schema (typebox) and result types
+- `index.ts` - extension factory: registers both tools and `/session-search`
 
 ## Tests
 

@@ -407,6 +407,16 @@ MCP calls in both naming styles classify the same way: built-in
 `mcp__<server>__<input.tool>` (or `mcp:<input.tool>` with no server), so
 globs like `mcp__slack__*read*` match.
 
+One built-in mapping carries a containment exemption: `session_excerpt` reads a
+single file from the sessions directory (pi's `~/.pi/agent/sessions`, or
+`PI_CODING_AGENT_DIR` + `/sessions` when that variable is set), which is that
+tool's own data rather than workspace data, so `decideLocalRead` treats a path
+inside that tree as in-root. The exemption is scoped to that tool by name:
+`read` and every other local-read tool keep ordinary containment for the same
+paths, and the secret-mask check still runs first. The sessions-root
+computation is pure (environment plus homedir, no filesystem access), and a
+test asserts it matches the extension's own resolution.
+
 Annotations are author-provided, unverified hints. Missing hints do not
 establish read-only behavior, and `destructiveHint: false` means
 non-destructive, not necessarily non-writing.

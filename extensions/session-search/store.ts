@@ -7,6 +7,11 @@
  * line per session: {path, mtime, size, summary}. On refresh we stat every
  * *.jsonl under the sessions dir (~678 files, ~ms) and re-parse only files
  * whose (mtime, size) changed. Entries whose file no longer exists are pruned.
+ *
+ * The sessions dir follows pi's own resolution (join(getAgentDir(),
+ * "sessions")): an explicit home argument wins, then PI_CODING_AGENT_DIR, then
+ * ~/.pi/agent. The index location deliberately does not move with it; override
+ * that separately with SESSION_SEARCH_INDEX_FILE.
  */
 
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
@@ -23,8 +28,23 @@ export interface IndexedSession extends SessionSummary {
 
 export type SessionIndex = Map<string, IndexedSession>;
 
-export function sessionsDir(home: string = homedir()): string {
-	return join(home, ".pi", "agent", "sessions");
+/** Expand a leading ~ the way pi's normalizePath does (~/ and, on Windows, ~\). */
+export function expandTilde(p: string, home: string = homedir()): string {
+	if (p === "~") return home;
+	if (p.startsWith("~/") || (process.platform === "win32" && p.startsWith("~\\"))) return join(home, p.slice(2));
+	return p;
+}
+
+/**
+ * The sessions directory: `<home>/.pi/agent/sessions` when a home is given
+ * explicitly, else `<PI_CODING_AGENT_DIR>/sessions` when that variable is set,
+ * else `~/.pi/agent/sessions`. Mirrors pi's `getAgentDir()` + "sessions".
+ */
+export function sessionsDir(home?: string): string {
+	if (home !== undefined && home.trim() !== "") return join(home, ".pi", "agent", "sessions");
+	const agentDir = process.env.PI_CODING_AGENT_DIR;
+	if (agentDir !== undefined && agentDir.trim() !== "") return join(expandTilde(agentDir), "sessions");
+	return join(homedir(), ".pi", "agent", "sessions");
 }
 
 export function indexPath(home: string = homedir()): string {

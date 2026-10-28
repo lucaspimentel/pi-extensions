@@ -6,13 +6,14 @@
 //
 // Run: node tests/session-search.test.mts
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, utimesSync, unlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { Value } from "typebox/value";
 
 const { parseSession, TEXT_CAP, isBoilerplate, isSubagentName } = await import("../extensions/session-search/parse.ts");
 const { parseQuery, searchSessions, formatHits, formatHit } = await import("../extensions/session-search/search.ts");
-const { refreshIndex, loadIndex, saveIndex, listSessionFiles } = await import("../extensions/session-search/store.ts");
+const { refreshIndex, loadIndex, saveIndex, listSessionFiles, sessionsDir } = await import("../extensions/session-search/store.ts");
 
 let passed = 0;
 function ok(name: string, fn: () => void) {
@@ -332,7 +333,7 @@ try {
 // ── context extraction ───────────────────────────────────────────────────
 console.log("context.ts");
 
-const { extractWindowContext, WINDOW_MESSAGES, TOTAL_CAP, PER_MESSAGE_CAP } = await import("../extensions/session-search/context.ts");
+const { extractWindowContext, selectAnchoredExcerpt, selectTailExcerpt, WINDOW_MESSAGES, TAIL_MESSAGES, TOTAL_CAP, PER_MESSAGE_CAP } = await import("../extensions/session-search/context.ts");
 
 function contextFixture(): string {
 	const lines: string[] = [line({ type: "session", version: 3, id: "s", timestamp: "2026-09-22T10:00:00.000Z", cwd: "/p" })];
@@ -395,5 +396,299 @@ ok("window: missing anchor falls back to nearest timestamp", () => {
 	assert.ok(out.includes("message number 10"));
 	assert.equal(extractWindowContext("", "2026-09-22T10:00:00.000Z"), "");
 });
+
+// ── excerpt selection: metadata + tail (context.ts) ──────────────────────────
+console.log("context.ts: selection");
+
+ok("selection: tail keeps the last TAIL_MESSAGES entries, oldest dropped first", () => {
+	assert.equal(TAIL_MESSAGES, 10);
+	const sel = selectTailExcerpt(contextFixture());
+	assert.deepEqual(sel.anchored, { tail: true });
+	assert.equal(sel.messageCount, 10);
+	assert.equal(sel.truncated, false);
+	assert.ok(sel.body.includes("message number 20"));
+	assert.ok(sel.body.includes("message number 11"));
+	assert.ok(!sel.body.includes("message number 10")); // 21 items: the tail starts at message 11
+});
+
+ok("selection: a missed query is labeled, an empty session is an empty success", () => {
+	const missed = selectTailExcerpt(contextFixture(), { missed: true });
+	assert.deepEqual(missed.anchored, { queryMissed: true });
+	assert.equal(missed.messageCount, 10);
+	assert.deepEqual(selectTailExcerpt(""), { body: "", messageCount: 0, truncated: false, anchored: { tail: true } });
+	const headerOnly = selectTailExcerpt(contextFixture().split("\n")[0]);
+	assert.equal(headerOnly.messageCount, 0);
+	assert.equal(headerOnly.body, "");
+});
+
+ok("selection: the tail trims the oldest entries to fit the caps", () => {
+	const big = "z".repeat(5000);
+	const lines = [line({ type: "session", version: 3, id: "s", timestamp: "2026-09-22T10:00:00.000Z", cwd: "/p" })];
+	for (let i = 1; i <= 12; i++) lines.push(msg("user", `marker-${i} ${big}`, `2026-09-22T10:${String(i).padStart(2, "0")}:00.000Z`, `m${i}`));
+	const sel = selectTailExcerpt(lines.join("\n"));
+	assert.equal(sel.truncated, true);
+	assert.ok(sel.messageCount < 12);
+	assert.ok(sel.body.includes("marker-12"));
+	assert.ok(!sel.body.includes("marker-1 "));
+	assert.ok(Buffer.byteLength(sel.body, "utf8") <= TOTAL_CAP);
+});
+
+ok("selection: anchored metadata is reported and forced anchors survive the budget", () => {
+	const big = "y".repeat(5000);
+	const lines = [line({ type: "session", version: 3, id: "s", timestamp: "2026-09-22T10:00:00.000Z", cwd: "/p" })];
+	for (let i = 1; i <= 10; i++) lines.push(msg("user", `marker-${i} ${big}`, `2026-09-22T10:${String(i).padStart(2, "0")}:00.000Z`, `b${i}`));
+	const anchor = "2026-09-22T10:05:00.000Z";
+	const far = "2026-09-22T10:09:00.000Z";
+	const sel = selectAnchoredExcerpt(lines.join("\n"), anchor, [anchor, far]);
+	assert.deepEqual(sel.anchored, { ts: anchor });
+	assert.equal(sel.truncated, true);
+	assert.ok(sel.body.includes("marker-5"), "window center kept");
+	assert.ok(sel.body.includes("marker-9"), "far anchor kept");
+	assert.ok(!sel.body.includes("marker-1 "));
+	assert.equal((sel.body.match(/marker-\d+ /g) ?? []).length, sel.messageCount);
+	assert.ok(Buffer.byteLength(sel.body, "utf8") <= TOTAL_CAP);
+});
+
+ok("selection: the byte cap holds for multi-byte text", () => {
+	const wide = "é".repeat(4000); // 2 bytes per character
+	const lines = [line({ type: "session", version: 3, id: "s", timestamp: "2026-09-22T10:00:00.000Z", cwd: "/p" })];
+	for (let i = 1; i <= 10; i++) lines.push(msg("user", `wide-${i} ${wide}`, `2026-09-22T10:${String(i).padStart(2, "0")}:00.000Z`, `w${i}`));
+	const sel = selectTailExcerpt(lines.join("\n"));
+	assert.equal(sel.truncated, true);
+	assert.ok(Buffer.byteLength(sel.body, "utf8") <= TOTAL_CAP, `body was ${Buffer.byteLength(sel.body, "utf8")} bytes`);
+});
+
+// ── sessions directory resolution (store.ts) ─────────────────────────────────
+console.log("store.ts: sessionsDir");
+
+ok("sessionsDir: explicit home wins, then PI_CODING_AGENT_DIR, then ~/.pi/agent", () => {
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	try {
+		delete process.env.PI_CODING_AGENT_DIR;
+		assert.equal(sessionsDir("/tmp/home"), join("/tmp/home", ".pi", "agent", "sessions"));
+		assert.equal(sessionsDir(), join(homedir(), ".pi", "agent", "sessions"));
+		process.env.PI_CODING_AGENT_DIR = "/tmp/agent-dir";
+		assert.equal(sessionsDir(), join("/tmp/agent-dir", "sessions"));
+		assert.equal(sessionsDir("/tmp/home"), join("/tmp/home", ".pi", "agent", "sessions"), "explicit home wins");
+		process.env.PI_CODING_AGENT_DIR = "~/custom-agent";
+		assert.equal(sessionsDir(), join(homedir(), "custom-agent", "sessions"));
+		process.env.PI_CODING_AGENT_DIR = "";
+		assert.equal(sessionsDir(), join(homedir(), ".pi", "agent", "sessions"), "empty override falls back");
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previous;
+	}
+});
+
+// ── excerpt orchestration (excerpt.ts) ──────────────────────────────────────
+console.log("excerpt.ts");
+
+const { buildExcerpt, excerptText, excerptToolResult } = await import("../extensions/session-search/excerpt.ts");
+const { excerptOutputSchema } = await import("../extensions/session-search/schema.ts");
+
+/** Every envelope, success or failure, must satisfy the declared output schema. */
+function assertEnvelope(env: any, label: string = "") {
+	assert.equal(Value.Check(excerptOutputSchema, env), true, `${label}: ${JSON.stringify(env).slice(0, 200)}`);
+	if (!env.ok) assert.equal(env.error !== undefined, true, `${label}: failures carry an error`);
+}
+
+/** A realistic session: a ~100KB system prompt and an ~830KB toolResult line. */
+function excerptFixture(): string {
+	const systemPrompt = "S".repeat(100 * 1024);
+	const toolOutput = "T".repeat(830 * 1024);
+	const lines = [
+		line({ type: "session", version: 3, id: "sess-ex", timestamp: "2026-10-28T00:00:00.000Z", cwd: "/proj/thing" }),
+		line({ type: "model_change", id: "mc", timestamp: "2026-10-28T00:00:00.001Z", provider: "p", modelId: "m" }),
+		msg("system", systemPrompt, "2026-10-28T00:00:01.000Z", "sys"),
+	];
+	for (let i = 1; i <= 12; i++) {
+		const ts = `2026-10-28T00:${String(i).padStart(2, "0")}:00.000Z`;
+		lines.push(msg(i % 2 === 1 ? "user" : "assistant", `conversation turn ${i} about the intake sampler`, ts, `c${i}`));
+		if (i === 4) lines.push(line({ type: "message", id: "tr4", timestamp: ts, message: { role: "toolResult", content: [{ type: "text", text: toolOutput }] } }));
+	}
+	lines.push(line({ type: "session_info", id: "si", timestamp: "2026-10-28T00:13:00.000Z", name: "excerpt fixture session" }));
+	return lines.join("\n");
+}
+
+const exTmp = mkdtempSync(join(tmpdir(), "session-excerpt-test-"));
+try {
+	const root = join(exTmp, "sessions");
+	const proj = join(root, "--proj--");
+	mkdirSync(proj, { recursive: true });
+	const content = excerptFixture();
+	const sessionFile = join(proj, "2026-10-28T00-00-00-000Z_ex.jsonl");
+	writeFileSync(sessionFile, content);
+
+	ok("excerpt: no query returns the tail, without the system prompt or tool output", () => {
+		const env = buildExcerpt({ path: sessionFile, sessionsRoot: root });
+		assertEnvelope(env, "tail");
+		assert.equal(env.ok, true);
+		assert.deepEqual(env.anchored, { tail: true });
+		assert.equal(env.messageCount, 10);
+		assert.equal(env.truncated, false);
+		assert.ok(env.body.includes("conversation turn 12"));
+		assert.ok(env.body.includes("conversation turn 3"));
+		assert.ok(!env.body.includes("conversation turn 2"));
+		assert.ok(!env.body.includes("SSSS"));
+		assert.ok(!env.body.includes("TTTT"));
+		assert.equal(env.sessionId, "sess-ex");
+		assert.equal(env.name, "excerpt fixture session");
+		assert.equal(env.cwd, "/proj/thing");
+		assert.equal(env.selfSession, false);
+		assert.ok(excerptText(env).startsWith("Excerpt from \"excerpt fixture session\" (/proj/thing, 2026-10-28, via session_excerpt)"));
+	});
+
+	ok("excerpt: a query anchors the window on its matches", () => {
+		const env = buildExcerpt({ path: sessionFile, sessionsRoot: root, query: "turn 6" });
+		assertEnvelope(env, "anchored");
+		assert.equal(env.ok, true);
+		assert.deepEqual(env.anchored, { ts: "2026-10-28T00:06:00.000Z" });
+		assert.equal(env.messageCount, 11); // the symmetric +/- 5 window
+		assert.ok(env.body.includes("conversation turn 6"));
+		assert.ok(env.body.includes("conversation turn 1"));
+		assert.ok(env.body.includes("conversation turn 11"));
+		assert.ok(!env.body.includes("conversation turn 12"));
+	});
+
+	ok("excerpt: a query that matches nothing falls back to the labeled tail", () => {
+		const env = buildExcerpt({ path: sessionFile, sessionsRoot: root, query: "zzz-not-present" });
+		assert.equal(env.ok, true);
+		assert.deepEqual(env.anchored, { queryMissed: true });
+		assert.equal(env.messageCount, 10);
+		assert.ok(excerptText(env).includes("the query matched nothing in this session"));
+	});
+
+	ok("excerpt: the active session's own file is allowed and flagged", () => {
+		const env = buildExcerpt({ path: sessionFile, sessionsRoot: root, activeSessionPath: sessionFile });
+		assert.equal(env.selfSession, true);
+		assert.ok(excerptText(env).includes(", this session,"));
+		const other = buildExcerpt({ path: sessionFile, sessionsRoot: root, activeSessionPath: join(proj, "other.jsonl") });
+		assert.equal(other.selfSession, false);
+	});
+
+	ok("excerpt: paths outside the sessions tree are rejected", () => {
+		const siblingDir = join(exTmp, "sessions-other");
+		mkdirSync(siblingDir, { recursive: true });
+		const siblingFile = join(siblingDir, "x.jsonl");
+		writeFileSync(siblingFile, content);
+		const outside = join(exTmp, "outside.jsonl");
+		writeFileSync(outside, content);
+		for (const p of [siblingFile, join(root, "..", "sessions-other", "x.jsonl"), outside]) {
+			const env = buildExcerpt({ path: p, sessionsRoot: root });
+			assertEnvelope(env, p);
+			assert.equal(env.ok, false, p);
+			assert.equal(env.error?.kind, "outside_sessions", p);
+			assert.equal(env.messageCount, 0, p);
+			assert.equal(env.body, "", p);
+		}
+	});
+
+	ok("excerpt: a symlink inside the tree cannot escape it", () => {
+		const outside = join(exTmp, "secret.jsonl");
+		writeFileSync(outside, content);
+		const link = join(proj, "linked.jsonl");
+		symlinkSync(outside, link);
+		const env = buildExcerpt({ path: link, sessionsRoot: root });
+		assert.equal(env.ok, false);
+		assert.equal(env.error?.kind, "outside_sessions");
+	});
+
+	ok("excerpt: a symlinked sessions root is still usable", () => {
+		const realRoot = join(exTmp, "real-sessions");
+		mkdirSync(join(realRoot, "--p--"), { recursive: true });
+		writeFileSync(join(realRoot, "--p--", "s.jsonl"), content);
+		const linkRoot = join(exTmp, "linked-sessions");
+		symlinkSync(realRoot, linkRoot);
+		const env = buildExcerpt({ path: join(linkRoot, "--p--", "s.jsonl"), sessionsRoot: linkRoot });
+		assert.equal(env.ok, true, env.error?.message ?? "");
+		assert.ok(env.body.includes("conversation turn 12"));
+	});
+
+	ok("excerpt: missing, non-regular, and unreadable targets are 'unreadable'", () => {
+		assert.equal(buildExcerpt({ path: join(proj, "nope.jsonl"), sessionsRoot: root }).error?.kind, "unreadable");
+		const dir = join(proj, "dir.jsonl");
+		mkdirSync(dir);
+		assert.equal(buildExcerpt({ path: dir, sessionsRoot: root }).error?.kind, "unreadable");
+		const env = buildExcerpt({
+			path: sessionFile,
+			sessionsRoot: root,
+			readFile: () => {
+				throw new Error("EACCES: permission denied");
+			},
+		});
+		assertEnvelope(env, "read failure");
+		assert.equal(env.error?.kind, "unreadable");
+		assert.ok(env.error?.message.includes("EACCES"));
+	});
+
+	ok("excerpt: non-session files are rejected", () => {
+		const notJsonl = join(proj, "notes.txt");
+		writeFileSync(notJsonl, content);
+		assert.equal(buildExcerpt({ path: notJsonl, sessionsRoot: root }).error?.kind, "not_a_session");
+		const plain = join(proj, "plain.jsonl");
+		writeFileSync(plain, msg("user", "just a message", "2026-10-28T00:00:00.000Z", "m"));
+		assert.equal(buildExcerpt({ path: plain, sessionsRoot: root }).error?.kind, "not_a_session");
+		const empty = join(proj, "empty.jsonl");
+		writeFileSync(empty, "");
+		assert.equal(buildExcerpt({ path: empty, sessionsRoot: root }).error?.kind, "not_a_session");
+		assert.equal(buildExcerpt({ path: "   ", sessionsRoot: root }).error?.kind, "not_a_session");
+	});
+
+	ok("excerpt: cancellation is reported before and after the read", () => {
+		const before = new AbortController();
+		before.abort();
+		const early = buildExcerpt({ path: sessionFile, sessionsRoot: root, signal: before.signal });
+		assert.equal(early.error?.kind, "cancelled");
+		const after = new AbortController();
+		const late = buildExcerpt({
+			path: sessionFile,
+			sessionsRoot: root,
+			signal: after.signal,
+			readFile: (p) => {
+				after.abort();
+				return readFileSync(p, "utf8");
+			},
+		});
+		assert.equal(late.error?.kind, "cancelled");
+	});
+
+	ok("excerpt: a session with no indexable content is an empty success", () => {
+		const meta = join(proj, "meta.jsonl");
+		writeFileSync(meta, line({ type: "session", version: 3, id: "sess-meta", timestamp: "2026-10-28T00:00:00.000Z", cwd: "/x" }));
+		const env = buildExcerpt({ path: meta, sessionsRoot: root });
+		assertEnvelope(env, "metadata only");
+		assert.equal(env.ok, true);
+		assert.equal(env.messageCount, 0);
+		assert.equal(env.body, "");
+		assert.equal(env.sessionId, "sess-meta");
+		assert.ok(excerptText(env).includes("no indexable messages"));
+	});
+
+	ok("excerpt: the tool result mirrors the envelope and marks failures", () => {
+		const okEnv = buildExcerpt({ path: sessionFile, sessionsRoot: root });
+		const result = excerptToolResult(okEnv);
+		assert.equal(result.isError, false);
+		assert.equal(JSON.stringify(result.structuredContent), JSON.stringify(result.details.result));
+		assert.deepEqual(result.structuredContent, okEnv);
+		assert.equal(result.content[0].type, "text");
+		assert.ok(result.content[0].text.startsWith("Excerpt from"));
+		assert.ok(result.content[0].text.includes("conversation turn 12"));
+		const bad = excerptToolResult(buildExcerpt({ path: join(exTmp, "outside.jsonl"), sessionsRoot: root }));
+		assert.equal(bad.isError, true);
+		assert.equal(bad.structuredContent.ok, false);
+		assert.ok(bad.content[0].text.includes("outside_sessions"));
+	});
+
+	ok("excerpt: reading a session writes no files and consults no index", () => {
+		const rootBefore = readdirSync(root).sort();
+		const projBefore = readdirSync(proj).sort();
+		buildExcerpt({ path: sessionFile, sessionsRoot: root, query: "sampler" });
+		buildExcerpt({ path: sessionFile, sessionsRoot: root });
+		assert.deepEqual(readdirSync(root).sort(), rootBefore);
+		assert.deepEqual(readdirSync(proj).sort(), projBefore);
+	});
+} finally {
+	rmSync(exTmp, { recursive: true, force: true });
+}
 
 console.log(`\n${passed} tests passed`);

@@ -71,7 +71,9 @@ export function classificationName(toolName: string, input: Record<string, unkno
 /** Guard's built-in map: pi built-ins, this repo's tools, and common packages. */
 const BUILTIN_CLASSES: Readonly<Record<string, ToolClass>> = Object.freeze({
 	// Local reads (no path argument for session_search and the memory reads:
-	// treated as inside the roots).
+	// treated as inside the roots). session_excerpt does carry a session path;
+	// decideLocalRead exempts paths inside the sessions directory for that one
+	// tool, since that tree is the tool's own data rather than workspace data.
 	read: "local-read",
 	grep: "local-read",
 	find: "local-read",
@@ -86,6 +88,7 @@ const BUILTIN_CLASSES: Readonly<Record<string, ToolClass>> = Object.freeze({
 	// remote-read, not local-read.
 	gh_read: "remote-read",
 	session_search: "local-read",
+	session_excerpt: "local-read",
 	memory_read: "local-read",
 	memory_search: "local-read",
 	memory_status: "local-read",

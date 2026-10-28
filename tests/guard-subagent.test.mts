@@ -1203,6 +1203,7 @@ const RESEARCHER_TOOLS = [
 	"slack_read_channel",
 	"slack_read_thread",
 	"session_search",
+	"session_excerpt",
 	"memory_read",
 	"memory_search",
 	"memory_status",

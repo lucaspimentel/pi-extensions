@@ -46,6 +46,7 @@ import {
 } from "./bashtier.ts";
 import { parseRule, ruleMatches, rulePatternAllowsRedirect, compilePattern } from "./rules.ts";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { normalizeMatchPath, normalizeRootList } from "./paths.ts";
 import {
 	assessBreakdownReliability,
@@ -566,6 +567,36 @@ export function explainHostShellCommand(
 }
 
 /**
+ * The sessions directory the session-search extension reads, resolved the same
+ * way that extension resolves it for the production case (no explicit home
+ * argument): PI_CODING_AGENT_DIR wins when set, else ~/.pi/agent, plus
+ * "/sessions". Purely string-based: environment values, homedir, and path
+ * joins, never a filesystem call. pi resolves the same path as
+ * join(getAgentDir(), "sessions").
+ */
+export function sessionSearchRoot(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
+	const agentDir = env.PI_CODING_AGENT_DIR;
+	const base = agentDir !== undefined && agentDir.trim() !== "" ? expandTilde(agentDir, home) : join(home, ".pi", "agent");
+	return join(base, "sessions");
+}
+
+/** Expand a leading ~ the way pi's normalizePath does (~/ and, on Windows, ~\). */
+function expandTilde(p: string, home: string): string {
+	if (p === "~") return home;
+	if (p.startsWith("~/") || (process.platform === "win32" && p.startsWith("~\\"))) return join(home, p.slice(2));
+	return p;
+}
+
+/**
+ * Containment for session_excerpt: the sessions tree only, never cwd. Reuses
+ * the read-only tier's string containment with that tree as the implicit root,
+ * so Windows case-insensitivity and ~/.. normalization behave the same.
+ */
+function pathInsideSessionsRoot(p: string, env: NodeJS.ProcessEnv = process.env): boolean {
+	return pathInsideAllowedRoots(p, sessionSearchRoot(env), []);
+}
+
+/**
  * Containment for read targets: cwd plus the configured readRoots (~ and
  * $HOME expanded, trailing globs stripped). A missing or empty path means
  * cwd (and is always inside).
@@ -599,6 +630,13 @@ export function decideLocalRead(call: Extract<GuardCall, { kind: "local-read" }>
 	}
 	if (localReadCell(profile) === "allow") {
 		return { action: "allow", reason: `local read: allowed in ${profile}` };
+	}
+	// session_excerpt reads one file from the sessions tree, which is that
+	// tool's own data rather than workspace data: treat it as inside the roots.
+	// Scoped to this tool on purpose: every other local-read tool (including
+	// the `read` tool) keeps ordinary containment.
+	if (call.tool === "session_excerpt" && hasPath && pathInsideSessionsRoot(call.path as string)) {
+		return { action: "allow", reason: "session excerpt inside the sessions directory" };
 	}
 	if (pathInsideReadRoots(call.path, config)) {
 		return { action: "allow", reason: hasPath ? "read inside cwd or a configured read root" : "read without a path argument (cwd)" };

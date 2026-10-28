@@ -1,9 +1,11 @@
 /**
  * session-search/context.ts
  *
- * Windowed context extraction for "Load context into session": given a
- * session file's content and an anchor timestamp (a search hit), return a
- * compact transcript excerpt of the surrounding conversation.
+ * Windowed context extraction: given a session file's content and an anchor
+ * (a search match, or nothing at all for the tail), return a compact
+ * transcript excerpt of the surrounding conversation. Used by the
+ * `session_excerpt` tool and by the /session-search "Load context into
+ * session" action, so both share one selection and one set of caps.
  *
  * Pure function: no fs, no pi. The caller reads the file.
  *
@@ -11,8 +13,13 @@
  *   - +/- WINDOW_MESSAGES user/assistant messages around the anchor
  *   - user + assistant text and summaries only; tool results excluded
  *   - per-message head cap (PER_MESSAGE_CAP) and total cap (TOTAL_CAP)
- *   - all matched (anchor) entries are always included in full-first order;
- *     when over the total cap, entries farthest from the anchor are dropped
+ *   - all matched (anchor) entries, plus the window center, are always
+ *     included; when over the total cap, other entries are dropped from the
+ *     end farthest from the anchor
+ *   - no anchor at all (no query, or a query that matched nothing): the last
+ *     TAIL_MESSAGES entries, trimmed from the oldest side to fit the cap
+ *   - the rendered body never exceeds TOTAL_CAP BYTES (UTF-8), not just
+ *     characters: a final byte-level trim guards multi-byte text
  */
 
 import { isBoilerplate } from "./parse.ts";
@@ -27,15 +34,42 @@ export interface ContextItem {
 export interface ContextOptions {
 	/** Messages to include on each side of the anchor. Default 5. */
 	window?: number;
-	/** Total character cap of the rendered excerpt. Default 16KB. */
+	/** Total cap of the rendered excerpt. Default 16KB. */
 	totalCap?: number;
 	/** Per-message character cap (head). Default 2KB. */
 	perMessageCap?: number;
 }
 
 export const WINDOW_MESSAGES = 5;
+/** Entries in a tail excerpt (no query, or a query that matched nothing). */
+export const TAIL_MESSAGES = 10;
 export const TOTAL_CAP = 16 * 1024;
 export const PER_MESSAGE_CAP = 2 * 1024;
+
+/** Marker appended when the rendered body had to be cut at the byte cap. */
+export const BYTE_TRIM_MARKER = "\n[...excerpt truncated]";
+
+/** How the window was chosen; mirrors the tool result envelope. */
+export type ExcerptAnchor = { ts: string } | { tail: true } | { queryMissed: true };
+
+/** One selected excerpt: the rendered body plus its selection metadata. */
+export interface ExcerptSelection {
+	body: string;
+	/** Entries included in the body (not rendered lines: text can be multiline). */
+	messageCount: number;
+	/** True when a cap dropped entries or clipped message text. */
+	truncated: boolean;
+	anchored: ExcerptAnchor;
+}
+
+export interface TailOptions {
+	totalCap?: number;
+	perMessageCap?: number;
+	/** Entries to keep from the end. Default TAIL_MESSAGES. */
+	tail?: number;
+	/** Set when a supplied query matched nothing in this session. */
+	missed?: boolean;
+}
 
 function capText(text: string, cap: number): string {
 	if (text.length <= cap) return text;
@@ -85,23 +119,36 @@ function timeOf(ts: string): number {
 	return Number.isNaN(t) ? 0 : t;
 }
 
+/** A selected entry plus what the shrink loop must never drop. */
+interface Slot {
+	item: ContextItem;
+	/** An anchor entry or the window center: kept even under cap pressure. */
+	keep: boolean;
+	/** The window center, used to pick the far end to drop from. */
+	center: boolean;
+}
+
+function fitsBudget(items: ContextItem[], perMessageCap: number, totalCap: number): boolean {
+	return items.reduce((n, it) => n + capText(it.text, perMessageCap).length + 16, 0) <= totalCap;
+}
+
 /**
- * Extract the transcript excerpt around anchorTs. `anchorTsList` (e.g. all
- * snippet timestamps of the hit) marks entries that must be included; the
- * first one anchors the window.
+ * Select the +/- window around `anchorTs`, widened to cover every anchor, then
+ * shrunk to the total cap by dropping the outermost non-protected entries
+ * (alternating ends, never an anchor and never the center).
  */
-export function extractWindowContext(sessionContent: string, anchorTs: string, anchorTsList: string[] = [], opts: ContextOptions = {}): string {
-	const window = opts.window ?? WINDOW_MESSAGES;
-	const totalCap = opts.totalCap ?? TOTAL_CAP;
-	const perMessageCap = opts.perMessageCap ?? PER_MESSAGE_CAP;
-
-	const items = collectItems(sessionContent);
-	if (items.length === 0) return "";
-
+function selectWindowItems(
+	items: ContextItem[],
+	anchorTs: string,
+	anchorTsList: string[],
+	window: number,
+	totalCap: number,
+	perMessageCap: number,
+): { slots: Slot[]; dropped: boolean } {
 	const anchors = new Set([anchorTs, ...anchorTsList].filter(Boolean));
 	let anchorIdx = items.findIndex((it) => it.ts === anchorTs);
 	if (anchorIdx === -1) {
-		// Fall back to the nearest item to the anchor time, then to the first anchor match.
+		// Fall back to the nearest item to the anchor time.
 		const target = timeOf(anchorTs);
 		let best = 0;
 		let bestDist = Infinity;
@@ -125,24 +172,135 @@ export function extractWindowContext(sessionContent: string, anchorTs: string, a
 		}
 	}
 
-	// Total-cap shrink: drop items farthest from the anchor (alternating ends),
-	// but never the anchor items themselves.
-	let selected: ContextItem[] = items.slice(lo, hi + 1);
-	const anchorItems = selected.filter((it) => anchors.has(it.ts));
-	const fits = (list: ContextItem[]) => list.reduce((n, it) => n + capText(it.text, perMessageCap).length + 16, 0) <= totalCap;
-	while (selected.length > anchorItems.length && !fits(selected)) {
-		const anchorPos = selected.findIndex((it) => anchors.has(it.ts));
-		const distHead = anchorPos;
-		const distTail = selected.length - 1 - anchorPos;
-		if (distHead >= distTail) selected = selected.slice(1);
-		else selected = selected.slice(0, -1);
+	let slots: Slot[] = [];
+	for (let i = lo; i <= hi; i++) {
+		slots.push({ item: items[i], keep: anchors.has(items[i].ts) || i === anchorIdx, center: i === anchorIdx });
 	}
 
-	const lines: string[] = [];
-	for (const it of selected) {
-		const time = it.ts.slice(11, 19);
-		const label = it.kind === "summary" ? `summary (${it.source ?? "custom"})` : it.kind;
-		lines.push(`[${time}] ${label}: ${capText(it.text, perMessageCap)}`);
+	let dropped = false;
+	while (slots.length > slots.filter((s) => s.keep).length && !fitsBudget(slots.map((s) => s.item), perMessageCap, totalCap)) {
+		const centerPos = Math.max(0, slots.findIndex((s) => s.center));
+		const distHead = centerPos;
+		const distTail = slots.length - 1 - centerPos;
+		const dropHead = distHead >= distTail;
+		let target = -1;
+		if (dropHead) {
+			for (let i = 0; i < slots.length; i++) {
+				if (!slots[i].keep) {
+					target = i;
+					break;
+				}
+			}
+		} else {
+			for (let i = slots.length - 1; i >= 0; i--) {
+				if (!slots[i].keep) {
+					target = i;
+					break;
+				}
+			}
+		}
+		if (target === -1) break; // only protected entries left
+		slots = slots.filter((_, i) => i !== target);
+		dropped = true;
 	}
-	return lines.join("\n");
+
+	return { slots, dropped };
+}
+
+/** Cap the rendered body at `cap` BYTES (UTF-8), leaving room for the marker. */
+function capBytes(body: string, cap: number): { body: string; trimmed: boolean } {
+	if (Buffer.byteLength(body, "utf8") <= cap) return { body, trimmed: false };
+	const markerBytes = Buffer.byteLength(BYTE_TRIM_MARKER, "utf8");
+	const budget = Math.max(0, cap - markerBytes);
+	const lines = body.split("\n");
+	const kept: string[] = [];
+	let used = 0;
+	for (const line of lines) {
+		const size = Buffer.byteLength(line, "utf8") + 1; // + newline
+		if (used + size > budget) break;
+		kept.push(line);
+		used += size;
+	}
+	return { body: kept.length > 0 ? kept.join("\n") + BYTE_TRIM_MARKER : BYTE_TRIM_MARKER.trimStart(), trimmed: true };
+}
+
+/** Render selected entries, applying the per-message and byte caps. */
+function renderSlots(slots: Slot[], perMessageCap: number, totalCap: number): { body: string; clipped: boolean } {
+	const lines: string[] = [];
+	let clipped = false;
+	for (const slot of slots) {
+		const capped = capText(slot.item.text, perMessageCap);
+		if (capped !== slot.item.text) clipped = true;
+		const time = slot.item.ts.slice(11, 19);
+		const label = slot.item.kind === "summary" ? `summary (${slot.item.source ?? "custom"})` : slot.item.kind;
+		lines.push(`[${time}] ${label}: ${capped}`);
+	}
+	const capped = capBytes(lines.join("\n"), totalCap);
+	return { body: capped.body, clipped: clipped || capped.trimmed };
+}
+
+/**
+ * Extract the transcript excerpt around anchorTs. `anchorTsList` (e.g. all
+ * snippet timestamps of the hit) marks entries that must be included; the
+ * first one anchors the window.
+ */
+export function extractWindowContext(sessionContent: string, anchorTs: string, anchorTsList: string[] = [], opts: ContextOptions = {}): string {
+	const window = opts.window ?? WINDOW_MESSAGES;
+	const totalCap = opts.totalCap ?? TOTAL_CAP;
+	const perMessageCap = opts.perMessageCap ?? PER_MESSAGE_CAP;
+
+	const items = collectItems(sessionContent);
+	if (items.length === 0) return "";
+
+	const { slots } = selectWindowItems(items, anchorTs, anchorTsList, window, totalCap, perMessageCap);
+	return renderSlots(slots, perMessageCap, totalCap).body;
+}
+
+/** Select an anchored excerpt with its metadata (the `session_excerpt` tool). */
+export function selectAnchoredExcerpt(sessionContent: string, anchorTs: string, anchorTsList: string[] = [], opts: ContextOptions = {}): ExcerptSelection {
+	const window = opts.window ?? WINDOW_MESSAGES;
+	const totalCap = opts.totalCap ?? TOTAL_CAP;
+	const perMessageCap = opts.perMessageCap ?? PER_MESSAGE_CAP;
+
+	const items = collectItems(sessionContent);
+	if (items.length === 0) return { body: "", messageCount: 0, truncated: false, anchored: { ts: anchorTs } };
+
+	const { slots, dropped } = selectWindowItems(items, anchorTs, anchorTsList, window, totalCap, perMessageCap);
+	const rendered = renderSlots(slots, perMessageCap, totalCap);
+	return {
+		body: rendered.body,
+		messageCount: slots.length,
+		truncated: dropped || rendered.clipped,
+		anchored: { ts: anchorTs },
+	};
+}
+
+/**
+ * Select the tail excerpt: the last `tail` entries (newest kept), trimmed from
+ * the oldest side to fit the caps. Used when no query was supplied and when a
+ * query matched nothing in this session.
+ */
+export function selectTailExcerpt(sessionContent: string, opts: TailOptions = {}): ExcerptSelection {
+	const totalCap = opts.totalCap ?? TOTAL_CAP;
+	const perMessageCap = opts.perMessageCap ?? PER_MESSAGE_CAP;
+	const tail = Math.max(1, opts.tail ?? TAIL_MESSAGES);
+	const anchored: ExcerptAnchor = opts.missed ? { queryMissed: true } : { tail: true };
+
+	const items = collectItems(sessionContent);
+	if (items.length === 0) return { body: "", messageCount: 0, truncated: false, anchored };
+
+	let slots: Slot[] = items.slice(-tail).map((item) => ({ item, keep: false, center: false }));
+	let dropped = false;
+	while (slots.length > 1 && !fitsBudget(slots.map((s) => s.item), perMessageCap, totalCap)) {
+		slots = slots.slice(1); // drop the oldest end
+		dropped = true;
+	}
+
+	const rendered = renderSlots(slots, perMessageCap, totalCap);
+	return {
+		body: rendered.body,
+		messageCount: slots.length,
+		truncated: dropped || rendered.clipped,
+		anchored,
+	};
 }

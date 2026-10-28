@@ -40,6 +40,7 @@ import {
 	isExfilCapableFetch,
 	maskArgumentVeto,
 	resolveDecision,
+	sessionSearchRoot,
 	type GuardCall,
 	type PolicyState,
 } from "../extensions/guard/policy/decision.ts";
@@ -333,6 +334,47 @@ test("local reads: allowed in cwd and read roots, prompt outside (except yolo/un
 	}
 	for (const profile of ["yolo", "unrestricted"] as Profile[]) {
 		assert.equal(decideRead(profile, "/etc/hosts").action, "allow", profile);
+	}
+});
+
+test("session_excerpt is exempt only for paths inside the sessions directory", () => {
+	const sessionsRoot = sessionSearchRoot(process.env, os.homedir());
+	const sessionPath = path.join(sessionsRoot, "--proj--", "2026-01-01T00-00-00-000Z_a.jsonl");
+	const excerpt = (p: string) => decide(makePolicy({ profile: "default" }), { kind: "local-read", tool: "session_excerpt", path: p });
+
+	// The sessions tree is the tool's own data: allowed even though it sits
+	// outside cwd and every configured read root.
+	assert.equal(excerpt(sessionPath).action, "allow");
+	assert.equal(excerpt(sessionPath).reason, "session excerpt inside the sessions directory");
+	// A sibling directory whose name only starts like the root is not inside it.
+	assert.equal(excerpt(`${sessionsRoot}-other/x.jsonl`).action, "prompt");
+	// Traversal out of the tree is not inside it either.
+	assert.equal(excerpt(path.join(sessionsRoot, "..", "elsewhere.jsonl")).action, "prompt");
+	assert.equal(excerpt(path.join(sessionsRoot, "..", "..", "elsewhere.jsonl")).action, "prompt");
+	// Scoped to this tool on purpose: ordinary local reads of the same path still
+	// prompt (gating of those tools is observe-only today).
+	assert.equal(decideRead("default", sessionPath).action, "prompt");
+	assert.equal(decide(makePolicy({ profile: "default" }), { kind: "local-read", tool: "read", path: sessionPath }).action, "prompt");
+	// The exemption is containment, not a profile override: secret masks still win.
+	assert.equal(excerpt(path.join(sessionsRoot, ".env")).action, "deny");
+});
+
+test("guard's sessions root matches the extension's own resolution", async () => {
+	const { sessionsDir } = await import("../extensions/session-search/store.ts");
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	try {
+		delete process.env.PI_CODING_AGENT_DIR;
+		assert.equal(sessionSearchRoot(process.env, os.homedir()), sessionsDir());
+		process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "guard-sessions-agreement");
+		assert.equal(sessionSearchRoot(process.env, os.homedir()), sessionsDir());
+		process.env.PI_CODING_AGENT_DIR = "~/custom-agent-dir";
+		assert.equal(sessionSearchRoot(process.env, os.homedir()), sessionsDir());
+		assert.equal(sessionSearchRoot(process.env, os.homedir()), path.join(os.homedir(), "custom-agent-dir", "sessions"));
+		process.env.PI_CODING_AGENT_DIR = "";
+		assert.equal(sessionSearchRoot(process.env, os.homedir()), sessionsDir());
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previous;
 	}
 });
 
@@ -633,6 +675,19 @@ test("pi's built-in powershell tool maps to the pwsh shell tier", () => {
 	// host_bash keeps its own discriminator.
 	const bashMapped = mapToolCallToGuardCall("host_bash", { command: "ls" }, makeConfig());
 	assert.equal(bashMapped.call.kind === "host-shell" && bashMapped.call.shell, "host-bash");
+});
+
+test("session_excerpt maps to local-read with its path retained", () => {
+	const sessionPath = path.join(sessionSearchRoot(process.env, os.homedir()), "--proj--", "s.jsonl");
+	const mapped = mapToolCallToGuardCall("session_excerpt", { path: sessionPath, query: "x" }, makeConfig());
+	assert.equal(mapped.cls, "local-read");
+	if (mapped.call.kind !== "local-read") throw new Error("expected a local-read call");
+	assert.equal(mapped.call.tool, "session_excerpt");
+	assert.equal(mapped.call.path, sessionPath);
+	// End to end through the mapping: the sessions tree is allowed, and the
+	// query parameter does not leak into path handling.
+	assert.equal(decide(makePolicy({ profile: "default" }), mapped.call).action, "allow");
+	assert.equal(mapToolCallToGuardCall("session_excerpt", {}, makeConfig()).cls, "local-read");
 });
 
 test("redirected commands need a redirect-aware allow rule", () => {

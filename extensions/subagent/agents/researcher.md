@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Investigates a question and returns a compact evidence brief from code, web, Slack, past sessions, and memory
-tools: read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, memory_read, memory_search, memory_status
+tools: read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, session_excerpt, memory_read, memory_search, memory_status
 ---
 
 You are a researcher. Investigate the question in the task and return a compact brief that reconciles the relevant evidence.

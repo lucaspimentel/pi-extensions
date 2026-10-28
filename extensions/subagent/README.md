@@ -62,8 +62,8 @@ streaming, usage display, security model).
 | `scout`   | read, ffgrep, fffind, ls, git_read, gh_read                                                                                                                 | inherit  |
 | `planner` | read, ffgrep, fffind, ls, git_read, gh_read                                                                                                                 | inherit  |
 | `worker`  | (all default)                                                                                                                                     | inherit  |
-| `reviewer` | read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, memory_read, memory_search, memory_status | inherit |
-| `researcher` | read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, memory_read, memory_search, memory_status | inherit |
+| `reviewer` | read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, session_excerpt, memory_read, memory_search, memory_status | inherit |
+| `researcher` | read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, session_excerpt, memory_read, memory_search, memory_status | inherit |
 
 Notes:
 
@@ -79,8 +79,8 @@ Notes:
   builds, tests, or repo mutation. Their evidence tools (`git_read`,
   `gh_read`, `web_fetch`, `web_search`, `slack_search`,
   `slack_read_channel`, `slack_read_thread`, `session_search`,
-  `memory_read`, `memory_search`, `memory_status`) are declared names, not a
-  runtime guarantee: `resolveAgentTools` silently drops a tool the
+  `session_excerpt`, `memory_read`, `memory_search`, `memory_status`) are
+  declared names, not a runtime guarantee: `resolveAgentTools` silently drops a tool the
   dispatching session did not register, and only `ffgrep`/`fffind` have
   substitutes (the built-in `grep`/`find`). Every other dropped name has no
   fallback, so web, Slack, session, memory, git, and GitHub sources can be

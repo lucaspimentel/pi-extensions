@@ -18,7 +18,7 @@
  */
 
 import { resolve } from "node:path";
-import type { IndexedSession } from "./store.ts";
+import type { SessionSummary } from "./parse.ts";
 
 export type OriginFilter = "user" | "assistant" | "summary";
 
@@ -152,7 +152,7 @@ function clipSnippet(text: string, pos: number): string {
 	return prefix + text.slice(start, end).replace(/\s+/g, " ").trim() + suffix;
 }
 
-function passesFilters(session: IndexedSession, filters: SearchFilters): boolean {
+function passesFilters(session: SessionSummary, filters: SearchFilters): boolean {
 	if (filters.excludePaths && filters.excludePaths.length > 0) {
 		const p = resolve(session.path);
 		if (filters.excludePaths.some((x) => resolve(x) === p)) return false;
@@ -171,8 +171,10 @@ function passesFilters(session: IndexedSession, filters: SearchFilters): boolean
 	return true;
 }
 
-/** Search the index. Returns hits sorted by score desc, limited to `limit`. */
-export function searchSessions(index: Iterable<IndexedSession>, rawQuery: string, filters: SearchFilters = {}): SearchHit[] {
+/** Search sessions. `index` is any iterable of parsed summaries: the global
+ *  index for a search, or a single session when re-matching one file to anchor
+ *  an excerpt. Returns hits sorted by score desc, limited to `limit`. */
+export function searchSessions(index: Iterable<SessionSummary>, rawQuery: string, filters: SearchFilters = {}): SearchHit[] {
 	const query = parseQuery(rawQuery);
 	if (!query) return [];
 	const limit = Math.max(1, filters.limit ?? 10);
