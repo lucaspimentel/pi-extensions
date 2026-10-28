@@ -156,7 +156,14 @@ export function formatList(state: StashState, now: Date = new Date()): string {
 export default function stash(pi: ExtensionAPI) {
 	function updateStatus(ctx: ExtensionContext) {
 		const count = loadStash().entries.length;
-		ctx.ui.setStatus("stash", count > 0 ? ctx.ui.theme.fg("dim", `📥 ${count}`) : undefined);
+		try {
+			ctx.ui.setStatus("stash", count > 0 ? ctx.ui.theme.fg("dim", `📥 ${count}`) : undefined);
+		} catch {
+			// Best-effort only, and only two things realistically throw here:
+			// ctx.ui throws once its session was replaced (reload/switch), and
+			// theme.fg throws "Unknown theme color: dim" for a custom theme that
+			// omits that token. Neither should break the stash operation itself.
+		}
 	}
 
 	function doStash(ctx: ExtensionContext): void {
@@ -320,6 +327,7 @@ export default function stash(pi: ExtensionAPI) {
 			}));
 		},
 		handler: async (args, ctx) => {
+			updateStatus(ctx); // resync from disk: the store is shared across sessions
 			const [sub, ...rest] = args.trim().split(/\s+/);
 			const value = rest.join(" ").trim();
 			switch (sub) {
@@ -347,12 +355,18 @@ export default function stash(pi: ExtensionAPI) {
 
 	pi.registerShortcut("ctrl+alt+s", {
 		description: "Stash editor draft",
-		handler: (ctx) => doStash(ctx),
+		handler: (ctx) => {
+			updateStatus(ctx); // resync from disk before deciding anything
+			doStash(ctx);
+		},
 	});
 
 	pi.registerShortcut("ctrl+alt+r", {
 		description: "Restore last stashed draft",
-		handler: (ctx) => doPop(ctx, undefined),
+		handler: (ctx) => {
+			updateStatus(ctx); // resync from disk before deciding anything
+			doPop(ctx, undefined);
+		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {

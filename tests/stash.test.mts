@@ -42,6 +42,7 @@ stash(pi);
 // ── Mock ctx ─────────────────────────────────────────────────────────────────
 let editorText = "";
 const notifications: Array<{ message: string; type?: string }> = [];
+const statuses: Array<{ key: string; text: string | undefined }> = [];
 let confirmResult = true;
 
 function makeCtx(overrides: Partial<any> = {}) {
@@ -58,7 +59,9 @@ function makeCtx(overrides: Partial<any> = {}) {
 				notifications.push({ message, type });
 			},
 			confirm: async (_title: string, _message: string) => confirmResult,
-			setStatus: (_key: string, _text: string | undefined) => {},
+			setStatus: (key: string, text: string | undefined) => {
+				statuses.push({ key, text });
+			},
 		},
 		...overrides,
 	};
@@ -68,15 +71,24 @@ function lastNotification(): string {
 	return notifications[notifications.length - 1]?.message ?? "";
 }
 
+function lastStashStatus(): { key: string; text: string | undefined } | undefined {
+	for (let i = statuses.length - 1; i >= 0; i--) {
+		if (statuses[i].key === "stash") return statuses[i];
+	}
+	return undefined;
+}
+
 async function stashDraft(text: string) {
 	editorText = text;
 	notifications.length = 0;
+	statuses.length = 0;
 	await shortcuts["ctrl+alt+s"].handler(makeCtx());
 }
 
 // Invoke the canonical root command with fresh notifications.
 async function stashCmd(args: string) {
 	notifications.length = 0;
+	statuses.length = 0;
 	await commands.stash.handler(args, makeCtx());
 }
 
@@ -280,6 +292,48 @@ async function main() {
 	assert.ok(state.entries.length <= 50, `expected <=50 entries, got ${state.entries.length}`);
 	assert.equal(state.entries[state.entries.length - 1].text, "entry 59", "newest entry should survive the cap");
 	assert.equal(state.entries[0].text, "entry 10", "oldest surviving entry should be entry 10 (0..9 evicted)");
+
+	// 16. Cross-session staleness: another session mutates the shared store
+	// directly, bypassing this session's handlers. The next stash interaction
+	// here must resync the widget from disk, clearing the stale "📥 N".
+	stashModule.saveStash({ version: 1, entries: [] });
+	await stashDraft("cross-session entry");
+	assert.equal(lastStashStatus()?.text, "📥 1", "widget should reflect the local stash count");
+
+	// A different session pops the last entry by writing the shared file.
+	stashModule.saveStash({ version: 1, entries: [] });
+
+	editorText = "";
+	await stashCmd("pop");
+	assert.match(lastNotification(), /empty/i);
+	const afterPop = lastStashStatus();
+	assert.ok(afterPop, "pop must (re)write the stash status key");
+	assert.equal(afterPop.text, undefined, "pop must clear the stale widget after resyncing");
+
+	// The stash shortcut must resync even on its early-return path: doStash
+	// bails out on an empty editor before writing any status of its own.
+	await stashDraft("stash-shortcut entry");
+	assert.equal(lastStashStatus()?.text, "📥 1", "widget should reflect the local stash count");
+	stashModule.saveStash({ version: 1, entries: [] });
+	editorText = "";
+	await shortcuts["ctrl+alt+s"].handler(makeCtx());
+	assert.match(lastNotification(), /empty/i);
+	const afterStashShortcut = lastStashStatus();
+	assert.ok(afterStashShortcut, "ctrl+alt+s must (re)write the stash status key");
+	assert.equal(
+		afterStashShortcut.text,
+		undefined,
+		"ctrl+alt+s must clear the stale widget on the empty-editor path",
+	);
+
+	// The restore shortcut must resync too.
+	await stashDraft("restore-shortcut entry");
+	assert.equal(lastStashStatus()?.text, "📥 1", "widget should reflect the local stash count");
+	stashModule.saveStash({ version: 1, entries: [] });
+	await shortcuts["ctrl+alt+r"].handler(makeCtx());
+	const afterRestoreShortcut = lastStashStatus();
+	assert.ok(afterRestoreShortcut, "ctrl+alt+r must (re)write the stash status key");
+	assert.equal(afterRestoreShortcut.text, undefined, "ctrl+alt+r must clear the stale widget after resyncing");
 
 	console.log("All stash tests passed.");
 }
