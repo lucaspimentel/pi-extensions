@@ -8,7 +8,7 @@ sandbox.
 > `sys.addaudithook` to detect out-of-sandbox reads. The node tool has no
 > equivalent (node's `--permission` flag is still experimental), so its
 > out-of-sandbox reads fail closed with the kernel's own error instead of
-> prompting. See `../../node/README.md`.
+> prompting. See [`../../guard/README.md`](../../guard/README.md).
 
 ## Problem
 

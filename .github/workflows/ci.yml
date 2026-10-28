@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-      - name: Install libseccomp headers (node-unit launcher compile)
+      - name: Install libseccomp headers (guard sandbox launcher compile)
         run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
       - run: npm ci
       - run: npx tsc --noEmit

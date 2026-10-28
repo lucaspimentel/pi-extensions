@@ -582,8 +582,9 @@ read-only bash tier that is already auto-allowed. This is a built-in tier, not a
   not the submitted code.
 - The node tool's sandbox differs from python's in isolation details that do not change its
   permission treatment (no out-of-sandbox read prompts: reads fail closed; socket blocking
-  matches python via a compiled seccomp launcher).
-  See [`extensions/node/README.md`](../node/README.md).
+  matches python via a compiled seccomp launcher). Both sandboxes are guard's ported
+  implementations now; see the tool table and the sandbox sections in
+  [`extensions/guard/README.md`](../guard/README.md).
 
 #### `toolDefaults` map
 
@@ -771,13 +772,14 @@ Every mode change (and the `session_start` reset to `manual`) is broadcast on pi
 - The mode signal is a courtesy UX, not a security boundary: the mount flags themselves are kernel-enforced, and a writable mount only exists because you explicitly switched into a mode that grants unprompted edits.
 
 Node-specific runtime deltas that do not change this treatment (no read prompts, rlimits via
-prlimit, seccomp installed by a compiled launcher) are documented in [`extensions/node/README.md`](../node/README.md).
+prlimit, seccomp installed by a compiled launcher) are documented in
+[`extensions/guard/README.md`](../guard/README.md).
 
 ### Out-of-sandbox read prompts
 
 When sandboxed python code reads a path outside every mounted root, the python extension emits `tool-permissions:prompt` `{ id, path }` and awaits the correlated `tool-permissions:promptResult` `{ id, outcome }`. This extension renders the dialog with the same option grammar as the ask dialogs: **Allow once** (read just this path, nothing persisted), allow reads from the covering directory for **this session**, the **project** config, or the **user** config, or **Deny once**. Each grant option opens the shared "Edit read root:" editor prefilled with the covering directory (cancelling it degrades to a plain allow-once). No mode-switch or save-rule options are offered: saved rules gate `tool_call` decisions, which python's internal reads bypass, and the session mode does not affect this prompt. On allow-with-grant, the grant is persisted through the normal `readAllowPaths` machinery and the mode event is re-broadcast **before** the verdict, so the python sandbox is remounted before its code replays. Non-interactive contexts (no UI) deny immediately. See `docs/read-prompts-design.md` for the full design.
 
-This flow is python-specific: the node tool has no audit-hook equivalent (node's `--permission` flag is still experimental), so out-of-mount reads there fail closed with the kernel's own error instead of prompting. See [`extensions/node/README.md`](../node/README.md).
+This flow is python-specific: the node tool has no audit-hook equivalent (node's `--permission` flag is still experimental), so out-of-mount reads there fail closed with the kernel's own error instead of prompting. See [`extensions/guard/README.md`](../guard/README.md).
 
 ## Slash command
 
