@@ -62,12 +62,13 @@ interface FakeOverlay {
 }
 
 /** A fake TUI whose terminal rows can be mutated mid-dialog (resize tests). */
-function makeFakeTui(rows?: { value: number }, opts: { failShowOverlay?: Error } = {}) {
+function makeFakeTui(rows?: { value: number }, opts: { failShowOverlay?: Error; mode?: string } = {}) {
 	const terminal = { columns: 80, get rows() { return rows?.value ?? 24; } };
 	const overlays: FakeOverlay[] = [];
 	let hideOverlayCalls = 0;
 	const tui: any = {
 		terminal,
+		mode: opts.mode ?? "regular",
 		requestRender() {},
 		showOverlay(component: FakeOverlay["component"], options: Record<string, unknown>) {
 			if (opts.failShowOverlay) throw opts.failShowOverlay;
@@ -583,6 +584,25 @@ test("an 18-column viewport keeps every control and the hide hint within 24 rows
 	assert.ok(lines.some((line) => line.includes("Deny")), "Deny is visible");
 	assert.ok(lines.some((line) => line.includes(HIDE_HINT)), "the hide hint survived the narrow viewport");
 	overlays[0].component.handleInput(ESC);
+	await promise;
+});
+
+test("a fullscreen host keeps PgUp/PgDn on the overlay path", async () => {
+	// The fullscreen viewport defers its page shortcuts to a focused overlay, so
+	// the overlay presentation never needs the inline path's ctrl+u/ctrl+d fallback.
+	const { tui, overlays } = makeFakeTui(undefined, { mode: "fullscreen" });
+	const host = makeFakeUI(tui);
+	const controller = new AbortController();
+	const { promise } = open(host.ui, longTitle(40), ["Allow once", "Deny"], controller.signal);
+	const overlay = overlays[0].component;
+	const first = overlay.render(80).map(stripTerminalSequences);
+	assert.ok(first.some((line) => line.includes("PgUp/PgDn to scroll")), "the conventional keys are advertised");
+	assert.ok(!first.some((line) => line.includes("ctrl+u/ctrl+d")), "no fallback keys on the overlay path");
+	overlay.handleInput(PAGE_DOWN);
+	assert.ok(overlay.render(80).map(stripTerminalSequences).some((line) => line.includes("above")), "PgDn scrolls the overflow");
+	overlay.handleInput(PAGE_UP);
+	assert.ok(overlay.render(80).map(stripTerminalSequences).some((line) => line.includes("detail line 1")), "PgUp returns to the top");
+	overlay.handleInput(ESC);
 	await promise;
 });
 

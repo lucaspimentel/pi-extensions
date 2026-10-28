@@ -32,12 +32,14 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import {
+	guardPageKeys,
 	paddedLine,
 	runDialogStage,
 	supportsOwnedStages,
 	textContentWidth,
 	type GuardAskUI,
 	type GuardAskTheme,
+	type GuardPageKeys,
 	type GuardStageContext,
 } from "./ask-overlay.ts";
 
@@ -253,6 +255,8 @@ function buildPickerStage(
 		}
 	};
 	const selectListTheme = editorThemeFrom(theme).selectList;
+	// Resolved live from the presentation and the current mode (see ask-overlay.ts).
+	const pageKeys = (): GuardPageKeys => guardPageKeys(ctx.presentation, tui.mode);
 	const terminalWidth = (): number => (tui as unknown as { terminal?: { columns?: number } }).terminal?.columns ?? 80;
 	const titleLines = (width: number): string[] => wrapTextWithAnsi(options.title.replace(/\t/g, "   "), textContentWidth(width));
 	const hintLinesOf = (width: number): string[] =>
@@ -303,7 +307,7 @@ function buildPickerStage(
 			return { body: [truncateToWidth(step.label, textContentWidth(width))], indicator: null, pageLines: 1 };
 		}
 		detailOffset = Math.min(Math.max(0, detailOffset), wrapped.length - 1);
-		return { body: [wrapped[detailOffset]], indicator: wrapped.length > 1 ? theme.fg("dim", `\u2026 ${detailOffset}/${wrapped.length - 1} (PgUp/PgDn)`) : null, pageLines: 1 };
+		return { body: [wrapped[detailOffset]], indicator: wrapped.length > 1 ? theme.fg("dim", `\u2026 ${detailOffset}/${wrapped.length - 1} (${pageKeys().label})`) : null, pageLines: 1 };
 	};
 
 	return {
@@ -360,11 +364,12 @@ function buildPickerStage(
 				else checked.add(step.occurrenceId);
 				return;
 			}
-			if (matchesKey(data, "pageUp")) {
+			const keys = pageKeys();
+			if (matchesKey(data, keys.up)) {
 				detailOffset = Math.max(0, detailOffset - detailPageLines);
 				return;
 			}
-			if (matchesKey(data, "pageDown")) {
+			if (matchesKey(data, keys.down)) {
 				detailOffset = Math.min(detailOffset + detailPageLines, Math.max(0, (wrapTextWithAnsi(options.steps[highlightIndex]?.label ?? "", textContentWidth(width)).length) - 1));
 				return;
 			}

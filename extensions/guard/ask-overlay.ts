@@ -52,9 +52,13 @@
  *
  * The selector's details body (everything past the first title line) is
  * bounded to the terminal height so the choice list, key hints, and the hide
- * hint always stay visible; overflow stays reachable with PgUp/PgDn at any
- * title budget, including a one-line window. The bounded title is rendered
- * by this adapter with public API only: the selector is constructed once
+ * hint always stay visible; overflow stays reachable with the presentation's
+ * page keys at any title budget, including a one-line window. The keys are
+ * not always PgUp/PgDn: a fullscreen host consumes plain pageUp/pageDown for
+ * transcript scrolling before any focused component that is not an overlay,
+ * so an inline stage there advertises ctrl+u/ctrl+d instead (see
+ * guardPageKeys). The bounded title is rendered by this adapter with public
+ * API only: the selector is constructed once
  * with the full title and never mutated; each render measures the real
  * rendered controls at the current width (wrapped option labels and key
  * hints included) through a one-line-title twin instance, verifies that
@@ -99,6 +103,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 	type Component,
+	type KeyId,
 	type OverlayHandle,
 	type TUI,
 } from "@earendil-works/pi-tui";
@@ -184,10 +189,40 @@ export function supportsOwnedStages(ui: GuardAskUI): boolean {
 	return typeof ui.setWidget === "function" && typeof ui.onTerminalInput === "function";
 }
 
+/** How a stage is mounted. The two paths do not receive the same keys: only
+ * the overlay path is deferred to by the fullscreen viewport's page shortcuts. */
+export type GuardStagePresentation = "inline" | "overlay";
+
+/** Page keys for one stage, plus the label to advertise in its hints. */
+export interface GuardPageKeys {
+	up: KeyId;
+	down: KeyId;
+	label: string;
+}
+
+/**
+ * Resolve the page keys a stage can actually receive. A fullscreen host
+ * (TuiAltScreen) registers its transcript-scroll shortcuts on raw terminal
+ * input before any extension or component listener and defers only to a
+ * focused overlay, so plain pageUp/pageDown never reach a component mounted
+ * inline in Pi's editor slot; that presentation pages with ctrl+u/ctrl+d
+ * (control bytes no terminal intercepts) instead. Overlays and regular-mode
+ * inline stages keep the conventional PgUp/PgDn, and an unknown mode is
+ * treated as regular so a host that omits the metric keeps today's keys.
+ */
+export function guardPageKeys(presentation: GuardStagePresentation, mode: string | undefined): GuardPageKeys {
+	if (presentation === "inline" && mode === "fullscreen") {
+		return { up: "ctrl+u", down: "ctrl+d", label: "ctrl+u/ctrl+d" };
+	}
+	return { up: "pageUp", down: "pageDown", label: "PgUp/PgDn" };
+}
+
 /** Context handed to a stage component factory by runOwnedStage. */
 export interface GuardStageContext<T> {
 	tui: TUI;
 	theme: GuardAskTheme;
+	/** Inline editor-slot mount or guard-owned overlay (see guardPageKeys). */
+	presentation: GuardStagePresentation;
 	/** Rows the stage may lay out in: the full terminal (overlay) or the
 	 * budgeted editor-slot window (inline). Stages must never read the
 	 * terminal's rows directly. */
@@ -312,6 +347,7 @@ function runInlineStage<T>(
 				const ctx: GuardStageContext<T> = {
 					tui,
 					theme,
+					presentation: "inline",
 					rowsFor,
 					isHidden: () => false,
 					setHidden: () => {},
@@ -522,6 +558,7 @@ export function runOwnedStage<T>(
 		component = build({
 			tui: borrowedTui,
 			theme: borrowedTheme,
+			presentation: "overlay",
 			rowsFor: () => terminalMetric(borrowedTui, "rows"),
 			isHidden: () => handle?.isHidden() ?? false,
 			setHidden: (hidden: boolean) => handle?.setHidden(hidden),
@@ -576,9 +613,12 @@ function buildSelectorStage(
 	theme: GuardAskTheme,
 	title: string,
 	options: string[],
-	stage: { settle(value: string | undefined): void; rowsFor(): number },
+	stage: { settle(value: string | undefined): void; rowsFor(): number; presentation: GuardStagePresentation },
 ): Component & { dispose(): void; invalidate(): void } {
 	const { matchesKey, ExtensionSelectorComponent } = deps;
+	// Resolved live from the presentation and the current mode: a host that
+	// swaps its renderer must not keep advertising keys the new one swallows.
+	const pageKeys = (): GuardPageKeys => guardPageKeys(stage.presentation, tui.mode);
 
 	// Scrolling state for the details window; clamped against the current
 	// layout budget on every layout computation.
@@ -649,7 +689,7 @@ function buildSelectorStage(
 		pageLines = contentCount;
 		const body = [...wrapped.slice(detailOffset, detailOffset + contentCount)];
 		const indicator = maxTitle >= 2
-			? truncateToWidth(theme.fg("dim", `… ${detailOffset} above, ${wrapped.length - detailOffset - contentCount} below (PgUp/PgDn to scroll)`), textContentWidth(width))
+			? truncateToWidth(theme.fg("dim", `… ${detailOffset} above, ${wrapped.length - detailOffset - contentCount} below (${pageKeys().label} to scroll)`), textContentWidth(width))
 			: null;
 		return { body, indicator };
 	};
@@ -703,11 +743,12 @@ function buildSelectorStage(
 				if (getKeybindings().matches(data, "tui.select.cancel")) selector.handleInput(data);
 				return;
 			}
-			if (matchesKey(data, "pageup")) {
+			const keys = pageKeys();
+			if (matchesKey(data, keys.up)) {
 				detailOffset = Math.max(0, detailOffset - pageLines);
 				return;
 			}
-			if (matchesKey(data, "pagedown")) {
+			if (matchesKey(data, keys.down)) {
 				detailOffset = Math.max(0, detailOffset + pageLines);
 				return;
 			}

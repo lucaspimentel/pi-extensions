@@ -11,15 +11,25 @@ import assert from "node:assert/strict";
 import { ExtensionSelectorComponent, initTheme } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import { createGuardEditorStage, createGuardPickerStage, type GuardPickerStep } from "../extensions/guard/ask-components.ts";
-import { createGuardAskSelect, inlineRowBudget } from "../extensions/guard/ask-overlay.ts";
+import { createGuardAskSelect, guardPageKeys, inlineRowBudget } from "../extensions/guard/ask-overlay.ts";
 
 initTheme("dark", false);
 
 const THEME = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 const CTRL_BRACKET = "\x1d"; // ctrl+] control byte
+const CTRL_D = "\x04";
+const CTRL_U = "\x15";
 const KITTY_RELEASE = "\x1b[93;5:3u";
 const ENTER = "\r";
 const ESC = "\x1b";
+const PAGE_UP = "\x1b[5~";
+const PAGE_DOWN = "\x1b[6~";
+
+const plain = (lines: string[]): string[] => lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
+
+function longTitle(lines: number): string {
+	return ["guard: host_bash", "ask rule matched", ...Array.from({ length: lines }, (_, i) => `detail line ${i + 1}`)].join("\n");
+}
 
 const askSelect = createGuardAskSelect({ matchesKey, isKeyRelease, isKeyRepeat, ExtensionSelectorComponent });
 const editorStage = createGuardEditorStage();
@@ -39,7 +49,7 @@ interface InlineMount {
  * custom promise and the host disposes the component. The overlay leg's
  * setWidget bridge and showOverlay are also provided so yield tests exercise
  * the stacking fallback. */
-function makeInlineHost(rows = 24, opts: { hasOverlay?: boolean } = {}) {
+function makeInlineHost(rows = 24, opts: { hasOverlay?: boolean; mode?: string } = {}) {
 	const terminal = { columns: 80, get rows() { return rows; } };
 	const overlays: Array<{ component: unknown }> = [];
 	const widgetEntries = new Map<string, unknown>();
@@ -47,6 +57,7 @@ function makeInlineHost(rows = 24, opts: { hasOverlay?: boolean } = {}) {
 	let inline: InlineMount | undefined;
 	const tui: any = {
 		terminal,
+		mode: opts.mode ?? "regular",
 		hasOverlay: () => opts.hasOverlay ?? false,
 		requestRender() {},
 		showOverlay(component: unknown) {
@@ -140,6 +151,72 @@ test("inline renders respect the row budget", async () => {
 	await tick();
 	assert.ok(host.inlineComponent()!.render(80).length <= inlineRowBudget(24));
 	host.inlineComponent()!.handleInput(ESC);
+	assert.equal(await promise, undefined);
+});
+
+// ── Page keys (the fullscreen viewport shadows PgUp/PgDn for inline stages) ─
+
+test("guardPageKeys maps presentation and host mode to the receivable keys", () => {
+	assert.deepEqual(guardPageKeys("inline", "fullscreen"), { up: "ctrl+u", down: "ctrl+d", label: "ctrl+u/ctrl+d" }, "the fullscreen viewport consumes PgUp/PgDn before an inline stage");
+	assert.equal(guardPageKeys("inline", "regular").label, "PgUp/PgDn");
+	assert.equal(guardPageKeys("inline", undefined).label, "PgUp/PgDn", "a host that omits the metric keeps the conventional keys");
+	assert.equal(guardPageKeys("overlay", "fullscreen").label, "PgUp/PgDn", "the fullscreen viewport defers to a focused overlay");
+});
+
+test("an inline stage on a fullscreen host pages the overflow with ctrl+u/ctrl+d", async () => {
+	const host = makeInlineHost(24, { mode: "fullscreen" }); // budget = 16
+	const { promise } = openStage(host.ui, (ui, signal) => (askSelect as (ui: unknown, title: string, options: string[], signal: AbortSignal) => Promise<string | undefined>)(ui, `${longTitle(30)}\nexact rule: echo asked`, ["Allow once", "Deny once"], signal));
+	await tick();
+	const component = host.inlineComponent()!;
+	const first = plain(component.render(80));
+	assert.ok(first.some((line) => line.includes("detail line 1")), "the window starts at the top");
+	assert.ok(!first.some((line) => line.includes("exact rule")), "the tail is initially out of view");
+	assert.ok(first.some((line) => line.includes("ctrl+u/ctrl+d")), "the indicator advertises the keys this presentation can receive");
+	assert.ok(!first.some((line) => line.includes("PgUp/PgDn")), "PgUp/PgDn is not advertised where the viewport would swallow it");
+	component.handleInput(PAGE_DOWN);
+	assert.deepEqual(plain(component.render(80)), first, "the stale key the viewport owns never moves the details window");
+	component.handleInput(CTRL_D);
+	const second = plain(component.render(80));
+	assert.ok(!second.some((line) => line.includes("detail line 1")), "ctrl+d scrolls the window past the top");
+	assert.ok(second.some((line) => line.includes("above")), "the indicator reports the scrolled-away lines");
+	for (let i = 0; i < 10; i++) component.handleInput(CTRL_D);
+	assert.ok(plain(component.render(80)).some((line) => line.includes("exact rule")), "the tail is reachable by keyboard");
+	for (let i = 0; i < 10; i++) component.handleInput(CTRL_U);
+	assert.ok(plain(component.render(80)).some((line) => line.includes("detail line 1")), "paging back returns to the top");
+	component.handleInput(ESC);
+	assert.equal(await promise, undefined);
+});
+
+test("an inline stage keeps PgUp/PgDn on a regular host", async () => {
+	const host = makeInlineHost(24, { mode: "regular" }); // budget = 16
+	const { promise } = openStage(host.ui, (ui, signal) => (askSelect as (ui: unknown, title: string, options: string[], signal: AbortSignal) => Promise<string | undefined>)(ui, `${longTitle(30)}\nexact rule: echo asked`, ["Allow once", "Deny once"], signal));
+	await tick();
+	const component = host.inlineComponent()!;
+	assert.ok(plain(component.render(80)).some((line) => line.includes("PgUp/PgDn to scroll")), "the conventional keys are still advertised");
+	component.handleInput(PAGE_DOWN);
+	assert.ok(plain(component.render(80)).some((line) => line.includes("above")), "PgDn scrolls the details window");
+	// A host that omits the mode metric must not lose the conventional keys.
+	delete host.tui.mode;
+	assert.ok(plain(component.render(80)).some((line) => line.includes("PgUp/PgDn to scroll")), "an unknown mode keeps PgUp/PgDn");
+	for (let i = 0; i < 10; i++) component.handleInput(PAGE_DOWN);
+	assert.ok(plain(component.render(80)).some((line) => line.includes("exact rule")), "the tail is reachable with PgDn");
+	component.handleInput(ESC);
+	assert.equal(await promise, undefined);
+});
+
+test("the picker's detail window pages with the presentation's keys", async () => {
+	const longLabel = Array.from({ length: 20 }, (_, i) => `segment ${i + 1}`).join(" ");
+	const steps: GuardPickerStep[] = [{ occurrenceId: 0, label: longLabel, detail: "prompting step" }];
+	const host = makeInlineHost(24, { mode: "fullscreen" });
+	const { promise } = openStage(host.ui, (ui, signal) => (pickerStage as (ui: unknown, signal: AbortSignal, options: { title: string; steps: GuardPickerStep[] }) => Promise<number[] | undefined>)(ui, signal, { title: "guard: select steps", steps }));
+	await tick();
+	const component = host.inlineComponent()!;
+	assert.ok(plain(component.render(80)).some((line) => line.includes("0/") && line.includes("ctrl+u/ctrl+d")), "the picker advertises the keys it can receive");
+	component.handleInput(PAGE_DOWN);
+	assert.ok(plain(component.render(80)).some((line) => line.includes("0/")), "the stale key does not move the detail window");
+	component.handleInput(CTRL_D);
+	assert.ok(plain(component.render(80)).some((line) => line.includes("1/")), "ctrl+d advances the detail window");
+	component.handleInput(ESC);
 	assert.equal(await promise, undefined);
 });
 

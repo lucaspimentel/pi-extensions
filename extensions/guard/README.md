@@ -155,22 +155,26 @@ Registration details:
   public `TUI.showOverlay`, and owns the returned handle (`setHidden` for
   the toggle, `handle.hide()` for removal), so cancelling under a foreign
   overlay leaves the foreign overlay focused and mounted. Long details are
-  bounded to the terminal height with PgUp/PgDn access to the overflow at
-  any title budget (including a one-line window), and a terminal too short
-  to show the decision controls disables approval with a wrapped warning
-  while keeping Esc; approval eligibility is recomputed from the live
-  terminal dimensions on every input, never from a previous paint. The
-  bounded title uses public API only: a twin selector measures the real
-  rendered controls at each width (wrapped option labels and key hints
-  included) and verifies the recomposition of the selector's public render
+  bounded to the terminal height with page-key access to the overflow at
+  any title budget (including a one-line window): PgUp/PgDn on the overlay
+  path and on regular-mode hosts, `ctrl+u`/`ctrl+d` for the inline
+  editor-slot presentation on a fullscreen host, whose viewport consumes
+  plain pageUp/pageDown before any focused component that is not an
+  overlay. A terminal too short to show the decision controls disables
+  approval with a wrapped warning while keeping Esc; approval eligibility
+  is recomputed from the live terminal dimensions on every input, never
+  from a previous paint. The bounded title uses public API only: a twin
+  selector measures the real rendered controls at each width (wrapped
+  option labels and key hints included) and verifies the recomposition of
+  the selector's public render
   output; SDK-private fields are never touched. Every setup failure runs
   one owned-resource cleanup and propagates the genuine error. The host's
   bridge-removal path is verified with a canary removal before the bridge
   is borrowed, which filters hosts that refuse every deletion; the bridge
   key stays in the cleanup boundary so a post-canary deletion failure is
   retried best-effort there; an entry can only remain if both deletion
-  attempts fail. Hosts without
-  the required capabilities fall back to the plain signal-aware selector
+  attempts fail. Hosts without the required capabilities fall back to the
+  plain signal-aware selector
   before anything is mounted; failed or cancelled displays are never
   retried. Ownership is guard-local: foreign
   extensions using the unsafe `ui.custom` path are not fixed by this.
