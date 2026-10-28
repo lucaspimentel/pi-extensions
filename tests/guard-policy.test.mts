@@ -64,8 +64,6 @@ import {
 	createSessionState,
 	footerLabel,
 	mapToolCallToGuardCall,
-	releaseResearchHold,
-	requestResearchHold,
 	setProfile,
 	lockWorkspace,
 } from "../extensions/guard/policy/state.ts";
@@ -1022,25 +1020,6 @@ test("cycle order skips unrestricted; cycling from unrestricted goes to research
 	assert.equal(state.profile, "unrestricted");
 	const r = cycleProfile(state);
 	assert.deepEqual(r, { ok: true, profile: "research" });
-});
-
-test("research hold blocks set and cycle; release restores the pre-hold profile", () => {
-	const state = createSessionState({ config: makeConfig(), sandbox: null, cwd: "/w", interactive: true });
-	const c1 = cycleProfile(state);
-	assert.deepEqual(c1, { ok: true, profile: "allow-edits" });
-	assert.deepEqual(requestResearchHold(state, "plan"), { granted: true, reason: "research granted", profile: "research" });
-	assert.equal(state.profile, "research");
-	assert.equal(cycleProfile(state).ok, false);
-	assert.equal(setProfile(state, "yolo").ok, false);
-	assert.match((setProfile(state, "yolo") as { notice: string }).notice, /blocked/);
-	// Staying in research is fine.
-	assert.deepEqual(setProfile(state, "research"), { ok: true });
-	// A second holder is refused.
-	assert.equal(requestResearchHold(state, "other").granted, false);
-	// Release restores.
-	assert.deepEqual(releaseResearchHold(state, "plan"), { released: true, reason: "research released; previous profile restored", profile: "allow-edits" });
-	assert.equal(state.profile, "allow-edits");
-	assert.deepEqual(releaseResearchHold(state, "plan"), { released: false, reason: "no research hold", profile: "allow-edits" });
 });
 
 test("workspace lock and ack; footer composes profile, sandbox, and lock", () => {

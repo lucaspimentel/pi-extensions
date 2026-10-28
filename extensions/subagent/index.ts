@@ -451,9 +451,9 @@ async function runSingleAgent(
 		args.push("--extension", bootstrapPath);
 		// Only the profile is inherited. The child loads its own guard
 		// configuration for its cwd; parent rules, masks, roots, grants, locks,
-		// scratch, workers, and research-holder ownership are never copied.
-		// Overriding the key also replaces stale ambient inheritance so nested
-		// dispatch reflects the current effective profile.
+		// scratch, and workers are never copied. Overriding the key also
+		// replaces stale ambient inheritance so nested dispatch reflects the
+		// current effective profile.
 		const childEnv = { ...process.env, [INHERIT_ENV]: serializeInheritance(snapshot.profile, randomUUID()) };
 
 		const exitCode = await new Promise<number>((resolve) => {

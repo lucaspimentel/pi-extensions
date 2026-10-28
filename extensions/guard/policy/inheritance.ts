@@ -5,8 +5,7 @@
  * into PI_GUARD_INHERIT immediately before spawning a child. The child's
  * guard parses the same variable once per process and installs the inherited
  * profile as an immutable restriction for the child's lifetime: the child may
- * only keep its inherited profile or switch to research (subject to the usual
- * research-hold rules).
+ * only keep its inherited profile or switch to research.
  *
  * This module is pure: parsing and serialization never touch process.env, so
  * tests can exercise them directly and the guard factory captures the parsed

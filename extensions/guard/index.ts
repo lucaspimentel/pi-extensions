@@ -27,7 +27,7 @@ import { addToConfigScope, effectiveAllowSuggestion, readGrantSuggestion } from 
 import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, validateShellAllowSave, validateShellSave } from "./policy/save.ts";
 import { runExecutionPrompt, runReadGrantPrompt, runWriteEditPrompt, type PromptFlowIO } from "./prompt-flow.ts";
 import { createGuardEditorStage, createGuardPickerStage } from "./ask-components.ts";
-import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, releaseResearchHold, requestResearchHold, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
+import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
 import { constraintFromParse, INHERIT_ENV, INHERITANCE_VERSION, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
 import { resolveWorkspaceScope, scopeContains, SessionShellRuleStore, type SessionShellScope } from "./session-shell-rules.ts";
 import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
@@ -506,9 +506,8 @@ export default function guard(pi: ExtensionAPI) {
 			return { block: true, reason: "guard: write/edit denied" };
 		}
 		// switch-to-allow-edits: land the rung through the same transition path
-		// as the profile commands (research holds and inherited restrictions are
-		// honored), then approve the current call. A refused or failed transition
-		// denies the call.
+		// as the profile commands (inherited restrictions are honored), then
+		// approve the current call. A refused or failed transition denies the call.
 		if (rt !== runtime || epoch !== rt.epoch || !state || !config || rt.teardownFailure) throw new Error("guard: approval expired after a policy change");
 		const next = { ...state };
 		const applied = setProfile(next, "allow-edits");
@@ -1042,34 +1041,6 @@ export default function guard(pi: ExtensionAPI) {
 		} catch (err) { return { kind: "refused", diagnostic: `Read grant refused: ${String(err)}${capabilityNote}` }; }
 	}
 
-	// Async bus listeners publish the effective policy only after teardown.
-	pi.events.on("guard:research-request", async (data: unknown) => {
-		const holder = (data as { holder?: string } | null)?.holder ?? "plan";
-		if (!state || !config || !runtime || !lastCtx) {
-			pi.events.emit("guard:research-ack", { granted: false, reason: "guard session state not initialized", profile: "default" });
-			return;
-		}
-		const next = { ...state };
-		const result = requestResearchHold(next, holder);
-		if (!result.granted) { pi.events.emit("guard:research-ack", result); return; }
-		try {
-			await transition(next, config, lastCtx);
-			runtime?.assertAvailable();
-			if (state?.researchHolder !== holder || state?.profile !== "research") throw new Error("research request superseded by a policy transition");
-			pi.events.emit("guard:research-ack", result);
-		}
-		catch (err) { pi.events.emit("guard:research-ack", { granted: false, reason: String(err), profile: state?.profile ?? "default" }); }
-	});
-	pi.events.on("guard:research-release", async (data: unknown) => {
-		const holder = (data as { holder?: string } | null)?.holder ?? "plan";
-		if (!state || !config || !lastCtx) return;
-		const next = { ...state };
-		const result = releaseResearchHold(next, holder);
-		if (!result.released) return;
-		try { await transition(next, config, lastCtx); pi.events.emit("guard:research-release-ack", result); }
-		catch (err) { pi.events.emit("guard:research-release-ack", { released: false, reason: String(err), profile: state?.profile ?? "default" }); }
-	});
-
 	// Step 5: subagent dispatch handshake. The subagent's query helper
 	// subscribes, emits, and unsubscribes without yielding, so this responder
 	// must acknowledge synchronously: no await may appear before the emit.
@@ -1348,7 +1319,7 @@ export default function guard(pi: ExtensionAPI) {
 			: "error" in state.inherited ? `inherited (subagent): INVALID (${state.inherited.error}); guard is blocked`
 			: `inherited (subagent): ${state.inherited.profile} (only "${state.inherited.profile}" and "research" are allowed)`;
 		notify(ctx, [
-			`profile (this session): ${state.profile}${state.researchHolder ? ` (research held by ${state.researchHolder})` : ""}`,
+			`profile (this session): ${state.profile}`,
 			...(inheritedLine ? [inheritedLine] : []),
 			`sandbox: ${state.sandbox?.mode ?? "unknown"} (${state.sandbox?.diagnostics.join("; ") ?? ""})`,
 			`workspace: ${state.workspaceLocked ? `LOCKED (/guard ack): ${state.workspaceLockReason}` : "unlocked"}`,
@@ -1442,7 +1413,6 @@ export default function guard(pi: ExtensionAPI) {
 		description: "Cycle guard profile (research -> default -> allow-edits -> auto -> trusted -> yolo; this session only)",
 		handler: async (ctx) => {
 			if (!state) return;
-			if (state.researchHolder) { notify(ctx, `Profile changes are blocked while ${state.researchHolder} holds research; the holder must release it first.`, "warning"); return; }
 			await applyProfile(nextProfile(state.profile), ctx);
 		},
 	});

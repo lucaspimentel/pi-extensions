@@ -13,8 +13,10 @@ grep/ffgrep secret-mask `tool_result` filter below. **Step 5 adds subagent
 profile inheritance** (below). pi-tool-permissions stays loaded and
 enforcing until switchover (step 6); the old standalone python/node
 extensions were unregistered from the manifest on 2026-10-21 (guard's
-ported copies are the only registered python/node tools) and remain in the
-tree as lineage and test targets.
+ported copies are the only registered python/node tools). The standalone
+implementations and their tests were deleted on 2026-10-28 after porting
+frame-protocol coverage to `tests/guard-worker-protocol.test.mts`, which tests
+the live guard implementations.
 
 ## Tools and enforcement (step 3)
 
@@ -356,12 +358,6 @@ filter stays observe-only:
   denied by name, so a shell command on the host is always an explicit
   `host_bash` call. A workspace lock forces the read-only sandbox back on for
   `bash` even in those profiles.
-- While plan holds research (the `guard:research-request` /
-  `guard:research-release` / `guard:research-ack` handshake), every profile
-  change is blocked except staying in research; releasing restores the
-  pre-hold profile. (Historical: `/plan` was retired 2026-10-26 in favor of
-  the agent-skills `plan` skill, so nothing in the registered extension set
-  emits a hold request; guard keeps the machinery and its tests, see TODO.md.)
 
 ### Host-shell precedence
 
@@ -427,42 +423,8 @@ non-destructive, not necessarily non-writing.
 
 Built-in recognition consults own map entries only: inherited
 Object.prototype names such as `constructor` or `__proto__` are ordinary
-custom tools (classification and planning follow the normal
+custom tools (classification follows the normal
 annotation/configuration/fallback rules; no name is reserved).
-
-### Planning eligibility (historical)
-
-(Historical: `/plan` was retired 2026-10-26 in favor of the agent-skills
-`plan` skill, so `isPlanningToolAllowed` and this filter have no registered
-consumer left; see TODO.md.)
-
-While `/plan` held the research profile, plan.ts filtered the CURRENTLY
-ACTIVE tool set through `isPlanningToolAllowed` (`policy/classes.ts`) with a
-fresh `pi.getAllTools()` annotation lookup at planning entry:
-
-1. built-in host-shell and local-write tools (`host_bash`, `pwsh`,
-   `powershell`, `write`, `edit`, memory/scratchpad writes) are removed
-   regardless of annotations;
-2. built-in local-read, remote-read, sandboxed-exec, and meta tools stay
-   (safe reads, the guard-owned sandboxed interpreters, `codemode`,
-   `tool_search`, `subagent`, `ask_user_question`);
-3. every other tool needs `readOnlyHint === true && destructiveHint !== true`
-   (write-capable or unknown MCP/custom tools are removed; `toolClasses`
-   overrides create no planning exceptions; input-dependent wrappers like
-   `pup_run` qualify only via explicit annotations).
-
-Built-in recognition uses explicit own map entries only: inherited property
-names (`constructor`, `__proto__`) are ordinary custom tools, so
-unannotated or conflicting-hint instances are removed and adequately
-read-only annotated instances stay; no name is prohibited.
-
-Registered-but-inactive tools are never activated, the pre-plan set is
-restored exactly on every exit path, and this is entry-time declaration
-filtering rather than execution containment: codemode/deferred tools can
-remain callable, other extensions can change activation afterwards, nested
-non-owned calls stay observe-only until the switchover (write/edit are
-enforced; local reads and remote tools are not), and trusted
-extensions have host privileges.
 
 ### Local reads and the directory-grep gap
 
@@ -499,7 +461,7 @@ corrupt file is ignored with a warning and never discards the other scope.
 |---|---|
 | `/guard` | profile picker (all seven profiles) |
 | `/guard help` | usage |
-| `/guard list` | profile, holder, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, discovery scan settings (cap, timeout, pruned basenames, collisions), webFetchAllow count, persistent host-shell rule counts, session host-shell grants (workspace, active/dormant) and the session rules in force for the current workspace, read/write roots, toolClasses count, classifier, debug state |
+| `/guard list` | profile, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, discovery scan settings (cap, timeout, pruned basenames, collisions), webFetchAllow count, persistent host-shell rule counts, session host-shell grants (workspace, active/dormant) and the session rules in force for the current workspace, read/write roots, toolClasses count, classifier, debug state |
 | `/guard reload` | reload guard.json, refresh sandbox detection, clear the annotation cache |
 | `/guard profile [name]` | set a profile directly (`unrestricted` included) |
 | `/guard model` / `/guard model clear` | pin the auto-mode classifier model to user config (picker over models with configured auth; `clear` resumes auto-select). A project-scope `classifier` pin in `.pi/guard.local.json` overrides the user pin and is a manual config edit |
@@ -556,15 +518,6 @@ removed.
   Emitted once per admitted interaction from the shared `admittedDialog`
   wrapper, unconditionally (no `HERDR_ENV` check), matching
   pi-tool-permissions and the herdr ask-user bridge.
-- `guard:research-request` / `guard:research-release` (in) and
-  `guard:research-ack` / `guard:research-release-ack` (out): the plan.ts
-  handshake, wired in step 4. (Historical: plan.ts was retired 2026-10-26 in
-  favor of the agent-skills `plan` skill, so nothing in the registered
-  extension set emits a hold request; guard keeps the channels, the
-  transition gating, and their tests, see TODO.md.) `/plan` requested the
-  hold before narrowing (write/edit/`host_bash`) and refused to start without
-  an acknowledgment; every exit path released it, and guard acks only after
-  the transition (teardown included) completes.
 
 ## Shared sandbox library (`sandbox/`)
 

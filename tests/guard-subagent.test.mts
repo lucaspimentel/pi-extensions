@@ -31,8 +31,6 @@ import {
 	cycleProfile,
 	footerLabel,
 	profileChangeAllowed,
-	releaseResearchHold,
-	requestResearchHold,
 	setProfile,
 } from "../extensions/guard/policy/state.ts";
 import guardExtension from "../extensions/guard/index.ts";
@@ -443,24 +441,7 @@ test("an invalid inheritance blocks the session instead of initializing a defaul
 		assert.match((result as { notice: string }).notice, /invalid/);
 		assert.equal(cycleProfile(state).ok, false);
 	}
-	const hold = requestResearchHold(state, "plan");
-	assert.equal(hold.granted, false, "research is unavailable in a blocked session");
 	assert.match(footerLabel(state), /inheritance invalid/);
-});
-
-test("research holds restore the inherited profile and cannot widen the restriction", () => {
-	const state = createSessionState({ config: makeConfig(), sandbox: null, cwd: "/w", interactive: true, inherited: { profile: "auto" } });
-	assert.deepEqual(requestResearchHold(state, "plan"), { granted: true, reason: "research granted", profile: "research" });
-	assert.equal(state.profile, "research");
-	assert.equal(state.profileBeforeHold, "auto");
-	// During the hold only research is settable (pre-existing rule).
-	const blocked = setProfile(state, "auto");
-	assert.equal(blocked.ok, false);
-	assert.match((blocked as { notice: string }).notice, /blocked/);
-	assert.deepEqual(releaseResearchHold(state, "plan"), { released: true, reason: "research released; previous profile restored", profile: "auto" });
-	assert.equal(state.profile, "auto", "release restores the inherited profile, never a wider one");
-	assert.equal(setProfile(state, "default").ok, false, "the restriction survives release");
-	assert.equal(setProfile(state, "yolo").ok, false);
 });
 
 test("footer and list surface inheritance without changing ordinary sessions", () => {

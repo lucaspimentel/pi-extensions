@@ -13,7 +13,6 @@ import { mergeConfig, loadUserConfigRaw, loadProjectConfigRaw, type GuardConfig 
 import {
 	classificationName,
 	classifyToolCall,
-	isPlanningToolAllowed,
 	isToolClass,
 	pupRunClass,
 	type ToolClass,
@@ -249,44 +248,6 @@ test("pup_run classifies by subcommand verb", () => {
 	assert.equal(classifyToolCall("pup_run", { args: ["logs", "search"] }), "remote-read");
 });
 
-test("isPlanningToolAllowed: built-in exceptions, annotations, and fail-closed unknowns", () => {
-	const readOnly = { readOnlyHint: true, destructiveHint: false } as const;
-	const writeCapable = { readOnlyHint: false, destructiveHint: true } as const;
-	// 1. Host-shell and local-write tools are removed regardless of hints.
-	for (const name of ["write", "edit", "host_bash", "pwsh", "powershell", "memory_write", "memory_forget", "memory_restore", "scratchpad"]) {
-		assert.equal(isPlanningToolAllowed(name, readOnly), false, name);
-		assert.equal(isPlanningToolAllowed(name, writeCapable), false, name);
-		assert.equal(isPlanningToolAllowed(name), false, name);
-	}
-	// 2. Built-in safe classes stay without annotations.
-	for (const name of ["read", "grep", "find", "ls", "fffind", "ffgrep", "git_read", "session_search", "session_excerpt", "memory_read", "memory_search", "memory_status", "web_search", "slack_search", "pup_logs_search", "bash", "python", "node", "codemode", "tool_search", "subagent", "ask_user_question"]) {
-		assert.equal(isPlanningToolAllowed(name), true, name);
-	}
-	// Built-in removal ignores even a perfect read-only declaration.
-	assert.equal(
-		isPlanningToolAllowed("host_bash", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
-		false,
-	);
-	// 3. Unknown/custom/MCP tools need explicit adequate annotations.
-	assert.equal(isPlanningToolAllowed("mcp__slack__post_message"), false, "no annotations: fail closed");
-	assert.equal(isPlanningToolAllowed("mcp__slack__post_message", {}), false);
-	assert.equal(isPlanningToolAllowed("mcp__slack__post_message", { readOnlyHint: false, destructiveHint: false }), false);
-	assert.equal(isPlanningToolAllowed("mcp__slack__post_message", { readOnlyHint: true, destructiveHint: true }), false, "contradictory hints: fail closed");
-	assert.equal(isPlanningToolAllowed("mcp__slack__search", readOnly), true);
-	assert.equal(isPlanningToolAllowed("jira_read", { readOnlyHint: true, openWorldHint: true, idempotentHint: true }), true);
-	assert.equal(isPlanningToolAllowed("jira_update", { readOnlyHint: false, openWorldHint: true }), false);
-	// Input-dependent wrappers qualify only through explicit annotations.
-	assert.equal(isPlanningToolAllowed("pup_run"), false, "unannotated pup_run is not planning-safe");
-	assert.equal(isPlanningToolAllowed("web_fetch"), false);
-	assert.equal(isPlanningToolAllowed("web_fetch", readOnly), true);
-	// The generic unknown-tool fallback does not make every remote-write result
-	// a name-based prohibition: an unknown tool with adequate hints qualifies.
-	assert.equal(isPlanningToolAllowed("totally_unknown_custom_tool", readOnly), true);
-	// Case-insensitive built-in lookup, matching classifyToolCall.
-	assert.equal(isPlanningToolAllowed("Write", readOnly), false);
-	assert.equal(isPlanningToolAllowed("Session_Search"), true);
-});
-
 // ── Inherited property names ─────────────────────────────────────────────────
 
 // `constructor` and `__proto__` resolve through Object.prototype on an ordinary
@@ -294,55 +255,42 @@ test("isPlanningToolAllowed: built-in exceptions, annotations, and fail-closed u
 // names are ordinary custom tools: they follow the normal
 // annotation/configuration/fallback rules and are never reserved or prohibited.
 const INHERITED_NAMES = ["constructor", "__proto__", "Constructor", "__PROTO__"] as const;
-const inheritedMatrix: Array<[string, boolean, ToolClass]> = [
-	// [annotations, planning allowed, classification]
-	[undefined, false, "remote-write"],
-	[{}, false, "remote-write"],
-	[{ destructiveHint: false }, false, "remote-write"],
-	[{ readOnlyHint: false, destructiveHint: false }, false, "remote-write"],
-	[{ readOnlyHint: true }, true, "remote-read"],
-	[{ readOnlyHint: true, destructiveHint: false }, true, "remote-read"],
-	[{ destructiveHint: true }, false, "remote-write"],
-	[{ readOnlyHint: true, destructiveHint: true }, false, "remote-write"],
+const inheritedMatrix: Array<[{ readOnlyHint?: boolean; destructiveHint?: boolean } | undefined, ToolClass]> = [
+	// [annotations, classification]
+	[undefined, "remote-write"],
+	[{}, "remote-write"],
+	[{ destructiveHint: false }, "remote-write"],
+	[{ readOnlyHint: false, destructiveHint: false }, "remote-write"],
+	[{ readOnlyHint: true }, "remote-read"],
+	[{ readOnlyHint: true, destructiveHint: false }, "remote-read"],
+	[{ destructiveHint: true }, "remote-write"],
+	[{ readOnlyHint: true, destructiveHint: true }, "remote-write"],
 ];
 
 for (const name of INHERITED_NAMES) {
 	test(`inherited-name tool "${name}" classifies through the normal fallback rules`, () => {
-		for (const [annotations, , cls] of inheritedMatrix) {
+		for (const [annotations, cls] of inheritedMatrix) {
 			const result = classifyToolCall(name, {}, { getAnnotations: () => annotations });
 			assert.equal(result, cls, `${name} with ${JSON.stringify(annotations) ?? "no annotations"}`);
 			// Always a valid class, never an inherited object or function.
 			assert.ok(isToolClass(result), name);
 		}
 	});
-	test(`inherited-name tool "${name}" follows the custom-tool planning rules`, () => {
-		for (const [annotations, allowed] of inheritedMatrix) {
-			assert.equal(
-				isPlanningToolAllowed(name, annotations),
-				allowed,
-				`${name} with ${JSON.stringify(annotations) ?? "no annotations"}`,
-			);
-		}
-	});
 }
 
 // Ordinary custom-name control: identical behavior, no inherited lookup involved.
 test("ordinary custom names behave like inherited-name tools without built-in entries", () => {
-	for (const [annotations, allowed, cls] of inheritedMatrix) {
+	for (const [annotations, cls] of inheritedMatrix) {
 		assert.equal(classifyToolCall("widget_flip", {}, { getAnnotations: () => annotations }), cls);
-		assert.equal(isPlanningToolAllowed("widget_flip", annotations), allowed);
 	}
 });
 
-test("configured overrides apply to inherited names during classification, never planning", () => {
+test("configured overrides apply to inherited names during classification", () => {
 	// A computed __proto__ key is a real own key; a bare object-literal
 	// __proto__ property would set the prototype instead.
 	assert.equal(classifyToolCall("__proto__", {}, { toolClasses: { ["__proto__"]: "meta" } }), "meta");
 	assert.equal(classifyToolCall("Constructor", {}, { toolClasses: { constructor: "local-read" } }), "local-read");
 	assert.equal(classifyToolCall("constructor", {}, { toolClasses: { "con*": "remote-read" } }), "remote-read");
-	// Overrides configure classification only: isPlanningToolAllowed takes no
-	// configuration at all, so an override can never create a planning exception.
-	// The matrix above already pins planning to the annotation rules alone.
 });
 
 test("isToolClass validates class names", () => {

@@ -1,6 +1,6 @@
 // Harness tests for the guard extension entry point (extensions/guard/index.ts)
 // with a fake pi API object: session_start wiring, the observe-only tool_call
-// hook, /guard subcommands, the cycle shortcut, the research hold, debug
+// hook, /guard subcommands, the cycle shortcut, debug
 // notifications, and the migrate command flow.
 // Run: node tests/guard-harness.test.mts
 import assert from "node:assert/strict";
@@ -335,7 +335,7 @@ test("harness: tool_call observer errors never break the call", async () => {
 	});
 });
 
-test("harness: /guard profile, cycle shortcut, research hold, and ack", async () => {
+test("harness: /guard profile, cycle shortcut, and ack", async () => {
 	await withTempHome(async () => {
 		const h = makeHarness();
 		const cwd = makeTempDir("guard-harness-cmd-");
@@ -359,24 +359,6 @@ test("harness: /guard profile, cycle shortcut, research hold, and ack", async ()
 		h.notifications.length = 0;
 		await h.shortcuts[0].handler(ctx);
 		assert.ok(h.notifications.some((n) => /Profile: research/.test(n)), "cycling from unrestricted goes to research");
-
-		// Hold research, then a profile change is blocked with a notice.
-		h.emitted.length = 0;
-		h.notifications.length = 0;
-		for (const listener of h.eventListeners["guard:research-request"] ?? []) await listener({ holder: "plan" });
-		const ack = h.emitted.find(([c]) => c === "guard:research-ack")?.[1] as { granted: boolean; reason: string; profile: string };
-		assert.equal(ack.granted, true);
-		assert.equal(ack.profile, "research");
-		await handler("profile yolo", ctx);
-		assert.ok(h.notifications.some((n) => /blocked/.test(n)));
-		await h.shortcuts[0].handler(ctx);
-		assert.ok(h.notifications.filter((n) => /blocked/.test(n)).length >= 2, "the cycle is blocked too");
-
-		// Release restores the pre-hold profile (research was already active when
-		// the hold was requested, so it stays).
-		for (const listener of h.eventListeners["guard:research-release"] ?? []) await listener({ holder: "plan" });
-		const restored = h.emitted.filter(([c]) => c === "guard:profile").at(-1)?.[1] as { profile: string };
-		assert.equal(restored.profile, "research", "release broadcasts the restored profile");
 
 		// /guard ack with no lock reports cleanly.
 		h.notifications.length = 0;
@@ -950,7 +932,7 @@ test("project/user read grants persist after teardown without quarantine or lega
 	});
 });
 
-test("registered raw worker is torn down before research profile and acknowledgment", async () => {
+test("registered raw worker is torn down before the profile publication", async () => {
 	if (sandboxMode === "degraded") return; // persistent workers are denied in degraded mode
 	await withTempHome(async () => {
 		const h = makeHarness();
@@ -964,13 +946,15 @@ test("registered raw worker is torn down before research profile and acknowledgm
 		for (let i = 0; i < 300 && !fs.existsSync(marker) && !executionSettled; i++) await new Promise((resolve) => setTimeout(resolve, 10));
 		assert.equal(fs.existsSync(marker), true, "worker reached the execution boundary");
 		h.emitted.length = 0;
-		await h.eventListeners["guard:research-request"][0]({ holder: "plan" });
+		// A plain profile change makes the transition tighter than unrestricted,
+		// so the raw (unsandboxed) worker is preempted and torn down before the
+		// effective profile is published.
+		await h.commandHandlers.get("guard")!("profile yolo", ctx);
 		assert.equal(executionSettled, true, "registered execution settles only after actual controller teardown");
 		const result = await pending;
 		assert.equal(result.isError, true);
 		assert.ok(["cancelled", "worker_error"].includes(result.structuredContent.status));
-		assert.deepEqual(h.emitted.map(([name]) => name), ["guard:profile", "guard:research-ack"]);
-		assert.equal((h.emitted[1][1] as { granted: boolean }).granted, true);
+		assert.deepEqual(h.emitted.map(([name]) => name), ["guard:profile"], "the profile publication follows the teardown");
 		await h.handlers.session_shutdown[0]({}, ctx);
 	});
 });
@@ -991,26 +975,6 @@ test("snapshot failure locks registered host/raw tools even in unrestricted", as
 		const profile = h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { workspaceLocked: boolean; sandbox: { workspaceMode: string } };
 		assert.equal(profile.workspaceLocked, true);
 		assert.equal(profile.sandbox.workspaceMode, "ro");
-		await h.handlers.session_shutdown[0]({}, ctx);
-	});
-});
-
-test("research publishes effective profile before ack; initial requests fail", async () => {
-	await withTempHome(async () => {
-		const h = makeHarness();
-		await h.eventListeners["guard:research-request"][0]({ holder: "plan" });
-		assert.equal((h.emitted.at(-1)![1] as { granted: boolean }).granted, false);
-		const ctx = harnessCtx(h, makeTempDir("guard-research-ack-"));
-		await h.handlers.session_start[0]({}, ctx);
-		h.emitted.length = 0;
-		await h.eventListeners["guard:research-request"][0]({ holder: "plan" });
-		assert.deepEqual(h.emitted.map(([name]) => name), ["guard:profile", "guard:research-ack"]);
-		assert.equal((h.emitted[0][1] as { profile: string }).profile, "research");
-		await h.handlers.session_tree[0]({}, ctx);
-		assert.equal((h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { profile: string }).profile, "research", "tree replacement preserves the active research hold");
-		await h.eventListeners["guard:research-release"][0]({ holder: "plan" });
-		assert.equal((h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { profile: string }).profile, "default");
-		await h.handlers.session_shutdown[0]({}, ctx);
 		await h.handlers.session_shutdown[0]({}, ctx);
 	});
 });
