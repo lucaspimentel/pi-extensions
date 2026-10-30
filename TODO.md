@@ -1,7 +1,5 @@
 # TODO
 
-> See also [`extensions/pi-tool-permissions/TODO.md`](extensions/pi-tool-permissions/TODO.md) for the pi-tool-permissions extension's own task list.
-
 ## gh-read: additional read-only operations
 
 Expand the allowlist in `extensions/gh-read/` and update [`docs/gh-read-design.md`](docs/gh-read-design.md), tool descriptions, prompt guidelines, and tests. Keep native gh commands on the existing argv interface; use structured parameters for narrowly scoped API operations, not unrestricted `gh api`.
