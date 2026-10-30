@@ -9,7 +9,7 @@ Expand the allowlist in `extensions/gh-read/` and update [`docs/gh-read-design.m
 ### Follow-up operations
 
 - [ ] Structured issue body/metadata read (title, state, labels, author, body, timestamps) as a separately designed operation. Deliberately not bundled with `issue comments`: it needs its own contract for body text vs. metadata, display truncation/labeling, and must not reconstruct threads or review state.
-- [ ] Review-thread resolved/outdated state via a narrowly scoped, tool-authored GraphQL query. Separate design cycle: the REST `pr comments`/`pr reviews` operations do not provide `isResolved`/`isOutdated` or infer that state from comment line fields.
+- [ ] Review-thread resolved/outdated state via a tool-authored GraphQL read hosted in `gh_read`. Settled: needs a GraphQL POST transport (the API runner is GET-only), bounded thread/comment pagination, and the `gh-pr-threads` CLI keeps only the write half. The REST `pr comments`/`pr reviews` operations do not provide `isResolved`/`isOutdated` or infer that state from comment line fields. See `docs/gh-read-design.md` "Review-thread read (next task)".
 - [ ] Commit details and base/head comparisons without fetching locally.
 - [ ] Releases via `gh release list` and `gh release view`, plus tag listing: versions, release notes, and asset metadata only.
 - [ ] Search via `gh search code`, `gh search prs`, `gh search issues`, and `gh search repos`.
@@ -28,14 +28,14 @@ Expand the allowlist in `extensions/gh-read/` and update [`docs/gh-read-design.m
 
 - [ ] Keep the same guarantees for follow-up operations: tool-controlled request construction, validated/encoded inputs, bounded pagination/runtime/output, and regression tests for rejected flags and unsafe inputs.
 
-### Guidance and discoverability (2026-10-29, no allowlist change; do this first)
+### Guidance and discoverability (2026-10-29, no allowlist change)
 
-- [ ] Add prompt-guideline lines to `extensions/gh-read/index.ts` (`promptGuidelines`, ends near `:145`) so the model stops shelling out to raw `gh api` where an existing operation or a documented workaround applies. Corpus evidence (all pi session logs, current session excluded): in the 317 sessions where gh_read was registered, roughly 188 of 405 `gh api` command lines targeted shapes gh_read already covers, and `gh api user --jq .login` alone accounts for 148 of them.
+- [x] Done 2026-10-30 (14 bullets; design doc "Prompt guidance"; timeline workaround intentionally not claimed). Add prompt-guideline lines to `extensions/gh-read/index.ts` (`promptGuidelines`) so the model stops shelling out to raw `gh api` where an existing operation or a documented workaround applies. Corpus evidence (all pi session logs, current session excluded): in the 317 sessions where gh_read was registered, roughly 184 of 405 `gh api` command lines targeted shapes gh_read already covers, and `gh api user --jq .login` alone accounts for 148 of them.
   - Account check: use `auth status` (with `--hostname github.com`, optionally `--active`) instead of `gh api user --jq .login`.
-  - Uncovered shapes and their workarounds: no operation exists for a PR's changed-file list, one review's own comments, comment lookup by comment id, or an issue/PR timeline. Use `pr view --json files,changedFiles` (compare both counts to detect gh's silent 100-file GraphQL cap) or `pr view --json files --jq ...`; `pr comments` with jq `select(.pull_request_review_id == <id>)` for one review; for a comment id, take the parent number from the comment's `html_url` and filter that parent's listing.
+  - Uncovered shapes and the shipped workarounds: `pr diff --name-only` first, else `pr view --json files,changedFiles` (compare both counts to detect gh's silent 100-file GraphQL cap); one review's comments via `pr comments` with jq `select(.pull_request_review_id == <id>)` (an empty batch is not proof until `source_complete`); a comment by id via the parent number from its `html_url` plus the parent listing's jq `select(.id == <id>)`. Timeline: no workaround claimed (the operation is still a TODO above).
   - Write boundary: gh_read never writes, so posting review replies or comments requires the shell (`host_bash`).
   - Thread-state limit: resolved/outdated review-thread state is unavailable here (REST does not expose it); do not attempt to derive it.
-  - Tests: `tests/gh-read-tool.test.mts` asserts guideline substrings at `:93-99`, `:439-441`, and `:628-632`; add an assertion per new line. Verify with `env -u PI_GUARD_INHERIT npm run test:gh-read` and `npm run test:ci` (node is not on guard's sandboxed PATH, so run through host_bash), plus `tsc`.
+  - Tests: `tests/gh-read-tool.test.mts` asserts guideline substrings at `:99`, `:439-441`, and `:630-632`, plus the new "steers away from raw gh api" test after the issue-comments registration test. Verify with `env -u PI_GUARD_INHERIT npm run test:gh-read` and `npm run test:ci` (node is not on guard's sandboxed PATH, so run through host_bash), plus `tsc`.
 
 ### Decided or deferred (2026-10-29)
 

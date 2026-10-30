@@ -45,6 +45,83 @@ the main session. Deliberately not tied to any one agent; agents opt in via
   `allow` in every profile (`otherRemoteReadCell`,
   `extensions/guard/policy/profiles.ts:160`).
 
+## Prompt guidance
+
+Purpose: steer agents from raw `gh api` and `gh pr-threads` shell calls to
+the operations above and to documented workarounds. Guidance only: no
+allowlist, schema, `description`, or `promptSnippet` change. It lives in the
+`promptGuidelines` array in `extensions/gh-read/index.ts` (14 bullets).
+
+Corpus (2026-10-29): all 1277 pi sessions, current session excluded; 1536
+`gh api` occurrences in total, 405 command lines in the 317 sessions where
+`gh_read` was registered. The first table breaks down the shapes seen in
+that 405-line sample; it is not a complete decomposition of the sample.
+
+`gh api` shapes in the sample:
+
+| Shape | Count | `gh_read` status |
+|---|---|---|
+| `gh api user --jq .login` | 148 | covered by `auth status` |
+| `issues/{n}/timeline` | 14-21 | uncovered |
+| `pulls/{n}/reviews` | 13 | covered by `pr reviews` |
+| comments by id | 13 | uncovered |
+| `branches` | 12 | uncovered |
+| `issues/{n}/comments` | 10 | covered by `issue comments` |
+| `graphql` | 9 | uncovered |
+| `commits` | 9 | uncovered |
+| `pulls/{n}/comments` | 8 | covered by `pr comments` |
+| `search/issues` | 7 | uncovered |
+| `git/trees/HEAD` | 5 | covered by `repo tree` |
+| `pulls/{n}/files` | 3 | uncovered |
+
+Outside the `gh api` denominator (neither is a `gh api` command line, so
+neither counts against the 405):
+
+| Shape | Count |
+|---|---|
+| `gh pr-threads` (personal gh CLI extension, unsupported by design) | 139 |
+| review-reply POSTs (writes) | 60+ |
+
+The covered `gh api` rows sum to 184 at `timeline = 14`
+(148 + 13 + 10 + 8 + 5), about half of the 405 lines, so roughly half of the
+escapes are a guidance problem, not an allowlist gap.
+
+Guidance added:
+
+- `auth status` instead of `gh api user --jq .login` (folded into the
+  `auth status` bullet).
+- A mapping from raw endpoints to operation names (`pulls/{n}/reviews` is
+  `pr reviews`, `pulls/{n}/comments` is `pr comments`,
+  `issues/{n}/comments` is `issue comments`, `git/trees/HEAD` is `repo tree`,
+  default branch is `repo metadata`), folded into the API-operations bullet.
+  Commits are deliberately not named: `commit checks` returns check runs, and
+  commit details are an open TODO.
+- A bullet for shapes with no dedicated operation: changed-file list
+  (`pr diff --name-only`, or `pr view --json files,changedFiles` comparing
+  the length of `files` with `changedFiles` to detect a truncated list), one
+  review's comments (`pr comments` with jq
+  `select(.pull_request_review_id == <id>)`, noting jq applies per batch so
+  `source_complete` is the stop condition), a comment by id (parent number
+  from `html_url`, then jq `select(.id == <id>)` on the parent listing), and
+  review-thread state stated as unavailable (do not derive it).
+- A write-boundary bullet: `gh_read` never writes; posting replies,
+  resolving threads, and submitting reviews need `host_bash`, which guard
+  may prompt for depending on the profile. The 60+ review-reply POSTs mean
+  `gh_read` can never make PR-review publication shell-free.
+
+Not covered by guidance: the issue/PR timeline (a TODO operation, so no
+workaround is claimed), `search/issues`, `commits`, `branches`, `graphql`.
+`gh pr-threads` is named only here; until the review-thread read below
+lands, the guidance gives no alternative for it.
+
+Verification (2026-10-30, against DataDog/dd-trace-dotnet#9397):
+`pr diff --name-only` returned 8 files; `pr view --json files,changedFiles`
+returned 8/8; jq `select(.pull_request_review_id == 5699725775)` gave 2 hits;
+comment 4287875152 was recovered from its `html_url` and matched in the
+parent listing. The `-R OWNER/REPO` form of `pr diff --name-only` was also run and returned
+the same 8 paths. The silent 100-file cap behind `pr view --json files` is
+cited from `TODO.md` and was not re-verified.
+
 ## Invocation contract
 
 - Structured argv, no shell: `{ subcommand, args }` where `subcommand` is a
@@ -354,7 +431,8 @@ historical snapshot or proof of an unchanged review state. Metadata reports
 the PR target, completeness, and continuation without fabricating a resolved
 SHA. Neither operation supplies `isResolved`/`isOutdated` review-thread
 state, infers resolution from line fields, nor reconstructs complete thread
-history; that needs a separately designed tool-authored GraphQL operation.
+history; that needs a tool-authored GraphQL operation (see "Review-thread
+read (next task)" below).
 
 The existing API bounds apply unchanged: one 30 s shared deadline, 8 MiB
 cumulative captured-output budget, external jq applied once to the newly
@@ -364,6 +442,19 @@ empty or scalar output and display truncation. For example:
 ```json
 {"subcommand":"pr comments","repo":"DataDog/dd-trace-dotnet","pr":9479,"jq":".[] | {author: .user.login, path, line, body, html_url}"}
 ```
+
+### Review-thread read (next task)
+
+Settled decisions for the resolved/outdated thread-state read; not
+implemented yet:
+
+- `gh_read` hosts the read.
+- It needs a tool-authored GraphQL POST transport, because the API runner
+  (`api-spawn.ts`) is GET-only.
+- Bounded pagination for threads and comments, with explicit completeness and
+  continuation metadata, not the `gh-pr-threads` CLI's unpaginated
+  first-100-threads/first-50-comments limits.
+- The `gh-pr-threads` CLI keeps only the write half (reply, resolve, submit).
 
 ### issue comments
 
@@ -889,6 +980,11 @@ Settled in the grill-me review:
 - `tests/guard-classes.test.mts`: built-in `gh_read` mapping and every
   discussion operation (`pr comments`, `pr reviews`, `issue comments`)
   classify as `remote-read`; configured class overrides win.
+- Prompt guidance: `tests/gh-read-tool.test.mts` asserts per-topic guideline
+  substrings (auth status instead of `gh api user`, operation-name mapping,
+  `pr diff --name-only`, `files,changedFiles`, `pull_request_review_id`,
+  `html_url` plus `select(.id ==`, thread-state "do not derive it", the
+  `host_bash` write boundary) and the 14-bullet count.
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 
@@ -931,11 +1027,13 @@ Settled in the grill-me review:
 - No write or write-adjacent commands, even "usually harmless" ones
   (`pr edit`, `issue comment` are out; so is `pr checkout`, which mutates
   the worktree).
-- No `gh api` (direct, with caller flags), `gh search`, `gh release`; the
-  `gh run` surface stays limited to the read-only `run list`/`run view`
-  pair: `gh run watch`, `gh run rerun`, `gh run download`, and
-  `--exit-status` remain excluded. Expand the allowlist only on demonstrated
-  need, one design-review cycle per addition.
+- No `gh api` in the `gh_read` allowlist (direct, with caller flags), no
+  `gh search`, no `gh release`; this scopes the tool's allowlist, not agent
+  behavior, so the prompt guidance above still discourages shelling out to
+  raw `gh api` through `host_bash`. The `gh run` surface stays limited to the
+  read-only `run list`/`run view` pair: `gh run watch`, `gh run rerun`,
+  `gh run download`, and `--exit-status` remain excluded. Expand the
+  allowlist only on demonstrated need, one design-review cycle per addition.
 - No run-level or all-jobs log reads: `/actions/runs/{id}/logs` returns a ZIP
   (verified), so `job logs` is job-scoped only and `run view --log` stays the
   run-level path. No step filtering (there is no per-step log endpoint), no
@@ -944,7 +1042,8 @@ Settled in the grill-me review:
   recorded in `TODO.md` as its own follow-up, so `job logs` never grows a
   second request for name, status, or conclusion.
 - No GraphQL review-thread reads or resolved/outdated thread state in the
-  REST PR operations; that is a separate future design cycle.
+  REST PR operations; that is a settled next task, see "Review-thread read
+  (next task)".
 - No URL arguments, no `--template`, no `--web` forms.
 - No token handling, masking, or account switching inside the tool. Keeping
   `--show-token` off the `auth status` allowlist is what keeps this non-goal

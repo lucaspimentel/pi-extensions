@@ -632,6 +632,21 @@ test("gh_read registers the issue comments literal, the numeric issue field, and
 	assert.ok(tool.promptGuidelines.some((line) => line.includes("repos/{owner}/{repo}/issues/{issue}/comments")), "endpoint guidance");
 });
 
+test("gh_read guidance steers away from raw gh api and states the write boundary", () => {
+	const tool = register();
+	const has = (...parts: string[]): boolean => tool.promptGuidelines.some((line) => parts.every((p) => line.includes(p)));
+	assert.ok(has("auth status", "gh api user --jq .login"), "auth status instead of gh api user");
+	assert.ok(has("raw `gh api`", "pulls/{n}/reviews", "'pr reviews'", "git/trees/HEAD", "'repo tree'"), "operation-name mapping");
+	assert.ok(has("'pr diff'", "--name-only"), "changed-file list via pr diff --name-only");
+	assert.ok(has("files,changedFiles"), "pr view files/changedFiles truncation check");
+	assert.ok(has("pull_request_review_id"), "one review's comments via jq");
+	assert.ok(has("source_complete"), "per-batch jq caveat");
+	assert.ok(has("html_url", "select(.id =="), "comment by id via html_url and jq");
+	assert.ok(has("do not derive it"), "thread-state unavailability");
+	assert.ok(has("never writes", "host_bash"), "write boundary");
+	assert.equal(tool.promptGuidelines.length, 14, "guideline count");
+});
+
 test("execute: rejected issue comments params fail closed with zero spawns", async () => {
 	const tool = register();
 	let spawns = 0;
