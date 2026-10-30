@@ -22,6 +22,7 @@ import {
 	setApiSpawnOverride,
 } from "../extensions/gh-read/api-spawn.ts";
 import { INJECTED_ENV, STRIPPED_ENV, buildGhEnv } from "../extensions/gh-read/spawn.ts";
+import { REVIEW_THREADS_QUERY } from "../extensions/gh-read/api.ts";
 
 // ── Harness ──────────────────────────────────────────────────────────────────
 
@@ -396,6 +397,230 @@ test("sync spawn throw resolves as an error result, never throws", async () => {
 	const outcome = await runner.request("repos/o/r");
 	assert.equal(outcome.kind, "error");
 	if (outcome.kind === "error") assert.ok(outcome.reason.includes("boom"));
+});
+
+// ── GraphQL transport (tool-authored POST) ───────────────────────────────
+
+/** The fixed GraphQL prefix every tool-authored review-thread POST carries. */
+const GRAPHQL_ARGV_PREFIX = [
+	"api",
+	"graphql",
+	"--hostname",
+	"github.com",
+	"--method",
+	"POST",
+	"--header",
+	"Accept: application/vnd.github+json",
+	"--header",
+	"X-GitHub-Api-Version: 2022-11-28",
+	"--include",
+	"-f",
+	`query=${REVIEW_THREADS_QUERY}`,
+];
+
+function graphqlVariables(cursor?: string): ReadonlyArray<readonly [string, string | number]> {
+	const variables: Array<readonly [string, string | number]> = [["owner", "OWNER"], ["repo", "REPO"], ["pr", 123]];
+	if (cursor !== undefined) variables.push(["cursor", cursor]);
+	return variables;
+}
+
+test("graphql: exact argv for a first call and for a resume call, options identical to REST", async () => {
+	const spawns = harness((spawn, index) => {
+		emitResponse(spawn.child, index === 0 ? '{"data":{}}' : '{"data":{"page":2}}');
+	});
+	const runner = new GhApiRunner({ cwd: "/anywhere", clock: defaultClock });
+	const first = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+	const second = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables("CURSOR1"));
+	assert.equal(first.kind, "response");
+	assert.equal(second.kind, "response");
+	assert.equal(spawns.length, 2);
+	for (const spawn of spawns) assert.equal(spawn.command, "gh");
+	assert.deepEqual(spawns[0]!.args, [
+		...GRAPHQL_ARGV_PREFIX,
+		"-f",
+		"owner=OWNER",
+		"-f",
+		"repo=REPO",
+		"-F",
+		"pr=123",
+	]);
+	assert.deepEqual(spawns[1]!.args, [
+		...GRAPHQL_ARGV_PREFIX,
+		"-f",
+		"owner=OWNER",
+		"-f",
+		"repo=REPO",
+		"-F",
+		"pr=123",
+		"-f",
+		"cursor=CURSOR1",
+	]);
+	assert.ok(spawns[0]!.args.includes("-f"), "caller strings ride -f (never placeholder-expanded)");
+	assert.ok(!spawns[0]!.args.includes("-F") || spawns[0]!.args[spawns[0]!.args.indexOf("-F") + 1] === "pr=123", "only the integer uses -F");
+	assert.ok(!spawns[0]!.args.some((arg) => arg.startsWith("cursor=")), "no cursor pair on a first page");
+	assert.deepEqual(spawns[0]!.options, spawns[1]!.options, "one runner: identical spawn options across transports");
+	const options = spawns[0]!.options;
+	assert.equal(options.shell, false);
+	assert.equal(options.windowsHide, true);
+	assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+	assert.equal(options.cwd, "/anywhere");
+	const env = options.env as Record<string, string | undefined>;
+	for (const key of STRIPPED_ENV) assert.equal(env[key], undefined, `${key} must be stripped`);
+	for (const [key, value] of Object.entries(INJECTED_ENV)) assert.equal(env[key], value);
+});
+
+test("graphql: exit 0 with a JSON object is accepted", async () => {
+	harness((spawn) => emitResponse(spawn.child, '{"data":{"repository":null}}', 0, 200));
+	const runner = new GhApiRunner({ clock: defaultClock });
+	const outcome = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+	assert.equal(outcome.kind, "response");
+	if (outcome.kind === "response") assert.equal(outcome.httpStatus, 200);
+});
+
+test("graphql: exit 1 with a 2xx JSON object is tolerated (errors beside usable data)", async () => {
+	harness((spawn) => {
+		emitResponse(spawn.child, JSON.stringify({ data: { ok: true }, errors: [{ message: "partial failure" }] }), 1, 200);
+	});
+	const runner = new GhApiRunner({ clock: defaultClock });
+	const outcome = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+	assert.equal(outcome.kind, "response");
+	if (outcome.kind === "response") assert.ok(outcome.body.includes("partial failure"));
+});
+
+test("graphql: exit 1 with a non-JSON, array, or null body is rejected", async () => {
+	for (const body of ["not json at all", "[{\"id\":1}]", "null", "\"a string\""]) {
+		harness((spawn) => emitResponse(spawn.child, body, 1, 200));
+		const runner = new GhApiRunner({ clock: defaultClock });
+		const outcome = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+		assert.equal(outcome.kind, "error", body);
+		if (outcome.kind === "error") assert.ok(outcome.reason.includes("exited with code 1"), body);
+	}
+});
+
+test("graphql: exit 2 with a JSON object body stays an error", async () => {
+	harness((spawn) => emitResponse(spawn.child, '{"data":{}}', 2, 200));
+	const runner = new GhApiRunner({ clock: defaultClock });
+	const outcome = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+	assert.equal(outcome.kind, "error");
+	if (outcome.kind === "error") assert.ok(outcome.reason.includes("exited with code 2"));
+});
+
+test("graphql: exit 1 with a 401 JSON body is rejected with httpStatus", async () => {
+	harness((spawn) => {
+		emitResponse(spawn.child, JSON.stringify({ message: "Bad credentials" }), 1, 401);
+	});
+	const runner = new GhApiRunner({ clock: defaultClock });
+	const outcome = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+	assert.equal(outcome.kind, "error");
+	if (outcome.kind === "error") {
+		assert.equal(outcome.httpStatus, 401);
+		assert.ok(outcome.reason.includes("exited with code 1"));
+	}
+});
+
+test("REST regression: exit 1 with a 200 JSON object body is still rejected", async () => {
+	harness((spawn) => emitResponse(spawn.child, '{"a":1}', 1, 200));
+	const runner = new GhApiRunner({ clock: defaultClock });
+	const outcome = await runner.request("repos/o/r");
+	assert.equal(outcome.kind, "error");
+	if (outcome.kind === "error") assert.ok(outcome.reason.includes("exited with code 1"));
+});
+
+test("graphql and REST share one captured-output budget; a poisoned runner refuses a later graphql call", async () => {
+	const spawns = harness((spawn, index) => {
+		if (index === 0) {
+			spawn.child.stdout.emit("data", Buffer.from("HTTP/1.1 200 OK\r\n\r\n{}"));
+			spawn.child.emit("close", 0, null);
+			return;
+		}
+		spawn.child.stdout.emit("data", Buffer.from("HTTP/1.1 200 OK\r\n\r\n"));
+		spawn.child.stdout.emit("data", Buffer.alloc(API_STDOUT_BUDGET, 0x61));
+		spawn.child.stdout.emit("data", Buffer.from("tail"));
+		spawn.child.emit("close", 1, null);
+	});
+	const runner = new GhApiRunner({ clock: defaultClock });
+	assert.equal((await runner.request("repos/o/r")).kind, "response");
+	const overflowed = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+	assert.equal(overflowed.kind, "error");
+	if (overflowed.kind === "error") assert.ok(overflowed.reason.includes("budget"));
+	assert.ok(runner.capturedBytes() > API_STDOUT_BUDGET - 1, "REST and GraphQL bytes share one counter");
+	assert.equal(runner.budgetExhausted(), true);
+	const spawnsBefore = spawns.length;
+	const refused = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+	assert.equal(refused.kind, "stop");
+	assert.equal(spawns.length, spawnsBefore, "the poisoned runner spawns nothing for the later call");
+});
+
+test("graphql: an exhausted deadline is refused before any spawn", async () => {
+	const clock = new FakeClock();
+	const spawns = harness(() => {
+		throw new Error("no child may spawn past the deadline");
+	});
+	const runner = new GhApiRunner({ clock: clock as unknown as typeof defaultClock, deadlineAt: clock.now() - 1 });
+	const outcome = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+	assert.equal(outcome.kind, "error");
+	if (outcome.kind === "error") assert.ok(outcome.reason.includes("deadline"));
+	assert.equal(spawns.length, 0);
+});
+
+test("graphql: an aborted signal is refused before any spawn", async () => {
+	const controller = new AbortController();
+	controller.abort();
+	const spawns = harness(() => {
+		throw new Error("no child may spawn after cancellation");
+	});
+	const runner = new GhApiRunner({ clock: defaultClock, signal: controller.signal });
+	const outcome = await runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+	assert.equal(outcome.kind, "error");
+	if (outcome.kind === "error") assert.ok(outcome.reason.includes("cancelled"));
+	assert.equal(spawns.length, 0);
+});
+
+test("graphql: deadline SIGTERM then SIGKILL on the injected clock, reaped before resolve", async () => {
+	const clock = new FakeClock();
+	const spawns = harness(() => {
+		// Child never closes on its own.
+	});
+	const runner = new GhApiRunner({ clock: clock as unknown as typeof defaultClock });
+	const promise = runner.graphql(REVIEW_THREADS_QUERY, graphqlVariables());
+	await untilSpawn(spawns, 1);
+	assert.deepEqual(spawns[0]!.child.signals, []);
+	clock.advance(API_DEADLINE_MS);
+	assert.deepEqual(spawns[0]!.child.signals, ["SIGTERM"]);
+	clock.advance(TEARDOWN_GRACE_MS);
+	assert.deepEqual(spawns[0]!.child.signals, ["SIGTERM", "SIGKILL"]);
+	spawns[0]!.child.emit("close", null, "SIGKILL");
+	const outcome = await promise;
+	assert.equal(outcome.kind, "error");
+	if (outcome.kind === "error") {
+		assert.ok(outcome.reason.includes("deadline"));
+		assert.equal(outcome.interrupted, true);
+	}
+});
+
+test("graphql: invalid queries and variables each fail with zero spawns", async () => {
+	let spawns = 0;
+	setApiSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	const runner = new GhApiRunner({ clock: defaultClock });
+	const cases: Array<[string, ReadonlyArray<readonly [string, string | number]>]> = [
+		["", []] as never,
+		["query { a\u0000b }", graphqlVariables()] as never,
+		[REVIEW_THREADS_QUERY, [["bad-name", "x"]] as never],
+		[REVIEW_THREADS_QUERY, [["query", "x"]] as never],
+		[REVIEW_THREADS_QUERY, [["owner", true]] as never],
+		[REVIEW_THREADS_QUERY, [["pr", 1.5]] as never],
+		[REVIEW_THREADS_QUERY, [["pr", Number.MAX_SAFE_INTEGER + 1]] as never],
+		[REVIEW_THREADS_QUERY, [["cursor", "a".repeat(513)]] as never],
+		[REVIEW_THREADS_QUERY, [["repo", "o\nr"]] as never],
+	];
+	for (const [query, variables] of cases) {
+		const outcome = await runner.graphql(query, variables);
+		assert.equal(outcome.kind, "error", `${query.slice(0, 20)} / ${JSON.stringify(variables)}`);
+	}
+	assert.equal(spawns, 0, "validation runs before any spawn");
 });
 
 test("reaping: the promise resolves only after the child reports close", async () => {

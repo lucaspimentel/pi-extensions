@@ -1,8 +1,9 @@
 /**
  * gh-read API operations: pinned repository contents and trees, combined
  * commit checks, exact advisory lookup, check-run annotations, repository
- * metadata, and mutable PR comments/reviews. Operation orchestration and
- * result rendering live together in this module.
+ * metadata, mutable PR comments/reviews, and PR review threads (resolved and
+ * outdated included) over a tool-authored GraphQL POST. Operation
+ * orchestration and result rendering live together in this module.
  *
  * Contract highlights (docs/gh-read-design.md, "GitHub API operations"):
  * - Omitted refs resolve through repository default-branch metadata, then
@@ -18,8 +19,11 @@
  *   target/query, pinned SHA, and independent per-source page/done states;
  *   they are matched against the invocation and resumed refs are never
  *   re-resolved.
- * - External jq filtering (jq.ts) is preflighted BEFORE network access and
- *   applied once to the final newly fetched batch, never to tool metadata.
+ * - External jq filtering (jq.ts) is applied once to the final newly fetched
+ *   batch, never to tool metadata. For API operations the filter is compiled
+ *   AFTER the fetch and before jq execution: the only prepareJq call is
+ *   inside runToolJq, which renderData reaches once the data is already in
+ *   hand (the expression's safety gates still run before any jq child).
  * - The displayed result is capped at API_DISPLAY_CAP bytes including
  *   metadata, escaping, diagnostics, and notices; overflow produces an
  *   explicitly incomplete UTF-8-safe prefix preview plus narrowing guidance.
@@ -162,6 +166,15 @@ function annotationsEndpoint(repo: string, checkRunId: number): string {
 	return `repos/${owner}/${name}/check-runs/${checkRunId}/annotations?${buildQuery([["per_page", PAGE_SIZE]])}`;
 }
 
+/**
+ * The one GraphQL document the tool ever sends: a pull request's review
+ * threads with their first 100 comments each, paginated by cursor. It is a
+ * fixed module constant (never caller-supplied text); the only variable
+ * values are the validated owner, repo, pr, and cursor.
+ */
+export const REVIEW_THREADS_QUERY =
+	"query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){url reviewThreads(first:100, after:$cursor){totalCount pageInfo{hasNextPage endCursor} nodes{id isResolved isOutdated path line startLine comments(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{id databaseId author{login __typename} body createdAt url}}}}}}}";
+
 // ── Link-header pagination ───────────────────────────────────────────────────
 
 /** Extracts the rel="next" target from a retained header block, or null. */
@@ -268,6 +281,33 @@ function decodePrReadContinuation(record: Record<string, unknown>): PrReadContin
 	return record as unknown as PrReadContinuation;
 }
 
+/**
+ * Cursor-based continuation for the GraphQL review-thread read. `first` is
+ * pinned at the page size (the operation never changes it) and `cursor` is
+ * the last observed endCursor, or null for a first-page retry.
+ */
+interface PrThreadsContinuation {
+	v: 1;
+	op: "pr threads";
+	repo: string;
+	pr: number;
+	first: 100;
+	cursor: string | null;
+}
+
+/** Opaque GitHub cursors, bounded to printable ASCII. */
+const GRAPHQL_CURSOR_RE = /^[\x21-\x7e]{1,512}$/;
+
+function decodePrThreadsContinuation(record: Record<string, unknown>): PrThreadsContinuation | null {
+	if (record["v"] !== 1 || record["op"] !== "pr threads") return null;
+	if (typeof record["repo"] !== "string") return null;
+	if (typeof record["pr"] !== "number" || !Number.isSafeInteger(record["pr"]) || record["pr"] < 1) return null;
+	if (record["first"] !== PAGE_SIZE) return null;
+	const cursor = record["cursor"];
+	if (cursor !== null && (typeof cursor !== "string" || !GRAPHQL_CURSOR_RE.test(cursor))) return null;
+	return record as unknown as PrThreadsContinuation;
+}
+
 interface IssueCommentsContinuation {
 	v: 1;
 	op: "issue comments";
@@ -288,7 +328,12 @@ function decodeIssueCommentsContinuation(record: Record<string, unknown>): Issue
 	return record as unknown as IssueCommentsContinuation;
 }
 
-type ContinuationPayload = CommitChecksContinuation | AdvisoryContinuation | PrReadContinuation | IssueCommentsContinuation;
+type ContinuationPayload =
+	| CommitChecksContinuation
+	| AdvisoryContinuation
+	| PrReadContinuation
+	| IssueCommentsContinuation
+	| PrThreadsContinuation;
 
 function encodeContinuation(payload: ContinuationPayload): { ok: true; token: string } | { ok: false; reason: string } {
 	const token = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
@@ -307,6 +352,7 @@ function decodeContinuation(token: string): ContinuationPayload | null {
 		if (record["op"] === "commit checks" || record["op"] === "advisory view") return parsed as ContinuationPayload;
 		if (record["op"] === "pr comments" || record["op"] === "pr reviews") return decodePrReadContinuation(record);
 		if (record["op"] === "issue comments") return decodeIssueCommentsContinuation(record);
+		if (record["op"] === "pr threads") return decodePrThreadsContinuation(record);
 		return null;
 	} catch {
 		return null;
@@ -394,6 +440,58 @@ function parseJsonObject(body: string): Record<string, unknown> | string {
 	} catch {
 		return "response body was not valid JSON";
 	}
+}
+
+/**
+ * Strips C0/C1 control characters plus U+2028/U+2029 line separators from
+ * externally sourced head text (a PR URL or a GraphQL error message) and
+ * truncates to 500 characters, so a hostile or malformed value cannot inject
+ * lines into the rendered metadata/notices head.
+ */
+function sanitizeHeadText(value: string): string {
+	return value.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, "").slice(0, 500);
+}
+
+/**
+ * Extracts the sanitized `message` strings of one GraphQL `errors` array.
+ * Entries without a string `message` are dropped and messages are sanitized;
+ * dedupe and the 10-line cap are deliberately NOT applied here. The caller
+ * accumulates the strings across every page of a traversal and applies
+ * `boundGraphqlMessages` once at the end, so the bound is per invocation: a
+ * 10-page read whose pages each carry `errors` still shows at most 10 notice
+ * lines in total, however long the metadata head grows.
+ */
+function extractGraphqlMessages(raw: unknown): string[] {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
+	const errors = (raw as Record<string, unknown>)["errors"];
+	if (!Array.isArray(errors)) return [];
+	const messages: string[] = [];
+	for (const entry of errors) {
+		if (typeof entry !== "object" || entry === null) continue;
+		const message = (entry as Record<string, unknown>)["message"];
+		if (typeof message !== "string") continue;
+		messages.push(sanitizeHeadText(message));
+	}
+	return messages;
+}
+
+/**
+ * Renders the messages accumulated for one invocation as at most 10 notice
+ * lines. Duplicates are removed preserving first-seen order and the count of
+ * any remaining distinct messages is appended as a single omission notice.
+ */
+function boundGraphqlMessages(messages: readonly string[]): string[] {
+	const seen = new Set<string>();
+	const distinct: string[] = [];
+	for (const message of messages) {
+		if (seen.has(message)) continue;
+		seen.add(message);
+		distinct.push(message);
+	}
+	const shown = distinct.slice(0, 10).map((message) => `GraphQL error: ${message}`);
+	const remaining = distinct.length - shown.length;
+	if (remaining > 0) shown.push(`${remaining} more GraphQL error messages omitted`);
+	return shown;
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
@@ -1167,6 +1265,9 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 		request: async (path) => clock.now() >= requester.deadline()
 			? { kind: "stop", reason: "shared deadline exceeded between responses" }
 			: await requester.request(path),
+		graphql: async (query, variables) => clock.now() >= requester.deadline()
+			? { kind: "stop", reason: "shared deadline exceeded between responses" }
+			: await requester.graphql(query, variables),
 		capturedBytes: () => requester.capturedBytes(),
 		budgetExhausted: () => requester.budgetExhausted(),
 		deadline: () => requester.deadline(),
@@ -1192,6 +1293,219 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 		}
 	}
 	return await renderData(invocation, summary, metadata, result.items, notices, isError, requester, deps);
+}
+
+// ── Operation: PR review threads (tool-authored GraphQL) ─────────────────
+
+/**
+ * One parsed review-thread page. A malformed shape is an error; a well-formed
+ * page whose `pageInfo.hasNextPage` is true but whose `endCursor` is missing
+ * or unusable is a NON-error incomplete stop: its nodes are still returned,
+ * but `cannotContinue` records that the traversal stops there (so no
+ * continuation is emitted).
+ */
+type PrThreadsPage =
+	| { kind: "page"; nodes: unknown[]; hasNextPage: boolean; endCursor: string | null; totalCount: number | undefined; url: string | undefined; cannotContinue?: string }
+	| { kind: "error"; reason: string };
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Applies the one shape rule to the GraphQL data envelope of one page. */
+function parseReviewThreadsPage(raw: unknown): PrThreadsPage {
+	if (!isPlainObject(raw)) return { kind: "error", reason: "reviewThreads response was not a JSON object" };
+	const data = raw["data"];
+	if (!isPlainObject(data)) return { kind: "error", reason: "GraphQL response had no data object" };
+	const repository = data["repository"];
+	if (!isPlainObject(repository)) return { kind: "error", reason: "GraphQL response had no repository object" };
+	const pullRequest = repository["pullRequest"];
+	if (!isPlainObject(pullRequest)) return { kind: "error", reason: "GraphQL response had no pullRequest object" };
+	const reviewThreads = pullRequest["reviewThreads"];
+	if (!isPlainObject(reviewThreads)) return { kind: "error", reason: "GraphQL response had no reviewThreads object" };
+	const nodes = reviewThreads["nodes"];
+	if (!Array.isArray(nodes)) return { kind: "error", reason: "reviewThreads had no nodes array" };
+	const pageInfo = reviewThreads["pageInfo"];
+	const hasNextPage = isPlainObject(pageInfo) ? pageInfo["hasNextPage"] : undefined;
+	if (typeof hasNextPage !== "boolean") return { kind: "error", reason: "reviewThreads pageInfo had no boolean hasNextPage" };
+	const rawTotal = reviewThreads["totalCount"];
+	const totalCount = typeof rawTotal === "number" && Number.isFinite(rawTotal) ? rawTotal : undefined;
+	const url = typeof pullRequest["url"] === "string" ? sanitizeHeadText(pullRequest["url"]) : undefined;
+	if (!hasNextPage) return { kind: "page", nodes: nodes as unknown[], hasNextPage: false, endCursor: null, totalCount, url };
+	const endCursor = isPlainObject(pageInfo) ? pageInfo["endCursor"] : undefined;
+	if (typeof endCursor !== "string" || !GRAPHQL_CURSOR_RE.test(endCursor)) {
+		return {
+			kind: "page",
+			nodes: nodes as unknown[],
+			hasNextPage: true,
+			endCursor: null,
+			totalCount,
+			url,
+			cannotContinue: "reviewThreads reported hasNextPage true but no usable endCursor; the traversal cannot continue from this page",
+		};
+	}
+	return { kind: "page", nodes: nodes as unknown[], hasNextPage: true, endCursor, totalCount, url };
+}
+
+/** Threads whose comments.totalCount exceeds the returned comments.nodes. */
+function countThreadsWithTruncatedComments(nodes: unknown[]): number {
+	let count = 0;
+	for (const node of nodes) {
+		if (!isPlainObject(node)) continue;
+		const comments = node["comments"];
+		if (!isPlainObject(comments)) continue;
+		const total = comments["totalCount"];
+		const commentNodes = comments["nodes"];
+		if (typeof total === "number" && Number.isSafeInteger(total) && Array.isArray(commentNodes) && total > commentNodes.length) count += 1;
+	}
+	return count;
+}
+
+/**
+ * Cursor-paged GraphQL review-thread read. The three standing notices are
+ * pushed before any continuation matching so they survive mismatch errors,
+ * jq errors, and display clipping. A continuation is emitted whenever the
+ * traversal is not done, including on the error path (retrying the failed
+ * page), except for the non-continuable incomplete stop above.
+ */
+async function opPrThreads(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
+	const repo = invocation.repo!;
+	const pr = invocation.pr!;
+	const [owner, name] = splitRepo(repo);
+	const summary = `gh_read api: pr threads ${repo} PR ${pr}`;
+	const metadata: Array<[string, string | number | boolean | null]> = [["repo", repo], ["pr", pr]];
+	// Standing notices BEFORE any continuation matching.
+	const notices: string[] = [
+		"resolved and outdated threads are included with nothing filtered; every reviewThreads node is returned verbatim",
+		"threads and comments are mutable reads, not commit-pinned or transactional snapshots; cursor paging can miss or duplicate threads that change between pages, so completion describes the observed traversal",
+		"each thread carries at most its first 100 comments, and deeper per-thread comment paging is unsupported in this version; threads_with_truncated_comments counts threads whose comments.totalCount exceeds their returned comments, and comments restart at their first page on resume",
+	];
+	let cursor: string | null = null;
+	if (invocation.continuation !== undefined) {
+		const payload = decodeContinuation(invocation.continuation);
+		if (payload === null || payload.op !== "pr threads" || payload.repo !== repo || payload.pr !== pr) {
+			const field =
+				payload === null
+					? "continuation token"
+					: payload.op !== "pr threads"
+						? "operation"
+						: payload.repo !== repo
+							? "repo"
+							: "pr";
+			return renderResult(summary, metadata, "", {
+				isError: true,
+				notices: [...notices, `continuation does not match this invocation (${field} differs)`],
+			});
+		}
+		cursor = payload.cursor;
+		metadata.push(["resumed", true]);
+		notices.push("a resumed result contains only the newly fetched threads, not threads returned by earlier invocations");
+	}
+
+	// Check the deadline between responses without changing the runner's
+	// interrupted-response errors.
+	const clock = deps?.clock ?? defaultClock;
+	const pagedRequester: ApiRequester = {
+		request: async (path) =>
+			clock.now() >= requester.deadline() ? { kind: "stop", reason: "shared deadline exceeded between responses" } : await requester.request(path),
+		graphql: async (query, variables) =>
+			clock.now() >= requester.deadline() ? { kind: "stop", reason: "shared deadline exceeded between responses" } : await requester.graphql(query, variables),
+		capturedBytes: () => requester.capturedBytes(),
+		budgetExhausted: () => requester.budgetExhausted(),
+		deadline: () => requester.deadline(),
+	};
+
+	const nodes: unknown[] = [];
+	// Sanitized messages from every page, deduped and capped once at the end
+	// (see extractGraphqlMessages) so the 10-line bound is per invocation.
+	const graphqlMessages: string[] = [];
+	let pagesFetched = 0;
+	let done = false;
+	let error: string | undefined;
+	let stopReason: string | undefined;
+	let nonContinuable = false;
+	let continuationCursor: string | null = cursor;
+	let threadsTotal: number | undefined;
+	let prUrl: string | undefined;
+	let threadsWithTruncatedComments = 0;
+
+	while (pagesFetched < MAX_PAGES_PER_SOURCE) {
+		if (pagedRequester.budgetExhausted()) {
+			stopReason = `captured-output budget of ${API_STDOUT_BUDGET} bytes exhausted between responses`;
+			break;
+		}
+		const requestCursor = cursor;
+		const variables: Array<readonly [string, string | number]> = [["owner", owner], ["repo", name], ["pr", pr]];
+		if (cursor !== null) variables.push(["cursor", cursor]);
+		const outcome = await pagedRequester.graphql(REVIEW_THREADS_QUERY, variables);
+		if (isGhApiStop(outcome)) {
+			stopReason = outcome.reason;
+			break;
+		}
+		if (isGhApiError(outcome)) {
+			error = describeRequestFailure("GraphQL review-thread read", outcome);
+			continuationCursor = requestCursor;
+			break;
+		}
+		pagesFetched += 1;
+		let parsedBody: unknown;
+		try {
+			parsedBody = JSON.parse(outcome.body) as unknown;
+		} catch {
+			error = "reviewThreads response body was not valid JSON";
+			continuationCursor = requestCursor;
+			break;
+		}
+		// Append messages before the shape check so a shape error still shows
+		// the GraphQL cause.
+		graphqlMessages.push(...extractGraphqlMessages(parsedBody));
+		const page = parseReviewThreadsPage(parsedBody);
+		if (page.kind === "error") {
+			error = page.reason;
+			continuationCursor = requestCursor;
+			break;
+		}
+		nodes.push(...page.nodes);
+		if (page.totalCount !== undefined) threadsTotal = page.totalCount;
+		if (page.url !== undefined) prUrl = page.url;
+		threadsWithTruncatedComments += countThreadsWithTruncatedComments(page.nodes);
+		if (page.cannotContinue !== undefined) {
+			stopReason = page.cannotContinue;
+			nonContinuable = true;
+			break;
+		}
+		if (!page.hasNextPage || page.endCursor === null) {
+			done = true;
+			break;
+		}
+		cursor = page.endCursor;
+		continuationCursor = page.endCursor;
+	}
+	if (!done && error === undefined && stopReason === undefined) {
+		stopReason = `page limit reached (${MAX_PAGES_PER_SOURCE} pages x ${PAGE_SIZE} threads per invocation)`;
+	}
+
+	if (prUrl !== undefined) metadata.push(["pr_url", prUrl]);
+	if (threadsTotal !== undefined) metadata.push(["threads_total", threadsTotal]);
+	metadata.push(
+		["source_complete", done],
+		["threads_returned", nodes.length],
+		["pages_fetched", pagesFetched],
+		["threads_with_truncated_comments", threadsWithTruncatedComments],
+	);
+	let isError = error !== undefined;
+	if (error !== undefined) metadata.push(["source_error", error]);
+	if (stopReason !== undefined) metadata.push(["incomplete_reason", stopReason]);
+	if (!done && !nonContinuable) {
+		const encoded = encodeContinuation({ v: 1, op: "pr threads", repo, pr, first: PAGE_SIZE, cursor: continuationCursor });
+		if (encoded.ok) metadata.push(["continuation", encoded.token]);
+		else {
+			isError = true;
+			notices.push(`continuation could not be encoded: ${encoded.reason}`);
+		}
+	}
+	notices.push(...boundGraphqlMessages(graphqlMessages));
+	return await renderData(invocation, summary, metadata, nodes, notices, isError, requester, deps);
 }
 
 // ── Operation: check-run annotations ──────────────────────────────────────
@@ -1290,5 +1604,7 @@ async function dispatchOperation(
 		case "pr reviews":
 		case "issue comments":
 			return await opDiscussionRead(invocation, requester, deps);
+		case "pr threads":
+			return await opPrThreads(invocation, requester, deps);
 	}
 }

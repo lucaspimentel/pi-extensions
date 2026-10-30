@@ -3,7 +3,9 @@
  *
  * Applies a caller-supplied jq expression to JSON data using the system jq
  * binary, fail-closed: jq is only invoked when the caller requested jq, and
- * only after three preflight gates complete BEFORE any network access:
+ * only after three preflight gates complete (for API operations the compile
+ * gate runs AFTER the GitHub fetch, since the filter is compiled on the way
+ * into the jq child; the safety gates still precede the jq child itself):
  *
  *   1. Executable resolution: an absolute jq path is resolved from PATH.
  *   2. Expression safety: a lexical security check grounded in jq's grammar
@@ -280,7 +282,8 @@ function doSpawn(jqPath: string, argv: string[], env: Record<string, string>): S
 
 /**
  * Compilation preflight: jq compiles the expression against a null input.
- * Exit 3 (compile error) rejects before any network access. Runtime errors
+ * Exit 3 (compile error) rejects before the jq child runs (for API
+ * operations the GitHub fetch has already happened by then). Runtime errors
  * (exit 5) still prove the expression compiled, so they pass preflight.
  */
 async function compilePreflight(

@@ -6,7 +6,7 @@
  * flag allowlists, value validators, and final argv construction, plus
  * structured validation for the narrowly scoped GitHub API operations
  * (repo contents, repo tree, commit checks, advisory view, check annotations,
- * repo metadata).
+ * repo metadata, pr comments, pr reviews, issue comments, pr threads).
  *
  * This module is pure (no pi imports) so the argv layout can be unit-tested
  * directly; spawn.ts consumes `ValidInvocation.argv` as a cross-step contract.
@@ -463,11 +463,11 @@ function appendToolAuthoredTokens(subcommand: GhSubcommand, argv: string[]): str
 
 // ── Structured GitHub API operations ────────────────────────────────────────
 //
-// The nine API operations use structured parameters (never the legacy args
+// The ten API operations use structured parameters (never the legacy args
 // array, never gh api with caller flags). They target github.com only and
 // are exempt from the worktree gate; api-spawn.ts owns the transport.
 
-export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata", "pr comments", "pr reviews", "issue comments"] as const;
+export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata", "pr comments", "pr reviews", "issue comments", "pr threads"] as const;
 
 export type ApiOperation = (typeof API_OPERATIONS)[number];
 
@@ -500,6 +500,7 @@ const OPERATION_FIELDS: Record<ApiOperation, ReadonlySet<string>> = {
 	"pr comments": new Set(["repo", "pr", "continuation", "jq"]),
 	"pr reviews": new Set(["repo", "pr", "continuation", "jq"]),
 	"issue comments": new Set(["repo", "issue", "continuation", "jq"]),
+	"pr threads": new Set(["repo", "pr", "jq", "continuation"]),
 };
 
 export interface ValidApiInvocation {
@@ -526,7 +527,7 @@ export interface ValidApiInvocation {
 	continuation?: string;
 	/** Check annotations: the check run id whose annotations are fetched. */
 	checkRunId?: number;
-	/** PR comments/reviews: positive safe integer pull request number. */
+	/** PR comments/reviews/threads: positive safe integer pull request number. */
 	pr?: number;
 	/** Issue comments: positive safe integer issue number. */
 	issue?: number;
@@ -723,7 +724,7 @@ export function validateApiInvocation(params: unknown): ValidApiInvocation | { o
 		}
 	}
 
-	if (op === "pr comments" || op === "pr reviews") {
+	if (op === "pr comments" || op === "pr reviews" || op === "pr threads") {
 		const rawPr = record["pr"];
 		if (rawPr === undefined) return apiInvalid("pr is required");
 		const prError = checkLineNumber(rawPr, "pr");

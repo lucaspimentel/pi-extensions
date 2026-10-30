@@ -102,12 +102,13 @@ test("every built-in tool name maps to its class", () => {
 	}
 });
 
-test("gh_read (covering pr comments, pr reviews, and issue comments) is remote-read; configured overrides still win", () => {
+test("gh_read (covering pr comments, pr reviews, pr threads, and issue comments) is remote-read; configured overrides still win", () => {
 	assert.equal(classifyToolCall("gh_read"), "remote-read");
 	// All discussion reads are the same tool call: classification is per tool,
 	// not per subcommand, so every op rides the single remote-read mapping.
 	assert.equal(classifyToolCall("gh_read", { subcommand: "pr comments", repo: "o/r", pr: 9 }), "remote-read");
 	assert.equal(classifyToolCall("gh_read", { subcommand: "pr reviews", repo: "o/r", pr: 9 }), "remote-read");
+	assert.equal(classifyToolCall("gh_read", { subcommand: "pr threads", repo: "o/r", pr: 9 }), "remote-read");
 	assert.equal(classifyToolCall("gh_read", { subcommand: "issue comments", repo: "o/r", issue: 9 }), "remote-read");
 	// The built-in entry wins over annotations and the name heuristic.
 	assert.equal(

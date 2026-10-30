@@ -18,7 +18,10 @@
  * is rejected as interrupted even if the retained prefix would parse.
  *
  * Unlike the native commands, API requests name an explicit github.com
- * repository, so no git worktree gate runs anywhere in this module.
+ * repository, so no git worktree gate runs anywhere in this module. Two
+ * transports share one runner: `request` issues a REST GET, `graphql` issues
+ * a tool-authored GraphQL POST (validated before any spawn, with the same
+ * deadline, budget, and teardown).
  *
  * Injectable seams (spawn function, clock) keep the whole module testable
  * network-free.
@@ -96,8 +99,18 @@ export function isGhApiStop(outcome: ApiRequestOutcome): outcome is GhApiStop {
 }
 
 export interface ApiRequester {
-	/** Issues one GET against github.com; pathAndQuery is already encoded. */
+	/**
+	 * Issues one REST GET against github.com; pathAndQuery is already encoded.
+	 * `graphql` issues a tool-authored GraphQL POST instead; both share the
+	 * same deadline, captured-output budget, and teardown behavior.
+	 */
 	request(pathAndQuery: string): Promise<ApiRequestOutcome>;
+	/**
+	 * Issues a tool-authored GraphQL POST. The query and variables are
+	 * validated before any spawn; variables are transported as `-f`
+	 * (string) or `-F` (number) pairs in caller order.
+	 */
+	graphql(query: string, variables: ReadonlyArray<readonly [string, string | number]>): Promise<ApiRequestOutcome>;
 	/** Cumulative captured response bytes (headers included) so far. */
 	capturedBytes(): number;
 	/** True once the budget has been exhausted mid-response or up front. */
@@ -134,6 +147,47 @@ export interface ApiRunnerOptions {
  * mid-response truncation the runner is poisoned: further requests are
  * refused as stops because no later response could be parsed reliably.
  */
+/** GraphQL variable names: the GraphQL name production. */
+const GRAPHQL_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Control characters rejected in the query and in string variable values. */
+const GRAPHQL_CONTROL_RE = /[\u0000-\u001F\u007F]/;
+/** Caller string values ride `-f`, so they are bounded to keep argv sane. */
+const GRAPHQL_VALUE_MAX_CHARS = 512;
+
+/**
+ * Validates a tool-authored GraphQL request before any spawn: the query must
+ * be a non-empty string without control characters, every variable name must
+ * be a GraphQL name other than `query`, and every value must be either a
+ * string without control characters of at most 512 characters or a safe
+ * integer. Returns a rejection reason, or null when the request is valid.
+ */
+function graphqlArgError(query: string, variables: ReadonlyArray<readonly [string, string | number]>): string | null {
+	if (typeof query !== "string" || query.length === 0) return "graphql query must be a non-empty string";
+	if (GRAPHQL_CONTROL_RE.test(query)) return "graphql query must not contain control characters";
+	for (const [name, value] of variables) {
+		if (!GRAPHQL_NAME_RE.test(name)) return `graphql variable name '${name}' is not a valid GraphQL name`;
+		if (name === "query") return "graphql variable name must not be 'query'";
+		if (typeof value === "number") {
+			if (!Number.isSafeInteger(value)) return `graphql variable '${name}' must be a safe integer`;
+			continue;
+		}
+		if (typeof value !== "string") return `graphql variable '${name}' must be a string or a safe integer`;
+		if (value.length > GRAPHQL_VALUE_MAX_CHARS) return `graphql variable '${name}' must be at most ${GRAPHQL_VALUE_MAX_CHARS} characters`;
+		if (GRAPHQL_CONTROL_RE.test(value)) return `graphql variable '${name}' must not contain control characters`;
+	}
+	return null;
+}
+
+/** True when a decoded body is a JSON object (arrays and null are not). */
+function isJsonObject(text: string): boolean {
+	try {
+		const parsed = JSON.parse(text) as unknown;
+		return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+	} catch {
+		return false;
+	}
+}
+
 export class GhApiRunner implements ApiRequester {
 	readonly deadlineAt: number;
 	private bytes = 0;
@@ -168,7 +222,12 @@ export class GhApiRunner implements ApiRequester {
 		return Math.max(0, this.deadlineAt - this.clock.now());
 	}
 
-	async request(pathAndQuery: string): Promise<ApiRequestOutcome> {
+	/**
+	 * Refusals shared by every transport before a spawn: a poisoned runner, an
+	 * exhausted up-front budget, an aborted signal, and an already-expired
+	 * deadline. Returns null when a request may proceed.
+	 */
+	private preflightOutcome(): ApiRequestOutcome | null {
 		if (this.poisoned) {
 			return { kind: "stop", reason: "captured-output budget exceeded on an earlier response; later requests refused" };
 		}
@@ -181,8 +240,48 @@ export class GhApiRunner implements ApiRequester {
 		if (this.remainingMs() <= 0) {
 			return { kind: "error", reason: `shared ${API_DEADLINE_MS} ms deadline exceeded before request`, interrupted: true };
 		}
+		return null;
+	}
 
-		const argv: string[] = [...COMMON_ARGV, pathAndQuery];
+	async request(pathAndQuery: string): Promise<ApiRequestOutcome> {
+		return await this.executeArgv([...COMMON_ARGV, pathAndQuery], "rest");
+	}
+
+	/**
+	 * Tool-authored GraphQL POST. GitHub's `-f` does NOT expand `{placeholder}`
+	 * values while `-F` does, so every caller-derived string rides `-f` and
+	 * only the validated integer uses `-F`; a `{` or `%` in a repo name can
+	 * never be expanded or reinterpreted.
+	 */
+	async graphql(query: string, variables: ReadonlyArray<readonly [string, string | number]>): Promise<ApiRequestOutcome> {
+		const argumentError = graphqlArgError(query, variables);
+		if (argumentError !== null) return { kind: "error", reason: argumentError };
+		const preflight = this.preflightOutcome();
+		if (preflight !== null) return preflight;
+		const argv: string[] = [
+			"api",
+			"graphql",
+			"--hostname",
+			"github.com",
+			"--method",
+			"POST",
+			"--header",
+			"Accept: application/vnd.github+json",
+			"--header",
+			"X-GitHub-Api-Version: 2022-11-28",
+			"--include",
+			"-f",
+			`query=${query}`,
+		];
+		for (const [name, value] of variables) {
+			argv.push(typeof value === "number" ? "-F" : "-f", `${name}=${value}`);
+		}
+		return await this.executeArgv(argv, "graphql");
+	}
+
+	private async executeArgv(argv: string[], mode: "rest" | "graphql"): Promise<ApiRequestOutcome> {
+		const preflight = this.preflightOutcome();
+		if (preflight !== null) return preflight;
 		const spawnFn = spawnOverride ?? spawn;
 		let child: ReturnType<typeof spawn>;
 		try {
@@ -359,7 +458,13 @@ export class GhApiRunner implements ApiRequester {
 					resolvePromise({ kind: "error", reason: "response body contained malformed UTF-8", stderr, interrupted: true });
 					return;
 				}
-				if (code !== 0) {
+				// GraphQL tolerance: GitHub's `api graphql` exits 1 even when the
+				// response carries usable data beside an `errors` array. Accept that
+				// exit only with a 2xx status AND a JSON object body; every other
+				// nonzero code (REST always) keeps the error path below.
+				const graphqlAccepted =
+					mode === "graphql" && code === 1 && httpStatus >= 200 && httpStatus < 300 && isJsonObject(bodyText);
+				if (code !== 0 && !graphqlAccepted) {
 					if (httpStatus >= 400) {
 						resolvePromise({
 							kind: "error",

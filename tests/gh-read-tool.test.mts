@@ -11,6 +11,7 @@ import { test } from "node:test";
 
 import ghReadExtension from "../extensions/gh-read/index.ts";
 import { PR_CHECKS_JSON_FIELDS } from "../extensions/gh-read/validate.ts";
+import { REVIEW_THREADS_QUERY } from "../extensions/gh-read/api.ts";
 import { setSpawnOverride } from "../extensions/shared/bounded-spawn.ts";
 import { setApiSpawnOverride } from "../extensions/gh-read/api-spawn.ts";
 import { setLogSpawnOverride } from "../extensions/gh-read/log-spawn.ts";
@@ -20,6 +21,7 @@ import { setLogSpawnOverride } from "../extensions/gh-read/log-spawn.ts";
 interface RegisteredTool {
 	name: string;
 	description: string;
+	promptSnippet: string;
 	parameters: unknown;
 	promptGuidelines: string[];
 	annotations: Record<string, unknown>;
@@ -781,5 +783,187 @@ test("execute api pr reviews: a later-page failure is an error that retains comp
 	assert.equal(result.isError, true, "HTTP errors pass through without automatic retries");
 	assert.ok(result.content[0].text.includes("review one"), "completed page data is preserved");
 	assert.ok(typeof result.details["continuation"] === "string", "the failed page is kept as the retry position");
+	setApiSpawnOverride(null);
+});
+
+// ── pr threads (GraphQL review threads) ─────────────────────────────────────
+
+const threadsPayload = (hasNextPage: boolean, endCursor: string | null): string =>
+	JSON.stringify({
+		data: {
+			repository: {
+				pullRequest: {
+					url: "https://github.com/owner/repo/pull/9",
+					reviewThreads: {
+						totalCount: 1,
+						pageInfo: { hasNextPage, endCursor },
+						nodes: [
+							{
+								id: "PRRT_1",
+								isResolved: true,
+								isOutdated: false,
+								path: "src/x.ts",
+								line: 42,
+								comments: {
+									totalCount: 1,
+									pageInfo: { hasNextPage: false, endCursor: null },
+									nodes: [{ id: "PRRC_1", databaseId: 7, author: { login: "alice", __typename: "User" }, body: "please fix", createdAt: "2026-01-01T00:00:00Z", url: "https://github.com/owner/repo/pull/9#discussion_r7" }],
+								},
+							},
+						],
+					},
+				},
+			},
+		},
+	});
+
+test("gh_read registers the pr threads literal and GraphQL review-thread guidance", () => {
+	const tool = register();
+	assert.ok(JSON.stringify(tool.parameters).includes('"const":"pr threads"'), "schema literal 'pr threads'");
+	assert.ok(tool.description.includes("pr threads"), "description names the operation");
+	assert.ok(tool.promptSnippet.includes("pr threads"), "promptSnippet names the operation");
+	assert.ok(tool.description.includes("reviewThreads"), "description names the GraphQL payload");
+	const has = (...parts: string[]): boolean => tool.promptGuidelines.some((line) => parts.every((p) => line.includes(p)));
+	assert.ok(has("'pr threads'", "GraphQL review-thread read"), "operation-name mapping for the GraphQL read");
+	assert.ok(has("'pr threads'", "resolved/outdated"), "the PR-discussions bullet points at pr threads for resolved/outdated state");
+	assert.ok(has("do not derive it"), "the never-derive-it warning survives");
+	assert.ok(has("never derive it from comment line fields"), "the shapes bullet names the REST reads as the ones without thread state");
+	assert.ok(has("'pr threads'", "page independently"), "the paging bullets enumerate pr threads");
+	assert.equal(tool.promptGuidelines.length, 14, "guideline count");
+	// No reference to the personal gh extension may leak into the guidance.
+	assert.ok(!tool.promptGuidelines.some((line) => line.includes("gh pr-threads")), "no gh-extension reference in the guidance");
+});
+
+test("execute: rejected pr threads params fail closed with zero spawns", async () => {
+	const tool = register();
+	let spawns = 0;
+	setSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	setApiSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	for (const bad of [
+		{ subcommand: "pr threads", repo: "owner/repo" }, // missing pr
+		{ subcommand: "pr threads", repo: "owner/repo", pr: "9" }, // string pr never coerced
+		{ subcommand: "pr threads", repo: "owner/repo", pr: 0 }, // below the positive range
+		{ subcommand: "pr threads", pr: 9 }, // missing repo
+		{ subcommand: "pr threads", repo: "owner/repo", pr: 9, args: [] }, // structured ops reject args
+		{ subcommand: "pr threads", repo: "owner/repo", pr: 9, ref: "main" }, // unrelated structured field
+		{ subcommand: "pr threads", repo: "owner/repo", pr: 9, cursor: "CURSOR1" }, // caller cursors are never accepted
+		{ subcommand: "pr threads", repo: "owner/repo", pr: 9, first: 100 }, // page size is fixed
+		{ subcommand: "pr threads", repo: "owner/repo", pr: 9, "2>&1": true }, // redirection-shaped field
+	]) {
+		const result = await tool.execute("id", bad, undefined, null, { cwd: "/repo" });
+		assert.equal(result.isError, true, JSON.stringify(bad));
+		assert.ok(result.content[0].text.startsWith("gh_read: "), JSON.stringify(bad));
+	}
+	assert.equal(spawns, 0, "no child process for rejected invocations");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
+test("execute api pr threads: tool-authored GraphQL POST, no git gate, verbatim nodes outside a worktree", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setSpawnOverride(() => {
+		throw new Error("no git gate or ref resolution may spawn on the GraphQL path");
+	});
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => httpOk(child, threadsPayload(false, null)));
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "pr threads", repo: "owner/repo", pr: 9 }, undefined, null, { cwd: "/not-a-worktree" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(argsList.length, 1, "exactly one gh api child; no ref resolution or git gate");
+	assert.deepEqual(argsList[0], [
+		"api",
+		"graphql",
+		"--hostname",
+		"github.com",
+		"--method",
+		"POST",
+		"--header",
+		"Accept: application/vnd.github+json",
+		"--header",
+		"X-GitHub-Api-Version: 2022-11-28",
+		"--include",
+		"-f",
+		`query=${REVIEW_THREADS_QUERY}`,
+		"-f",
+		"owner=owner",
+		"-f",
+		"repo=repo",
+		"-F",
+		"pr=9",
+	]);
+	assert.ok(result.content[0].text.includes('"isResolved":true'), "resolved state passes through verbatim");
+	assert.ok(result.content[0].text.includes('"isOutdated":false'));
+	assert.ok(result.content[0].text.includes('"__typename":"User"'));
+	assert.ok(result.content[0].text.includes("pr_url: https://github.com/owner/repo/pull/9"));
+	assert.match(result.content[0].text, /resolved and outdated threads are included/);
+	assert.equal(result.details["subcommand"], "pr threads");
+	assert.equal(result.details["source_complete"], true);
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
+test("execute api pr threads: a resume token rides -f cursor= and cross-operation tokens are rejected", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => httpOk(child, threadsPayload(false, null)));
+		return child;
+	}) as never);
+	const token = Buffer.from(JSON.stringify({ v: 1, op: "pr threads", repo: "owner/repo", pr: 9, first: 100, cursor: "CURSOR9" })).toString("base64url");
+	const resumed = await tool.execute("id", { subcommand: "pr threads", repo: "owner/repo", pr: 9, continuation: token }, undefined, null, { cwd: "/w" });
+	assert.equal(resumed.isError, undefined, resumed.content[0].text);
+	assert.equal(argsList.length, 1);
+	assert.deepEqual(argsList[0]!.slice(-2), ["-f", "cursor=CURSOR9"]);
+	assert.match(resumed.content[0].text, /only the newly fetched threads/);
+
+	// Cross-operation tokens reject before any request.
+	const commentsToken = Buffer.from(JSON.stringify({ v: 1, op: "pr comments", repo: "owner/repo", pr: 9, perPage: 100, source: { page: 2, done: false } })).toString("base64url");
+	const issueToken = Buffer.from(JSON.stringify({ v: 1, op: "issue comments", repo: "owner/repo", issue: 9, perPage: 100, source: { page: 2, done: false } })).toString("base64url");
+	const before = argsList.length;
+	for (const bad of [
+		{ subcommand: "pr threads", repo: "owner/repo", pr: 9, continuation: commentsToken }, // REST token on the GraphQL op
+		{ subcommand: "pr comments", repo: "owner/repo", pr: 9, continuation: token }, // GraphQL token on the REST op
+		{ subcommand: "pr threads", repo: "owner/repo", pr: 9, continuation: issueToken },
+		{ subcommand: "pr threads", repo: "owner/repo", pr: 10, continuation: token }, // pr differs
+	]) {
+		const result = await tool.execute("id", bad, undefined, null, { cwd: "/w" });
+		assert.equal(result.isError, true, JSON.stringify(bad));
+		assert.ok(result.content[0].text.includes("continuation does not match"), JSON.stringify(bad));
+	}
+	assert.equal(argsList.length, before, "mismatched continuations are detected before any request");
+	setApiSpawnOverride(null);
+});
+
+test("execute api pr threads: a GraphQL exit 1 with usable data beside errors is accepted end to end", async () => {
+	const tool = register();
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		void args;
+		const child = fakeChild();
+		queueMicrotask(() => {
+			const body = JSON.stringify({ ...JSON.parse(threadsPayload(false, null)), errors: [{ message: "partial failure" }] });
+			child.stdout.emit("data", Buffer.from(`HTTP/1.1 200 OK\r\n\r\n${body}`));
+			child.emit("close", 1, null);
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "pr threads", repo: "owner/repo", pr: 9 }, undefined, null, { cwd: "/w" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.ok(result.content[0].text.includes("GraphQL error: partial failure"));
+	assert.equal(result.details["source_complete"], true);
 	setApiSpawnOverride(null);
 });

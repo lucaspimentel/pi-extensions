@@ -15,6 +15,7 @@ import {
 	API_DISPLAY_CAP,
 	MAX_PAGES_PER_SOURCE,
 	PAGE_SIZE,
+	REVIEW_THREADS_QUERY,
 	type ApiOperationDeps,
 	type ApiToolResult,
 	runApiOperation,
@@ -40,18 +41,28 @@ function error(reason: string, httpStatus?: number): ApiRequestOutcome {
 
 interface ScriptedRequester extends ApiRequester {
 	requests: string[];
+	/** Separate record so every REST test also proves it makes no GraphQL call. */
+	graphqlCalls: Array<{ query: string; variables: Array<readonly [string, string | number]> }>;
 	script: Array<(pathAndQuery: string) => ApiRequestOutcome>;
 }
 
 function requester(script: Array<(pathAndQuery: string) => ApiRequestOutcome>): ScriptedRequester {
 	const self: ScriptedRequester = {
 		requests: [],
+		graphqlCalls: [],
 		script,
 		async request(pathAndQuery: string) {
 			self.requests.push(pathAndQuery);
 			const next = self.script.shift();
 			if (next === undefined) throw new Error(`unexpected request: ${pathAndQuery}`);
 			return next(pathAndQuery);
+		},
+		async graphql(query, variables) {
+			self.graphqlCalls.push({ query, variables: variables.map((pair) => [pair[0], pair[1]] as const) });
+			const next = self.script.shift();
+			if (next === undefined) throw new Error(`unexpected graphql call: ${query.slice(0, 40)}`);
+			const cursor = variables.find(([name]) => name === "cursor");
+			return next(cursor !== undefined ? String(cursor[1]) : "");
 		},
 		capturedBytes: () => 0,
 		budgetExhausted: () => false,
@@ -1249,4 +1260,336 @@ test("repo metadata: HTTP 404 and 403 pass through verbatim with no retry", asyn
 	assert.equal(forbiddenResult.isError, true);
 	assert.ok(forbiddenResult.content[0].text.includes("HTTP 403"));
 	assert.equal(forbidden.requests.length, 1);
+});
+
+// ── pr threads: GraphQL review threads with resolved/outdated state ──────────
+
+const threadsParams = { subcommand: "pr threads", repo: "OWNER/REPO", pr: 123 } as const;
+
+function thread(id: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		id: `PRRT_${id}`,
+		isResolved: false,
+		isOutdated: false,
+		path: "src/x.ts",
+		line: 10,
+		startLine: 8,
+		comments: {
+			totalCount: 1,
+			pageInfo: { hasNextPage: false, endCursor: null },
+			nodes: [{ id: `PRRC_${id}`, databaseId: id, author: { login: "alice", __typename: "User" }, body: "hi", createdAt: "2026-01-01T00:00:00Z", url: "https://github.com/OWNER/REPO/pull/123#discussion_r1" }],
+		},
+		...overrides,
+	};
+}
+
+function threadsPage(nodes: unknown[], hasNextPage: boolean, endCursor: string | null): string {
+	return JSON.stringify({
+		data: {
+			repository: {
+				pullRequest: {
+					url: "https://github.com/OWNER/REPO/pull/123",
+					reviewThreads: { totalCount: nodes.length, pageInfo: { hasNextPage, endCursor }, nodes },
+				},
+			},
+		},
+	});
+}
+
+const threadsToken = (overrides: Record<string, unknown> = {}) =>
+	Buffer.from(JSON.stringify({ v: 1, op: "pr threads", repo: threadsParams.repo, pr: threadsParams.pr, first: PAGE_SIZE, cursor: null, ...overrides })).toString("base64url");
+const threadsData = (result: ApiToolResult) => JSON.parse(result.content[0].text.split("\ndata:\n")[1]!);
+const threadsContinuation = (result: ApiToolResult) => JSON.parse(Buffer.from(result.details.continuation as string, "base64url").toString("utf8"));
+const threadsCursor = (result: ApiToolResult) => threadsContinuation(result).cursor;
+const graphqlVariables = (api: ScriptedRequester) => api.graphqlCalls.at(-1)!.variables;
+
+test("pr threads: happy path issues one GraphQL call, no REST request, and verbatim nodes", async () => {
+	const nodes = [thread(1), thread(2, { isResolved: true, isOutdated: true })];
+	const api = requester([() => response(threadsPage(nodes, false, null))]);
+	const result = await run(threadsParams, api);
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(api.graphqlCalls.length, 1);
+	assert.equal(api.requests.length, 0, "no REST request on the GraphQL path");
+	assert.equal(api.graphqlCalls[0]!.query, REVIEW_THREADS_QUERY);
+	assert.deepEqual(api.graphqlCalls[0]!.variables, [["owner", "OWNER"], ["repo", "REPO"], ["pr", 123]], "no cursor key on a first page");
+	assert.deepEqual(threadsData(result), nodes, "nodes returned verbatim, resolved and outdated included");
+	assert.equal(result.details.pr_url, "https://github.com/OWNER/REPO/pull/123");
+	assert.equal(result.details.threads_total, 2);
+	assert.equal(result.details.source_complete, true);
+	assert.equal(result.details.threads_returned, 2);
+	assert.equal(result.details.pages_fetched, 1);
+	assert.equal(result.details.threads_with_truncated_comments, 0);
+	assert.equal(result.details.continuation, undefined);
+	assert.match(result.content[0].text, /resolved and outdated threads are included/);
+	assert.match(result.content[0].text, /mutable reads, not commit-pinned/);
+	assert.match(result.content[0].text, /first 100 comments/);
+	const head = result.content[0].text.split("\ndata:\n")[0]!;
+	assert.deepEqual(
+		head.split("\n").slice(1).filter((line) => !line.startsWith("notice:")).map((line) => line.split(":")[0]),
+		["repo", "pr", "pr_url", "threads_total", "source_complete", "threads_returned", "pages_fetched", "threads_with_truncated_comments"],
+	);
+});
+
+test("pr threads: two pages in one invocation, then a resume that returns only the new batch", async () => {
+	const both = requester([() => response(threadsPage([thread(1)], true, "CURSOR_A")), () => response(threadsPage([thread(2)], false, null))]);
+	const all = await run(threadsParams, both);
+	assert.equal(all.isError, undefined, all.content[0].text);
+	assert.equal(all.details.pages_fetched, 2);
+	assert.equal(all.details.threads_returned, 2);
+	assert.equal(all.details.continuation, undefined);
+	assert.deepEqual(graphqlVariables(both), [["owner", "OWNER"], ["repo", "REPO"], ["pr", 123], ["cursor", "CURSOR_A"]]);
+
+	// Stop after the first page, then resume from the emitted cursor.
+	const first = requester([() => response(threadsPage([thread(1)], true, "CURSOR_A"))]);
+	first.budgetExhausted = () => first.graphqlCalls.length > 0;
+	const partial = await run(threadsParams, first);
+	assert.equal(partial.details.source_complete, false);
+	assert.equal(threadsCursor(partial), "CURSOR_A");
+	const next = requester([() => response(threadsPage([thread(2)], false, null))]);
+	const resumed = await run({ ...threadsParams, continuation: partial.details.continuation }, next);
+	assert.deepEqual(graphqlVariables(next), [["owner", "OWNER"], ["repo", "REPO"], ["pr", 123], ["cursor", "CURSOR_A"]]);
+	assert.deepEqual(threadsData(resumed), [thread(2)], "a resume returns only the newly fetched batch");
+	assert.equal(resumed.details.resumed, true);
+	assert.equal(resumed.details.source_complete, true);
+	assert.equal(resumed.details.continuation, undefined);
+	assert.match(resumed.content[0].text, /only the newly fetched threads/);
+});
+
+test("pr threads: a resume token with cursor null restarts at the first page", async () => {
+	const api = requester([() => response(threadsPage([], false, null))]);
+	const resumed = await run({ ...threadsParams, continuation: threadsToken({ cursor: null }) }, api);
+	assert.equal(resumed.isError, undefined);
+	assert.equal(resumed.details.resumed, true);
+	assert.deepEqual(graphqlVariables(api), [["owner", "OWNER"], ["repo", "REPO"], ["pr", 123]]);
+});
+
+test("pr threads: page limit is non-error incompleteness carrying the tenth endCursor", async () => {
+	const api = requester(Array.from({ length: MAX_PAGES_PER_SOURCE }, (_, i) => () => response(threadsPage([thread(i + 1)], true, `CURSOR_${i + 1}`))));
+	const result = await run(threadsParams, api);
+	assert.equal(result.isError, undefined);
+	assert.equal(result.details.source_complete, false);
+	assert.equal(result.details.pages_fetched, MAX_PAGES_PER_SOURCE);
+	assert.equal(result.details.threads_returned, MAX_PAGES_PER_SOURCE);
+	assert.match(result.details.incomplete_reason as string, /page limit/);
+	assert.equal(threadsCursor(result), "CURSOR_10");
+	assert.equal(result.content[0].text.match(/^continuation:/gm)?.length, 1);
+});
+
+test("pr threads: invalid token target and cursor invariants reject before any request", async () => {
+	const variants = [
+		{ op: "pr comments" }, { op: "issue comments" }, { op: "pr threads " },
+		{ repo: "other/repo" }, { repo: 123 },
+		{ pr: 124 }, { pr: "123" }, { pr: 0 }, { pr: -1 }, { pr: 1.5 }, { pr: Number.MAX_SAFE_INTEGER + 1 },
+		{ first: 99 }, { first: "100" },
+		{ cursor: "" }, { cursor: "a".repeat(513) }, { cursor: 123 }, { cursor: [] }, { cursor: {} }, { cursor: "bad\ncursor" },
+	];
+	for (const variant of variants) {
+		const api = requester([]);
+		const result = await run({ ...threadsParams, continuation: threadsToken(variant) }, api);
+		assert.equal(result.isError, true, JSON.stringify(variant));
+		assert.equal(api.graphqlCalls.length, 0, JSON.stringify(variant));
+		assert.equal(api.requests.length, 0, JSON.stringify(variant));
+		assert.match(result.content[0].text, /continuation does not match this invocation/);
+	}
+	// Cross-operation tokens rejected in both directions.
+	const threadsTokenValue = threadsToken();
+	const prCommentsToken = Buffer.from(JSON.stringify({ v: 1, op: "pr comments", repo: "OWNER/REPO", pr: 123, perPage: PAGE_SIZE, source: { page: 2, done: false } })).toString("base64url");
+	const issueToken = Buffer.from(JSON.stringify({ v: 1, op: "issue comments", repo: "OWNER/REPO", issue: 123, perPage: PAGE_SIZE, source: { page: 2, done: false } })).toString("base64url");
+	const intoComments = requester([]);
+	const commentsResult = await run({ subcommand: "pr comments", repo: "OWNER/REPO", pr: 123, continuation: threadsTokenValue }, intoComments);
+	assert.equal(commentsResult.isError, true);
+	assert.equal(intoComments.requests.length, 0);
+	const intoThreads = requester([]);
+	const threadsResult = await run({ ...threadsParams, continuation: issueToken }, intoThreads);
+	assert.equal(threadsResult.isError, true);
+	assert.equal(intoThreads.graphqlCalls.length, 0);
+});
+
+test("pr threads: a later-page error retains earlier threads and retries the failed cursor", async () => {
+	const api = requester([() => response(threadsPage([thread(1)], true, "CURSOR_A")), () => error("server exploded", 500)]);
+	const result = await run(threadsParams, api);
+	assert.equal(result.isError, true);
+	assert.deepEqual(threadsData(result), [thread(1)]);
+	assert.equal(result.details.pages_fetched, 1);
+	assert.equal(result.details.source_complete, false);
+	assert.match(result.details.source_error as string, /GraphQL review-thread read failed/);
+	assert.match(result.details.source_error as string, /500/);
+	assert.equal(threadsCursor(result), "CURSOR_A");
+	const retry = requester([() => response(threadsPage([thread(2)], false, null))]);
+	await run({ ...threadsParams, continuation: result.details.continuation }, retry);
+	assert.deepEqual(graphqlVariables(retry), [["owner", "OWNER"], ["repo", "REPO"], ["pr", 123], ["cursor", "CURSOR_A"]]);
+});
+
+test("pr threads: a first-page error emits a continuation with a null retry cursor", async () => {
+	const api = requester([() => error("forbidden", 403)]);
+	const result = await run(threadsParams, api);
+	assert.equal(result.isError, true);
+	assert.deepEqual(threadsData(result), []);
+	assert.equal(result.details.pages_fetched, 0);
+	assert.equal(threadsCursor(result), null);
+});
+
+test("pr threads: budget and between-response deadline stops are non-error incompleteness with a continuation", async () => {
+	for (const stop of ["budget", "deadline"]) {
+		let now = 0;
+		const api = requester([() => {
+			now = 2;
+			return response(threadsPage([thread(1)], true, "CURSOR_A"));
+		}]);
+		if (stop === "budget") api.budgetExhausted = () => api.graphqlCalls.length > 0;
+		else api.deadline = () => 1;
+		const result = await run(threadsParams, api, { clock: { now: () => now, setTimeout, clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout) } });
+		assert.equal(result.isError, undefined, stop);
+		assert.deepEqual(threadsData(result), [thread(1)]);
+		assert.equal(result.details.source_complete, false);
+		assert.equal(threadsCursor(result), "CURSOR_A");
+		assert.match(result.details.incomplete_reason as string, stop === "budget" ? /budget/ : /deadline/);
+	}
+});
+
+test("pr threads: hasNextPage true with an unusable endCursor is a non-continuable incomplete stop", async () => {
+	const cases = [
+		JSON.stringify({ data: { repository: { pullRequest: { url: "u", reviewThreads: { totalCount: 1, pageInfo: { hasNextPage: true }, nodes: [thread(1)] } } } } }),
+		JSON.stringify({ data: { repository: { pullRequest: { url: "u", reviewThreads: { totalCount: 1, pageInfo: { hasNextPage: true, endCursor: "" }, nodes: [thread(1)] } } } } }),
+		JSON.stringify({ data: { repository: { pullRequest: { url: "u", reviewThreads: { totalCount: 1, pageInfo: { hasNextPage: true, endCursor: 42 }, nodes: [thread(1)] } } } } }),
+		JSON.stringify({ data: { repository: { pullRequest: { url: "u", reviewThreads: { totalCount: 1, pageInfo: { hasNextPage: true, endCursor: "a".repeat(513) }, nodes: [thread(1)] } } } } }),
+	];
+	for (const body of cases) {
+		const api = requester([() => response(body)]);
+		const result = await run(threadsParams, api);
+		assert.equal(result.isError, undefined, body);
+		assert.equal(result.details.source_complete, false);
+		assert.match(result.details.incomplete_reason as string, /endCursor/);
+		assert.equal(result.details.continuation, undefined, "a non-continuable incomplete stop emits no continuation");
+		assert.equal(result.details.pages_fetched, 1);
+		assert.deepEqual(threadsData(result), [thread(1)]);
+		assert.equal(api.graphqlCalls.length, 1, "no second request");
+	}
+});
+
+test("pr threads: malformed shapes are errors, never a zero-thread success", async () => {
+	const nodes = [thread(1)];
+	const bodies: Array<[string, string]> = [
+		["[]", "not a JSON object"],
+		[JSON.stringify({ errors: [{ message: "boom" }] }), "no data object"],
+		[JSON.stringify({ data: null }), "no data object"],
+		[JSON.stringify({ data: { repository: null } }), "no repository object"],
+		[JSON.stringify({ data: { repository: {} } }), "no pullRequest object"],
+		[JSON.stringify({ data: { repository: { pullRequest: { url: "u", reviewThreads: null } } } }), "no reviewThreads object"],
+		[JSON.stringify({ data: { repository: { pullRequest: { url: "u", reviewThreads: {} } } } }), "no nodes array"],
+		[JSON.stringify({ data: { repository: { pullRequest: { url: "u", reviewThreads: { nodes: {} } } } } }), "no nodes array"],
+		[JSON.stringify({ data: { repository: { pullRequest: { url: "u", reviewThreads: { nodes, pageInfo: {} } } } } }), "boolean hasNextPage"],
+		[JSON.stringify({ data: { repository: { pullRequest: { url: "u", reviewThreads: { nodes, pageInfo: { hasNextPage: null } } } } } }), "boolean hasNextPage"],
+		[JSON.stringify({ data: { repository: { pullRequest: { url: "u", reviewThreads: { nodes, pageInfo: { hasNextPage: "true" } } } } } }), "boolean hasNextPage"],
+	];
+	for (const [body, expected] of bodies) {
+		const api = requester([() => response(body)]);
+		const result = await run(threadsParams, api);
+		assert.equal(result.isError, true, body);
+		assert.deepEqual(threadsData(result), [], body);
+		assert.ok((result.details.source_error as string).includes(expected), `${body} -> ${result.details.source_error as string}`);
+	}
+	// A shape error still surfaces the GraphQL messages.
+	const api = requester([() => response(JSON.stringify({ data: null, errors: [{ message: "Cannot query field" }] }))]);
+	const result = await run(threadsParams, api);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /GraphQL error: Cannot query field/);
+	assert.match(result.details.source_error as string, /no data object/);
+});
+
+test("pr threads: threads_with_truncated_comments counts only threads whose comments are cut", async () => {
+	const truncated = thread(1, { comments: { totalCount: 150, pageInfo: { hasNextPage: true, endCursor: "C" }, nodes: Array.from({ length: 100 }, (_, i) => ({ id: i })) } });
+	const exact = thread(2, { comments: { totalCount: 100, pageInfo: { hasNextPage: false, endCursor: null }, nodes: Array.from({ length: 100 }, (_, i) => ({ id: i })) } });
+	const api = requester([() => response(threadsPage([truncated, exact, null], false, null))]);
+	const result = await run(threadsParams, api);
+	assert.equal(result.details.threads_with_truncated_comments, 1);
+	assert.deepEqual(threadsData(result), [truncated, exact, null], "a null node is returned verbatim and skipped by the counter");
+});
+
+test("pr threads: GraphQL messages dedupe, sanitize, and bound to 10 plus an omission notice", async () => {
+	const base = JSON.parse(threadsPage([thread(1)], false, null)) as Record<string, unknown>;
+	const errors = [
+		...Array.from({ length: 10 }, (_, i) => ({ message: `msg ${i}` })),
+		{ message: "bad\u0000line" },
+		{ message: "badline" },
+		{ message: "msg 0" },
+		{ message: 42 },
+		null,
+	];
+	const api = requester([() => response(JSON.stringify({ ...base, errors }))]);
+	const result = await run(threadsParams, api);
+	assert.equal(result.content[0].text.match(/^notice: GraphQL error: /gm)?.length, 10, "at most 10 message lines");
+	assert.match(result.content[0].text, /GraphQL error: msg 0/);
+	assert.match(result.content[0].text, /1 more GraphQL error messages omitted/);
+	assert.ok(!result.content[0].text.includes("badline"), "the 11th distinct message is omitted, not the sanitized duplicate");
+	assert.ok(!result.content[0].text.includes("\u0000"), "control characters are stripped");
+});
+
+test("pr threads: the GraphQL message bound is per invocation, not per page", async () => {
+	const withErrors = (nodes: unknown[], hasNextPage: boolean, endCursor: string | null, messages: string[]) =>
+		JSON.stringify({ ...(JSON.parse(threadsPage(nodes, hasNextPage, endCursor)) as Record<string, unknown>), errors: messages.map((message) => ({ message })) });
+	const api = requester([
+		() => response(withErrors([thread(1)], true, "CURSOR_A", Array.from({ length: 10 }, (_, i) => `msg ${i}`))),
+		() => response(withErrors([thread(2)], false, null, [
+			...Array.from({ length: 5 }, (_, i) => `msg ${i + 5}`),
+			...Array.from({ length: 5 }, (_, i) => `msg ${i + 10}`),
+		])),
+	]);
+	const result = await run(threadsParams, api);
+	assert.equal(result.details.pages_fetched, 2);
+	assert.equal(result.content[0].text.match(/^notice: GraphQL error: /gm)?.length, 10, "at most 10 message lines across both pages");
+	assert.equal(result.content[0].text.match(/more GraphQL error messages omitted/g)?.length, 1, "exactly one omission notice for the invocation");
+	assert.match(result.content[0].text, /GraphQL error: msg 0/);
+	assert.equal(result.content[0].text.match(/GraphQL error: msg 5$/gm)?.length, 1, "a message repeated on a later page is not re-shown");
+	assert.ok(!result.content[0].text.includes("GraphQL error: msg 10"), "the 11th distinct message is omitted");
+	assert.match(result.content[0].text, /5 more GraphQL error messages omitted/);
+});
+
+test("pr threads: jq applies once to the node array; metadata and notices stay unfiltered", async () => {
+	const api = requester([() => response(threadsPage([thread(1)], false, null))]);
+	let calls = 0;
+	const result = await run({ ...threadsParams, jq: "length" }, api, {
+		jqRun: async (expression, document) => {
+			calls += 1;
+			assert.equal(expression, "length");
+			assert.deepEqual(JSON.parse(document), [thread(1)]);
+			return { kind: "result", output: "1", outputTruncated: false, outputBytes: 1 };
+		},
+	});
+	assert.equal(calls, 1);
+	assert.equal(result.details.threads_returned, 1);
+	assert.equal(result.details.source_complete, true);
+	assert.match(result.content[0].text, /resolved and outdated threads are included/);
+
+	const failing = await run({ ...threadsParams, jq: "bad" }, requester([() => response(threadsPage([thread(1)], false, null))]), {
+		jqRun: async () => ({ kind: "error", reason: "compile error" }),
+	});
+	assert.equal(failing.isError, true);
+	assert.match(failing.content[0].text, /jq filtering failed/);
+	assert.match(failing.content[0].text, /resolved and outdated threads are included/);
+
+	const empty = await run({ ...threadsParams, jq: "length" }, requester([() => response(threadsPage([], false, null))]), {
+		jqRun: async () => ({ kind: "result", output: "", outputTruncated: false, outputBytes: 0 }),
+	});
+	assert.match(empty.content[0].text, /empty filtered result/);
+	assert.match(empty.content[0].text, /resolved and outdated threads are included/);
+});
+
+test("pr threads: display clipping keeps metadata and notices complete", async () => {
+	const huge = thread(1, { comments: { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: 1, body: "界🙂".repeat(API_DISPLAY_CAP) }] } });
+	const result = await run(threadsParams, requester([() => response(threadsPage([huge], false, null))]));
+	assert.equal(result.details.output_truncated, true);
+	assert.match(result.content[0].text, /NOT complete JSON/);
+	assert.match(result.content[0].text, /source_complete: true/);
+	assert.match(result.content[0].text, /notice: resolved and outdated threads are included/);
+	assert.ok(!result.content[0].text.includes("\uFFFD"));
+});
+
+test("pr threads: a continuation that cannot be encoded is an error with a notice", async () => {
+	const longRepo = `${"a".repeat(4000)}/r`;
+	const api = requester(Array.from({ length: MAX_PAGES_PER_SOURCE }, (_, i) => () => response(threadsPage([thread(i + 1)], true, `CURSOR_${i + 1}`))));
+	const result = await run({ subcommand: "pr threads", repo: longRepo, pr: 123 }, api);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /continuation could not be encoded/);
+	assert.equal(result.details.continuation, undefined);
 });

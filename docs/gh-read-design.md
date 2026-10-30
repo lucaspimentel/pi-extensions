@@ -6,6 +6,10 @@ extensions/shared/bounded-spawn.ts, guard classification, agent rollout, and
 tests. The git-read extraction regression guard held: tests/git-read-*.test.mts
 passed unmodified after the refactor.
 
+Addition: `pr threads` (see "pr threads"): the GraphQL review-thread read
+with resolved/outdated state, implemented as the tenth API operation and the
+first (and only) tool-authored GraphQL POST transport.
+
 Addition: `job logs` (see "job logs"). Design settled in a grill-me review on
 2026-10-26; NOT yet implemented. It is the first API operation whose response
 body is text rather than JSON, and the first to use a windowed retention mode
@@ -67,7 +71,7 @@ that 405-line sample; it is not a complete decomposition of the sample.
 | comments by id | 13 | uncovered |
 | `branches` | 12 | uncovered |
 | `issues/{n}/comments` | 10 | covered by `issue comments` |
-| `graphql` | 9 | uncovered |
+| `graphql` | 9 | `pr threads` covers the review-thread read |
 | `commits` | 9 | uncovered |
 | `pulls/{n}/comments` | 8 | covered by `pr comments` |
 | `search/issues` | 7 | uncovered |
@@ -93,7 +97,9 @@ Guidance added:
 - A mapping from raw endpoints to operation names (`pulls/{n}/reviews` is
   `pr reviews`, `pulls/{n}/comments` is `pr comments`,
   `issues/{n}/comments` is `issue comments`, `git/trees/HEAD` is `repo tree`,
-  default branch is `repo metadata`), folded into the API-operations bullet.
+  default branch is `repo metadata`, and the tool-authored GraphQL
+  review-thread read is `pr threads`), folded into the API-operations
+  bullet.
   Commits are deliberately not named: `commit checks` returns check runs, and
   commit details are an open TODO.
 - A bullet for shapes with no dedicated operation: changed-file list
@@ -103,16 +109,18 @@ Guidance added:
   `select(.pull_request_review_id == <id>)`, noting jq applies per batch so
   `source_complete` is the stop condition), a comment by id (parent number
   from `html_url`, then jq `select(.id == <id>)` on the parent listing), and
-  review-thread state stated as unavailable (do not derive it).
+  resolved/outdated review-thread state pointing at `pr threads` (never
+  derive it from comment line fields).
 - A write-boundary bullet: `gh_read` never writes; posting replies,
   resolving threads, and submitting reviews need `host_bash`, which guard
   may prompt for depending on the profile. The 60+ review-reply POSTs mean
   `gh_read` can never make PR-review publication shell-free.
 
 Not covered by guidance: the issue/PR timeline (a TODO operation, so no
-workaround is claimed), `search/issues`, `commits`, `branches`, `graphql`.
-`gh pr-threads` is named only here; until the review-thread read below
-lands, the guidance gives no alternative for it.
+workaround is claimed), `search/issues`, `commits`, `branches`, and generic
+`graphql` reads other than the review-thread read. `gh pr-threads` is named
+only here; the guidance now points at `pr threads` for the review-thread
+read.
 
 Verification (2026-10-30, against DataDog/dd-trace-dotnet#9397):
 `pr diff --name-only` returned 8 files; `pr view --json files,changedFiles`
@@ -129,11 +137,13 @@ cited from `TODO.md` and was not re-verified.
   string so the schema stays flat like `git_read`'s):
   - `pr view`, `pr diff`, `pr list`, `pr checks`, `issue view`, `issue list`,
     `auth status`, `run list`, `run view`
-- Ten narrowly scoped GitHub API operations share the same tool with
-  structured parameters instead of an args array: `repo contents`,
-  `repo tree`, `commit checks`, `advisory view`, `check annotations`,
-  `repo metadata`, `pr comments`, `pr reviews`, `issue comments`, and
-  `job logs` (see "GitHub API operations").
+- Eleven narrowly scoped GitHub API operations share the same tool with
+  structured parameters instead of an args array (ten implemented today;
+  `job logs` is designed but not yet implemented, see "job logs"):
+  `repo contents`, `repo tree`, `commit checks`, `advisory view`,
+  `check annotations`, `repo metadata`, `pr comments`, `pr reviews`,
+  `issue comments`, `pr threads`, and `job logs` (see "GitHub API
+  operations").
   Mixing shapes is rejected in both directions: native subcommands reject
   structured fields, API operations reject `args`.
 - Command construction happens in validate.ts during validation: it emits the
@@ -250,12 +260,15 @@ Value validation (native commands):
 
 ## GitHub API operations
 
-The ten structured operations (`repo contents`, `repo tree`, `commit
-checks`, `advisory view`, `check annotations`, `repo metadata`, `pr comments`,
-`pr reviews`, `issue comments`, `job logs`) make read-only GET requests to
-api.github.com ONLY, always inside `gh`, with a fixed tool-authored argv (see
-"API runner"). All but `job logs` return JSON; `job logs` returns a job's log
-as text. They name an explicit repository, so they are exempt from the
+The eleven designed structured operations (`repo contents`, `repo tree`,
+`commit checks`, `advisory view`, `check annotations`, `repo metadata`,
+`pr comments`, `pr reviews`, `issue comments`, `pr threads`, `job logs`)
+make read-only requests to api.github.com ONLY, always inside `gh`, with a
+fixed tool-authored argv (see "API runner"); ten are implemented today and
+`job logs` is designed but not yet implemented. Every operation but
+`job logs` returns JSON; `pr threads` sends a tool-authored GraphQL POST
+instead of a REST GET, and `job logs` returns a job's log as text. They name
+an explicit repository, so they are exempt from the
 worktree gate and work anywhere. Validation is complete at runtime (calls
 that bypass schema validation still get checked): unknown or mixed fields,
 wrong types, missing required fields, unsafe integers, and malformed
@@ -268,9 +281,12 @@ continuations are rejected before any child runs.
   are transported literally or rejected: path segments that cannot be
   encoded (lone surrogates) fail validation; `.`, `..`, empty, leading and
   trailing slash segments are rejected outright. gh placeholder expansion
-  (`:owner`) is unreachable because `:` is percent-encoded, and no caller
-  text reaches a flag position (the endpoint argument always starts with
-  `repos/` or `advisories/`).
+  (`:owner`) is unreachable because `:` is percent-encoded, and the REST
+  endpoint argument always starts with `repos/` or `advisories/`, never with
+  caller text. The GraphQL read is the one operation whose request carries
+  caller-derived values in flag positions: it rides `-f`/`-F` variable
+  pairs whose names are GraphQL names and whose values are validated
+  non-control strings (at most 512 characters) or a safe integer.
 - Ref pinning (repo contents/tree and commit checks only): an omitted ref
   resolves through repository default-branch metadata; branch/tag/short-SHA
   refs resolve through the commits endpoint
@@ -431,8 +447,8 @@ historical snapshot or proof of an unchanged review state. Metadata reports
 the PR target, completeness, and continuation without fabricating a resolved
 SHA. Neither operation supplies `isResolved`/`isOutdated` review-thread
 state, infers resolution from line fields, nor reconstructs complete thread
-history; that needs a tool-authored GraphQL operation (see "Review-thread
-read (next task)" below).
+history; that is what `pr threads` provides over a tool-authored GraphQL
+POST (see "pr threads" below).
 
 The existing API bounds apply unchanged: one 30 s shared deadline, 8 MiB
 cumulative captured-output budget, external jq applied once to the newly
@@ -443,18 +459,89 @@ empty or scalar output and display truncation. For example:
 {"subcommand":"pr comments","repo":"DataDog/dd-trace-dotnet","pr":9479,"jq":".[] | {author: .user.login, path, line, body, html_url}"}
 ```
 
-### Review-thread read (next task)
+### pr threads
 
-Settled decisions for the resolved/outdated thread-state read; not
-implemented yet:
+Required explicit `repo` (`OWNER/REPO` on github.com) and `pr` (a positive
+safe-integer PR number, never coerced from a string, branch, or URL). Only
+`jq` and `continuation` are optional. `args`, `ref`, `first`, `cursor`,
+`resolved`, `depth`, `issue`, and any other unrelated structured field are
+rejected before spawning. There is no worktree gate, no ref resolution, and
+no SHA pinning.
 
-- `gh_read` hosts the read.
-- It needs a tool-authored GraphQL POST transport, because the API runner
-  (`api-spawn.ts`) is GET-only.
-- Bounded pagination for threads and comments, with explicit completeness and
-  continuation metadata, not the `gh-pr-threads` CLI's unpaginated
-  first-100-threads/first-50-comments limits.
-- The `gh-pr-threads` CLI keeps only the write half (reply, resolve, submit).
+The transport is tool-authored and is the only GraphQL request the tool ever
+makes: `gh api graphql --hostname github.com --method POST --header "Accept:
+application/vnd.github+json" --header "X-GitHub-Api-Version: 2022-11-28"
+--include -f query=<fixed document>` followed by one variable pair per
+argument, in caller order. The document is a module constant
+(`REVIEW_THREADS_QUERY` in api.ts), never caller-supplied text:
+
+```graphql
+query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){url reviewThreads(first:100, after:$cursor){totalCount pageInfo{hasNextPage endCursor} nodes{id isResolved isOutdated path line startLine comments(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{id databaseId author{login __typename} body createdAt url}}}}}}}
+```
+
+GitHub's `-f` does NOT expand `{placeholder}` values while `-F` does, so
+every caller-derived string (owner, repo, cursor) rides `-f` and only the
+validated integer (`pr`) uses `-F`; a `{` or `%` in a repository name is
+therefore transported literally. The runner shares the one 30 s deadline,
+the 8 MiB cumulative captured-output budget, the 64 KiB header block cap,
+the 16 KiB cumulative stderr cap, strict UTF-8 decoding, poisoning, and the
+SIGTERM-then-SIGKILL teardown of "API runner" above. Exit code 1 is
+tolerated ONLY when the HTTP status is 2xx and the decoded body parses to a
+JSON object, because `gh api graphql` exits 1 when a body carries usable
+partial data beside an `errors` array; exit 0 keeps its meaning, every other
+nonzero code (including 2) stays an error, a non-2xx status stays an error
+carrying `httpStatus`, and the REST transports keep the original
+exit-0-only rule.
+
+The payload is the verbatim `reviewThreads.nodes` array: `id`, `isResolved`,
+`isOutdated`, `path`, `line`, `startLine`, and each thread's
+`comments.nodes` are passed through with nothing normalized, filtered, or
+reconstructed, so resolved and outdated threads are returned alongside
+unresolved ones. There is one shape rule with two buckets:
+
+- Malformed shapes are errors (never a zero-thread success): a non-object
+  body, missing or null `data`, a null or non-object `repository`,
+  `pullRequest`, or `reviewThreads`, a missing or non-array `nodes`, and a
+  missing, null, or non-boolean `pageInfo.hasNextPage`.
+- A well-formed page with `hasNextPage: true` and a missing or unusable
+  `endCursor` is a NON-error incomplete stop: its nodes are returned,
+  `source_complete` is false, an explicit `incomplete_reason` is set, and NO
+  continuation is emitted (there is no position to continue from).
+
+Bounds: 100 threads per page, each thread's first 100 comments, and at most
+10 pages, so up to 1,000 threads per invocation. This supersedes the earlier
+"bounded pagination for threads and comments": per-thread comment paging is
+unsupported in this version and is recorded as a follow-up in `TODO.md`.
+Threads whose `comments.totalCount` exceeds the returned `comments.nodes`
+are counted in `threads_with_truncated_comments`, and comments restart at
+their first page on resume.
+
+The continuation payload is `{v:1, op:"pr threads", repo, pr, first:100,
+cursor}`, where `cursor` is the last observed `endCursor`, or null for a
+first-page retry. Decoding requires `op === "pr threads"`, a string `repo`, a
+positive safe-integer `pr`, `first === 100`, and a `cursor` that is exactly
+null or a 1..512-character printable-ASCII string; the token is then matched
+against repo and pr before any request runs. A continuation is emitted
+whenever the traversal is not done, including on the error path, where the
+retry cursor is the cursor used for the failed request (null for a
+first-page failure); page-limit and between-response budget/deadline stops
+are nonerror incompleteness, and only the non-continuable incomplete stop
+above suppresses the token.
+
+Mutability: threads and comments are mutable reads, not commit-pinned or
+transactional snapshots, and cursor paging can miss or duplicate threads
+that change between pages, so completion describes the observed traversal
+only. Every result carries three standing notices (resolved/outdated threads
+are included unfiltered; the mutability caveat; and the per-thread comment
+bound), initialized before continuation matching so they survive mismatch
+errors, jq errors, and display clipping. GraphQL `errors` messages are
+sanitized per page, then deduped and bounded once for the invocation to 10
+notice lines plus an omission count, so a multi-page traversal cannot
+multiply the metadata head.
+
+```json
+{"subcommand":"pr threads","repo":"DataDog/dd-trace-dotnet","pr":9397,"jq":".[] | select(.isResolved == false) | {path, line, isOutdated, author: .comments.nodes[0].author.login}"}
+```
 
 ### issue comments
 
@@ -525,7 +612,7 @@ BOM-prefixed on the first line, with no job/step prefixes, unlike
 Settled in the grill-me review (2026-10-26):
 
 - Input surface is `{repo, job_id}` only, as above.
-- Worktree-gate EXEMPT, like the other nine API operations and unlike
+- Worktree-gate EXEMPT, like the other ten API operations and unlike
   `run view --log`, because the target repository is explicit and the common
   case is debugging CI from a directory that is not a checkout.
 - Retention is the first 50 KiB plus the last 50 KiB of the response BODY
@@ -587,12 +674,15 @@ Out of scope here: a JSON job-metadata operation on `actions/jobs/{id}`
 ### API runner (api-spawn.ts)
 
 A dedicated runner per invocation, separate from the native executor
-(which keeps its 15 s / 50 KiB contract unchanged). Every request is a
+(which keeps its 15 s / 50 KiB contract unchanged). Every REST request is a
 fixed argv: `gh api --hostname github.com --method GET --header "Accept:
 application/vnd.github+json" --header "X-GitHub-Api-Version: 2022-11-28"
 --include <encoded-path>`; no caller flags, field arguments, or
-`--paginate`. One monotonic 30-second deadline is shared across ref
-resolution, all paged children, and jq. The captured-output budget is 8
+`--paginate`. The one other transport is the tool-authored GraphQL POST used
+by `pr threads`, documented under "pr threads"; it shares this runner's
+deadline, budget, header/stderr caps, strict decode, and teardown. One
+monotonic 30-second deadline is shared across ref resolution, all paged
+children, and jq. The captured-output budget is 8
 MiB of gh response stdout CUMULATIVELY (resolution requests and response
 headers included). Honest scope: this bounds what the tool CAPTURES, not
 network transfer or gh's internal memory use. Header blocks are bounded
@@ -606,21 +696,25 @@ instead of silently substituting replacement characters. Spawn function
 and clock are injectable seams; tests run network-free.
 
 One per-operation retention mode was added for `job logs`: the default
-"full" mode above is unchanged for the other nine operations, while
+"full" mode above is unchanged for the other ten operations, while
 "window" mode keeps the first 50 KiB and last 50 KiB of the response BODY,
 still counts every byte for the omission metadata, never poisons on growth
 past the 8 MiB budget, and carries the retained window on the error path so a
 deadline or interrupt can return it. The header/body split, the 64 KiB
 header block, the 16 KiB stderr cap, the strict UTF-8 decode, and the shared
-30 s deadline apply to both modes. The nine existing operations must remain
+30 s deadline apply to both modes. The ten existing operations must remain
 byte-identical; their budget and poison tests are re-pinned against the
 unchanged "full" mode.
 
 ### External jq filtering (jq.ts)
 
-jq is optional (only invoked when requested) and preflighted BEFORE any
-network access: absolute executable resolution, a lexical security check,
-and compilation by jq itself (`jq -c -n <expr>`; exit 3 rejects). The
+jq is optional (only invoked when requested). Three gates run before the
+jq child: absolute executable resolution, a lexical security check, and
+compilation by jq itself (`jq -c -n <expr>`; exit 3 rejects). For API
+operations the compile gate runs after the GitHub fetch, because the only
+`prepareJq` call sits inside `runToolJq`, which `renderData` reaches once
+the data is already in hand (compile-on-the-way-in); hoisting it ahead of
+the first request is a known follow-up (`TODO.md`). The
 lexical check is grounded in jq's grammar, not substring regexes: it
 recognizes comments, strings, escapes, executable tokens, and nested
 string interpolation; rejects executable module/import/include constructs
@@ -648,7 +742,9 @@ continuation stay outside filtered output.
 PR continuation payloads carry `v: 1`, `op` (`pr comments` or `pr reviews`),
 `repo`, numeric `pr`, `perPage: 100`, and `source: {page, done: false}`.
 issue-comments payloads are the same shape with `op: "issue comments"` and a
-numeric `issue` instead of `pr`. Before any request, the decoder requires a
+numeric `issue` instead of `pr`. The `pr threads` payload is cursor-based,
+not offset-based: `{v:1, op:"pr threads", repo, pr, first:100, cursor}` (see
+"pr threads"). Before any request, the decoder requires a
 non-array source object and a positive safe-integer page, then the handler
 matches operation/repo/target exactly (issue comment tokens also require a
 positive safe-integer issue; a legacy-v1 PR token never satisfies an issue
@@ -711,10 +807,11 @@ repository context, so it is useful precisely where the other eight are not:
 outside any worktree. The other eight keep the gate unchanged, including
 `run view --log`: the dual-window log runner reuses the identical
 worktreeCheckPassed gate even though `run view` accepts `-R` (settled
-one-simple-contract rule). Separately, the ten API operations are exempt as a
-class, as documented under "GitHub API operations"; `job logs` inherits that
-exemption even though it returns log text, so a CI log can be read from a
-directory that is not a checkout while `run view --log` still cannot.
+one-simple-contract rule). Separately, the ten implemented API operations
+are exempt as a class, as documented under "GitHub API operations";
+`job logs` inherits that exemption even though it returns log text, so a CI
+log can be read from a directory that is not a checkout while `run view
+--log` still cannot.
 
 ## Trust model for env and config
 
@@ -872,7 +969,12 @@ Settled in the grill-me review:
   `job_id` (a safe-integer number is accepted and normalized; a number beyond
   2^53 is rejected with the pass-it-as-a-string message), and rejects `args`,
   URLs, branches, jq, continuation, and unknown fields, including
-  schema-bypass calls.
+  schema-bypass calls. Review-thread coverage: `pr threads` requires an
+  explicit repo and a positive safe-integer pr, validates
+  continuation/jq transport, rejects `args`, `ref`, `first`, `cursor`,
+  `resolved`, `depth`, `issue`, and redirection-shaped fields before target
+  validation, and rejects `pr` on every other API operation and on native
+  subcommands.
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout
@@ -900,6 +1002,15 @@ Settled in the grill-me review:
   body-only byte accounting (the header block is excluded), no poisoning on
   growth past the 8 MiB budget, the retained window returned on the deadline
   and interrupted paths, and strict UTF-8 rejection of a malformed window.
+  GraphQL coverage: the exact first-call and resume argv (`-f` for strings,
+  `-F` for the integer, a `-f cursor=` pair only on resume) with spawn
+  options identical to REST, exit-0 acceptance, 2xx exit-1 acceptance with a
+  JSON object body, rejection of non-JSON/array/null bodies and of exit 2,
+  a 401 JSON body rejected with `httpStatus`, the REST exit-0-only
+  regression, a budget shared across `request` and `graphql` plus poisoning
+  refusal of a later call, pre-spawn deadline and cancellation refusals,
+  SIGTERM->SIGKILL reaping of a GraphQL child, and invalid query/variable
+  rejections with zero spawns.
 - `tests/gh-read-api.test.mts`: orchestration with a scripted requester
   seam: ref resolution and pinning (default branch, explicit refs, 40-hex
   fast path), text files with CRLF/EOF-preserving line ranges, binary/
@@ -938,7 +1049,21 @@ Settled in the grill-me review:
   boundary with N = 1, empty-body success with the no-log-output notice,
   `isError: true` with the retained window on timeout/interrupt, 404/403
   passthrough with no shape matching and no extra request, and jq/continuation
-  rejection with zero requests.
+  rejection with zero requests. Review-thread orchestration: one GraphQL call
+  with no REST request and verbatim nodes (resolved and outdated included),
+  two pages in one invocation and a resume that holds only the new batch
+  with the resume notice, a resume token whose cursor is null, the 10-page
+  limit with the tenth endCursor as the continuation, every token mismatch
+  in both directions (wrong op/repo/pr, `first: 99`, empty/oversized/numeric/
+  non-object cursors, cross-operation tokens) with zero requests, retained
+  threads plus the failed page's cursor on a later-page error, a null
+  first-page retry cursor, budget and deadline stops as nonerror
+  incompleteness with a continuation, the unusable-endCursor stop as
+  nonerror incompleteness WITHOUT a continuation, malformed shapes as errors
+  (never a zero-thread success), truncated-comment counting with a null node
+  skipped, message dedupe/sanitization/bounding, jq once on the node array
+  with metadata and notices unfiltered, display clipping, and a continuation
+  encode failure.
 - `tests/gh-read-jq.test.mts`: REAL-jq coverage (required in CI): lexical
   security matrix (benign keywords, imports incl. interpolations, malformed
   constructs), preflight compile rejection, zero/multi-value output, env/
@@ -976,15 +1101,28 @@ Settled in the grill-me review:
   with no git-gate spawn even outside a worktree, `details.subcommand`,
   guidance stating that logs exist only once the job completes and preferring
   `job logs` over `run view -j --log`, and fail-closed validation with zero
-  spawns.
+  spawns. Review-thread coverage: the `pr threads` schema literal in the
+  schema text, description/snippet/guideline assertions (operation-name
+  mapping, resolved/outdated pointer, the never-derive-it warning, and the
+  unchanged 14-bullet count), fail-closed validation with zero spawns for
+  missing/invalid pr, `args`, `ref`, `cursor`, `first`, and `2>&1`, the exact
+  tool-authored GraphQL POST argv with a valid payload and no git-gate
+  spawn, `details.subcommand`, a resume run whose argv carries
+  `-f cursor=<c>`, cross-operation token rejection before any request, a
+  2xx exit-1 read accepted end to end with the GraphQL error visible, and
+  the GraphQL message bound applied once per invocation (dedupe across
+  pages, at most 10 notice lines plus one omission count) rather than per
+  page.
 - `tests/guard-classes.test.mts`: built-in `gh_read` mapping and every
-  discussion operation (`pr comments`, `pr reviews`, `issue comments`)
-  classify as `remote-read`; configured class overrides win.
+  discussion operation (`pr comments`, `pr reviews`, `pr threads`,
+  `issue comments`) classify as `remote-read`; configured class overrides
+  win.
 - Prompt guidance: `tests/gh-read-tool.test.mts` asserts per-topic guideline
   substrings (auth status instead of `gh api user`, operation-name mapping,
   `pr diff --name-only`, `files,changedFiles`, `pull_request_review_id`,
-  `html_url` plus `select(.id ==`, thread-state "do not derive it", the
-  `host_bash` write boundary) and the 14-bullet count.
+  `html_url` plus `select(.id ==`, thread-state "do not derive it" together
+  with the `pr threads` pointer, the `host_bash` write boundary) and the
+  14-bullet count.
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 
@@ -1001,6 +1139,11 @@ Settled in the grill-me review:
   and an independent bounded continuation, without a worktree and without
   any `pr` metadata or `/pulls/` request; the result distinguishes itself
   from inline PR review reads and never claims review-thread state.
+- The same agent can fetch a PR's review threads with resolved/outdated
+  state via `pr threads`, using explicit `repo` + numeric `pr` and a cursor
+  continuation, outside a worktree and without any caller-supplied GraphQL
+  text; malformed responses are errors, and an unusable cursor is reported
+  as incompleteness rather than a complete read.
 - The same agent can triage GitHub Actions runs: `run list` finds runs,
   `run view` (numeric run id, no interactive selection) shows a summary or,
   with `--log`/`--log-failed`, bounded first-and-last-50 KiB log output, and
@@ -1041,9 +1184,11 @@ Settled in the grill-me review:
 - No job-metadata operation (`actions/jobs/{id}`) in this change: it is
   recorded in `TODO.md` as its own follow-up, so `job logs` never grows a
   second request for name, status, or conclusion.
-- No GraphQL review-thread reads or resolved/outdated thread state in the
-  REST PR operations; that is a settled next task, see "Review-thread read
-  (next task)".
+- No GraphQL mutations and no caller-supplied GraphQL text: `pr threads`
+  sends one fixed tool-authored document with validated variables, and every
+  other operation stays on REST. The REST PR operations still provide no
+  resolved/outdated thread state, and no jq filter or comment line field can
+  manufacture it.
 - No URL arguments, no `--template`, no `--web` forms.
 - No token handling, masking, or account switching inside the tool. Keeping
   `--show-token` off the `auth status` allowlist is what keeps this non-goal
