@@ -7,12 +7,14 @@
  * Use the `/idle-summary` command to trigger it immediately; doing so
  * suppresses the pending idle timer for the current idle period.
  * `/idle-summary model` opens a picker for the model used to generate
- * summaries.
+ * summaries; `/idle-summary model clear` removes that pin.
  *
- * Model selection: prefers the cheapest/fastest model from the same provider as
- * the currently selected model, then falls back through the remaining scoped (or
- * available) models in ascending cost order. Falls back gracefully if no model or
- * API key is available.
+ * Model selection: the global pin in `~/.pi/agent/idle-summary.json`
+ * (`"model": "provider/modelId"`, shared helpers in ../shared/model-pin.ts)
+ * when it resolves and has configured auth; otherwise the session model,
+ * priced or not. One model per run, no fallback chain. Bails silently when
+ * there is no model or the session model has no configured auth. A pin that
+ * cannot be used is reported once per session at session_start.
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -22,15 +24,19 @@ import {
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-	DEFAULT_IDLE_TIMEOUT_MS,
-	modelLabel,
-	orderedSummaryCandidates,
-	pickableModels,
-	resolveIdleTimeoutMs,
-} from "./idle-summary-models.ts";
+	clearModelPin,
+	createIgnoredPinNotifier,
+	describeIgnoredPin,
+	readModelPin,
+	resolveModel,
+	type ResolvedModel,
+	writeModelPin,
+} from "../shared/model-pin.ts";
+import { modelLabel, pickableModels } from "../shared/model-selection.ts";
+import { DEFAULT_IDLE_TIMEOUT_MS, resolveIdleTimeoutMs } from "./idle-summary-models.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,10 +61,11 @@ const CUSTOM_TYPE = "idle-summary";
 const CONFIG_FILE = "idle-summary.json";
 
 // ── Config persistence ──────────────────────────────────────────────────────
-// The user's summary model and idle timeout live in the global agent dir
+// The user's summary model pin and idle timeout live in the global agent dir
 // (`getAgentDir()`), so they apply across all projects and sessions. Stored as
 // `{ "model": "provider/modelId", "timeoutMinutes": 3 }`. Missing/corrupt file
-// = defaults for everything.
+// = defaults for everything. The pin is read and written through
+// ../shared/model-pin.ts, which preserves sibling keys such as timeoutMinutes.
 const configPath = () => join(getAgentDir(), CONFIG_FILE);
 
 const readConfig = (): Record<string, unknown> | undefined => {
@@ -71,46 +78,17 @@ const readConfig = (): Record<string, unknown> | undefined => {
 	}
 };
 
-const readConfiguredModel = (): string | undefined => {
-	const model = readConfig()?.model;
-	return typeof model === "string" ? model : undefined;
-};
+// The model for a summary run: the pin when it resolves and has auth, else
+// the session model unchanged (callers apply their own auth check to it).
+const summaryModel = (ctx: ExtensionContext): ResolvedModel =>
+	resolveModel(readModelPin(configPath()).ref, ctx.model, ctx.modelRegistry);
 
-const writeConfiguredModel = (ref: string): void => {
-	try {
-		// Merge into the existing config so fields like timeoutMinutes survive.
-		writeFileSync(
-			configPath(),
-			JSON.stringify({ ...readConfig(), model: ref }, null, 2),
-		);
-	} catch {
-		// Best-effort: a failed write just means the choice won't persist.
-	}
-};
-
-// Build the candidate pool from the session's scoped models, or all available
-// models when no scoping is configured (scopedModels is empty in that case).
-// Resolution order: an explicit user override (from `/idle-summary model`), then
-// the pure `selectModel` heuristic (cheapest model from the currently
-// selected model's provider first, then the rest by ascending cost). Each
-// candidate must have configured auth.
-const summaryPool = (
-	ctx: ExtensionContext,
-): Model<Api>[] =>
+// Picker pool: the session's scoped models, or all available models when no
+// scoping is configured (scopedModels is empty in that case).
+const pickerPool = (ctx: ExtensionContext) =>
 	ctx.scopedModels.length > 0
 		? ctx.scopedModels.map((s) => s.model)
 		: ctx.modelRegistry.getAvailable();
-
-// Ordered models to try for a summary run: the explicit `/idle-summary model`
-// override first (authoritative), then the remaining ranked, authed models,
-// skipping unpriced models in the fallback ordering.
-const summaryCandidates = (ctx: ExtensionContext): Model<Api>[] =>
-	orderedSummaryCandidates(
-		summaryPool(ctx),
-		ctx.model?.provider,
-		readConfiguredModel(),
-		(m: Model<Api>) => ctx.modelRegistry.hasConfiguredAuth(m),
-	);
 
 // ── Conversation helpers ─────────────────────────────────────────────────────
 
@@ -195,6 +173,9 @@ export default function (pi: ExtensionAPI) {
 	// would clear the flag out from under an old in-flight run and let it touch
 	// the new session's stale ctx.
 	let generation = 0;
+	// Once-per-session dedupe for the pin read warning and the ignored-pin
+	// notice; reset on every session_start.
+	const pinNotifier = createIgnoredPinNotifier();
 
 	function clearIdleTimer() {
 		if (idleTimer) {
@@ -240,40 +221,29 @@ export default function (pi: ExtensionAPI) {
 			},
 		];
 
-		// Try the preferred model first, then fall back through the ranked
-		// candidates. `complete` can also resolve with an error response (empty
-		// content + `errorMessage`) instead of throwing, so an empty summary counts
-		// as a failure that moves to the next candidate.
-		const candidates = summaryCandidates(ctx);
-		if (candidates.length === 0) return; // No authed model available — bail silently
+		// One model per run: the pin when usable, else the session model.
+		// `complete` can resolve with an error response (empty content +
+		// `errorMessage`) instead of throwing, so an empty summary is a failure.
+		const resolved = summaryModel(ctx);
+		const usedModel = resolved.model;
+		if (!usedModel) return; // No model selected: bail silently
+		if (!resolved.pinned && !ctx.modelRegistry.hasConfiguredAuth(usedModel)) return; // No auth: bail silently
 
 		let lastError: string | undefined;
 		let summary: string | undefined;
-		let usedModel: Model<Api> | undefined;
-
-		for (const candidate of candidates) {
-			let response;
-			try {
-				response = await ctx.modelRegistry.streamSimple(candidate, { messages }).result();
-			} catch (e) {
-				lastError = e instanceof Error ? e.message : String(e);
-				continue;
-			}
-
+		try {
+			const response = await ctx.modelRegistry.streamSimple(usedModel, { messages }).result();
 			summary = response.content
 				.filter((c): c is { type: "text"; text: string } => c.type === "text")
 				.map((c) => c.text)
 				.join("\n")
 				.trim();
-
-			if (summary) {
-				usedModel = candidate;
-				break;
-			}
-			lastError = response.errorMessage ?? lastError;
+			if (!summary) lastError = response.errorMessage;
+		} catch (e) {
+			lastError = e instanceof Error ? e.message : String(e);
 		}
 
-		// The model awaits above can take several seconds. If a /reload or session
+		// The model await above can take several seconds. If a /reload or session
 		// replacement (/new, /resume, /fork) happened during that await, session_shutdown
 		// fired and bumped `generation` before the runner was invalidated. This summary
 		// belongs to a now-dead session, so bail silently before touching the stale
@@ -281,8 +251,8 @@ export default function (pi: ExtensionAPI) {
 		// "command:idle-summary" error after the reload/replacement finishes).
 		if (generation !== runGeneration) return;
 
-		if (!summary || !usedModel) {
-			// Every candidate failed. Surface it instead of bailing silently so the
+		if (!summary) {
+			// The model failed. Surface it instead of bailing silently so the
 			// user knows the summary didn't generate (e.g. a rate-limited model).
 			if (ctx.hasUI) {
 				ctx.ui.notify(
@@ -293,7 +263,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const modelLabelUsed = `${usedModel.provider}/${usedModel.id}`;
+		const modelLabelUsed = modelLabel(usedModel);
 		// Defense in depth: the generation check above is the primary guard, but keep
 		// a try/catch around sendMessage in case of a race where shutdown fires
 		// between the check and the call.
@@ -320,8 +290,31 @@ export default function (pi: ExtensionAPI) {
 		return box;
 	});
 
-	pi.on("session_start", () => {
+	pi.on("session_start", (_event, ctx) => {
 		clearIdleTimer();
+		pinNotifier.reset();
+		// No pin and nothing wrong with the file: return before touching ctx,
+		// which may already be stale (the closure is reused across session
+		// replacement).
+		const pin = readModelPin(configPath());
+		if (!pin.ref && !pin.warning) return;
+		try {
+			if (!ctx.hasUI) return;
+			if (pin.warning) {
+				const warning = pin.warning;
+				pinNotifier.notifyOnce(warning, () => ctx.ui.notify(`idle-summary: ${warning}`, "warning"));
+			}
+			if (pin.ref) {
+				const ignored = resolveModel(pin.ref, ctx.model, ctx.modelRegistry).ignoredPin;
+				if (ignored) {
+					pinNotifier.notifyOnce(ignored.ref, () =>
+						ctx.ui.notify(describeIgnoredPin("idle-summary", ignored, ctx.model), "warning"),
+					);
+				}
+			}
+		} catch {
+			// Best effort: a stale ctx never breaks session start.
+		}
 	});
 
 	pi.on("agent_start", () => {
@@ -337,8 +330,8 @@ export default function (pi: ExtensionAPI) {
 		armIdleTimer(ctx);
 	});
 
-	// Shared model picker for `/idle-summary model`. Opens a picker; the choice is persisted to the
-	// global agent dir and preferred on every future summary.
+	// Model picker for `/idle-summary model`. The choice is pinned in the
+	// global agent dir and used for every future summary while it resolves.
 	async function pickSummaryModel(ctx: ExtensionContext): Promise<void> {
 		if (!ctx.hasUI) {
 			ctx.ui.notify(
@@ -348,16 +341,17 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const pool = summaryPool(ctx);
 		const hasAuth = (m: Model<Api>) => ctx.modelRegistry.hasConfiguredAuth(m);
-		const pickable = pickableModels(pool, hasAuth);
+		const pickable = pickableModels(pickerPool(ctx), hasAuth);
 		if (pickable.length === 0) {
 			ctx.ui.notify("No models with configured auth are available.", "warning");
 			return;
 		}
 
-		const [current] = summaryCandidates(ctx);
-		// Put the effective current model first so it is pre-highlighted.
+		// Put the effective current model first so it is pre-highlighted. An
+		// unpinned session model without auth is not offered.
+		const resolved = summaryModel(ctx).model;
+		const current = resolved && hasAuth(resolved) ? resolved : undefined;
 		const ordered = current
 			? [current, ...pickable.filter((m) => modelLabel(m) !== modelLabel(current))]
 			: pickable;
@@ -368,25 +362,59 @@ export default function (pi: ExtensionAPI) {
 		});
 		if (!choice) return; // cancelled
 
-		writeConfiguredModel(choice);
+		let warnings: string[];
+		try {
+			({ warnings } = writeModelPin(configPath(), choice));
+		} catch (err) {
+			ctx.ui.notify(
+				`idle-summary: could not save the summary model: ${err instanceof Error ? err.message : String(err)}`,
+				"warning",
+			);
+			return;
+		}
+		for (const warning of warnings) ctx.ui.notify(`idle-summary: ${warning}`, "warning");
 		ctx.ui.notify(`Summary model set to ${choice}`, "info");
 	}
 
+	// `/idle-summary model clear`: drop the pin, keep every other key.
+	function clearSummaryModel(ctx: ExtensionContext): void {
+		let cleared: boolean;
+		try {
+			cleared = clearModelPin(configPath());
+		} catch (err) {
+			ctx.ui.notify(
+				`idle-summary: could not clear the summary model: ${err instanceof Error ? err.message : String(err)}`,
+				"warning",
+			);
+			return;
+		}
+		ctx.ui.notify(
+			cleared ? "Summary model pin cleared; using the session model." : "No summary model pin set.",
+			"info",
+		);
+	}
+
 	// Trigger a summary immediately, and suppress the pending idle timer.
-	// `/idle-summary model` opens the model picker instead, leaving the idle
-	// timer armed.
+	// `/idle-summary model [clear]` manages the model pin instead, leaving the
+	// idle timer armed.
 	pi.registerCommand("idle-summary", {
-		description: "Generate a session summary now; /idle-summary model picks the summary model",
+		description:
+			"Generate a session summary now; /idle-summary model picks the summary model, /idle-summary model clear uses the session model",
 		getArgumentCompletions: (prefix: string) => {
 			const items = [
 				{ value: "model", label: "model", description: "Choose the model used to generate session summaries" },
+				{ value: "model clear", label: "model clear", description: "Remove the summary model pin and use the session model" },
 			];
 			const filtered = items.filter((i) => i.value.startsWith(prefix));
 			return filtered.length > 0 ? filtered : null;
 		},
 		handler: async (args, ctx) => {
-			if ((args ?? "").trim() === "model") {
-				await pickSummaryModel(ctx);
+			const command = (args ?? "").trim();
+			if (/^model(\s|$)/i.test(command)) {
+				const sub = command.slice(5).trim().toLowerCase();
+				if (!sub) await pickSummaryModel(ctx);
+				else if (sub === "clear") clearSummaryModel(ctx);
+				else ctx.ui.notify("Usage: /idle-summary model | /idle-summary model clear", "warning");
 				return;
 			}
 			clearIdleTimer();

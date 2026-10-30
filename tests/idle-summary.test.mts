@@ -12,8 +12,27 @@
 // boolean reset on session_start would clear the flag out from under an old
 // in-flight run (scenario 4 below).
 //
+// Also covers the global summary model pin: pinned model used, unusable pin
+// falling back to the session model, the once-per-session ignored-pin notice,
+// /idle-summary model clear, and the picker write/cancel/error paths.
+//
 // Run: node tests/idle-summary.test.mts
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// Isolate the global config: a real ~/.pi/agent/idle-summary.json (pin or
+// timeoutMinutes) must never leak into these tests. Set before the import;
+// getAgentDir() reads the variable on every call.
+const agentDir = mkdtempSync(join(tmpdir(), "idle-summary-agent-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
+const configFile = join(agentDir, "idle-summary.json");
+process.on("exit", () => rmSync(agentDir, { recursive: true, force: true }));
+const setConfig = (value: Record<string, unknown> | undefined) => {
+	rmSync(configFile, { recursive: true, force: true });
+	if (value) writeFileSync(configFile, JSON.stringify(value));
+};
 
 const idleSummary = (await import("../extensions/idle-summary/index.ts")).default;
 const { resolveIdleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS } = await import(
@@ -26,6 +45,9 @@ const commands: Record<string, any> = {};
 let sendMessageCalls: any[] = [];
 let notifyCalls: Array<{ message: string; type?: string }> = [];
 let selectCalls = 0;
+let selectItems: string[][] = [];
+let selectAnswer: string | undefined;
+let streamModels: any[] = [];
 
 const pi: any = {
 	on(event: string, handler: any) {
@@ -106,7 +128,8 @@ function makeCtx(overrides: Partial<any> = {}): any {
 		mode: "tui",
 		cwd: process.cwd(),
 		scopedModels: [],
-		model: undefined,
+		// The summary uses the session model when there is no pin.
+		model: pool[0],
 		signal: new AbortController().signal,
 		sessionManager: {
 			// A non-empty conversation so buildConversationText returns content.
@@ -117,9 +140,13 @@ function makeCtx(overrides: Partial<any> = {}): any {
 		modelRegistry: {
 			getAvailable: () => pool,
 			hasConfiguredAuth: () => true,
-			// streamSimple(candidate, { messages }).result() is the call shape the
-			// extension uses (since bcf1d8f); all candidates await the same deferred.
-			streamSimple: () => ({ result: async () => completePromise }),
+			find: (provider: string, id: string) => pool.find((m) => m.provider === provider && m.id === id),
+			// streamSimple(model, { messages }).result() is the call shape the
+			// extension uses (since bcf1d8f); every call awaits the same deferred.
+			streamSimple: (model: any) => {
+				streamModels.push(model);
+				return { result: async () => completePromise };
+			},
 		},
 		ui: {
 			notify: (message: string, type?: string) => {
@@ -128,9 +155,10 @@ function makeCtx(overrides: Partial<any> = {}): any {
 			},
 			// Cancelled picker: proves the model path was taken without ever
 			// writing the (real, global) summary model config.
-			select: async (_title: string, _items: string[], _opts: any) => {
+			select: async (_title: string, items: string[], _opts: any) => {
 				selectCalls++;
-				return undefined;
+				selectItems.push(items);
+				return selectAnswer;
 			},
 		},
 		...overrides,
@@ -142,6 +170,9 @@ function resetScenario() {
 	sendMessageCalls = [];
 	notifyCalls = [];
 	selectCalls = 0;
+	selectItems = [];
+	selectAnswer = undefined;
+	streamModels = [];
 	completePromise = new Promise<any>((r) => {
 		resolveComplete = r;
 	});
@@ -282,8 +313,9 @@ async function main() {
 	assert.ok(modelCompletions, "expected completion for empty prefix");
 	assert.deepEqual(
 		modelCompletions.map((i: any) => i.value),
-		["model"],
+		["model", "model clear"],
 	);
+	assert.deepEqual(commands["idle-summary"].getArgumentCompletions("model ")?.map((i: any) => i.value), ["model clear"]);
 	assert.equal(commands["idle-summary"].getArgumentCompletions("mo")?.[0]?.value, "model");
 	assert.equal(commands["idle-summary"].getArgumentCompletions("zzz"), null);
 
@@ -298,6 +330,123 @@ async function main() {
 
 	console.log("  ✓ idle-summary stale-ctx regression: 4 scenarios passed");
 	console.log("  ✓ idle-summary /idle-summary model dispatch: 3 checks passed");
+
+	await testModelPin();
+	console.log("  ✓ idle-summary model pin: resolution, notices, clear, picker");
+}
+
+const resolved = (text: string) => resolveComplete({ content: [{ type: "text", text }] });
+
+async function testModelPin() {
+	// A. A usable pin is the summary model.
+	setConfig({ model: "openai/gpt-5.6-luna" });
+	resetScenario();
+	notifyCalls = [];
+	const a = runSummary();
+	resolved("pinned summary");
+	await a;
+	assert.equal(streamModels.length, 1, "one model call per run");
+	assert.equal(streamModels[0].id, "gpt-5.6-luna", "the pinned model is used");
+	assert.equal(sendMessageCalls[0]?.details?.model, "openai/gpt-5.6-luna");
+
+	// B. An unusable pin falls back to the session model (one call, no chain).
+	setConfig({ model: "x/y" });
+	resetScenario();
+	const b = runSummary();
+	resolved("fallback summary");
+	await b;
+	assert.deepEqual(streamModels.map((m) => m.id), ["claude-haiku-4-5"], "the session model is used");
+	assert.equal(sendMessageCalls[0]?.details?.model, "anthropic/claude-haiku-4-5");
+
+	// C. A failed run is reported once with the existing text; no fallback chain.
+	setConfig(undefined);
+	resetScenario();
+	const c = runSummary();
+	resolveComplete({ content: [], errorMessage: "rate limited" });
+	await c;
+	assert.equal(streamModels.length, 1, "no second model is tried");
+	assert.deepEqual(notifyCalls, [{ message: "idle-summary: no model produced a summary. rate limited", type: "warning" }]);
+
+	// D. Unpriced session model still produces output; no model or an unpinned
+	// model without auth bails silently.
+	resetScenario();
+	const unpriced = { provider: "openrouter", id: "z-ai/glm-5.2:free", api: "openai-completions" };
+	const d = commands["idle-summary"].handler("", makeCtx({ model: unpriced }));
+	resolved("free summary");
+	await d;
+	assert.equal(sendMessageCalls[0]?.details?.model, "openrouter/z-ai/glm-5.2:free");
+	resetScenario();
+	await commands["idle-summary"].handler("", makeCtx({ model: undefined }));
+	const noAuthCtx = makeCtx();
+	noAuthCtx.modelRegistry = { ...noAuthCtx.modelRegistry, hasConfiguredAuth: () => false };
+	await commands["idle-summary"].handler("", noAuthCtx);
+	assert.equal(streamModels.length, 0, "no call without a usable model");
+	assert.equal(sendMessageCalls.length + notifyCalls.length, 0, "silent bail");
+
+	// E. Ignored-pin notice: once per session, again after a new session_start.
+	setConfig({ model: "x/y" });
+	resetScenario(); // session_start #1 (notifies)
+	const ignoredNotice = 'idle-summary: pinned model "x/y" ignored (not found); using the session model anthropic/claude-haiku-4-5.';
+	const noticeCount = () => notifyCalls.filter((n) => n.message === ignoredNotice).length;
+	assert.equal(noticeCount(), 1, "one notice at session start");
+	assert.equal(notifyCalls.find((n) => n.message === ignoredNotice)?.type, "warning");
+	const e = runSummary();
+	resolved("summary");
+	await e;
+	assert.equal(noticeCount(), 1, "a run does not repeat the notice");
+	handlers.session_start({}, makeCtx());
+	assert.equal(noticeCount(), 2, "a new session reports it again");
+	// A corrupt config reports the read warning; a stale ctx with a pin never throws.
+	writeFileSync(configFile, "{ nope");
+	notifyCalls = [];
+	handlers.session_start({}, makeCtx());
+	assert.match(notifyCalls[0]?.message ?? "", /^idle-summary: .*failed to read .*ignoring the model pin$/);
+	setConfig({ model: "x/y" });
+	stale = true;
+	handlers.session_start({}, makeCtx()); // must NOT throw
+	stale = false;
+
+	// F. /idle-summary model clear: with and without a pin; timeoutMinutes survives.
+	setConfig({ timeoutMinutes: 7 });
+	resetScenario();
+	await commands["idle-summary"].handler("model clear", makeCtx());
+	assert.deepEqual(notifyCalls, [{ message: "No summary model pin set.", type: "info" }]);
+	assert.equal(readFileSync(configFile, "utf8"), JSON.stringify({ timeoutMinutes: 7 }), "no write without a pin");
+	setConfig({ model: "openai/gpt-5.6-luna", timeoutMinutes: 7 });
+	resetScenario();
+	await commands["idle-summary"].handler("model clear", makeCtx());
+	assert.deepEqual(notifyCalls.map((n) => n.message), ["Summary model pin cleared; using the session model."]);
+	assert.deepEqual(JSON.parse(readFileSync(configFile, "utf8")), { timeoutMinutes: 7 }, "timeoutMinutes survives the clear");
+	resetScenario();
+	await commands["idle-summary"].handler("model bogus", makeCtx());
+	assert.equal(notifyCalls[0]?.type, "warning");
+	assert.match(notifyCalls[0]?.message ?? "", /^Usage: \/idle-summary model/);
+	assert.equal(sendMessageCalls.length, 0, "an unknown model sub-command never generates");
+
+	// G. Picker: resolved model pre-highlighted; a pick writes the pin and
+	// keeps timeoutMinutes; cancel writes nothing; a write error warns.
+	setConfig({ timeoutMinutes: 7 });
+	resetScenario();
+	selectAnswer = "openai/gpt-5.6-luna";
+	await commands["idle-summary"].handler("model", makeCtx());
+	assert.deepEqual(selectItems[0], ["anthropic/claude-haiku-4-5", "openai/gpt-5.6-luna"], "the session model is first when unpinned");
+	assert.deepEqual(JSON.parse(readFileSync(configFile, "utf8")), { timeoutMinutes: 7, model: "openai/gpt-5.6-luna" });
+	assert.deepEqual(notifyCalls, [{ message: "Summary model set to openai/gpt-5.6-luna", type: "info" }]);
+	resetScenario();
+	await commands["idle-summary"].handler("model", makeCtx());
+	assert.equal(selectItems[0][0], "openai/gpt-5.6-luna", "the pin is pre-highlighted");
+	assert.equal(notifyCalls.length, 0, "cancel notifies nothing");
+	assert.deepEqual(JSON.parse(readFileSync(configFile, "utf8")), { timeoutMinutes: 7, model: "openai/gpt-5.6-luna" }, "cancel writes nothing");
+	setConfig(undefined);
+	mkdirSync(configFile); // a directory where the file goes: the write fails
+	resetScenario();
+	notifyCalls = []; // session_start reported the unreadable file; only the write matters here
+	selectAnswer = "openai/gpt-5.6-luna";
+	await commands["idle-summary"].handler("model", makeCtx());
+	assert.match(notifyCalls[0]?.message ?? "", /^idle-summary: could not save the summary model/);
+	assert.ok(!notifyCalls.some((n) => n.message.startsWith("Summary model set to")), "no success after a failed write");
+	setConfig(undefined);
+	assert.equal(existsSync(configFile), false);
 }
 
 main().catch((err) => {
