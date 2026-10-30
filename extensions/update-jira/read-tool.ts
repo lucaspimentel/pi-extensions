@@ -2,7 +2,7 @@
  * The jira_read tool: read-only Jira operations.
  *
  * Actions:
- * - get: digest (explicit summary/status/assignee/description fields, capped
+ * - get: digest (explicit summary/status/assignee/description/issuelinks fields, capped
  *   description) or the complete raw server payload (raw: true).
  * - comments: one newest-first page (20 comments) with pagination metadata.
  *
@@ -18,7 +18,7 @@ import { buildIssueDigest } from "./digest.ts";
 import { resultOutputSchema } from "./schema.ts";
 import type { ErrorKind } from "./results.ts";
 
-const GET_DIGEST_FIELDS = ["summary", "status", "assignee", "description"];
+const GET_DIGEST_FIELDS = ["summary", "status", "assignee", "description", "issuelinks"];
 
 export const readParameters = Type.Object({
 	action: Type.Union([Type.Literal("get"), Type.Literal("comments")], {
@@ -88,7 +88,7 @@ export function createReadTool(deps: ToolDeps) {
 		label: "Jira Read",
 		description: [
 			"Read a Jira ticket. Two actions:",
-			'- get: returns a digest (key, summary, status, assignee, description capped at 1500 characters). Pass raw: true for the complete server payload (view "full", fields ["*all"]) with no local shaping. The server may return bodies as HTML when markdown would lose rich content; the applied format and any server warning are preserved. A digest, especially a truncated HTML one, is not a safe write-back source: before editing description or environment, read with raw: true and write the body back in the format the server actually returned.',
+			'- get: returns a digest (key, summary, status, assignee, issue links, description capped at 1500 characters). Pass raw: true for the complete server payload (view "full", fields ["*all"]) with no local shaping. The server may return bodies as HTML when markdown would lose rich content; the applied format and any server warning are preserved. A digest, especially a truncated HTML one, is not a safe write-back source: before editing description or environment, read with raw: true and write the body back in the format the server actually returned.',
 			"- comments: returns one page of the issue's comments, newest-first (maxResults 20, orderBy -created), with pagination metadata (startAt, maxResults, total, isLast). Page by passing startAt; additional pages are not fetched automatically.",
 			"The target is ticketKey when given, otherwise the ticket key detected from the current git branch (requires update-jira.json configuration). Read-only.",
 		].join("\n"),

@@ -246,6 +246,30 @@ test("digest: handles missing fields, unassigned issues, and null descriptions",
 	assert.equal(result.digest.descriptionTruncated, false);
 });
 
+test("digest: extracts issue links in both directions and skips malformed entries", () => {
+	const result = buildIssueDigest({
+		key: "EXAMPLE-5",
+		fields: {
+			issuelinks: [
+				{ type: { name: "Relates", inward: "relates to", outward: "relates to" }, outwardIssue: { key: "OTHER-822", fields: { summary: "Lang", status: { name: "Open" } } } },
+				{ type: { name: "Blocks", inward: "is blocked by", outward: "blocks" }, inwardIssue: { key: "OTHER-1" } },
+				{ type: { name: "Blocks", inward: "is blocked by", outward: "blocks" }, outwardIssue: { key: "OTHER-2" } },
+				{ type: { name: "Blocks" } },
+				"junk",
+			],
+		},
+	});
+	assert.ok(result.ok);
+	if (!result.ok) return;
+	assert.deepEqual(result.digest.links, [
+		{ relation: "relates to", key: "OTHER-822", summary: "Lang", status: "Open" },
+		{ relation: "is blocked by", key: "OTHER-1", summary: undefined, status: undefined },
+		{ relation: "blocks", key: "OTHER-2", summary: undefined, status: undefined },
+	]);
+	assert.ok(renderDigestText(result.digest).includes("- relates to OTHER-822: Lang [Open]"));
+	assert.deepEqual(buildIssueDigest({ key: "EXAMPLE-6", fields: {} }).ok && (buildIssueDigest({ key: "EXAMPLE-6", fields: {} }) as { digest: { links: unknown[] } }).digest.links, []);
+});
+
 test("digest: description is capped at 1500 characters with a marker", () => {
 	const long = "x".repeat(2000);
 	const truncated = truncateDescription(long);

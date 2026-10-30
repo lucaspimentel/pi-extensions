@@ -2,7 +2,7 @@
  * Digest extraction for jira_read action "get".
  *
  * The digest is a shaped summary (key, summary, status, assignee, capped
- * description) built from the explicit-field full view. It preserves the
+ * description, issue links) built from the explicit-field full view. It preserves the
  * actual content format and server warnings: a digest, especially a
  * truncated HTML one, is never a safe write-back source.
  *
@@ -18,8 +18,18 @@ export interface IssueDigest {
 	assignee: string;
 	description: string;
 	descriptionTruncated: boolean;
+	/** Issue links (fields.issuelinks), one entry per linked issue. */
+	links: IssueLink[];
 	appliedContentFormat?: string;
 	warning?: string;
+}
+
+export interface IssueLink {
+	/** Relationship as seen from this issue, e.g. "blocks" or "is blocked by". */
+	relation: string;
+	key: string;
+	summary?: string;
+	status?: string;
 }
 
 export type DigestResult = { ok: true; digest: IssueDigest } | { ok: false; message: string };
@@ -34,6 +44,35 @@ export function truncateDescription(text: string): { text: string; truncated: bo
 		return { text, truncated: false };
 	}
 	return { text: text.slice(0, DIGEST_DESCRIPTION_CAP), truncated: true };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+/** Extract issue links from fields.issuelinks; malformed entries are skipped. */
+export function extractIssueLinks(raw: unknown): IssueLink[] {
+	if (!Array.isArray(raw)) return [];
+	const links: IssueLink[] = [];
+	for (const entry of raw) {
+		const link = asRecord(entry);
+		if (!link) continue;
+		const type = asRecord(link.type);
+		const outward = asRecord(link.outwardIssue);
+		const inward = asRecord(link.inwardIssue);
+		const other = outward ?? inward;
+		const key = asString(other?.key);
+		if (!other || !key) continue;
+		const relation = (outward ? asString(type?.outward) : asString(type?.inward)) ?? asString(type?.name) ?? "relates to";
+		const otherFields = asRecord(other.fields);
+		links.push({
+			relation,
+			key,
+			summary: asString(otherFields?.summary),
+			status: asString(asRecord(otherFields?.status)?.name),
+		});
+	}
+	return links;
 }
 
 export function buildIssueDigest(serverData: unknown): DigestResult {
@@ -67,6 +106,7 @@ export function buildIssueDigest(serverData: unknown): DigestResult {
 		assignee,
 		description: truncated.text,
 		descriptionTruncated: truncated.truncated,
+		links: extractIssueLinks(fields.issuelinks),
 		appliedContentFormat: asString(data.appliedContentFormat),
 		warning: asString(data.warning),
 	};
@@ -89,6 +129,13 @@ export function renderDigestText(digest: IssueDigest): string {
 		lines.push("Description: (empty)");
 	} else {
 		lines.push(`Description: ${digest.description}`);
+	}
+	if (digest.links.length > 0) {
+		lines.push("Links:");
+		for (const link of digest.links) {
+			const detail = [link.summary, link.status ? `[${link.status}]` : undefined].filter(Boolean).join(" ");
+			lines.push(`- ${link.relation} ${link.key}${detail ? `: ${detail}` : ""}`);
+		}
 	}
 	if (digest.descriptionTruncated) {
 		lines.push(`[description truncated at ${DIGEST_DESCRIPTION_CAP} characters; call jira_read with action "get" and raw: true for the complete description]`);

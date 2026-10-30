@@ -46,7 +46,8 @@ fail-closed errors.
 
 ### `jira_read` (read-only)
 
-- `action: "get"`: a digest of key, summary, status, assignee, and the
+- `action: "get"`: a digest of key, summary, status, assignee, issue links
+  (relation, key, summary, status; not web/remote links), and the
   description capped at 1500 characters (with a truncation marker pointing at
   `raw: true`). `raw: true` instead returns the complete server payload
   (view `full`, fields `["*all"]`) with no local shaping. The server may

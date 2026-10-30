@@ -201,7 +201,7 @@ test("read get digest: routes view full with explicit fields and markdown", asyn
 			cloudId: "https://example.atlassian.net/",
 			issueIdOrKey: "EXAMPLE-101",
 			view: "full",
-			fields: ["summary", "status", "assignee", "description"],
+			fields: ["summary", "status", "assignee", "description", "issuelinks"],
 			fieldsByKeys: true,
 			responseContentFormat: "markdown",
 		});

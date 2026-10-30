@@ -145,10 +145,10 @@ per-action validation in code.
 `idempotentHint: true`)
 
 - `get` — `getJiraIssue`. For the digest, request `view: "full"` with
-`fields: ["summary", "status", "assignee", "description"]` explicitly,
+`fields: ["summary", "status", "assignee", "description", "issuelinks"]` explicitly,
 rather than relying on compact defaults. Verify the response shape with a
 read-only probe before implementing its parser. Return key, summary,
-status, assignee, and description; handle missing fields and null bodies.
+status, assignee, issue links, and description; handle missing fields and null bodies.
 Cap the digest description at 1500 characters with an explicit truncation
 marker pointing at `raw: true`. Request markdown but preserve
 `appliedContentFormat` and server warnings: the server can return HTML when
