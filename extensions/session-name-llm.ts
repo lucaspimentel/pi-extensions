@@ -1,8 +1,8 @@
 /**
  * LLM Session Name Extension (manual)
  *
- * Regenerates a short session title on demand with /name-llm, using the
- * session's active model. Nothing is titled automatically: the command is the
+ * Regenerates a short session title on demand with /name-llm. Nothing is
+ * titled automatically: the command is the
  * only trigger, and it replaces whatever name is currently set, including a
  * manual /name, which is the point of asking for it. The title is built from
  * the current title plus the session's context: the branch's original user
@@ -28,14 +28,33 @@
  * skill-only prompts become the invoked-skill description). The same
  * derivation applies to theme anchors and recent-turn samples.
  *
+ * Model: the global pin in `~/.pi/agent/session-name-llm.json`
+ * (`"model": "provider/modelId"`, shared helpers in shared/model-pin.ts) when
+ * it resolves and has configured auth; otherwise the session's active model.
+ * A pin that cannot be used (or a pin file that cannot be read) is named once
+ * per session in the run's result message.
+ * `/name-llm model` picks the pin, `/name-llm model clear` removes it.
+ *
  * A second /name-llm while a run is in flight is refused rather than racing
  * the first one on setSessionName, and a run is aborted via a generation
  * counter when the session is replaced (/new, /resume, /fork): see
  * idle-summary/index.ts for the full rationale.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+	clearModelPin,
+	createIgnoredPinNotifier,
+	type IgnoredPin,
+	ignoredPinReasonText,
+	readModelPin,
+	resolveModel,
+	writeModelPin,
+} from "./shared/model-pin.ts";
+import { modelLabel, pickableModels } from "./shared/model-selection.ts";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -50,6 +69,11 @@ const RECENT_MESSAGE_COUNT = 10;
 const RECENT_MESSAGE_SAMPLE_LENGTH = 300;
 const INITIAL_PROMPT_COUNT = 2;
 const INITIAL_PROMPT_SAMPLE_LENGTH = 1000;
+const CONFIG_FILE = "session-name-llm.json";
+const USAGE = "Usage: /name-llm (regenerate the title) | /name-llm model (pick the title model) | /name-llm model clear (use the session model)";
+
+/** Global pin file; resolved per call so PI_CODING_AGENT_DIR is honored. */
+const configPath = () => join(getAgentDir(), CONFIG_FILE);
 
 // ── Pure helpers (exported for tests) ────────────────────────────────────────
 
@@ -237,8 +261,14 @@ export const buildRecentTurnsText = (entries: unknown[], maxMessages: number = R
 
 // ── Title outcomes ───────────────────────────────────────────────────────────
 
+/**
+ * Pin diagnostics for one run: a pin that could not be used (and the model
+ * used instead), or a pin file that could not be read.
+ */
+type PinInfo = { ignored?: IgnoredPin; used?: Model<Api>; warning?: string };
+
 /** Result of one title-generation model call. */
-type TitleGeneration = { ok: true; title: string } | { ok: false; reason: string };
+type TitleGeneration = ({ ok: true; title: string } | { ok: false; reason: string }) & { pin?: PinInfo };
 
 /**
  * Result of applying a title: "applied" sets a new name, "unchanged" skips
@@ -247,10 +277,25 @@ type TitleGeneration = { ok: true; title: string } | { ok: false; reason: string
  * carries a user-facing cause. Every outcome is surfaced by /name-llm.
  */
 type TitleOutcome =
-	| { status: "applied"; title: string }
-	| { status: "unchanged"; title: string }
+	| { status: "applied"; title: string; pin?: PinInfo }
+	| { status: "unchanged"; title: string; pin?: PinInfo }
 	| { status: "noop"; reason: string }
-	| { status: "failed"; reason: string };
+	| { status: "failed"; reason: string; pin?: PinInfo };
+
+/**
+ * Suffix for a run message when the pin could not be used, e.g.
+ * ` (pinned model "x/y" ignored: not found; used anthropic/claude-x)`.
+ */
+export const pinNote = (pin: PinInfo | undefined): string => {
+	if (!pin) return "";
+	const parts: string[] = [];
+	if (pin.warning) parts.push(pin.warning);
+	if (pin.ignored) {
+		const used = pin.used ? `; used ${modelLabel(pin.used)}` : "";
+		parts.push(`pinned model "${pin.ignored.ref}" ignored: ${ignoredPinReasonText(pin.ignored.reason)}${used}`);
+	}
+	return parts.length > 0 ? ` (${parts.join("; ")})` : "";
+};
 
 // Noop reason that means "no input yet" (as opposed to an internal skip like a
 // rename during generation); /name-llm phrases it differently.
@@ -280,6 +325,24 @@ export default function (pi: ExtensionAPI) {
 	// rather than racing the first one on setSessionName. Cleared on
 	// session_start so a replacement session cannot inherit the entry.
 	const titleRunsInFlight = new Set<string>();
+	// Once-per-session dedupe for the pin diagnostics (an unusable pin, or a
+	// pin file that cannot be read); reset on every session_start.
+	const pinNotifier = createIgnoredPinNotifier();
+
+	/**
+	 * Pin diagnostics for one run, at most once per session: an unusable pin
+	 * (or a corrupt pin file) is named in the first result that reports it and
+	 * never again until the next session replaces this one, so a permanently
+	 * broken pin does not repeat the same sentence on every /name-llm.
+	 */
+	function pinNoteOnce(pin: PinInfo | undefined): string {
+		if (!pin) return "";
+		const key = pin.ignored ? pin.ignored.ref : pin.warning;
+		// No standalone emit: the note is appended to the run's own message, so
+		// only the first sighting per session (per pin/warning) is kept.
+		if (!key || !pinNotifier.notifyOnce(key, () => {})) return "";
+		return pinNote(pin);
+	}
 
 	/** Name from both the live manager and the session file (see header). */
 	const snapshotName = (ctx: ExtensionContext): NameSnapshot => ({
@@ -290,10 +353,16 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	async function generateTitle(ctx: ExtensionContext, prompt: string): Promise<TitleGeneration> {
-		const model = ctx.model;
-		if (!model) return { ok: false, reason: "no model selected" };
-		if (!ctx.modelRegistry.hasConfiguredAuth(model)) {
-			return { ok: false, reason: "model has no configured auth" };
+		const read = readModelPin(configPath());
+		const resolved = resolveModel(read.ref, ctx.model, ctx.modelRegistry);
+		const model = resolved.model;
+		const pin: PinInfo | undefined =
+			read.warning || resolved.ignoredPin
+				? { warning: read.warning, ignored: resolved.ignoredPin, used: model }
+				: undefined;
+		if (!model) return { ok: false, reason: "no model selected", pin };
+		if (!resolved.pinned && !ctx.modelRegistry.hasConfiguredAuth(model)) {
+			return { ok: false, reason: "model has no configured auth", pin };
 		}
 
 		let response;
@@ -315,7 +384,7 @@ export default function (pi: ExtensionAPI) {
 				{ maxTokens: MAX_TOKENS },
 			).result();
 		} catch (err) {
-			return { ok: false, reason: clampReason(err instanceof Error ? err.message : String(err)) };
+			return { ok: false, reason: clampReason(err instanceof Error ? err.message : String(err)), pin };
 		}
 
 		const text = response.content
@@ -330,9 +399,9 @@ export default function (pi: ExtensionAPI) {
 				: response.stopReason
 					? `empty response: stop reason ${response.stopReason}`
 					: "empty response";
-			return { ok: false, reason: clampReason(detail) };
+			return { ok: false, reason: clampReason(detail), pin };
 		}
-		return { ok: true, title: sanitizeTitle(text) };
+		return { ok: true, title: sanitizeTitle(text), pin };
 	}
 
 	/**
@@ -368,24 +437,97 @@ export default function (pi: ExtensionAPI) {
 			return { status: "noop", reason: "session was renamed during generation" };
 		}
 
-		if (!generated.ok) return { status: "failed", reason: generated.reason };
+		const pin = generated.pin;
+		if (!generated.ok) return { status: "failed", reason: generated.reason, pin };
 		const title = generated.title;
 
 		// No thrash: never fire a redundant session_info_changed (and tab
 		// rename) when the generated title matches the current name.
-		if (title === current) return { status: "unchanged", title };
+		if (title === current) return { status: "unchanged", title, pin };
 		try {
 			pi.setSessionName(title);
 		} catch {
 			// Stale runner race between the generation check and the call.
-			return { status: "failed", reason: "could not set the session name" };
+			return { status: "failed", reason: "could not set the session name", pin };
 		}
-		return { status: "applied", title };
+		return { status: "applied", title, pin };
+	}
+
+	/**
+	 * `/name-llm model`: pick the title model pin. Mirrors idle-summary's
+	 * picker: the resolved model is pre-highlighted, the choice is written to
+	 * the global pin file with sibling keys preserved.
+	 */
+	async function pickTitleModel(ctx: ExtensionContext): Promise<void> {
+		if (!ctx.hasUI) {
+			ctx.ui.notify("/name-llm model needs an interactive UI; run it in the TUI.", "warning");
+			return;
+		}
+		const hasAuth = (m: Model<Api>) => ctx.modelRegistry.hasConfiguredAuth(m);
+		const pool = ctx.scopedModels.length > 0 ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable();
+		const pickable = pickableModels(pool, hasAuth);
+		if (pickable.length === 0) {
+			ctx.ui.notify("No models with configured auth are available.", "warning");
+			return;
+		}
+		// The effective model first so it is pre-highlighted; an unpinned
+		// session model without auth is not offered.
+		const resolved = resolveModel(readModelPin(configPath()).ref, ctx.model, ctx.modelRegistry).model;
+		const current = resolved && hasAuth(resolved) ? resolved : undefined;
+		const ordered = current
+			? [current, ...pickable.filter((m) => modelLabel(m) !== modelLabel(current))]
+			: pickable;
+		const choice = await ctx.ui.select("Title model:", ordered.map(modelLabel), { signal: ctx.signal });
+		if (!choice) return; // cancelled
+		let warnings: string[];
+		try {
+			({ warnings } = writeModelPin(configPath(), choice));
+		} catch (err) {
+			ctx.ui.notify(
+				`Could not save the title model: ${err instanceof Error ? err.message : String(err)}`,
+				"warning",
+			);
+			return;
+		}
+		for (const warning of warnings) ctx.ui.notify(`name-llm: ${warning}`, "warning");
+		ctx.ui.notify(`Title model set to ${choice}`, "info");
+	}
+
+	/** `/name-llm model clear`: drop the pin, keep every other key. */
+	function clearTitleModel(ctx: ExtensionContext): void {
+		let cleared: boolean;
+		try {
+			cleared = clearModelPin(configPath());
+		} catch (err) {
+			ctx.ui.notify(
+				`Could not clear the title model: ${err instanceof Error ? err.message : String(err)}`,
+				"warning",
+			);
+			return;
+		}
+		ctx.ui.notify(cleared ? "Title model pin cleared; using the session model." : "No title model pin set.", "info");
 	}
 
 	pi.registerCommand("name-llm", {
-		description: "Regenerate the session title now with the session's model",
-		handler: async (_args, ctx) => {
+		description:
+			"Regenerate the session title now (pinned title model, else the session model); /name-llm model picks the pin, /name-llm model clear removes it",
+		getArgumentCompletions: (prefix: string) => {
+			const items = [
+				{ value: "model", label: "model", description: "Choose the model used to generate session titles" },
+				{ value: "model clear", label: "model clear", description: "Remove the title model pin and use the session model" },
+			];
+			const filtered = items.filter((i) => i.value.startsWith(prefix));
+			return filtered.length > 0 ? filtered : null;
+		},
+		handler: async (args, ctx) => {
+			const command = (args ?? "").trim();
+			if (/^model(\s|$)/i.test(command)) {
+				const sub = command.slice(5).trim().toLowerCase();
+				if (!sub) await pickTitleModel(ctx);
+				else if (sub === "clear") clearTitleModel(ctx);
+				else ctx.ui.notify(USAGE, "warning");
+				return;
+			}
 			const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral";
 			// Mark the run in flight before the first await so a second
 			// invocation cannot start a parallel model call.
@@ -396,12 +538,14 @@ export default function (pi: ExtensionAPI) {
 			titleRunsInFlight.add(sessionId);
 			try {
 				const outcome = await applyTitle(ctx);
+				// "noop" carries no pin: nothing was generated and nothing is reported.
+				const note = pinNoteOnce("pin" in outcome ? outcome.pin : undefined);
 				switch (outcome.status) {
 					case "applied":
-						ctx.ui.notify(`Session title: ${outcome.title}`, "info");
+						ctx.ui.notify(`Session title: ${outcome.title}${note}`, "info");
 						break;
 					case "unchanged":
-						ctx.ui.notify(`Title unchanged: ${outcome.title}`, "info");
+						ctx.ui.notify(`Title unchanged: ${outcome.title}${note}`, "info");
 						break;
 					case "noop": {
 						// "Nothing to title yet" only fits missing input; internal
@@ -415,7 +559,7 @@ export default function (pi: ExtensionAPI) {
 						break;
 					}
 					case "failed":
-						ctx.ui.notify(`Could not regenerate the session title: ${outcome.reason}.`, "warning");
+						ctx.ui.notify(`Could not regenerate the session title: ${outcome.reason}.${note}`, "warning");
 						break;
 				}
 			} catch {
@@ -428,6 +572,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", () => {
 		titleRunsInFlight.clear();
+		pinNotifier.reset();
 	});
 
 	pi.on("session_shutdown", () => {

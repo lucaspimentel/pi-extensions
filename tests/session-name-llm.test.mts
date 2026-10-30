@@ -6,13 +6,23 @@
 // handlers only), regeneration of a named session, titling of an unnamed one,
 // replacing a manual name, unchanged-title and failure reporting, the
 // in-flight refusal, a rename that lands during the model call winning, and
-// the stale-run generation guard.
+// the stale-run generation guard, and the global title model pin
+// (resolution, once-per-session ignored-pin notes, /name-llm model picker and
+// clear).
 //
 // Run: node tests/session-name-llm.test.mts
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Isolate the global pin file: a real ~/.pi/agent/session-name-llm.json must
+// never leak into these tests. Set before the import; getAgentDir() reads the
+// variable on every call.
+const agentDir = mkdtempSync(join(tmpdir(), "session-name-llm-agent-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
+const pinFile = join(agentDir, "session-name-llm.json");
+process.on("exit", () => rmSync(agentDir, { recursive: true, force: true }));
 
 const mod = await import("../extensions/session-name-llm.ts");
 const {
@@ -242,20 +252,30 @@ function load(pi: MockPi) {
 
 function makeCtx(opts: {
 	complete?: (model: any, context: any, options?: any) => Promise<any>;
-	authed?: boolean;
+	authed?: boolean | ((model: any) => boolean);
 	entries?: any[];
 	sessionFile?: string;
 	sessionId?: string;
+	model?: any;
+	models?: any[];
+	hasUI?: boolean;
+	select?: (title: string, items: string[], opts?: any) => Promise<string | undefined>;
 } = {}) {
+	const authed = opts.authed ?? true;
 	const ctx: any = {
+		hasUI: opts.hasUI ?? true,
+		scopedModels: [],
+		signal: new AbortController().signal,
 		sessionManager: {
 			getSessionId: () => opts.sessionId ?? "s1",
 			getBranch: () => opts.entries ?? [],
 			getSessionFile: () => opts.sessionFile,
 		},
-		model: { provider: "anthropic", id: "claude-x" },
+		model: "model" in opts ? opts.model : { provider: "anthropic", id: "claude-x" },
 		modelRegistry: {
-			hasConfiguredAuth: () => opts.authed ?? true,
+			hasConfiguredAuth: (m: any) => (typeof authed === "function" ? authed(m) : authed),
+			find: (provider: string, id: string) => (opts.models ?? []).find((m) => m.provider === provider && m.id === id),
+			getAvailable: () => opts.models ?? [],
 			// generateTitle uses streamSimple(...).result(); delegate to the
 			// same complete mock so the assertions below stay simple.
 			streamSimple: (model: any, context: any, options?: any) => ({
@@ -264,7 +284,14 @@ function makeCtx(opts: {
 		},
 	};
 	ctx.notifies = [] as { msg: string; level?: string }[];
-	ctx.ui = { notify: (msg: string, level?: string) => ctx.notifies.push({ msg, level }) };
+	ctx.selects = [] as { title: string; items: string[] }[];
+	ctx.ui = {
+		notify: (msg: string, level?: string) => ctx.notifies.push({ msg, level }),
+		select: async (title: string, items: string[], selectOpts?: any) => {
+			ctx.selects.push({ title, items });
+			return opts.select ? opts.select(title, items, selectOpts) : undefined;
+		},
+	};
 	return ctx;
 }
 
@@ -667,6 +694,184 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
 	assert.ok(toastWith(secondCtx, "Session title: second title"));
 	release();
 	await first;
+}
+
+// ── Global title model pin ───────────────────────────────────────────────────
+
+const setPin = (value: Record<string, unknown> | undefined) => {
+	rmSync(pinFile, { recursive: true, force: true });
+	if (value) writeFileSync(pinFile, JSON.stringify(value));
+};
+const pinned = { provider: "baseten", id: "zai-org/GLM-5.2", cost: { input: 1, output: 1 } };
+const sessionModel = { provider: "anthropic", id: "claude-x", cost: { input: 3, output: 15 } };
+
+// 17. A usable pin is the model the title call uses; no note is appended.
+{
+	setPin({ model: "baseten/zai-org/GLM-5.2" });
+	const pi = makePi();
+	const { commands } = load(pi);
+	const used: any[] = [];
+	const ctx = makeCtx({
+		model: sessionModel,
+		models: [pinned, sessionModel],
+		complete: async (model) => { used.push(model); return textResponse("Pinned title"); },
+		entries: [msgEntry("user", "recent")],
+	});
+	await commands["name-llm"].handler("", ctx);
+	assert.equal(used.length, 1);
+	assert.equal(used[0], pinned, "the pinned model is used");
+	assert.ok(ctx.notifies.some((n: any) => n.msg === "Session title: Pinned title"), "no pin note when the pin is used");
+}
+
+// 18. An unusable pin falls back to the session model and the run says so,
+// on applied, unchanged and failed outcomes. The same note is shown at most
+// once per session: an extra run stays quiet, a fresh session_start re-arms it.
+{
+	setPin({ model: "x/y" });
+	const pi = makePi("Same");
+	const { commands, handlers } = load(pi);
+	const freshSession = () => handlers.session_start({}, undefined);
+	const used: any[] = [];
+	const note = ' (pinned model "x/y" ignored: not found; used anthropic/claude-x)';
+	const ctx = makeCtx({
+		model: sessionModel,
+		models: [pinned, sessionModel],
+		complete: async (model) => { used.push(model); return textResponse("New title"); },
+		entries: [msgEntry("user", "recent")],
+	});
+	await commands["name-llm"].handler("", ctx);
+	assert.equal(used[0], sessionModel, "the session model is used");
+	assert.ok(toastWith(ctx, `Session title: New title${note}`), JSON.stringify(ctx.notifies));
+
+	// A second run in the same session still falls back but stays quiet: the
+	// note is once per session, not once per run.
+	const repeatCtx = makeCtx({ model: sessionModel, models: [sessionModel], complete: async () => textResponse("New title"), entries: [msgEntry("user", "recent")] });
+	await commands["name-llm"].handler("", repeatCtx);
+	assert.ok(toastWith(repeatCtx, "Title unchanged: New title"), "the title is still reported");
+	assert.ok(!toastWith(repeatCtx, "ignored:"), "the pin note is not repeated within one session");
+
+	// session_start re-arms it: the same unchanged outcome now names the pin.
+	freshSession();
+	const rearmedCtx = makeCtx({ model: sessionModel, models: [sessionModel], complete: async () => textResponse("New title"), entries: [msgEntry("user", "recent")] });
+	await commands["name-llm"].handler("", rearmedCtx);
+	assert.ok(toastWith(rearmedCtx, `Title unchanged: New title${note}`), JSON.stringify(rearmedCtx.notifies));
+
+	freshSession();
+	setPin({ model: "baseten/zai-org/GLM-5.2" });
+	const noAuthCtx = makeCtx({
+		model: sessionModel,
+		models: [pinned, sessionModel],
+		authed: (m: any) => m !== pinned,
+		complete: async () => { throw new Error("api down"); },
+		entries: [msgEntry("user", "recent")],
+	});
+	await commands["name-llm"].handler("", noAuthCtx);
+	assert.ok(
+		toastWith(noAuthCtx, 'Could not regenerate the session title: api down. (pinned model "baseten/zai-org/GLM-5.2" ignored: no configured auth; used anthropic/claude-x)'),
+		JSON.stringify(noAuthCtx.notifies),
+	);
+
+	// No session model to fall back to: "no model selected" plus the note. A
+	// new session re-arms the note even for the same "x/y" pin reported above.
+	freshSession();
+	setPin({ model: "x/y" });
+	const noModelCtx = makeCtx({ model: undefined, models: [], entries: [msgEntry("user", "recent")] });
+	await commands["name-llm"].handler("", noModelCtx);
+	assert.ok(toastWith(noModelCtx, 'Could not regenerate the session title: no model selected. (pinned model "x/y" ignored: not found)'));
+
+	// A corrupt pin file is reported in the note and the session model runs.
+	freshSession();
+	writeFileSync(pinFile, "{ nope");
+	const corruptCtx = makeCtx({ model: sessionModel, models: [sessionModel], complete: async () => textResponse("Corrupt ok"), entries: [msgEntry("user", "recent")] });
+	await commands["name-llm"].handler("", corruptCtx);
+	const corruptToast = toastWith(corruptCtx, "Session title: Corrupt ok (");
+	assert.ok(corruptToast && /failed to read .*ignoring the model pin\)$/.test(corruptToast.msg), JSON.stringify(corruptCtx.notifies));
+}
+
+// 19. An unpinned, unpriced session model still produces a title.
+{
+	setPin(undefined);
+	const pi = makePi();
+	const { commands } = load(pi);
+	const unpriced = { provider: "openrouter", id: "z-ai/glm-5.2:free" };
+	const ctx = makeCtx({ model: unpriced, models: [unpriced], complete: async () => textResponse("Free model title"), entries: [msgEntry("user", "recent")] });
+	await commands["name-llm"].handler("", ctx);
+	assert.equal(pi.name(), "Free model title");
+}
+
+// 20. /name-llm model clear with and without a pin; unknown sub-commands warn;
+// any other argument still runs the title.
+{
+	const pi = makePi();
+	const { commands } = load(pi);
+	setPin(undefined);
+	const noPinCtx = makeCtx();
+	await commands["name-llm"].handler("model clear", noPinCtx);
+	assert.ok(toastWith(noPinCtx, "No title model pin set."));
+	assert.equal(existsSync(pinFile), false, "clear without a pin writes nothing");
+
+	setPin({ model: "baseten/zai-org/GLM-5.2", other: 1 });
+	const clearCtx = makeCtx();
+	await commands["name-llm"].handler("Model  CLEAR", clearCtx);
+	assert.ok(toastWith(clearCtx, "Title model pin cleared; using the session model."));
+	assert.deepEqual(JSON.parse(readFileSync(pinFile, "utf8")), { other: 1 }, "only the model key is removed");
+
+	const usageCtx = makeCtx();
+	await commands["name-llm"].handler("model nope", usageCtx);
+	const usage = toastWith(usageCtx, "Usage: /name-llm");
+	assert.ok(usage);
+	assert.equal(usage.level, "warning");
+
+	let calls = 0;
+	const otherCtx = makeCtx({ complete: async () => { calls++; return textResponse("Arg title"); }, entries: [msgEntry("user", "recent")] });
+	await commands["name-llm"].handler("models please", otherCtx);
+	assert.equal(calls, 1, "a non-model argument runs the title as before");
+}
+
+// 21. Picker: headless warns; the resolved model is pre-highlighted; a pick
+// writes the pin (siblings preserved); cancel writes nothing; a write error
+// warns instead of reporting success.
+{
+	const pi = makePi();
+	const { commands } = load(pi);
+	setPin(undefined);
+	const headless = makeCtx({ hasUI: false, models: [pinned, sessionModel] });
+	await commands["name-llm"].handler("model", headless);
+	assert.ok(toastWith(headless, "/name-llm model needs an interactive UI"));
+	assert.equal(headless.selects.length, 0);
+
+	const cancelCtx = makeCtx({ model: sessionModel, models: [pinned, sessionModel] });
+	await commands["name-llm"].handler("model", cancelCtx);
+	assert.deepEqual(cancelCtx.selects[0].items, ["anthropic/claude-x", "baseten/zai-org/GLM-5.2"], "the session model is pre-highlighted when unpinned");
+	assert.equal(existsSync(pinFile), false, "cancel writes nothing");
+	assert.equal(cancelCtx.notifies.length, 0);
+
+	setPin({ keep: true });
+	const pickCtx = makeCtx({ model: sessionModel, models: [pinned, sessionModel], select: async () => "baseten/zai-org/GLM-5.2" });
+	await commands["name-llm"].handler("model", pickCtx);
+	assert.ok(toastWith(pickCtx, "Title model set to baseten/zai-org/GLM-5.2"));
+	assert.deepEqual(JSON.parse(readFileSync(pinFile, "utf8")), { keep: true, model: "baseten/zai-org/GLM-5.2" });
+
+	const againCtx = makeCtx({ model: sessionModel, models: [pinned, sessionModel] });
+	await commands["name-llm"].handler("model", againCtx);
+	assert.equal(againCtx.selects[0].items[0], "baseten/zai-org/GLM-5.2", "the pin is pre-highlighted");
+
+	setPin(undefined);
+	mkdirSync(pinFile); // a directory where the file goes: the write fails
+	const failCtx = makeCtx({ model: sessionModel, models: [sessionModel], select: async () => "anthropic/claude-x" });
+	await commands["name-llm"].handler("model", failCtx);
+	assert.ok(toastWith(failCtx, "Could not save the title model"), JSON.stringify(failCtx.notifies));
+	assert.ok(!toastWith(failCtx, "Title model set to"), "no success after a failed write");
+	setPin(undefined);
+}
+
+// 22. Completions offer the model sub-commands.
+{
+	const { commands } = load(makePi());
+	const complete = (commands["name-llm"] as any).getArgumentCompletions;
+	assert.deepEqual(complete("").map((i: any) => i.value), ["model", "model clear"]);
+	assert.deepEqual(complete("model c").map((i: any) => i.value), ["model clear"]);
+	assert.equal(complete("zzz"), null);
 }
 
 // ── herdr-tab-name: rename via a fake herdr on PATH ──────────────────────────
