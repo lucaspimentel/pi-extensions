@@ -1,12 +1,11 @@
 /**
- * Shared model-selection helpers.
+ * Shared model helpers: display labels, dedupe, and the interactive picker
+ * list used by guard, idle-summary, session-name-llm and pi-tool-permissions.
  *
- * Both `idle-summary` and `pi-tool-permissions` need to pick a cheap/fast LLM
- * (a summary generator, a permission classifier) from whatever models the
- * user currently has configured. This module holds the pure ranking/auth/dedupe
- * logic that used to be duplicated verbatim in both extensions — see
- * `idle-summary/idle-summary-models.ts` and `pi-tool-permissions/index.ts`,
- * which both re-export these under their own extension-specific names.
+ * Model resolution for guard, idle-summary and session-name-llm is the global
+ * pin in `./model-pin.ts` (pinned model, else the session model). The
+ * cost-ranking helpers that pi-tool-permissions' classifier auto-select uses
+ * live in `../pi-tool-permissions/rules.ts`, which is the only consumer.
  *
  * Type-only imports only, so this module (like the files that re-export it)
  * is safe to import from a plain JS test runner via type-stripping — no TUI
@@ -25,33 +24,6 @@ export const modelLabel = (model: Model<Api>): string =>
 	`${model.provider}/${model.id}`;
 
 /**
- * Whether a model carries pricing information. Models without input and
- * output rates provide no signal for ordering, so ranking ignores them
- * (they cannot be compared by cost, and would otherwise default to a cost
- * score of 0 — i.e. "free" — and leap to the front of the ranking).
- */
-export const hasPrice = (model: Model<Api>): boolean =>
-	model.cost.input != null && model.cost.output != null;
-
-/**
- * The `api` id of pi's virtual catalog entries (router models). Not exported
- * by pi's public index, so compare the string. Cast needed because the `Api`
- * union from pi-ai does not include "pi-virtual".
- */
-const VIRTUAL_MODEL_API = "pi-virtual";
-export const isVirtualModel = (model: Model<Api>): boolean =>
-	(model.api as string) === VIRTUAL_MODEL_API;
-
-/**
- * Cost proxy for both cheapness and speed: smaller/cheaper models generally
- * respond faster. Lower score = preferred. Uses per-million input + output
- * rates. Callers must ensure the model has pricing (see `hasPrice`) before
- * relying on this score.
- */
-export const modelCostScore = (model: Model<Api>): number =>
-	(model.cost.input ?? 0) + (model.cost.output ?? 0);
-
-/**
  * Dedupe a model pool by `provider/id`, preserving first-seen order.
  */
 export const dedupeModels = (pool: Model<Api>[]): Model<Api>[] => {
@@ -64,47 +36,6 @@ export const dedupeModels = (pool: Model<Api>[]): Model<Api>[] => {
 		out.push(m);
 	}
 	return out;
-};
-
-/**
- * Rank a model pool for auto-selection.
- *
- * Models without pricing information are ignored entirely (they cannot be
- * ordered by cost). Ordering: models from `currentProvider` come first
- * (cheapest within that provider first), then all other providers in ascending
- * cost order. Ties keep insertion order (Array.prototype.sort is stable as of
- * ES2019).
- */
-export const rankModels = (
-	pool: Model<Api>[],
-	currentProvider: string | undefined,
-): Model<Api>[] => {
-	// Virtual models report $0 cost (they pass hasPrice and would sort first)
-	// and are excluded from auto-selection only; pickableModels still offers
-	// them, since the streamSimple call path routes virtual models correctly.
-	const unique = dedupeModels(pool).filter((m) => hasPrice(m) && !isVirtualModel(m));
-	return [...unique].sort((a, b) => {
-		const aSame = currentProvider !== undefined && a.provider === currentProvider;
-		const bSame = currentProvider !== undefined && b.provider === currentProvider;
-		if (aSame !== bSame) return aSame ? -1 : 1;
-		return modelCostScore(a) - modelCostScore(b);
-	});
-};
-
-/**
- * Pick the first ranked model that has configured auth.
- *
- * `hasAuth` is injected so tests can stub it without a real ModelRegistry.
- */
-export const selectModel = (
-	pool: Model<Api>[],
-	currentProvider: string | undefined,
-	hasAuth: HasAuth,
-): Model<Api> | undefined => {
-	for (const model of rankModels(pool, currentProvider)) {
-		if (hasAuth(model)) return model;
-	}
-	return undefined;
 };
 
 /**

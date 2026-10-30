@@ -408,10 +408,10 @@
  *   defaults (user-specific). See docs/auto-mode-design.md for the full design.
  *
  *   `classifier` can also be picked interactively with
- *   `/permissions auto model` (see below) instead of hand-editing the config —
- *   mirrors idle-summary's `/idle-summary model`. The picker writes
- *   `autoMode.classifier` into the project or user config (same `--user`/
- *   `--project` scoping as `/permissions default`) and takes effect immediately.
+ *   `/permissions auto model` (see below) instead of hand-editing the config.
+ *   The picker writes `autoMode.classifier` into the project or user config
+ *   (same `--user`/`--project` scoping as `/permissions default`) and takes
+ *   effect immediately.
  *
  * Slash commands:
  *   /permissions                       - show this help
@@ -868,7 +868,7 @@ export default function (pi: ExtensionAPI) {
 		const matchInput = inputForMatching(event.toolName, event.input as Record<string, unknown>, ctx.cwd);
 		const nonInteractive = ctx.mode === "print" || ctx.mode === "json";
 		// Pick the classifier model (explicit pin, or auto-select from the pool
-		// preferring the currently selected model's provider). Mirrors idle-summary.
+		// preferring the currently selected model's provider).
 		const classifierModel = mode === "auto" ? resolveClassifierModelFromCtx(ctx) : undefined;
 		// Keep the status line in sync with the resolved model. The auto-select
 		// can drift mid-session (auth changes, scoped models change), and auto
@@ -1465,9 +1465,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// Persist an explicit classifier model pin into `autoMode.classifier` for
-	// the given scope (mirrors idle-summary's /idle-summary model persistence, but
-	// reuses the project/user config files and scoping this extension already
-	// has instead of a separate global file).
+	// the given scope. Unlike idle-summary's global `"model"` pin, this reuses
+	// the project/user config files and scoping this extension already has.
 	function setClassifier(scope: Scope, cwd: string, provider: string, model: string): void {
 		const cfg = scope === "user" ? loadUserConfigRaw() : loadProjectConfigRaw(cwd);
 		cfg.autoMode = { ...(cfg.autoMode ?? {}), classifier: { provider, model } };

@@ -20,12 +20,8 @@ import { dirname, join, posix, win32 } from "node:path";
 import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
 import {
 	dedupeModels,
-	hasPrice,
-	modelCostScore,
 	modelLabel,
 	pickableModels,
-	rankModels,
-	selectModel,
 	type HasAuth,
 } from "../shared/model-selection.ts";
 
@@ -2594,13 +2590,79 @@ export interface ClassifyResult {
 /** Seam type for the model completion call (mirrors ModelRegistry.complete). */
 export type ClassifierComplete = (model: Model<Api>, context: Context) => Promise<AssistantMessage>;
 
-// The generic ranking/dedupe/auth/pricing logic below used to be duplicated
-// verbatim between this file and idle-summary/idle-summary-models.ts; it now
-// lives in extensions/shared/model-selection.ts and is re-exported here
-// directly. Only `pickClassifierModel`'s explicit-pin resolution (a registry
-// `find` seam, unlike idle-summary's pool-based string-ref lookup) is
-// classifier-specific and stays local.
+// The dedupe/label/picker helpers live in extensions/shared/model-selection.ts
+// and are re-exported here directly. The cost-ranking helpers below (hasPrice,
+// isVirtualModel, modelCostScore, rankModels, selectModel) are used only by
+// this extension's classifier auto-select, so they live here.
 export { dedupeModels, hasPrice, modelCostScore, modelLabel, pickableModels, rankModels };
+
+/**
+ * Whether a model carries pricing information. Models without input and
+ * output rates provide no signal for ordering, so ranking ignores them
+ * (they cannot be compared by cost, and would otherwise default to a cost
+ * score of 0 — i.e. "free" — and leap to the front of the ranking).
+ */
+const hasPrice = (model: Model<Api>): boolean =>
+	model.cost.input != null && model.cost.output != null;
+
+/**
+ * The `api` id of pi's virtual catalog entries (router models). Not exported
+ * by pi's public index, so compare the string. Cast needed because the `Api`
+ * union from pi-ai does not include "pi-virtual".
+ */
+const VIRTUAL_MODEL_API = "pi-virtual";
+export const isVirtualModel = (model: Model<Api>): boolean =>
+	(model.api as string) === VIRTUAL_MODEL_API;
+
+/**
+ * Cost proxy for both cheapness and speed: smaller/cheaper models generally
+ * respond faster. Lower score = preferred. Uses per-million input + output
+ * rates. Callers must ensure the model has pricing (see `hasPrice`) before
+ * relying on this score.
+ */
+const modelCostScore = (model: Model<Api>): number =>
+	(model.cost.input ?? 0) + (model.cost.output ?? 0);
+
+/**
+ * Rank a model pool for auto-selection.
+ *
+ * Models without pricing information are ignored entirely (they cannot be
+ * ordered by cost). Ordering: models from `currentProvider` come first
+ * (cheapest within that provider first), then all other providers in ascending
+ * cost order. Ties keep insertion order (Array.prototype.sort is stable as of
+ * ES2019).
+ */
+const rankModels = (
+	pool: Model<Api>[],
+	currentProvider: string | undefined,
+): Model<Api>[] => {
+	// Virtual models report $0 cost (they pass hasPrice and would sort first)
+	// and are excluded from auto-selection only; pickableModels still offers
+	// them, since the streamSimple call path routes virtual models correctly.
+	const unique = dedupeModels(pool).filter((m) => hasPrice(m) && !isVirtualModel(m));
+	return [...unique].sort((a, b) => {
+		const aSame = currentProvider !== undefined && a.provider === currentProvider;
+		const bSame = currentProvider !== undefined && b.provider === currentProvider;
+		if (aSame !== bSame) return aSame ? -1 : 1;
+		return modelCostScore(a) - modelCostScore(b);
+	});
+};
+
+/**
+ * Pick the first ranked model that has configured auth.
+ *
+ * `hasAuth` is injected so tests can stub it without a real ModelRegistry.
+ */
+export const selectModel = (
+	pool: Model<Api>[],
+	currentProvider: string | undefined,
+	hasAuth: HasAuth,
+): Model<Api> | undefined => {
+	for (const model of rankModels(pool, currentProvider)) {
+		if (hasAuth(model)) return model;
+	}
+	return undefined;
+};
 
 /**
  * Pick the classifier model. If `explicit` is set, `find` it directly; otherwise
