@@ -445,9 +445,22 @@ User scope `~/.pi/agent/guard.json`, project scope `<cwd>/.pi/guard.local.json`
 `discoveryTimeoutMs`, `webFetchAllow` (URL globs or `/regex/`), `hostBash`
 (`allow`/`ask`/`deny` lists of `HostBash(...)` / `Pwsh(...)` rules),
 `readRoots`, `writeRoots`, `toolClasses` (name/glob -> class),
-`bashValidators`, the `classifier` pin, and the `classifierEnvironment` /
+`bashValidators`, the `model` classifier pin, and the `classifierEnvironment` /
 `classifierAllow` / `classifierSoftDeny` / `classifierHardDeny` lists.
-Scalars are project-wins with a fallback to the built-in default;
+
+The classifier pin is the top-level string `"model": "provider/modelId"`
+(the model id may contain slashes) and is read from the **user file only**.
+The value must carry a provider: a bare model id is rejected with a warning
+and reads as unset.
+The auto profile classifies with the pinned model when it is found and has
+configured auth, otherwise with the session's active model (whatever its
+price); there is no ranking or auto-selection. A pin that cannot be used is
+reported once per session and the session model is used. A `model` or the
+retired `classifier` key in `.pi/guard.local.json` is ignored with a
+once-per-session warning, and a leftover `classifier` object in the user file
+is warned about on every load (it is no longer read).
+
+Other scalars are project-wins with a fallback to the built-in default;
 `discoveryMatchCap` (integer 1..200000) and `discoveryTimeoutMs` ms (integer
 1..600000) fall back project-valid, then user-valid, then the defaults 500 and
 5000. Lists union with dedupe; `discoveryPruneNames` is additionally sorted and
@@ -461,10 +474,10 @@ corrupt file is ignored with a warning and never discards the other scope.
 |---|---|
 | `/guard` | profile picker (all seven profiles) |
 | `/guard help` | usage |
-| `/guard list` | profile, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, discovery scan settings (cap, timeout, pruned basenames, collisions), webFetchAllow count, persistent host-shell rule counts, session host-shell grants (workspace, active/dormant) and the session rules in force for the current workspace, read/write roots, toolClasses count, classifier, debug state |
+| `/guard list` | profile, sandbox mode and diagnostics, workspace lock, protected paths, mask exceptions, discovery scan settings (cap, timeout, pruned basenames, collisions), webFetchAllow count, persistent host-shell rule counts, session host-shell grants (workspace, active/dormant) and the session rules in force for the current workspace, read/write roots, toolClasses count, classifier (the user pin or "no pin (session model)", whether the pin is ignored and why, and the effective model), debug state |
 | `/guard reload` | reload guard.json, refresh sandbox detection, clear the annotation cache |
 | `/guard profile [name]` | set a profile directly (`unrestricted` included) |
-| `/guard model` / `/guard model clear` | pin the auto-mode classifier model to user config (picker over models with configured auth; `clear` resumes auto-select). A project-scope `classifier` pin in `.pi/guard.local.json` overrides the user pin and is a manual config edit |
+| `/guard model` / `/guard model clear` | pin the auto-mode classifier model as `"model"` in `~/.pi/agent/guard.json` (picker over models with configured auth, the effective model pre-highlighted; headless prints the pin and, when it is ignored, the reason and the model used instead); `clear` removes the pin so the classifier uses the session model. There is no project-scope pin |
 | `/guard migrate [dry]` | convert pi-tool-permissions configs (below) |
 | `/guard ack` | clear the workspace lock (step 3 sets it on audit findings) |
 | `/guard debug on\|off` | session-only; when on, each decision is also shown as a notification |
@@ -484,7 +497,10 @@ converts everything that has a guard home:
   rules are dropped with a note;
 - MCP allow rules (bare `mcp__*` names and `Mcp(...)`) -> `toolClasses`
   entries set to `remote-read`;
-- `bashValidators` as-is; `autoMode.classifier` -> `classifier`;
+- `bashValidators` as-is; the user-scope `autoMode.classifier`
+  (`{ provider, model }`) -> `"model": "provider/model"` in
+  `~/.pi/agent/guard.json`; a project-scope `autoMode.classifier` is listed
+  as dropped, since guard reads the pin from the user file only;
   `autoMode.environment`/`allow`/`soft_deny`/`hard_deny` -> the
   `classifier*` keys.
 

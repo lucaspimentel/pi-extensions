@@ -186,9 +186,24 @@ Holes, verified 2026-10-02:
   `protectedPaths`, `maskPatterns`, `maskExceptions`, `webFetchAllow`,
   `hostBash` (`allow`/`ask`/`deny` lists of `HostBash(...)` rules, replacing
   `Bash(...)`), `readRoots`, `writeRoots`, `toolClasses`, `bashValidators`,
-  and the classifier pin and natural-language lists. Scalars: project wins;
+  the classifier pin, and the natural-language lists. Scalars: project wins;
   lists: union with dedupe. A corrupt file is ignored with a warning and
   never discards the other scope.
+- **Classifier model pin** (2026-10-30, supersedes the `classifier`
+  `{ provider, model }` object and its project-wins merge): the top-level
+  string `"model": "provider/modelId"`, read from the **user file only**.
+  Resolution is shared with idle-summary and session-name-llm
+  (`extensions/shared/model-pin.ts`): the pinned model when
+  `modelRegistry.find` returns it and it has configured auth, otherwise the
+  session model (`ctx.model`), priced or not; no pool ranking, pricing, or
+  provider preference. An unpinned session model without configured auth
+  means no classifier (fallthroughs prompt). An unusable pin is reported
+  once per session; a project `model`/`classifier` key is ignored with a
+  once-per-session warning; a user `classifier` object warns that it is no
+  longer read. The classifier cache key carries the label of the model that
+  actually classifies, so a mid-session model switch never reuses another
+  model's verdicts, and a `model_select` handler refreshes the auto footer
+  label.
 - **`/guard migrate`** converts `pi-tool-permissions.json` (user and project
   scopes, including their legacy fallback paths). Everything that has a home
   in guard carries over:
@@ -196,7 +211,9 @@ Holes, verified 2026-10-02:
   - `readAllowPaths` -> `readRoots`; `writeAllowPaths` -> `writeRoots`;
   - `WebFetch(domain:x)` allow rules -> `webFetchAllow` URL globs;
   - MCP allow rules -> read entries in `toolClasses`;
-  - `bashValidators`, and the auto-mode classifier pin and lists, as-is.
+  - `bashValidators` and the auto-mode classifier lists as-is; the
+    user-scope `autoMode.classifier` becomes `"model": "provider/modelId"`,
+    and a project-scope one is listed as dropped (user-file-only pin).
 
   Anything without a home (Read/Write/Grep/Glob rules, `toolDefaults`,
   `nonInteractiveAsk`, implicit-allow toggles) is **listed as dropped**.
