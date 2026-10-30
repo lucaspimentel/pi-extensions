@@ -11,7 +11,9 @@
  *   - MCP allow rules (bare mcp__* names and Mcp(...)) -> toolClasses
  *     entries set to remote-read;
  *   - bashValidators copied as-is;
- *   - autoMode.classifier -> classifier; autoMode.environment/allow/
+ *   - autoMode.classifier -> "model": "provider/modelId" in the USER scope
+ *     only (guard reads the pin from the user config alone; a project-scope
+ *     autoMode.classifier is LISTED as dropped); autoMode.environment/allow/
  *     soft_deny/hard_deny -> classifierEnvironment/classifierAllow/
  *     classifierSoftDeny/classifierHardDeny.
  *
@@ -223,6 +225,7 @@ function convertSlot(
 function migrateScope(
 	src: { path: string; found: boolean; cfg: LegacyConfig },
 	existing: GuardConfig,
+	scope: "user" | "project",
 ): MigrateScopeReport {
 	const patch: GuardConfig = {};
 	const dropped: string[] = [];
@@ -280,7 +283,8 @@ function migrateScope(
 			const provider = auto.classifier.provider;
 			const model = auto.classifier.model;
 			if (typeof provider === "string" && typeof model === "string" && provider && model) {
-				patch.classifier = { provider, model };
+				if (scope === "user") patch.model = `${provider}/${model}`;
+				else dropped.push(`autoMode.classifier: ${provider}/${model} (guard reads the classifier pin from the user config only; use /guard model)`);
 			}
 		}
 		const environment = stringList(auto.environment);
@@ -345,7 +349,7 @@ function countChanges(existing: GuardConfig, patch: GuardConfig): number {
 			if (base[k] === undefined) changes++;
 		}
 	}
-	if (patch.classifier && JSON.stringify(existing.classifier) !== JSON.stringify(patch.classifier)) changes++;
+	if (patch.model !== undefined && existing.model !== patch.model) changes++;
 	return changes;
 }
 
@@ -357,8 +361,8 @@ function countChanges(existing: GuardConfig, patch: GuardConfig): number {
 export function computeMigration(home: string = homedir(), cwd: string = process.cwd()): MigrateReport {
 	const userSrc = readLegacy(home, cwd, true);
 	const projectSrc = readLegacy(home, cwd, false);
-	const user = migrateScope(userSrc, loadUserConfigRaw(home));
-	const project = migrateScope(projectSrc, loadProjectConfigRaw(cwd));
+	const user = migrateScope(userSrc, loadUserConfigRaw(home), "user");
+	const project = migrateScope(projectSrc, loadProjectConfigRaw(cwd), "project");
 
 	const lines: string[] = [];
 	if (![...stringList(userSrc.cfg.allow), ...stringList(projectSrc.cfg.allow)].some((rule) => rule.trim().toLowerCase() === "host_bash")) {

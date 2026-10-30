@@ -1185,7 +1185,7 @@ test("applying yolo or unrestricted emits a danger notice; other profiles do not
 // ── /guard model: classifier pin through the command-dialog gate ──────────
 
 /** Minimal Model stand-in for the picker pool: pickableModels and modelLabel
- *  use provider/id, rankModels uses cost and api. */
+ *  use provider/id. */
 function fakeModel(provider: string, id: string, cost = 5): any {
 	return { provider, id, api: "openai-completions", cost: { input: cost, output: cost } };
 }
@@ -1235,7 +1235,7 @@ test("guard model in a headless context reports the pin and usage without writin
 		await startSession(h, ctx);
 		const selector = installSelector(ctx);
 		await h.commandHandlers.get("guard")!("model", ctx);
-		assert.ok(h.notifications.some((n) => n.includes("guard: classifier: (auto-select)")), "the current pin is reported");
+		assert.ok(h.notifications.some((n) => n.includes("guard: classifier: (session model)")), "the current pin is reported");
 		assert.ok(h.notifications.some((n) => n.includes("/guard model clear")), "the usage line is shown");
 		assert.equal(selector.opened.length, 0, "headless never opens the selector");
 		assert.equal(fs.existsSync(userGuardJson()), false, "headless writes nothing");
@@ -1248,6 +1248,7 @@ test("picking a classifier model writes the pin, reloads, and pre-highlights it 
 		const cwd = makeTempDir("guard-dialogs-model-pick-");
 		const ctx = harnessCtx(h, cwd);
 		ctx.modelRegistry = registryFor([fakeModel("prov-a", "cheap", 1), fakeModel("prov-b", "other", 5)]);
+		ctx.model = fakeModel("prov-a", "cheap", 1);
 		await startSession(h, ctx);
 		const selector = installSelector(ctx);
 		let seenOptions: string[] = [];
@@ -1259,11 +1260,12 @@ test("picking a classifier model writes the pin, reloads, and pre-highlights it 
 		assert.deepEqual(seenOptions, ["prov-a/cheap", "prov-b/other"], "the effective model is first, then the pickable pool");
 		selector.answer("prov-b/other");
 		await pick;
-		const saved = JSON.parse(fs.readFileSync(userGuardJson(), "utf8")) as { classifier?: { provider: string; model: string } };
-		assert.deepEqual(saved.classifier, { provider: "prov-b", model: "other" }, "the pin was written to the user config in the fake home");
+		const saved = JSON.parse(fs.readFileSync(userGuardJson(), "utf8")) as Record<string, unknown>;
+		assert.equal(saved.model, "prov-b/other", "the pin was written to the user config in the fake home as a string");
+		assert.equal("classifier" in saved, false, "the retired classifier object is never written");
 		assert.ok(h.notifications.includes("guard: classifier model set to prov-b/other (user config)."), "the set notice was shown");
 		// The post-write transition reloaded the merged config: the next picker
-		// run pre-highlights the pinned model even though it is not the cheapest.
+		// run pre-highlights the pinned model, not the session model.
 		const pick2 = h.commandHandlers.get("guard")!("model", ctx);
 		await selector.waitFor(2);
 		assert.equal(seenOptions[0], "prov-b/other", "the pinned model is pre-highlighted after the reload");
@@ -1292,17 +1294,47 @@ test("cancelling the classifier picker writes nothing and does not transition", 
 	});
 });
 
-/** Writes a project-scope classifier pin into <cwd>/.pi/guard.local.json. */
-function writeProjectPin(cwd: string, provider: string, model: string): void {
+/** Writes ignored project-scope pin keys into <cwd>/.pi/guard.local.json. */
+function writeProjectPin(cwd: string, keys: Record<string, unknown>): void {
 	fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
-	fs.writeFileSync(path.join(cwd, ".pi", "guard.local.json"), JSON.stringify({ classifier: { provider, model } }, null, 2) + "\n", "utf8");
+	fs.writeFileSync(path.join(cwd, ".pi", "guard.local.json"), JSON.stringify(keys, null, 2) + "\n", "utf8");
 }
 
-test("picking a classifier model under an overriding project pin warns that the project pin stays effective", (t) => {
+function writeUserPin(ref: string): void {
+	fs.mkdirSync(path.dirname(userGuardJson()), { recursive: true });
+	fs.writeFileSync(userGuardJson(), JSON.stringify({ model: ref }, null, 2) + "\n", "utf8");
+}
+
+const LEFTOVER_KEYS = /project classifier pins are not read\. Use \/guard model/;
+
+test("project model/classifier keys are ignored with one warning per session", (t) => {
+	return withCleanTempHome(t, async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-model-project-keys-");
+		writeProjectPin(cwd, { model: "prov-p/pinned", classifier: { provider: "prov-p", model: "pinned" } });
+		const ctx = harnessCtx(h, cwd);
+		ctx.modelRegistry = registryFor([fakeModel("prov-p", "pinned"), fakeModel("prov-a", "cheap")]);
+		ctx.model = fakeModel("prov-a", "cheap");
+		await startSession(h, ctx);
+		const warnings = () => h.notifications.filter((n) => LEFTOVER_KEYS.test(n));
+		assert.equal(warnings().length, 1, "one warning at session start");
+		assert.ok(warnings()[0].includes('"model" and "classifier"'), "the warning names both keys");
+		assert.ok(warnings()[0].includes(path.join(cwd, ".pi", "guard.local.json")) || warnings()[0].includes(`${cwd}/.pi/guard.local.json`), "the warning names the project file");
+		await h.commandHandlers.get("guard")!("reload", ctx);
+		for (const handler of h.handlers.session_tree ?? []) await handler({}, ctx);
+		assert.equal(warnings().length, 1, "reload and tree navigation do not repeat it");
+		await h.commandHandlers.get("guard")!("list", ctx);
+		assert.ok(h.notifications.some((n) => n.includes("classifier: no pin (session model); effective: prov-a/cheap")), "the project pin is not effective");
+		await startSession(h, ctx);
+		assert.equal(warnings().length, 2, "a new session warns again");
+	});
+});
+
+test("picking a classifier model with ignored project pin keys shows the plain success notice", (t) => {
 	return withCleanTempHome(t, async () => {
 		const h = makeHarness();
 		const cwd = makeTempDir("guard-dialogs-model-set-project-pin-");
-		writeProjectPin(cwd, "prov-p", "pinned");
+		writeProjectPin(cwd, { classifier: { provider: "prov-p", model: "pinned" } });
 		const ctx = harnessCtx(h, cwd);
 		ctx.modelRegistry = registryFor([fakeModel("prov-p", "pinned", 1), fakeModel("prov-a", "cheap", 2), fakeModel("prov-b", "other", 5)]);
 		await startSession(h, ctx);
@@ -1311,48 +1343,85 @@ test("picking a classifier model under an overriding project pin warns that the 
 		await selector.waitFor(1);
 		selector.answer("prov-a/cheap");
 		await pick;
-		const saved = JSON.parse(fs.readFileSync(userGuardJson(), "utf8")) as { classifier?: { provider: string; model: string } };
-		assert.deepEqual(saved.classifier, { provider: "prov-a", model: "cheap" }, "the user pin was still written");
-		const warning = h.notifications.find((n) => n.includes("guard: classifier model set to prov-a/cheap (user config)"));
-		assert.ok(warning, "a set notice was shown");
-		assert.ok(warning!.includes("project pin"), "the notice names the overriding project pin");
-		assert.ok(warning!.includes("prov-p/pinned"), "the notice names the still-effective classifier");
-		assert.ok(!h.notifications.includes("guard: classifier model set to prov-a/cheap (user config)."), "no plain success notice that would be false");
+		const saved = JSON.parse(fs.readFileSync(userGuardJson(), "utf8")) as Record<string, unknown>;
+		assert.equal(saved.model, "prov-a/cheap", "the user pin was written");
+		assert.ok(h.notifications.includes("guard: classifier model set to prov-a/cheap (user config)."), "plain success: the project key never overrides");
+		assert.ok(!h.notifications.some((n) => n.includes("overrides it")), "no project-override notice");
 	});
 });
 
-test("clearing the user pin under a project pin does not claim auto-select resumes", (t) => {
+test("clearing the user pin keeps its notice text even with ignored project keys", (t) => {
 	return withCleanTempHome(t, async () => {
 		const h = makeHarness();
 		const cwd = makeTempDir("guard-dialogs-model-clear-project-pin-");
-		writeProjectPin(cwd, "prov-p", "pinned");
+		writeProjectPin(cwd, { model: "prov-p/pinned" });
 		const ctx = harnessCtx(h, cwd);
 		await startSession(h, ctx);
 		fs.mkdirSync(path.dirname(userGuardJson()), { recursive: true });
-		fs.writeFileSync(userGuardJson(), JSON.stringify({ classifier: { provider: "prov-a", model: "cheap" } }, null, 2) + "\n", "utf8");
+		fs.writeFileSync(userGuardJson(), JSON.stringify({ model: "prov-a/cheap", readRoots: ["/x"] }, null, 2) + "\n", "utf8");
 		await h.commandHandlers.get("guard")!("model clear", ctx);
-		const notice = h.notifications.find((n) => n.includes("user classifier pin cleared"));
-		assert.ok(notice, "a cleared notice was shown");
-		assert.ok(notice!.includes("project pin"), "the notice names the still-applied project pin");
-		assert.ok(!h.notifications.some((n) => n.includes("resuming auto-select")), "no false auto-select claim");
+		assert.ok(h.notifications.includes("guard: classifier pin cleared (user config); using the session model."), "the clear notice names the session model");
+		assert.deepEqual(JSON.parse(fs.readFileSync(userGuardJson(), "utf8")), { readRoots: ["/x"] }, "only the model key was removed");
 	});
 });
 
-test("headless model report shows the effective classifier when a project pin overrides", (t) => {
+test("headless model report names an ignored pin and the model used instead", (t) => {
 	return withCleanTempHome(t, async () => {
 		const h = makeHarness();
-		const cwd = makeTempDir("guard-dialogs-model-headless-project-pin-");
-		writeProjectPin(cwd, "prov-p", "pinned");
+		const cwd = makeTempDir("guard-dialogs-model-headless-ignored-");
+		writeUserPin("prov-x/missing");
 		const ctx = harnessCtx(h, cwd);
 		ctx.hasUI = false;
+		ctx.modelRegistry = registryFor([fakeModel("prov-a", "cheap")]);
+		ctx.model = fakeModel("prov-a", "cheap");
 		await startSession(h, ctx);
-		fs.mkdirSync(path.dirname(userGuardJson()), { recursive: true });
-		fs.writeFileSync(userGuardJson(), JSON.stringify({ classifier: { provider: "prov-a", model: "cheap" } }, null, 2) + "\n", "utf8");
 		await h.commandHandlers.get("guard")!("model", ctx);
-		const notice = h.notifications.find((n) => n.includes("guard: classifier:"));
+		const notice = h.notifications.find((n) => n.startsWith("guard: classifier: prov-x/missing"));
 		assert.ok(notice, "the report was shown");
-		assert.ok(notice!.includes("prov-a/cheap"), "the user pin is reported");
-		assert.ok(notice!.includes("effective: prov-p/pinned"), "the effective project pin is reported");
+		assert.ok(notice!.includes("guard: classifier: prov-x/missing (ignored: not found; using prov-a/cheap)"), notice);
+		assert.ok(notice!.includes("use the session model"), "usage wording names the session model");
+	});
+});
+
+test("an ignored user pin is reported once per session at session start", (t) => {
+	return withCleanTempHome(t, async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-model-ignored-notice-");
+		writeUserPin("prov-x/missing");
+		const ctx = harnessCtx(h, cwd);
+		ctx.modelRegistry = registryFor([fakeModel("prov-a", "cheap")]);
+		ctx.model = fakeModel("prov-a", "cheap");
+		await startSession(h, ctx);
+		const expected = 'guard: classifier: pinned model "prov-x/missing" ignored (not found); using the session model prov-a/cheap.';
+		const count = () => h.notifications.filter((n) => n === expected).length;
+		assert.equal(count(), 1, "one notice at session start");
+		for (const handler of h.handlers.session_tree ?? []) await handler({}, ctx);
+		await h.commandHandlers.get("guard")!("reload", ctx);
+		assert.equal(count(), 1, "tree navigation and reload do not repeat it");
+		await h.commandHandlers.get("guard")!("list", ctx);
+		assert.ok(h.notifications.some((n) => n.includes("classifier: pin prov-x/missing (ignored: not found); effective: prov-a/cheap")), "/guard list shows the pin and the effective model");
+		await startSession(h, ctx);
+		assert.equal(count(), 2, "a new session reports it again");
+	});
+});
+
+test("an unpinned classifier follows model_select in the auto footer", (t) => {
+	return withCleanTempHome(t, async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-model-select-footer-");
+		const ctx = harnessCtx(h, cwd);
+		ctx.modelRegistry = registryFor([fakeModel("prov-a", "cheap"), fakeModel("prov-b", "other")]);
+		ctx.model = fakeModel("prov-a", "cheap");
+		await startSession(h, ctx);
+		await h.commandHandlers.get("guard")!("profile auto", ctx);
+		assert.ok(String(h.status.get("guard")).includes("auto: cheap"), `footer before: ${h.status.get("guard")}`);
+		ctx.model = fakeModel("prov-b", "other");
+		for (const handler of h.handlers.model_select ?? []) await handler({ type: "model_select", model: ctx.model, previousModel: undefined, source: "set" }, ctx);
+		assert.ok(String(h.status.get("guard")).includes("auto: other"), `footer after: ${h.status.get("guard")}`);
+		// No session model and no pin: the existing no-classifier label.
+		ctx.model = undefined;
+		for (const handler of h.handlers.model_select ?? []) await handler({ type: "model_select", model: undefined, previousModel: undefined, source: "set" }, ctx);
+		assert.ok(String(h.status.get("guard")).includes("auto (no classifier)"), `footer without a model: ${h.status.get("guard")}`);
 	});
 });
 

@@ -119,18 +119,22 @@ function scriptInput(ctx: Record<string, any>, inputs: Array<string | undefined>
 
 interface FakeModel { provider: string; id: string; api: string; cost: { input: number; output: number } }
 const FAKE_MODEL: FakeModel = { provider: "fake", id: "fake-classifier", api: "fake-api", cost: { input: 1, output: 2 } };
+const OTHER_MODEL: FakeModel = { provider: "other", id: "other-classifier", api: "fake-api", cost: { input: 1, output: 2 } };
 
 /** Counting classifier registry. `gate` holds completions open (staleness
  * tests); `responses` are raw model texts; `throwOnComplete` fails the call. */
 function classifierRegistry(options: { responses?: string[]; throwOnComplete?: boolean; gate?: Promise<void> } = {}) {
 	const prompts: string[] = [];
+	const models: FakeModel[] = [];
 	let served = 0;
 	return {
 		prompts,
-		getAvailable: () => [FAKE_MODEL],
+		models,
+		getAvailable: () => [FAKE_MODEL, OTHER_MODEL],
 		hasConfiguredAuth: () => true,
-		find: () => FAKE_MODEL,
-		streamSimple: (_model: unknown, context: { messages: Array<{ content: Array<{ type: string; text?: string }> }> }) => {
+		find: (provider: string, id: string) => [FAKE_MODEL, OTHER_MODEL].find((m) => m.provider === provider && m.id === id),
+		streamSimple: (model: FakeModel, context: { messages: Array<{ content: Array<{ type: string; text?: string }> }> }) => {
+			models.push(model);
 			prompts.push((context.messages[0]?.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n"));
 			const respond = async () => {
 				await options.gate;
@@ -153,7 +157,9 @@ function harnessCtx(h: Harness, cwd: string, options: { hasUI?: boolean; registr
 		cwd,
 		hasUI: options.hasUI ?? true,
 		mode: "tui",
-		model: undefined,
+		// The classifier follows the session model when no pin is set: without
+		// a session model every classifier test would silently lose it.
+		model: registry ? FAKE_MODEL : undefined,
 		scopedModels: [],
 		modelRegistry: registry ?? {
 			getAvailable: () => [],
@@ -483,6 +489,41 @@ test("the real classifier request carries the tool name and path, evaluates once
 		assert.equal(calls.length, 1, "an allow verdict still reaches the dialog");
 		assert.equal(result.isError, true);
 		assert.match(resultText(result), /the request was not approved/);
+		await shutdownSession(h);
+	});
+});
+
+test("the classifier follows the session model per call, a usable user pin overrides it, and an ignored pin falls back", async () => {
+	const external = externalDir();
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = tempDir("guard-req-access-clfmodel-");
+		const requestPath = path.join(external, "data.txt");
+		const registry = classifierRegistry({ responses: ["VERDICT: soft_deny\nREASON: fixture"] });
+		const ctx = harnessCtx(h, cwd, { registry });
+		await startSession(h, ctx);
+		await setProfile(h, ctx, "auto");
+		const hook = () => h.handlers.tool_call[0]({ toolName: "request_read_access", input: { path: requestPath } }, ctx);
+		await hook();
+		assert.deepEqual(registry.models.map((m) => m.id), ["fake-classifier"], "unpinned: the session model classifies");
+		ctx.model = OTHER_MODEL;
+		await hook();
+		assert.deepEqual(registry.models.map((m) => m.id), ["fake-classifier", "other-classifier"], "a model switch classifies again with the new model (no cross-model cache hit)");
+		await hook();
+		assert.equal(registry.models.length, 2, "the same model reuses its cached verdict");
+
+		mkdirSync(path.join(process.env.HOME!, ".pi", "agent"), { recursive: true });
+		writeFileSync(userConfigPath(), JSON.stringify({ model: "fake/fake-classifier" }));
+		await h.commandHandlers.get("guard")!("reload", ctx);
+		await hook();
+		assert.equal(registry.models.at(-1)?.id, "fake-classifier", "a usable pin overrides the session model");
+
+		writeFileSync(userConfigPath(), JSON.stringify({ model: "x/missing" }));
+		await h.commandHandlers.get("guard")!("reload", ctx);
+		const before = registry.models.length;
+		await hook();
+		assert.equal(registry.models.length, before + 1);
+		assert.equal(registry.models.at(-1)?.id, "other-classifier", "an ignored pin falls back to the session model");
 		await shutdownSession(h);
 	});
 });

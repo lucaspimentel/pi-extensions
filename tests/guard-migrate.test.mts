@@ -100,6 +100,7 @@ test("migrate converts every legacy key with a guard home", () => {
 			allow: ["Bash(dotnet build *)", "Read"],
 			deny: ["Bash(sudo*)"],
 			bashAllowRedirectsTo: ["/tmp"],
+			autoMode: { classifier: { provider: "prov-p", model: "pinned" } },
 		},
 	);
 	const report = computeMigration(home, cwd);
@@ -115,7 +116,8 @@ test("migrate converts every legacy key with a guard home", () => {
 	assert.deepEqual(u.patch.readRoots, ["~/source", "/tmp/logs"]);
 	assert.deepEqual(u.patch.writeRoots, ["/tmp/scratch"]);
 	assert.deepEqual(u.patch.bashValidators, { duckdb: "readonly-duckdb" });
-	assert.deepEqual(u.patch.classifier, { provider: "anthropic", model: "claude-haiku-4-5" });
+	assert.equal(u.patch.model, "anthropic/claude-haiku-4-5", "the user classifier pin becomes the top-level model string");
+	assert.equal("classifier" in u.patch, false, "the retired classifier object is never written");
 	assert.deepEqual(u.patch.classifierEnvironment, ["Trusted repo: github.com/lucaspimentel/*"]);
 	assert.deepEqual(u.patch.classifierAllow, ["Running tests and linters"]);
 	assert.deepEqual(u.patch.classifierSoftDeny, ["Force pushing"]);
@@ -146,6 +148,10 @@ test("migrate converts every legacy key with a guard home", () => {
 	assert.match(userDropped, /Mcp\(atlassian_\*\)/, "MCP deny/ask rules are dropped");
 	const projectDropped = p.dropped.join("\n");
 	assert.match(projectDropped, /'Read'/);
+	// The project scope never gets a pin: guard reads it from the user config only.
+	assert.equal(p.patch.model, undefined, "no project-scope model pin");
+	assert.equal("classifier" in p.patch, false);
+	assert.match(projectDropped, /autoMode\.classifier: prov-p\/pinned \(guard reads the classifier pin from the user config only; use \/guard model\)/);
 
 	// Suspected runners are copied but listed.
 	assert.ok(u.suspectedRunners.includes("HostBash(cargo build *)"));
@@ -213,6 +219,20 @@ test("migrate is idempotent: a second run changes nothing and the files are iden
 	assert.equal(secondWrite, 0, "re-writing the same patch adds nothing");
 	assert.equal(fs.readFileSync(userConfigPath(home), "utf8"), userAfterFirst, "user guard.json is byte-identical");
 	assert.equal(fs.readFileSync(projectConfigPath(cwd), "utf8"), projectAfterFirst, "project guard.local.json is byte-identical");
+});
+
+test("migrate counts the user model pin as a change only when it differs", () => {
+	const home = makeTempDir("guard-mig-pin-home-");
+	const cwd = makeTempDir("guard-mig-pin-cwd-");
+	writeLegacy(home, cwd, { autoMode: { classifier: { provider: "baseten", model: "zai-org/GLM-5.2" } } }, undefined);
+	fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+	fs.writeFileSync(userConfigPath(home), JSON.stringify({ model: "other/model" }), "utf8");
+	const report = computeMigration(home, cwd);
+	assert.equal(report.user.patch.model, "baseten/zai-org/GLM-5.2");
+	assert.equal(report.user.changes, 1, "a different pin is one change");
+	addToConfigScope("user", report.user.patch, { home, cwd });
+	assert.equal((JSON.parse(fs.readFileSync(userConfigPath(home), "utf8")) as GuardConfig).model, "baseten/zai-org/GLM-5.2", "the scalar pin is written");
+	assert.equal(computeMigration(home, cwd).user.changes, 0, "the same pin is no change");
 });
 
 test("migrate unions into existing guard.json entries without removing them", () => {

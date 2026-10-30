@@ -195,7 +195,7 @@ export class GuardRuntime {
 
 	private hostPolicyKey(policy: PolicyState): string {
 		const config = policy.config;
-		return JSON.stringify([config.hostBash, config.bashValidators, config.writeRoots, config.classifier, config.classifierEnvironment, config.classifierAllow, config.classifierSoftDeny, config.classifierHardDeny]);
+		return JSON.stringify([config.hostBash, config.bashValidators, config.writeRoots, config.model, config.classifierEnvironment, config.classifierAllow, config.classifierSoftDeny, config.classifierHardDeny]);
 	}
 	private launchPolicyKey(policy: PolicyState, detection: SandboxDetection): string {
 		return JSON.stringify([realpathSync(policy.cwd), this.workerMode(policy, detection), this.workerMode(policy, detection) === "none" ? null : resolveWorktreeCommonDir(policy.cwd), policy.profile === "research", detection.mode, detection.bwrapPath, detection.launcherPath, this.roots(policy), policy.config.maskPatterns, policy.config.maskExceptions, policy.config.protectedPaths, policy.config.discoveryPruneNames, policy.config.discoveryMatchCap, policy.config.discoveryTimeoutMs, policy.workspaceLocked]);

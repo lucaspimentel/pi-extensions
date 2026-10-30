@@ -18,10 +18,10 @@ import {
 	loadConfig,
 	loadUserConfigRaw,
 	saveUserConfig,
-	setUserClassifierPin,
-	clearUserClassifierPin,
+	setUserModelPin,
+	clearUserModelPin,
 	loadProjectConfigRaw,
-	projectClassifierPin,
+	leftoverProjectPinKeys,
 	saveProjectConfig,
 	projectConfigPath,
 	userConfigPath,
@@ -67,7 +67,7 @@ import {
 	setProfile,
 	lockWorkspace,
 } from "../extensions/guard/policy/state.ts";
-import { classifyAction, parseClassifierResponse, verdictToGuardAction } from "../extensions/guard/policy/classifier.ts";
+import { classifierCacheKey, classifyAction, parseClassifierResponse, verdictToGuardAction } from "../extensions/guard/policy/classifier.ts";
 
 const tempDirs: string[] = [];
 function trackCleanup(dir: string) {
@@ -876,6 +876,13 @@ test("classifyAction caches and falls back safely on errors", async () => {
 	const failing = async () => { throw new Error("boom"); };
 	const r3 = await classifyAction(failing as any, { id: "m" } as any, "HostBash", { command: "x" }, cfg, errCache);
 	assert.equal(r3.verdict, "no_match", "classifier failure falls back to no_match");
+	// The cache key carries the model that actually classifies: a mid-session
+	// model switch must not reuse another model's verdict.
+	const r4 = await classifyAction(fakeComplete as any, { provider: "other", id: "n" } as any, "HostBash", { command: "ls" }, cfg, cache);
+	assert.equal(r4.verdict, "allow");
+	assert.equal(calls, 2, "a different model is a cache miss");
+	assert.notEqual(classifierCacheKey("HostBash", { command: "ls" }, cfg, "a/m"), classifierCacheKey("HostBash", { command: "ls" }, cfg, "b/m"));
+	assert.equal(classifierCacheKey("HostBash", { command: "ls" }, cfg, "a/m"), classifierCacheKey("HostBash", { command: "ls" }, cfg, "a/m"));
 });
 
 // ── guard.json config ─────────────────────────────────────────────────────────
@@ -954,36 +961,52 @@ test("classifier pin helpers: set preserves siblings and overwrites; clear remov
 	fs.mkdirSync(path.dirname(userPath), { recursive: true });
 	fs.writeFileSync(userPath, JSON.stringify({ protectedPaths: ["x"], hostBash: { allow: ["HostBash(ls *)"] } }, null, 2) + "\n", "utf8");
 	const before = fs.readFileSync(userPath, "utf8");
-	assert.equal(clearUserClassifierPin(home), false, "clear with no pin is a no-op");
+	assert.equal(clearUserModelPin(home), false, "clear with no pin is a no-op");
 	assert.equal(fs.readFileSync(userPath, "utf8"), before, "a no-op clear does not rewrite the file");
 	// Set writes the pin and preserves sibling keys; round-trips through the loader.
-	setUserClassifierPin("prov-a", "m-1", home);
+	setUserModelPin("prov-a/m-1", home);
 	const withPin = loadUserConfigRaw(home);
-	assert.deepEqual(withPin.classifier, { provider: "prov-a", model: "m-1" });
+	assert.equal(withPin.model, "prov-a/m-1");
 	assert.deepEqual(withPin.protectedPaths, ["x"], "sibling keys survive the set");
 	assert.deepEqual(withPin.hostBash, { allow: ["HostBash(ls *)"] }, "sibling keys survive the set");
-	// Set overwrites an existing pin.
-	setUserClassifierPin("prov-b", "m-2", home);
-	assert.deepEqual(loadUserConfigRaw(home).classifier, { provider: "prov-b", model: "m-2" });
-	// Clear removes only the classifier key.
-	assert.equal(clearUserClassifierPin(home), true);
+	assert.equal(mergeConfig(withPin, {}, "/w", home).model, "prov-a/m-1", "the pin round-trips through the merge");
+	// Set overwrites an existing pin; slash ids survive.
+	setUserModelPin("prov-b/org/m-2", home);
+	assert.equal(loadUserConfigRaw(home).model, "prov-b/org/m-2");
+	// Clear removes only the model key.
+	assert.equal(clearUserModelPin(home), true);
 	const cleared = loadUserConfigRaw(home);
-	assert.equal("classifier" in cleared, false, "only the classifier key is removed");
+	assert.equal("model" in cleared, false, "only the model key is removed");
 	assert.deepEqual(cleared.protectedPaths, ["x"]);
 	assert.deepEqual(cleared.hostBash, { allow: ["HostBash(ls *)"] });
 });
 
-test("projectClassifierPin: coerced project pin, undefined when absent or invalid", () => {
+test("mergeConfig: the model pin is read from the user config only; invalid and retired keys warn", () => {
+	const fromUser = mergeConfig({ model: "prov-u/m" }, { model: "prov-p/m" }, "/w");
+	assert.equal(fromUser.model, "prov-u/m", "a project model never overrides the user pin");
+	const projectOnly = mergeConfig({}, { model: "prov-p/m" }, "/w");
+	assert.equal(projectOnly.model, undefined, "a project-only model is ignored");
+	assert.deepEqual(projectOnly.warnings, [], "the project key is reported by index.ts, not the merge");
+	const invalid = mergeConfig({ model: { provider: "a", model: "b" } as unknown as string }, {}, "/w");
+	assert.equal(invalid.model, undefined);
+	assert.ok(invalid.warnings.some((w) => w.includes('"model" must be a "provider/modelId" string')), "an invalid pin warns");
+	const retired = mergeConfig({ classifier: { provider: "a", model: "b" } } as unknown as GuardConfig, {}, "/w");
+	assert.equal(retired.model, undefined, "the retired classifier object is not read");
+	assert.ok(retired.warnings.some((w) => w.includes('"classifier" key is no longer read; use "model": "provider/modelId"')), "the retired key warns");
+	assert.equal("classifier" in (retired as unknown as Record<string, unknown>), false, "no classifier field in the resolved config");
+});
+
+test("leftoverProjectPinKeys: names the ignored project model/classifier keys", () => {
 	const cwd = makeTempDir("guard-policy-proj-pin-");
-	assert.equal(projectClassifierPin(cwd), undefined, "no project config means no pin");
+	assert.deepEqual(leftoverProjectPinKeys(cwd), [], "no project config means no leftover keys");
 	fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
 	const projPath = path.join(cwd, ".pi", "guard.local.json");
 	fs.writeFileSync(projPath, JSON.stringify({ classifier: { provider: "prov-p", model: "pinned" } }), "utf8");
-	assert.deepEqual(projectClassifierPin(cwd), { provider: "prov-p", model: "pinned" });
-	// An invalid shape is ignored exactly like mergeConfig ignores it, so the
-	// user pin (or auto-select) stays effective.
-	fs.writeFileSync(projPath, JSON.stringify({ classifier: "garbage" }), "utf8");
-	assert.equal(projectClassifierPin(cwd), undefined, "invalid project pins are ignored");
+	assert.deepEqual(leftoverProjectPinKeys(cwd), ["classifier"]);
+	fs.writeFileSync(projPath, JSON.stringify({ model: "prov-p/pinned", classifier: "garbage", readRoots: [] }), "utf8");
+	assert.deepEqual(leftoverProjectPinKeys(cwd), ["model", "classifier"]);
+	fs.writeFileSync(projPath, JSON.stringify({ readRoots: [] }), "utf8");
+	assert.deepEqual(leftoverProjectPinKeys(cwd), []);
 });
 
 test("classifier pin helpers surface the parse warning before overwriting a corrupt user config", () => {
@@ -995,12 +1018,12 @@ test("classifier pin helpers surface the parse warning before overwriting a corr
 	const originalWarn = console.warn;
 	console.warn = (msg?: unknown) => { emitted.push(String(msg)); };
 	try {
-		setUserClassifierPin("prov-c", "m-3", home);
+		setUserModelPin("prov-c/m-3", home);
 	} finally {
 		console.warn = originalWarn;
 	}
-	assert.ok(emitted.some((w) => w.includes("failed to read")), "the parse warning is surfaced before the write");
-	assert.deepEqual(loadUserConfigRaw(home).classifier, { provider: "prov-c", model: "m-3" }, "the pin is still written (documented clobber behavior)");
+	assert.ok(emitted.some((w) => w.startsWith("[guard] ") && w.includes("failed to read")), "the parse warning is surfaced before the write");
+	assert.equal(loadUserConfigRaw(home).model, "prov-c/m-3", "the pin is still written (documented clobber behavior)");
 });
 
 // ── Session state ─────────────────────────────────────────────────────────────

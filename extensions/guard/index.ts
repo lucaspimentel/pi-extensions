@@ -5,7 +5,7 @@ import { Type } from "typebox";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { createGuardAskSelect, supportsOwnedStages } from "./ask-overlay.ts";
 import { homedir } from "node:os";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { GuardRuntime, validateReadGrant, validateReadRootSave } from "./runtime.ts";
 import { DialogGate } from "./dialogs.ts";
 import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
@@ -17,12 +17,12 @@ import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
 import { detectSandboxMode } from "./sandbox/detect.ts";
 import { PROTECTED_TOP_LEVEL, SCAN_MATCH_CAP_DEFAULT, SCAN_TIMEOUT_MS_DEFAULT } from "./sandbox/spec.ts";
 import { effectivePruneNames } from "./sandbox/scan.ts";
-import { clearUserClassifierPin, discoveryCollisionWarningsFor, discoveryNoticeText, discoveryWeakeningSignature, loadConfig, loadUserConfigRaw, projectClassifierPin, resolvedClassifierConfig, setUserClassifierPin, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
+import { clearUserModelPin, discoveryCollisionWarningsFor, discoveryNoticeText, discoveryWeakeningSignature, leftoverProjectPinKeys, loadConfig, loadUserConfigRaw, PROJECT_CONFIG_REL, resolvedClassifierConfig, setUserModelPin, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
 import { bashRunsOnHost, decide, explainHostShellCommand, pathInsideWriteRoots, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
 import { makeIsProtectedPath } from "./policy/protected.ts";
 import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
 import { computeMigration } from "./policy/migrate.ts";
-import { pickClassifierModel, classifyAction } from "./policy/classifier.ts";
+import { classifyAction } from "./policy/classifier.ts";
 import { addToConfigScope, effectiveAllowSuggestion, readGrantSuggestion } from "./policy/suggest.ts";
 import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, validateShellAllowSave, validateShellSave } from "./policy/save.ts";
 import { runExecutionPrompt, runReadGrantPrompt, runWriteEditPrompt, type PromptFlowIO } from "./prompt-flow.ts";
@@ -32,6 +32,7 @@ import { constraintFromParse, INHERIT_ENV, INHERITANCE_VERSION, parseInheritance
 import { resolveWorkspaceScope, scopeContains, SessionShellRuleStore, type SessionShellScope } from "./session-shell-rules.ts";
 import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
 import { modelLabel, pickableModels } from "../shared/model-selection.ts";
+import { createIgnoredPinNotifier, describeIgnoredPin, ignoredPinReasonText, resolveModel, type ResolvedModel } from "../shared/model-pin.ts";
 
 const DEFAULT_CYCLE_SHORTCUT = "ctrl+alt+g";
 
@@ -131,6 +132,11 @@ export default function guard(pi: ExtensionAPI) {
 	let discoveryNoticeSignature: string | null = null;
 	let annotationSnapshot: Array<{ name: string; annotations?: ToolAnnotations }> | null = null;
 	const classifierCache = new Map<string, { verdict: "allow" | "soft_deny" | "hard_deny" | "no_match"; reason: string }>();
+	// Once-per-session dedupe for the ignored classifier pin notice (keyed by
+	// the pin ref) and the leftover project pin keys warning; both reset on a
+	// fresh session start.
+	const pinNotifier = createIgnoredPinNotifier();
+	let projectPinKeysNotified = false;
 
 	function getAnnotations(name: string): ToolAnnotations | undefined {
 		if (annotationSnapshot === null) annotationSnapshot = pi.getAllTools().map((t) => ({ name: t.name, annotations: t.annotations }));
@@ -270,8 +276,19 @@ export default function guard(pi: ExtensionAPI) {
 		if (freshExplanation && freshExplanation.decision.action !== "allow") message += `; ${stillPromptingCount(freshExplanation)} step(s) still prompt`;
 		notify(ctx, message);
 	}
+	/**
+	 * The classifier model: the user-config "model" pin when it resolves and
+	 * has configured auth, else the session model. An unpinned session model
+	 * without configured auth maps to no model, so the existing "no
+	 * classifier model available" path applies.
+	 */
+	function resolveClassifier(ctx: ExtensionContext): ResolvedModel {
+		const resolved = resolveModel(config?.model, ctx.model, ctx.modelRegistry);
+		if (!resolved.pinned && resolved.model && !ctx.modelRegistry.hasConfiguredAuth(resolved.model)) return { ...resolved, model: undefined };
+		return resolved;
+	}
 	function classifierModel(ctx: ExtensionContext): Model<Api> | undefined {
-		return pickClassifierModel(ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable(), ctx.model?.provider, (m) => ctx.modelRegistry.hasConfiguredAuth(m), config?.classifier, (provider, modelId) => ctx.modelRegistry.find(provider, modelId));
+		return resolveClassifier(ctx).model;
 	}
 	/** Recompute the session's classifier label after a config change, then publish: startSession only computes it once, so a /guard reload or a /guard model write would otherwise leave a stale label in the footer. */
 	function refreshClassifierLabel(ctx: ExtensionContext): void {
@@ -375,8 +392,29 @@ export default function guard(pi: ExtensionAPI) {
 		} } : commandGuard ? { expectedEpoch: commandGuard.epoch, beforeCommit: commandGuard.check } : undefined);
 	}
 
+	/** Once-per-session notices about the classifier pin: ignored project pin keys, and a user pin that cannot be used. Best effort. */
+	function notifyPinIssues(ctx: ExtensionContext): void {
+		if (!projectPinKeysNotified) {
+			let keys: string[] = [];
+			try { keys = leftoverProjectPinKeys(ctx.cwd); } catch { /* unreadable project config: loadConfig already warned */ }
+			if (keys.length) {
+				projectPinKeysNotified = true;
+				notify(ctx, `guard: ${keys.map((k) => `"${k}"`).join(" and ")} in ${join(ctx.cwd, PROJECT_CONFIG_REL)} ${keys.length > 1 ? "are" : "is"} ignored: project classifier pins are not read. Use /guard model to pin the classifier in the user config.`, "warning");
+			}
+		}
+		let resolved: ResolvedModel;
+		try { resolved = resolveClassifier(ctx); } catch { return; }
+		const ignored = resolved.ignoredPin;
+		if (ignored) {
+			pinNotifier.notifyOnce(ignored.ref, () => notify(ctx, describeIgnoredPin("guard: classifier", ignored, resolved.model), "warning"));
+		}
+	}
 	async function startSession(ctx: ExtensionContext, fresh: boolean): Promise<void> {
-		if (fresh) discoveryNoticeSignature = null;
+		if (fresh) {
+			discoveryNoticeSignature = null;
+			pinNotifier.reset();
+			projectPinKeysNotified = false;
+		}
 		if (runtime) {
 			dialogs.invalidate("approval expired after a session replacement");
 			await runtime.dispose(fresh ? "session replacement" : "session tree/cwd replacement");
@@ -411,10 +449,19 @@ export default function guard(pi: ExtensionAPI) {
 			onLockSettled: () => publish(ctx),
 		});
 		for (const warning of (config as ResolvedGuardConfig & { warnings?: string[] }).warnings ?? []) notify(ctx, warning, "warning");
+		notifyPinIssues(ctx);
 		publish(ctx);
 	}
 	pi.on("session_start", async (_event, ctx) => { await startSession(ctx, true); });
 	pi.on("session_tree", async (_event, ctx) => { await startSession(ctx, false); });
+	// An unpinned (or ignored-pin) classifier follows the session model, so a
+	// model switch must refresh the footer's classifier label. Footer only:
+	// the profile event payload carries no classifier field.
+	pi.on("model_select", async (_event, ctx) => {
+		if (!state || !runtime) return;
+		try { state.classifierLabel = classifierModel(ctx)?.id ?? null; } catch { state.classifierLabel = null; }
+		updateFooter(ctx);
+	});
 	pi.on("session_shutdown", async () => {
 		dialogs.invalidate("approval expired during shutdown");
 		if (runtime) await runtime.dispose();
@@ -1166,11 +1213,10 @@ export default function guard(pi: ExtensionAPI) {
 	 *  with a pending approval prompt. */
 	async function pickClassifierPin(ctx: ExtensionContext): Promise<void> {
 		if (!ctx.hasUI) {
-			const pin = loadUserConfigRaw().classifier;
-			const project = projectClassifierPin(ctx.cwd);
-			let status = `guard: classifier: ${pin ? `${pin.provider}/${pin.model}` : "(auto-select)"}`;
-			if (project) status += `\neffective: ${project.provider}/${project.model} (project pin in ${ctx.cwd}/.pi/guard.local.json overrides the user pin)`;
-			notify(ctx, `${status}\n/guard model  Pick the classifier model (saved to user config) | /guard model clear  Remove the user pin`);
+			const resolved = resolveClassifier(ctx);
+			let status = `guard: classifier: ${config?.model ?? "(session model)"}`;
+			if (resolved.ignoredPin) status += ` (ignored: ${ignoredPinReasonText(resolved.ignoredPin.reason)}; using ${resolved.model ? modelLabel(resolved.model) : "no model"})`;
+			notify(ctx, `${status}\n/guard model  Pick the classifier model (saved to user config) | /guard model clear  Remove the pin (use the session model)`);
 			return;
 		}
 		const pool = ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable();
@@ -1211,17 +1257,14 @@ export default function guard(pi: ExtensionAPI) {
 		const model = byLabel.get(choice);
 		if (!model) return;
 		if (ownership.signal?.aborted) { notify(ctx, ownership.cancelled.message, "warning"); return; }
-		setUserClassifierPin(model.provider, model.id);
-		if (!(await applyClassifierConfigChange(ctx))) return;
-		// The classifier merge is project-wins: with a project pin that differs
-		// from the pin just written, the effective classifier is unchanged and
-		// the plain success notice would be false.
-		const project = projectClassifierPin(ctx.cwd);
-		if (project && !(project.provider === model.provider && project.model === model.id)) {
-			notify(ctx, `guard: classifier model set to ${choice} (user config), but a project pin in ${ctx.cwd}/.pi/guard.local.json overrides it: the effective classifier stays ${project.provider}/${project.model}.`, "warning");
-		} else {
-			notify(ctx, `guard: classifier model set to ${choice} (user config).`);
+		try {
+			setUserModelPin(modelLabel(model));
+		} catch (err) {
+			notify(ctx, `guard: could not save the classifier model pin: ${String(err)}`, "warning");
+			return;
 		}
+		if (!(await applyClassifierConfigChange(ctx))) return;
+		notify(ctx, `guard: classifier model set to ${choice} (user config).`);
 	}
 	/** Danger notices emitted at warning level whenever a host-powered profile
 	 *  is applied, regardless of entry path (picker, command, cycle shortcut). */
@@ -1312,6 +1355,14 @@ export default function guard(pi: ExtensionAPI) {
 		}
 		notify(ctx, `guard: migrate wrote ${added} new entr${added === 1 ? "y" : "ies"}:\n${written.join("\n")}\nRe-running adds nothing (union with dedupe).`);
 	}
+	/** /guard list line: the user pin (or the session model) plus the model that would actually classify. */
+	function classifierListLine(ctx: ExtensionContext): string {
+		let resolved: ResolvedModel;
+		try { resolved = resolveClassifier(ctx); } catch { resolved = { pinned: false }; }
+		const effective = resolved.model ? modelLabel(resolved.model) : "none (no model with configured auth)";
+		const pin = config?.model ? `pin ${config.model}${resolved.ignoredPin ? ` (ignored: ${ignoredPinReasonText(resolved.ignoredPin.reason)})` : ""}` : "no pin (session model)";
+		return `classifier: ${pin}; effective: ${effective}`;
+	}
 	function showList(ctx: ExtensionContext): void {
 		if (!state || !config) { notify(ctx, "guard: no active session state yet."); return; }
 		const cfg = effectiveConfig();
@@ -1335,7 +1386,7 @@ export default function guard(pi: ExtensionAPI) {
 			`read roots: ${cfg.readRoots.join(", ") || "(none)"}`,
 			`write roots: ${cfg.writeRoots.join(", ") || "(none)"}`,
 			`toolClasses overrides: ${Object.keys(cfg.toolClasses).length}`,
-			`classifier: ${cfg.classifier ? `${cfg.classifier.provider}/${cfg.classifier.model}` : "(auto-select)"}`,
+			classifierListLine(ctx),
 			`shared scratch: ${runtime?.scratchDir ?? "not initialized"}`,
 			`debug: ${debugEnabled ? "on" : "off"}`,
 		].join("\n"));
@@ -1354,7 +1405,7 @@ export default function guard(pi: ExtensionAPI) {
 			const command = args.trim();
 			if (!command || command === "profile") { await pickProfile(ctx); return; }
 			if (command === "help") {
-				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy, discovery scan settings and shared scratch", "/guard reload            Reload guard.json", "/guard model             Pick the classifier model (saved to user config)", "/guard model clear       Remove the classifier pin (resume auto-select)", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python, node and write/edit; other non-owned tools remain observe-only (grep results are secret-filtered).",
+				notify(ctx, ["guard: usage", "/guard [profile <name>]  Pick or set the session profile", "/guard list              Inspect effective policy, discovery scan settings and shared scratch", "/guard reload            Reload guard.json", "/guard model             Pick the classifier model (saved to user config)", "/guard model clear       Remove the classifier pin (use the session model)", "/guard migrate [dry]     Preview before confirming migration", "/guard ack               Clear workspace lock after successful worker teardown", "/guard debug on|off      Live enforcement/observation decisions", `Profiles: ${PROFILE_LADDER.join(" -> ")}; unrestricted is command-only.`, `Cycle shortcut: ${config?.cycleShortcut ?? DEFAULT_CYCLE_SHORTCUT}`, "Guard ENFORCES bash, host_bash, python, node and write/edit; other non-owned tools remain observe-only (grep results are secret-filtered).",
 				"Approval prompts: Allow once, Allow for this session (memory-only rules for this workspace and its subdirectories, never written to config), and project/user saves. /guard list shows the session records.", "Headless prompts deny. Sandbox failures never run on the host. Raw descendants may escape tracking; tightening cannot undo previous host effects.", "Subagent children inherit this session's effective profile at each spawn and cannot leave it except for research (guard:subagent-snapshot-request)."].join("\n"));
 				return;
 			}
@@ -1364,18 +1415,13 @@ export default function guard(pi: ExtensionAPI) {
 			if (/^model(\s|$)/i.test(command)) {
 				const sub = command.slice(5).trim().toLowerCase();
 				if (sub && sub !== "clear") {
-					notify(ctx, "guard usage: /guard model  Pick the classifier model (saved to user config) | /guard model clear  Remove the pin (resume auto-select)", "warning");
+					notify(ctx, "guard usage: /guard model  Pick the classifier model (saved to user config) | /guard model clear  Remove the pin (use the session model)", "warning");
 					return;
 				}
 				if (sub === "clear") {
-					if (!clearUserClassifierPin()) { notify(ctx, "guard: no classifier pin in the user config."); return; }
+					if (!clearUserModelPin()) { notify(ctx, "guard: no classifier pin in the user config."); return; }
 					if (!(await applyClassifierConfigChange(ctx))) return;
-					// A project pin keeps applying after the user pin is gone:
-					// auto-select only resumes when no project pin shadows it.
-					const project = projectClassifierPin(ctx.cwd);
-					notify(ctx, project
-						? `guard: user classifier pin cleared (user config); a project pin in ${ctx.cwd}/.pi/guard.local.json still applies, so auto-select does not resume.`
-						: "guard: classifier pin cleared (user config); resuming auto-select.");
+					notify(ctx, "guard: classifier pin cleared (user config); using the session model.");
 					return;
 				}
 				await pickClassifierPin(ctx);

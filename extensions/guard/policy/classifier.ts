@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
-import { modelLabel, selectModel, type HasAuth } from "../../shared/model-selection.ts";
+import { modelLabel } from "../../shared/model-selection.ts";
 
 export type ClassifierVerdict = "allow" | "soft_deny" | "hard_deny" | "no_match";
 
@@ -25,9 +25,12 @@ export interface ClassifyResult {
 /** Seam type for the model completion call (mirrors ModelRegistry.streamSimple consumers). */
 export type ClassifierComplete = (model: Model<Api>, context: Context) => Promise<AssistantMessage>;
 
+/**
+ * The classifier's natural-language configuration. The model is not part of
+ * it: index.ts resolves the model (user-config "model" pin, else the session
+ * model) and passes it to classifyAction separately.
+ */
 export interface ResolvedClassifierConfig {
-	/** Optional explicit model pin; auto-select when absent. */
-	classifier?: { provider: string; model: string };
 	/** Free-text facts shown to the classifier (e.g. trusted repos/domains). */
 	environment: string[];
 	allow: string[];
@@ -70,25 +73,6 @@ export const DEFAULT_CLASSIFIER = {
 		"Sending data to third-party APIs or external services for telemetry, analytics, or exfiltration (not normal GitHub dev actions like opening PRs or pushing branches via gh)",
 	],
 };
-
-/**
- * Pick the classifier model. If `explicit` is set, `find` it directly;
- * otherwise rank the pool (preferring the current provider) and return the
- * first with configured auth. `find` and `hasAuth` are injected seams.
- */
-export function pickClassifierModel(
-	pool: Model<Api>[],
-	currentProvider: string | undefined,
-	hasAuth: HasAuth,
-	explicit?: { provider: string; model: string },
-	find?: (provider: string, modelId: string) => Model<Api> | undefined,
-): Model<Api> | undefined {
-	if (explicit && find) {
-		const m = find(explicit.provider, explicit.model);
-		if (m && hasAuth(m)) return m;
-	}
-	return selectModel(pool, currentProvider, hasAuth);
-}
 
 /**
  * Status-bar label for the auto profile. Shows the resolved classifier model
@@ -322,16 +306,22 @@ export function verdictToGuardAction(verdict: ClassifierVerdict, nonInteractive:
 	return "fallthrough"; // no_match
 }
 
-/** Cache key: hash(toolName, input, ruleset). Binds token cost on loops. */
+/**
+ * Cache key: hash(toolName, input, model, ruleset). Binds token cost on
+ * loops. `model` is the label of the model that actually classifies
+ * (`provider/modelId`), so a mid-session model switch never reuses another
+ * model's cached verdicts.
+ */
 export function classifierCacheKey(
 	toolName: string,
 	input: Record<string, unknown>,
 	config: ResolvedClassifierConfig,
+	model: string,
 	context: string[] = [],
 ): string {
 	const ruleset = JSON.stringify({
 		x: context,
-		c: config.classifier,
+		m: model,
 		e: config.environment,
 		a: config.allow,
 		s: config.soft_deny,
@@ -343,8 +333,8 @@ export function classifierCacheKey(
 
 /**
  * Run the classifier. `complete` is injected so this is unit-testable without
- * HTTP. Results are cached by (toolName, input, ruleset) for the lifetime of
- * the provided cache Map.
+ * HTTP. Results are cached by (toolName, input, model, ruleset) for the
+ * lifetime of the provided cache Map.
  */
 export async function classifyAction(
 	complete: ClassifierComplete,
@@ -355,7 +345,7 @@ export async function classifyAction(
 	cache: Map<string, ClassifyResult>,
 	context: string[] = [],
 ): Promise<ClassifyResult> {
-	const key = classifierCacheKey(toolName, input, config, context);
+	const key = classifierCacheKey(toolName, input, config, modelLabel(model), context);
 	const cached = cache.get(key);
 	if (cached) return cached;
 	const prompt = buildClassifierPrompt(toolName, input, config, context);

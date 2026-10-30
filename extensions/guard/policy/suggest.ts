@@ -231,10 +231,13 @@ export function addToConfigScope(
 		next.bashValidators = base;
 	}
 
-	// Scalars: set when the patch carries them.
-	for (const key of ["cycleShortcut", "classifier"] as const) {
+	// Scalars: set when the patch carries them. The classifier pin is
+	// user-only (guard reads it from the user file), so a project scope never
+	// writes it even if a patch carries one.
+	for (const key of ["cycleShortcut", "model"] as const) {
 		const value = patch[key];
 		if (value === undefined) continue;
+		if (key === "model" && scope === "project") continue;
 		(next as Record<string, unknown>)[key] = value;
 	}
 
@@ -288,9 +291,10 @@ export function countPatchChanges(
 			if (base[k] !== v) changes++;
 		}
 	}
-	for (const key of ["cycleShortcut", "classifier"] as const) {
+	for (const key of ["cycleShortcut", "model"] as const) {
 		const value = patch[key];
 		if (value === undefined) continue;
+		if (key === "model" && scope === "project") continue;
 		const current = existing[key];
 		if (JSON.stringify(current) !== JSON.stringify(value)) changes++;
 	}

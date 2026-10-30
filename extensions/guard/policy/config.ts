@@ -5,6 +5,11 @@
  * built-in default. Corrupt or partially valid files fail safe: warn and use
  * defaults for the bad keys, never throw.
  *
+ * The classifier model pin is the top-level string "model"
+ * ("provider/modelId", see ../../shared/model-pin.ts) and is read from the
+ * USER config only: a project "model" (or the retired "classifier" object) is
+ * ignored, and index.ts warns about it once per session.
+ *
  * Merge semantics (mirroring pi-tool-permissions): scalar keys project-wins
  * (discoveryMatchCap and discoveryTimeoutMs fall back project-valid, then
  * user-valid, then the built-in default); list keys (protectedPaths,
@@ -19,6 +24,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { clearModelPin, coerceModelPin, writeModelPin } from "../../shared/model-pin.ts";
 import { DEFAULT_BASH_VALIDATORS, BASH_VALIDATOR_NONE } from "./bashtier.ts";
 import { DEFAULT_CLASSIFIER } from "./classifier.ts";
 import { isToolClass, OWNED_EXECUTORS, TOOL_CLASSES } from "./classes.ts";
@@ -65,8 +71,11 @@ export interface GuardConfig {
 	readRoots?: string[];
 	/** Writable roots for write/edit (default profile) and redirect exemptions. */
 	writeRoots?: string[];
-	/** Optional explicit classifier model pin; auto-select when absent. */
-	classifier?: { provider: string; model: string };
+	/**
+	 * Classifier model pin, "provider/modelId". Read from the user config
+	 * only; when absent or unusable the classifier uses the session model.
+	 */
+	model?: string;
 	/** Free-text facts shown to the classifier. */
 	classifierEnvironment?: string[];
 	/** Additive natural-language classifier lists (on top of the defaults). */
@@ -92,7 +101,8 @@ export interface ResolvedGuardConfig {
 	hostBash: Required<HostBashRules>;
 	readRoots: string[];
 	writeRoots: string[];
-	classifier?: { provider: string; model: string };
+	/** User-config classifier pin ("provider/modelId"); the session model when absent. */
+	model?: string;
 	classifierEnvironment: string[];
 	classifierAllow: string[];
 	classifierSoftDeny: string[];
@@ -141,34 +151,26 @@ export function saveUserConfig(cfg: GuardConfig, home: string = homedir()): void
 }
 
 /**
- * Persist an explicit classifier model pin into the user config, preserving
- * every sibling key. User scope only: guard's /guard model command has no
- * project-scope variant (unlike pi-tool-permissions), so there is no scope
- * argument to get wrong.
+ * Persist the classifier model pin ("provider/modelId") into the user config
+ * as the top-level "model" key, preserving every sibling key. User scope
+ * only: there is no project-scope pin. A corrupt user config is warned about
+ * (console.warn) and replaced; write errors throw.
  */
-export function setUserClassifierPin(provider: string, model: string, home: string = homedir()): void {
-	const warnings: string[] = [];
-	const cfg = loadUserConfigRaw(home, warnings);
-	// A corrupt user config parses to an empty object: surface the parse
-	// warning before the write below replaces the raw bytes with the pin.
+export function setUserModelPin(ref: string, home: string = homedir()): void {
+	const { warnings } = writeModelPin(userConfigPath(home), ref);
 	for (const w of warnings) console.warn(`[guard] ${w}`);
-	cfg.classifier = { provider, model };
-	saveUserConfig(cfg, home);
 }
 
 /**
- * Remove the classifier pin from the user config, leaving every other key in
+ * Remove the "model" pin from the user config, leaving every other key in
  * place. Returns false when there was no pin: nothing is read-modify-written
  * and the file is left byte-for-byte unchanged.
  */
-export function clearUserClassifierPin(home: string = homedir()): boolean {
+export function clearUserModelPin(home: string = homedir()): boolean {
 	const warnings: string[] = [];
-	const cfg = loadUserConfigRaw(home, warnings);
+	loadUserConfigRaw(home, warnings);
 	for (const w of warnings) console.warn(`[guard] ${w}`);
-	if (!cfg.classifier) return false;
-	delete cfg.classifier;
-	saveUserConfig(cfg, home);
-	return true;
+	return clearModelPin(userConfigPath(home));
 }
 
 export function loadProjectConfigRaw(cwd: string, warnings: string[] = []): GuardConfig {
@@ -180,15 +182,13 @@ export function saveProjectConfig(cwd: string, cfg: GuardConfig): void {
 }
 
 /**
- * The project-scope classifier pin, coerced exactly like mergeConfig (which
- * resolves classifier as project-wins over the user pin). Undefined when the
- * project config has no pin or an invalid one: in both cases the user pin or
- * auto-select stays effective. Diagnostic helper for the /guard model
- * notices; parse warnings are not surfaced here (loadConfig already reports
- * them on the reload that follows any write).
+ * Classifier pin keys present in the raw project config ("model" and/or the
+ * retired "classifier"). Both are ignored: the pin is user-config only.
+ * Drives the once-per-session warning in index.ts.
  */
-export function projectClassifierPin(cwd: string): { provider: string; model: string } | undefined {
-	return coerceClassifierPin(loadProjectConfigRaw(cwd).classifier, []);
+export function leftoverProjectPinKeys(cwd: string): string[] {
+	const raw = loadProjectConfigRaw(cwd) as Record<string, unknown>;
+	return ["model", "classifier"].filter((key) => Object.prototype.hasOwnProperty.call(raw, key));
 }
 
 /** Load both scopes (raw, unmerged); warnings go to console.warn. */
@@ -261,20 +261,6 @@ function coerceHostBash(raw: unknown, warnings: string[]): Required<HostBashRule
 		deny: stringList(o.deny, warnings, "hostBash.deny"),
 		ask: stringList(o.ask, warnings, "hostBash.ask"),
 	};
-}
-
-function coerceClassifierPin(raw: unknown, warnings: string[]): { provider: string; model: string } | undefined {
-	if (raw === undefined) return undefined;
-	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-		warnings.push("guard config: classifier must be an object { provider, model }; ignoring it");
-		return undefined;
-	}
-	const o = raw as { provider?: unknown; model?: unknown };
-	if (typeof o.provider !== "string" || typeof o.model !== "string" || !o.provider || !o.model) {
-		warnings.push("guard config: classifier pin needs string provider and model; ignoring it");
-		return undefined;
-	}
-	return { provider: o.provider, model: o.model };
 }
 
 function coerceValidators(raw: unknown, warnings: string[]): Record<string, string> | undefined {
@@ -370,6 +356,13 @@ export function mergeConfig(
 		coerceIntInRange(project.discoveryTimeoutMs, 1, DISCOVERY_TIMEOUT_MS_MAX, warnings, "discoveryTimeoutMs") ??
 		coerceIntInRange(user.discoveryTimeoutMs, 1, DISCOVERY_TIMEOUT_MS_MAX, warnings, "discoveryTimeoutMs") ??
 		SCAN_TIMEOUT_MS_DEFAULT;
+	// Classifier pin: user config only (a project pin is ignored and reported
+	// separately by index.ts via leftoverProjectPinKeys).
+	const pin = coerceModelPin((user as Record<string, unknown>).model, "guard config");
+	if (pin.warning) warnings.push(pin.warning);
+	if (Object.prototype.hasOwnProperty.call(user, "classifier")) {
+		warnings.push('guard config: the user "classifier" key is no longer read; use "model": "provider/modelId"');
+	}
 	return {
 		cycleShortcut,
 		protectedPaths: dedupe([...stringList(user.protectedPaths, warnings, "protectedPaths"), ...stringList(project.protectedPaths, warnings, "protectedPaths")]),
@@ -386,7 +379,7 @@ export function mergeConfig(
 		},
 		readRoots: dedupe([...stringList(user.readRoots, warnings, "readRoots"), ...stringList(project.readRoots, warnings, "readRoots")]),
 		writeRoots: dedupe([...stringList(user.writeRoots, warnings, "writeRoots"), ...stringList(project.writeRoots, warnings, "writeRoots")]),
-		classifier: coerceClassifierPin(project.classifier ?? user.classifier, warnings),
+		...(pin.ref ? { model: pin.ref } : {}),
 		classifierEnvironment: dedupe([...stringList(user.classifierEnvironment, warnings, "classifierEnvironment"), ...stringList(project.classifierEnvironment, warnings, "classifierEnvironment")]),
 		classifierAllow: dedupe([...stringList(user.classifierAllow, warnings, "classifierAllow"), ...stringList(project.classifierAllow, warnings, "classifierAllow")]),
 		classifierSoftDeny: dedupe([...stringList(user.classifierSoftDeny, warnings, "classifierSoftDeny"), ...stringList(project.classifierSoftDeny, warnings, "classifierSoftDeny")]),
@@ -401,7 +394,6 @@ export function mergeConfig(
 /** Resolved classifier config (defaults at the bottom, additive lists). */
 export function resolvedClassifierConfig(cfg: ResolvedGuardConfig) {
 	return {
-		classifier: cfg.classifier,
 		environment: cfg.classifierEnvironment,
 		allow: dedupe([...DEFAULT_CLASSIFIER.allow, ...cfg.classifierAllow]),
 		soft_deny: dedupe([...DEFAULT_CLASSIFIER.soft_deny, ...cfg.classifierSoftDeny]),
