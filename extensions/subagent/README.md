@@ -38,11 +38,12 @@ streaming, usage display, security model).
   run's annotations, still a single 100-item page), `repo metadata` (flat
   repository facts: default branch, description, visibility, URLs),
   `pr comments` (inline review comments and replies), `pr reviews`
-  (review bodies and verdicts), and `issue comments` (conversation comments
+  (review bodies and verdicts), `issue comments` (conversation comments
   on an issue or PR, from the issues endpoint, unlike inline review
-  comments) as structured API operations; all network
-  reads (guard class `remote-read`), and the API operations work outside a
-  git worktree. The PR API operations require explicit `repo` + a positive
+  comments), and `org team` (one organization team by bare org login and
+  team slug, a single unpaged object) as structured API operations; all
+  network reads (guard class `remote-read`), and the API operations work
+  outside a git worktree. The PR API operations require explicit `repo` + a positive
   safe-integer `pr` number and `issue comments` requires explicit `repo` +
   a positive safe-integer `issue` number; all return verbatim arrays and
   accept optional jq and independent continuation tokens bound to the same

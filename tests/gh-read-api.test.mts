@@ -1262,6 +1262,90 @@ test("repo metadata: HTTP 404 and 403 pass through verbatim with no retry", asyn
 	assert.equal(forbidden.requests.length, 1);
 });
 
+// ── Organization team ───────────────────────────────────────────────────────
+
+test("org team: one request, full object passed through verbatim", async () => {
+	const teamObject = {
+		id: 12345,
+		node_id: "T_abc",
+		url: "https://api.github.com/teams/12345",
+		html_url: "https://github.com/orgs/DataDog/teams/serverless-azure-and-gcp",
+		name: "Serverless Azure and GCP",
+		slug: "serverless-azure-and-gcp",
+		description: "d",
+		privacy: "closed",
+		permission: "push",
+		organization: { login: "DataDog" },
+	};
+	const apiRequester = requester([() => response(JSON.stringify(teamObject))]);
+	const result = await run({ subcommand: "org team", org: "DataDog", slug: "serverless-azure-and-gcp" }, apiRequester);
+	assert.equal(result.isError, undefined);
+	assert.ok(
+		result.content[0].text.startsWith("gh_read api: org team DataDog/serverless-azure-and-gcp"),
+		result.content[0].text,
+	);
+	assert.equal(result.details["org"], "DataDog");
+	assert.equal(result.details["slug"], "serverless-azure-and-gcp");
+	assert.deepEqual(apiRequester.requests, ["orgs/DataDog/teams/serverless-azure-and-gcp"], "exactly one unpaged request");
+	assert.ok(
+		result.content[0].text.includes("orgs/DataDog/teams/serverless-azure-and-gcp (single object; no pagination)"),
+		result.content[0].text,
+	);
+	const dataLine = result.content[0].text.split("data:\n")[1]!;
+	assert.deepEqual(JSON.parse(dataLine.trimEnd()), teamObject, "response passes through unmodified");
+	assert.ok(!result.details["continuation"], "no continuation machinery");
+});
+
+test("org team: jq narrows the object; applied exactly once", async () => {
+	const apiRequester = requester([() => response(JSON.stringify({ name: "Serverless Azure and GCP", slug: "serverless-azure-and-gcp" }))]);
+	let jqCalls = 0;
+	const result = await run({ subcommand: "org team", org: "DataDog", slug: "serverless-azure-and-gcp", jq: ".name" }, apiRequester, {
+		jqRun: async (expression, document) => {
+			assert.equal(expression, ".name");
+			JSON.parse(document);
+			jqCalls += 1;
+			return { kind: "result", output: '"Serverless Azure and GCP"', outputTruncated: false, outputBytes: 24 };
+		},
+	});
+	assert.equal(result.isError, undefined);
+	assert.equal(jqCalls, 1);
+	assert.deepEqual(apiRequester.requests, ["orgs/DataDog/teams/serverless-azure-and-gcp"], "jq does not add a request");
+	assert.ok(result.content[0].text.trimEnd().endsWith('"Serverless Azure and GCP"'));
+});
+
+test("org team: non-object bodies (array, string, invalid JSON) are errors", async () => {
+	const asArray = requester([() => response(JSON.stringify([{ id: 1 }]))]);
+	const arrayResult = await run({ subcommand: "org team", org: "o", slug: "s" }, asArray);
+	assert.equal(arrayResult.isError, true);
+	assert.ok(arrayResult.content[0].text.includes("response body was not a JSON object"));
+
+	const asString = requester([() => response('"just a string"')]);
+	const stringResult = await run({ subcommand: "org team", org: "o", slug: "s" }, asString);
+	assert.equal(stringResult.isError, true);
+	assert.ok(stringResult.content[0].text.includes("not a JSON object"));
+
+	const asGarbage = requester([() => response("<html>gateway error</html>")]);
+	const garbageResult = await run({ subcommand: "org team", org: "o", slug: "s" }, asGarbage);
+	assert.equal(garbageResult.isError, true);
+	assert.ok(garbageResult.content[0].text.includes("not valid JSON"));
+});
+
+test("org team: 404 is an ordinary error result with exactly one request", async () => {
+	const notFound = requester([() => error("Not Found", 404)]);
+	const result = await run({ subcommand: "org team", org: "DataDog", slug: "gh-read-plan-nonexistent-slug" }, notFound);
+	assert.equal(result.isError, true);
+	assert.ok(result.content[0].text.includes("org team read failed: Not Found (HTTP 404)"), result.content[0].text);
+	assert.deepEqual(notFound.requests, ["orgs/DataDog/teams/gh-read-plan-nonexistent-slug"], "exactly one request, no retry");
+});
+
+test("org team: 403 passthrough is an ordinary error result with exactly one request", async () => {
+	const forbidden = requester([() => error("Forbidden", 403)]);
+	const result = await run({ subcommand: "org team", org: "DataDog", slug: "private-team" }, forbidden);
+	assert.equal(result.isError, true);
+	assert.ok(result.content[0].text.includes("org team read failed: Forbidden (HTTP 403)"), result.content[0].text);
+	assert.deepEqual(forbidden.requests, ["orgs/DataDog/teams/private-team"], "exactly one request, no retry");
+});
+
 // ── pr threads: GraphQL review threads with resolved/outdated state ──────────
 
 const threadsParams = { subcommand: "pr threads", repo: "OWNER/REPO", pr: 123 } as const;

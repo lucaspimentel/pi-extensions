@@ -1,9 +1,10 @@
 /**
  * gh-read API operations: pinned repository contents and trees, combined
  * commit checks, exact advisory lookup, check-run annotations, repository
- * metadata, mutable PR comments/reviews, and PR review threads (resolved and
- * outdated included) over a tool-authored GraphQL POST. Operation
- * orchestration and result rendering live together in this module.
+ * metadata, mutable PR comments/reviews, PR review threads (resolved and
+ * outdated included) over a tool-authored GraphQL POST, and one organization
+ * team by org + slug. Operation orchestration and result rendering live
+ * together in this module.
  *
  * Contract highlights (docs/gh-read-design.md, "GitHub API operations"):
  * - Omitted refs resolve through repository default-branch metadata, then
@@ -164,6 +165,15 @@ function advisoryEndpoint(id: string): string {
 function annotationsEndpoint(repo: string, checkRunId: number): string {
 	const [owner, name] = splitRepo(repo);
 	return `repos/${owner}/${name}/check-runs/${checkRunId}/annotations?${buildQuery([["per_page", PAGE_SIZE]])}`;
+}
+
+/**
+ * Endpoint for one organization team: a single object, no pagination, no
+ * Link parsing, exactly ONE request ever. Both segments are validated bare
+ * tokens from validate.ts and still encoded individually for transport.
+ */
+function teamEndpoint(org: string, slug: string): string {
+	return `orgs/${encodeSegment(org)}/teams/${encodeSegment(slug)}`;
 }
 
 /**
@@ -1569,6 +1579,36 @@ async function opRepoMetadata(invocation: ValidApiInvocation, requester: ApiRequ
 	return await renderData(invocation, summary, metadata, body, [], false, requester, deps);
 }
 
+// ── Operation: organization team ──────────────────────────────────────────
+
+/**
+ * One tool-authored GET of one organization team object: no pagination, no
+ * Link parsing, no continuation, exactly ONE request ever. The response
+ * passes through verbatim. A 404 is an ordinary error result covering both a
+ * nonexistent team and a team the active token cannot see; there is no
+ * not-found-as-data path and no body sniffing.
+ */
+async function opOrgTeam(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
+	const org = invocation.org!;
+	const slug = invocation.slug!;
+	const summary = `gh_read api: org team ${org}/${slug}`;
+	const metadata: Array<[string, string | number | boolean | null]> = [
+		["org", org],
+		["slug", slug],
+		["endpoint", `orgs/${org}/teams/${slug} (single object; no pagination)`],
+	];
+
+	const outcome = await requester.request(teamEndpoint(org, slug));
+	if (!isResponse(outcome)) {
+		return renderResult(summary, metadata, "", { isError: true, notices: [describeRequestFailure("org team read", outcome)] });
+	}
+	const body = parseJsonObject(outcome.body);
+	if (typeof body === "string") {
+		return renderResult(summary, metadata, "", { isError: true, notices: [body] });
+	}
+	return await renderData(invocation, summary, metadata, body, [], false, requester, deps);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export async function runApiOperation(
@@ -1606,5 +1646,7 @@ async function dispatchOperation(
 			return await opDiscussionRead(invocation, requester, deps);
 		case "pr threads":
 			return await opPrThreads(invocation, requester, deps);
+		case "org team":
+			return await opOrgTeam(invocation, requester, deps);
 	}
 }

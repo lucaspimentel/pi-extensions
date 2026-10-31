@@ -142,7 +142,7 @@ cited from `TODO.md` and was not re-verified.
   `job logs`, which is designed but not yet implemented, see "job logs"):
   `repo contents`, `repo tree`, `commit checks`, `advisory view`,
   `check annotations`, `repo metadata`, `pr comments`, `pr reviews`,
-  `issue comments`, `pr threads`, and `job logs` (see "GitHub API
+  `issue comments`, `pr threads`, `org team`, and `job logs` (see "GitHub API
   operations").
   Mixing shapes is rejected in both directions: native subcommands reject
   structured fields, API operations reject `args`.
@@ -262,7 +262,8 @@ Value validation (native commands):
 
 The designed structured operations (`repo contents`, `repo tree`,
 `commit checks`, `advisory view`, `check annotations`, `repo metadata`,
-`pr comments`, `pr reviews`, `issue comments`, `pr threads`, `job logs`)
+`pr comments`, `pr reviews`, `issue comments`, `pr threads`, `org team`,
+`job logs`)
 make read-only requests to api.github.com ONLY, always inside `gh`, with a
 fixed tool-authored argv (see "API runner"); all are implemented except
 `job logs`, which is designed but not yet implemented. Every operation but
@@ -282,9 +283,9 @@ continuations are rejected before any child runs.
   encoded (lone surrogates) fail validation; `.`, `..`, empty, leading and
   trailing slash segments are rejected outright. gh placeholder expansion
   (`:owner`) is unreachable because `:` is percent-encoded, and the REST
-  endpoint argument always starts with `repos/` or `advisories/`, never with
-  caller text. The GraphQL read is the one operation whose request carries
-  caller-derived values in flag positions: it rides `-f`/`-F` variable
+  endpoint argument always starts with `repos/`, `orgs/`, or `advisories/`,
+  never with caller text. The GraphQL read is the one operation whose request
+  carries caller-derived values in flag positions: it rides `-f`/`-F` variable
   pairs whose names are GraphQL names and whose values are validated
   non-control strings (at most 512 characters) or a safe integer.
 - Ref pinning (repo contents/tree and commit checks only): an omitted ref
@@ -396,6 +397,26 @@ metadata follow-up, because `gh repo view --json` is GraphQL-backed with
 relationship collections (`issues`, `pullRequests`, `milestones`, ...) that
 would let non-metadata data through the door, and its text mode prints the
 README; the README stays covered by `repo contents` instead.
+
+### org team
+
+Required `org` (a bare organization login matching `^[A-Za-z0-9-]+$`, at
+most 39 characters) and `slug` (a bare team slug matching
+`^[A-Za-z0-9_.-]+$`, at most 100 characters); optional `jq`. A leading `@`,
+an embedded `/`, and a `.`-or-`..` slug are all rejected with a field-naming
+message, never silently normalized, so no dot segment can reach the
+endpoint. Both values are percent-encoded per segment inside api.ts for
+transport; every character the regexes admit is URL-unreserved, so that
+encoding is inert for accepted input rather than a defense. A single
+tool-authored GET `orgs/{org}/teams/{slug}` is issued: no ref resolution, no
+pagination, no Link parsing, no continuation, exactly ONE request ever. The
+body MUST be a JSON object (arrays, strings, and invalid JSON are errors),
+and the object passes through verbatim, narrowed only by an optional jq
+filter. The metadata head names `org`, `slug`, and the
+`orgs/{org}/teams/{slug} (single object; no pagination)` endpoint. A 404 is
+an ordinary error result: it covers both a nonexistent team and a team the
+active token cannot see, and the tool does no body sniffing to tell them
+apart.
 
 ### pr comments and pr reviews
 
@@ -976,7 +997,12 @@ Settled in the grill-me review:
   continuation/jq transport, rejects `args`, `ref`, `first`, `cursor`,
   `resolved`, `depth`, `issue`, and redirection-shaped fields before target
   validation, and rejects `pr` on every other API operation and on native
-  subcommands.
+  subcommands. Org-team coverage: `org team` requires explicit `org` +
+  `slug`, applies the organization-login and team-slug regexes with their
+  39/100-character caps, rejects a leading `@`, an embedded `/`, and a
+  `.`-or-`..` value in `slug` with field-naming messages, accepts jq, rejects
+  every sibling field on the operation, and rejects `org`/`slug` on every
+  other API operation.
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout
@@ -1065,7 +1091,10 @@ Settled in the grill-me review:
   (never a zero-thread success), truncated-comment counting with a null node
   skipped, message dedupe/sanitization/bounding, jq once on the node array
   with metadata and notices unfiltered, display clipping, and a continuation
-  encode failure.
+  encode failure. Organization-team orchestration: one request to the exact
+  endpoint with the verbatim object passed through, jq applied once,
+  non-object bodies (array, string, invalid JSON) as errors, and 404/403
+  passthrough with no retry.
 - `tests/gh-read-jq.test.mts`: REAL-jq coverage (required in CI): lexical
   security matrix (benign keywords, imports incl. interpolations, malformed
   constructs), preflight compile rejection, zero/multi-value output, env/

@@ -976,3 +976,95 @@ test("pr threads: unknown, mixed, and redirection-shaped fields rejected before 
 	apiRejects({ subcommand: "pr threads", repo: "o/r", pr: "1" }, ["pr"]);
 	apiRejects({ subcommand: "pr threads", repo: "o/r", pr: 1, args: ["--json"] }, ["structured parameters, not an args array"]);
 });
+
+// ── org team (API operation) validation ─────────────────────────────────────
+
+test("org team: required org and slug, optional jq, no other fields", () => {
+	assert.deepEqual(apiOk({ subcommand: "org team", org: "DataDog", slug: "serverless-azure-and-gcp" }), {
+		ok: true,
+		op: "org team",
+		org: "DataDog",
+		slug: "serverless-azure-and-gcp",
+	});
+	assert.equal(apiOk({ subcommand: "org team", org: "DataDog", slug: "s", jq: ".name" }).jq, ".name");
+	// The regexes are permissive like API_REPO_RE: hyphens, dots, and
+	// underscores round-trip literally.
+	assert.equal(apiOk({ subcommand: "org team", org: "a-b", slug: "a.b_c-d" }).slug, "a.b_c-d");
+	apiRejects({ subcommand: "org team", slug: "s" }, ["org is required"]);
+	apiRejects({ subcommand: "org team", org: "DataDog" }, ["slug is required"]);
+	for (const org of ["", 42, null, undefined, true, ["DataDog"]]) {
+		apiRejects({ subcommand: "org team", org, slug: "s" }, ["org"]);
+	}
+	for (const slug of ["", 42, null, undefined, true, ["s"]]) {
+		apiRejects({ subcommand: "org team", org: "DataDog", slug }, ["slug"]);
+	}
+	apiRejects({ subcommand: "org team", org: "Data.Dog", slug: "s" }, ["org"]);
+});
+
+test("org team: leading '@' and embedded '/' in slug are rejected with the bare-slug message", () => {
+	for (const slug of ["@x", "@DataDog/team", "a/b", "DataDog/team", "@/team"]) {
+		const checked = validateToolParams({ subcommand: "org team", org: "DataDog", slug });
+		assert.equal(checked.ok, false, `expected rejection for slug '${slug}'`);
+		if (!checked.ok) {
+			assert.ok(checked.reason.includes("slug"), checked.reason);
+			assert.ok(checked.reason.includes("bare team slug"), checked.reason);
+		}
+	}
+	// Neither value is silently normalized: a leading '@' stays an error.
+	apiRejects({ subcommand: "org team", org: "@DataDog", slug: "s" }, ["org"]);
+});
+
+test("org team: a '.' or '..' slug is rejected so no dot segment reaches the endpoint", () => {
+	for (const slug of [".", ".."]) {
+		apiRejects({ subcommand: "org team", org: "DataDog", slug }, ["slug must not be a '.' or '..' segment"]);
+	}
+	// A leading or embedded dot with other characters stays valid, and a longer
+	// dot run is not a special segment: only a slug that IS a dot segment would
+	// be normalized away by the server.
+	assert.equal(apiOk({ subcommand: "org team", org: "DataDog", slug: ".team-1" }).slug, ".team-1");
+	assert.equal(apiOk({ subcommand: "org team", org: "DataDog", slug: "a..b" }).slug, "a..b");
+	assert.equal(apiOk({ subcommand: "org team", org: "DataDog", slug: "..." }).slug, "...");
+});
+
+test("org team: length caps at 39 for org and 100 for slug", () => {
+	assert.equal(apiOk({ subcommand: "org team", org: "a".repeat(39), slug: "b".repeat(100) }).org, "a".repeat(39));
+	apiRejects({ subcommand: "org team", org: "a".repeat(40), slug: "s" }, ["org must be at most 39 characters"]);
+	apiRejects({ subcommand: "org team", org: "DataDog", slug: "b".repeat(101) }, ["slug must be at most 100 characters"]);
+});
+
+test("org team: jq follows the legacy jq rule; every sibling field is rejected", () => {
+	const base = { subcommand: "org team", org: "DataDog", slug: "s" };
+	for (const jq of ["", ".a\u0000b", ".\nb", 1, null, false]) apiRejects({ ...base, jq }, ["jq"]);
+	for (const field of ["repo", "pr", "issue", "check_run_id", "id", "type", "ref", "path", "start_line", "end_line", "recursive", "continuation", "page", "per_page", "endpoint", "host", "2>&1", "redirect", "unknown"]) {
+		apiRejects({ ...base, [field]: "x" }, [`unknown field '${field}'`]);
+	}
+	// An args array is rejected by the shape discriminator before per-field
+	// validation, so its message is the structured-parameters one.
+	apiRejects({ ...base, args: ["--json"] }, ["structured parameters, not an args array"]);
+});
+
+test("org team: org and slug are rejected on every other operation and on native subcommands", () => {
+	const others: Array<Record<string, unknown>> = [
+		{ subcommand: "repo metadata", repo: "o/r" },
+		{ subcommand: "repo contents", repo: "o/r", path: "" },
+		{ subcommand: "repo tree", repo: "o/r" },
+		{ subcommand: "commit checks", repo: "o/r", ref: "main" },
+		{ subcommand: "advisory view", id: "CVE-2026-1234" },
+		{ subcommand: "check annotations", repo: "o/r", check_run_id: 1 },
+		{ subcommand: "pr comments", repo: "o/r", pr: 1 },
+		{ subcommand: "pr reviews", repo: "o/r", pr: 1 },
+		{ subcommand: "pr threads", repo: "o/r", pr: 1 },
+		{ subcommand: "issue comments", repo: "o/r", issue: 1 },
+	];
+	for (const unrelated of others) {
+		apiRejects({ ...unrelated, org: "DataDog" }, ["unknown field 'org'"]);
+		apiRejects({ ...unrelated, slug: "s" }, ["unknown field 'slug'"]);
+	}
+	for (const native of ["pr view", "issue view", "run list"]) {
+		for (const [field, value] of [["org", "DataDog"], ["slug", "s"]] as const) {
+			const checked = validateToolParams({ subcommand: native, args: [], [field]: value });
+			assert.equal(checked.ok, false);
+			if (!checked.ok) assert.ok(checked.reason.includes(`unknown field '${field}'`));
+		}
+	}
+});

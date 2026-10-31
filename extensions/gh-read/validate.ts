@@ -467,12 +467,28 @@ function appendToolAuthoredTokens(subcommand: GhSubcommand, argv: string[]): str
 // array, never gh api with caller flags). They target github.com only and
 // are exempt from the worktree gate; api-spawn.ts owns the transport.
 
-export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata", "pr comments", "pr reviews", "issue comments", "pr threads"] as const;
+export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata", "pr comments", "pr reviews", "issue comments", "pr threads", "org team"] as const;
 
 export type ApiOperation = (typeof API_OPERATIONS)[number];
 
 /** Exact OWNER/REPO on github.com: no host prefix (that is the legacy -R form). */
 const API_REPO_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/;
+
+/** Bare GitHub organization login; the permissive API_REPO_RE owner precedent. */
+const API_ORG_RE = /^[A-Za-z0-9-]+$/;
+const ORG_MAX_CHARS = 39;
+
+/** Bare team slug: letters, digits, underscore, dot, hyphen. No '@' or '/'. */
+const API_TEAM_SLUG_RE = /^[A-Za-z0-9_.-]+$/;
+const TEAM_SLUG_MAX_CHARS = 100;
+
+/**
+ * A '.' or '..' slug matches the regex above but would emit a dot endpoint
+ * segment, which a server may normalize away; rejected outright like the
+ * dot segments checkApiPath refuses for repo contents. Deeper dot runs
+ * ('...') are ordinary slug characters and stay accepted.
+ */
+const DOT_SEGMENT_RE = /^\.{1,2}$/;
 
 /** Exact CVE/GHSA advisory identifiers. GHSA alphabet: 23456789cfghjmpqrvwx. */
 const CVE_ID_RE = /^CVE-\d{4}-\d{4,19}$/;
@@ -501,6 +517,7 @@ const OPERATION_FIELDS: Record<ApiOperation, ReadonlySet<string>> = {
 	"pr reviews": new Set(["repo", "pr", "continuation", "jq"]),
 	"issue comments": new Set(["repo", "issue", "continuation", "jq"]),
 	"pr threads": new Set(["repo", "pr", "jq", "continuation"]),
+	"org team": new Set(["org", "slug", "jq"]),
 };
 
 export interface ValidApiInvocation {
@@ -531,6 +548,10 @@ export interface ValidApiInvocation {
 	pr?: number;
 	/** Issue comments: positive safe integer issue number. */
 	issue?: number;
+	/** Organization team: bare organization login. */
+	org?: string;
+	/** Organization team: bare team slug (no leading '@', no embedded '/'). */
+	slug?: string;
 }
 
 function apiInvalid(reason: string): { ok: false; reason: string } {
@@ -746,6 +767,38 @@ export function validateApiInvocation(params: unknown): ValidApiInvocation | { o
 		const idError = checkLineNumber(rawId, "check_run_id");
 		if (idError !== null) return apiInvalid(idError);
 		result.checkRunId = rawId as number;
+	}
+
+	if (op === "org team") {
+		const org = record["org"];
+		if (typeof org !== "string" || org.length === 0) {
+			return apiInvalid("org is required and must be a bare organization login");
+		}
+		if (org.length > ORG_MAX_CHARS) {
+			return apiInvalid(`org must be at most ${ORG_MAX_CHARS} characters`);
+		}
+		if (!API_ORG_RE.test(org)) {
+			return apiInvalid(`org must be a bare organization login matching ${API_ORG_RE.source}, got '${org}'`);
+		}
+		result.org = org;
+
+		const slug = record["slug"];
+		if (typeof slug !== "string" || slug.length === 0) {
+			return apiInvalid("slug is required and must be a bare team slug");
+		}
+		if (slug.length > TEAM_SLUG_MAX_CHARS) {
+			return apiInvalid(`slug must be at most ${TEAM_SLUG_MAX_CHARS} characters`);
+		}
+		if (slug.startsWith("@") || slug.includes("/")) {
+			return apiInvalid(`slug must be a bare team slug with no leading '@' and no embedded '/', got '${slug}'`);
+		}
+		if (DOT_SEGMENT_RE.test(slug)) {
+			return apiInvalid(`slug must not be a '.' or '..' segment, got '${slug}'`);
+		}
+		if (!API_TEAM_SLUG_RE.test(slug)) {
+			return apiInvalid(`slug must be a bare team slug matching ${API_TEAM_SLUG_RE.source}, got '${slug}'`);
+		}
+		result.slug = slug;
 	}
 
 	if (record["continuation"] !== undefined) {

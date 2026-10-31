@@ -834,6 +834,50 @@ test("gh_read registers the pr threads literal and GraphQL review-thread guidanc
 	assert.ok(!tool.promptGuidelines.some((line) => line.includes("gh pr-threads")), "no gh-extension reference in the guidance");
 });
 
+test("gh_read registers the org team literal and the org/slug schema fields", () => {
+	const tool = register();
+	const schema = tool.parameters as { properties: Record<string, unknown> };
+	assert.ok(JSON.stringify(schema).includes('"const":"org team"'), "schema literal 'org team'");
+	assert.equal((schema.properties["org"] as { type?: string } | undefined)?.type, "string", "org is a string schema field");
+	assert.equal((schema.properties["slug"] as { type?: string } | undefined)?.type, "string", "slug is a string schema field");
+	assert.ok(!("outputSchema" in (tool as unknown as Record<string, unknown>)), "no outputSchema");
+	assert.equal(tool.promptGuidelines.length, 14, "guideline count");
+	assert.ok(tool.description.includes("org team"), "description names the operation");
+	assert.ok(tool.description.includes("organization team object"), "description names the returned shape");
+	assert.ok(tool.promptSnippet.includes("org team"), "promptSnippet names the operation");
+	const jqField = (schema.properties["jq"] as { description?: string } | undefined)?.description ?? "";
+	assert.ok(jqField.includes("organization team objects"), "the jq field description lists the org team shape");
+});
+
+test("execute api org team: tool-authored gh api argv, no git gate, verbatim object outside a worktree", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setSpawnOverride(() => {
+		throw new Error("no git gate or ref resolution may spawn on the org team path");
+	});
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => {
+			const body = JSON.stringify({ id: 7, slug: "serverless-azure-and-gcp", privacy: "closed" });
+			child.stdout.emit("data", Buffer.from(`HTTP/1.1 200 OK\r\n\r\n${body}`));
+			child.emit("close", 0, null);
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "org team", org: "DataDog", slug: "serverless-azure-and-gcp" }, undefined, null, { cwd: "/not-a-worktree" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(argsList.length, 1, "exactly one gh api child");
+	const argv = argsList[0]!;
+	assert.equal(argv[0], "api");
+	assert.equal(argv[argv.length - 1], "orgs/DataDog/teams/serverless-azure-and-gcp");
+	assert.ok(result.content[0].text.includes('"privacy":"closed"'), "the team object passes through verbatim");
+	assert.equal(result.details["subcommand"], "org team");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
 test("execute: rejected pr threads params fail closed with zero spawns", async () => {
 	const tool = register();
 	let spawns = 0;

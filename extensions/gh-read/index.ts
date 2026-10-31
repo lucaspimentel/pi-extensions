@@ -4,10 +4,11 @@
  * Read-only GitHub access for agents: tool `gh_read` runs an allowlisted
  * set of read-only gh subcommands (pr view/diff/list/checks, issue
  * view/list, auth status, run list/view) as an argv-array child process,
- * never through a shell, plus ten narrowly scoped GitHub API operations
+ * never through a shell, plus narrowly scoped GitHub API operations
  * (repo contents, repo tree, commit checks, advisory view, check
  * annotations, repo metadata, pr comments, pr reviews, issue comments,
- * pr threads) with tool-authored, encoded requests against github.com only.
+ * pr threads, org team) with tool-authored, encoded requests against
+ * github.com only.
  *
  * Argument validation lives in validate.ts; the bounded, sanitized spawn
  * layer for native commands lives in spawn.ts; log-carrying invocations
@@ -51,6 +52,7 @@ const SUBCOMMAND_SCHEMAS = [
 	Type.Literal("pr reviews"),
 	Type.Literal("issue comments"),
 	Type.Literal("pr threads"),
+	Type.Literal("org team"),
 ] as const;
 
 const ghReadParams = Type.Object({
@@ -64,6 +66,12 @@ const ghReadParams = Type.Object({
 	),
 	repo: Type.Optional(
 		Type.String({ description: "API operations: exact OWNER/REPO on github.com, e.g. 'DataDog/dd-trace-dotnet'. No host prefix." }),
+	),
+	org: Type.Optional(
+		Type.String({ description: "org team: the bare organization login, e.g. 'DataDog'. Never used with native subcommands." }),
+	),
+	slug: Type.Optional(
+		Type.String({ description: "org team: the bare team slug with no leading '@' and no embedded '/', e.g. 'serverless-azure-and-gcp'. Never used with native subcommands." }),
 	),
 	pr: Type.Optional(
 		Type.Number({ description: "pr comments/pr reviews/pr threads: required pull request number, a safe integer >= 1. Never used with native subcommands or 'issue comments'; branches, strings, and URLs are not accepted." }),
@@ -87,7 +95,7 @@ const ghReadParams = Type.Object({
 		Type.Boolean({ description: "repo tree: recurse (default true). False performs a shallow read without the recursive query parameter." }),
 	),
 	jq: Type.Optional(
-		Type.String({ description: "External jq filter applied once to JSON data (directory listings, trees, combined checks, advisory results, PR comment/review arrays, issue conversation-comment arrays, GraphQL review-thread nodes). Never applied to file text or tool metadata. Module imports are rejected; jq must be installed." }),
+		Type.String({ description: "External jq filter applied once to JSON data (directory listings, trees, combined checks, advisory results, PR comment/review arrays, issue conversation-comment arrays, GraphQL review-thread nodes, organization team objects). Never applied to file text or tool metadata. Module imports are rejected; jq must be installed." }),
 	),
 	continuation: Type.Optional(
 		Type.String({ description: "Opaque continuation token from a previous incomplete commit-checks, CVE, PR comments/reviews/threads, or issue-comments result. Pass it back unchanged with the same subcommand and repo/ref, id/type, repo/pr, or repo/issue. PR comments, PR reviews, issue comments, and pr threads each page independently; 'pr threads' is bound to its repo + pr and pages by cursor." }),
@@ -109,7 +117,7 @@ interface GhReadDetails {
 }
 
 const NATIVE_DESCRIPTION =
-	"Run a read-only gh command (pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view) for the current repository (or anywhere, for `auth status`), or a narrowly scoped GitHub API operation: 'repo contents' (decoded file text or directory entries at a pinned ref), 'repo tree' (recursive or shallow tree), 'commit checks' (check runs plus legacy statuses for a commit), 'advisory view' (exact CVE/GHSA lookup), or 'check annotations' (annotations of one check run), or 'repo metadata' (default branch, description, visibility, URLs, and other flat repository facts), or 'pr comments' (inline review comments and replies), or 'pr reviews' (review bodies and verdicts), or 'issue comments' (conversation comments on an issue or PR), or 'pr threads' (GraphQL review threads, resolved and outdated included). 'pr comments', 'pr reviews', and 'issue comments' require repo plus a positive safe-integer pr (or issue) number and return verbatim REST arrays with independent bounded continuation paging but no resolved/outdated thread state; 'pr threads' requires repo plus a positive safe-integer pr number and returns the GraphQL reviewThreads nodes with that state and bounded cursor continuation. All accept optional jq. Native commands take flags in args; API operations take structured fields (repo, path, ref, jq, ...) and work outside a git worktree. Only allowlisted flags and fields are accepted; output is capped and nothing mutates.";
+	"Run a read-only gh command (pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view) for the current repository (or anywhere, for `auth status`), or a narrowly scoped GitHub API operation: 'repo contents' (decoded file text or directory entries at a pinned ref), 'repo tree' (recursive or shallow tree), 'commit checks' (check runs plus legacy statuses for a commit), 'advisory view' (exact CVE/GHSA lookup), or 'check annotations' (annotations of one check run), or 'repo metadata' (default branch, description, visibility, URLs, and other flat repository facts), or 'pr comments' (inline review comments and replies), or 'pr reviews' (review bodies and verdicts), or 'issue comments' (conversation comments on an issue or PR), or 'pr threads' (GraphQL review threads, resolved and outdated included), or 'org team' (one organization team object by bare org login and team slug, a single unpaged object). 'pr comments', 'pr reviews', and 'issue comments' require repo plus a positive safe-integer pr (or issue) number and return verbatim REST arrays with independent bounded continuation paging but no resolved/outdated thread state; 'pr threads' requires repo plus a positive safe-integer pr number and returns the GraphQL reviewThreads nodes with that state and bounded cursor continuation; 'org team' requires a bare org login plus a team slug and returns one organization team object. All accept optional jq. Native commands take flags in args; API operations take structured fields (repo, path, ref, jq, ...) and work outside a git worktree. Only allowlisted flags and fields are accepted; output is capped and nothing mutates.";
 
 export default function ghReadExtension(pi: ExtensionAPI): void {
 	pi.registerTool<typeof ghReadParams, GhReadDetails>({
@@ -117,14 +125,14 @@ export default function ghReadExtension(pi: ExtensionAPI): void {
 		label: "GitHub Read",
 		description: NATIVE_DESCRIPTION,
 		promptSnippet:
-			"Run read-only gh commands (pr/issue view, list, pr diff, pr checks, auth status, GitHub Actions run list/view with bounded log output) and scoped GitHub API reads (repo contents/tree, commit checks, advisories, check annotations, repo metadata, pr comments/reviews, issue comments, pr threads)",
+			"Run read-only gh commands (pr/issue view, list, pr diff, pr checks, auth status, GitHub Actions run list/view with bounded log output) and scoped GitHub API reads (repo contents/tree, commit checks, advisories, check annotations, repo metadata, pr comments/reviews, issue comments, pr threads, org team)",
 		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 		promptGuidelines: [
 			"Prefer gh_read over asking the user to paste PR descriptions, review comments, or issue bodies; native commands run in the session's repository, while scoped API operations name an explicit target and work outside a worktree.",
 			"Pass flags and values in args, e.g. subcommand 'pr view' with args ['--comments'] or subcommand 'pr list' with args ['--state', 'open', '--limit', '20'].",
 			"Use subcommand 'pr checks' for PR check status: it always returns JSON (fields like name, state, bucket are appended automatically), so failed/pending checks still come back as data. 'pr checks' with -R/--repo also needs a PR number or branch selector.",
 			"Use subcommand 'auth status' to check login state and which account is active per host, e.g. args ['--hostname', 'github.com'] or args ['--active']; it works outside a git worktree and its JSON output is fetched for you (--json hosts is appended automatically, and --show-token/--template are rejected). To learn the active login, use this instead of shelling out to raw `gh api user --jq .login`; it needs no repo and no worktree.",
-			"Use API operations for explicit-target, cross-repository reads outside a worktree: 'repo contents' needs repo + path (empty path = root; optional ref, line range, jq); 'repo tree' needs repo (optional ref, subtree path, recursive); 'commit checks' needs repo + ref and returns check runs plus legacy statuses with bounded continuation for more pages; 'advisory view' needs an exact id (CVE-... or GHSA-...). Do not shell out to raw `gh api` for shapes these operations already cover; name the operation instead: `pulls/{n}/reviews` is 'pr reviews', `pulls/{n}/comments` is 'pr comments', `issues/{n}/comments` is 'issue comments', `git/trees/HEAD` is 'repo tree', the default branch is 'repo metadata', and the tool-authored GraphQL review-thread read (resolved/outdated state) is 'pr threads'.",
+			"Use API operations for explicit-target, cross-repository reads outside a worktree: 'repo contents' needs repo + path (empty path = root; optional ref, line range, jq); 'repo tree' needs repo (optional ref, subtree path, recursive); 'commit checks' needs repo + ref and returns check runs plus legacy statuses with bounded continuation for more pages; 'advisory view' needs an exact id (CVE-... or GHSA-...). Do not shell out to raw `gh api` for shapes these operations already cover; name the operation instead: `pulls/{n}/reviews` is 'pr reviews', `pulls/{n}/comments` is 'pr comments', `issues/{n}/comments` is 'issue comments', `git/trees/HEAD` is 'repo tree', `orgs/{org}/teams/{slug}` is 'org team', the default branch is 'repo metadata', and the tool-authored GraphQL review-thread read (resolved/outdated state) is 'pr threads'.",
 			"Run triage: use 'run list' with -b/--branch, -c/--commit, -s/--status, or --limit to find runs; 'run view' requires a numeric run id (interactive selection is unsupported); use --log-failed for failed-step logs or -j <job id> --log for one job's logs. Log output is bounded to the first and last 50 KiB; the middle is omitted and noted.",
 			"Annotations: 'check annotations' needs repo + check_run_id; a single page of at most 100 annotations is fetched, and results may be incomplete at exactly 100 items.",
 			"Repository facts: 'repo metadata' needs only repo and returns the flat REST repository object (default branch, description, visibility, dates, URLs, license, language, archived/fork/template flags, topics, counts, and the authenticated token's permissions) as one unpaged request; narrow with jq, e.g. .default_branch.",
