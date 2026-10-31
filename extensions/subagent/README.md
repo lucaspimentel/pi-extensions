@@ -40,15 +40,19 @@ streaming, usage display, security model).
   `pr comments` (inline review comments and replies), `pr reviews`
   (review bodies and verdicts), `issue comments` (conversation comments
   on an issue or PR, from the issues endpoint, unlike inline review
-  comments), and `org team` (one organization team by bare org login and
-  team slug, a single unpaged object) as structured API operations; all
-  network reads (guard class `remote-read`), and the API operations work
-  outside a git worktree. The PR API operations require explicit `repo` + a positive
-  safe-integer `pr` number and `issue comments` requires explicit `repo` +
-  a positive safe-integer `issue` number; all return verbatim arrays and
-  accept optional jq and independent continuation tokens bound to the same
-  operation/repo/target.
-  They are mutable listings, not SHA-pinned snapshots, and provide no
+  comments), `pr threads` (GraphQL review threads, resolved and outdated
+  included, paged by cursor), and `org team` (one organization team by bare
+  org login and team slug, a single unpaged object) as structured API
+  operations. Every one of them is a network read (guard class
+  `remote-read`), and the API operations work outside a git worktree. The PR
+  API operations require explicit `repo` + a positive safe-integer `pr`
+  number and `issue comments` requires explicit `repo` + a positive
+  safe-integer `issue` number; all accept optional jq and independent
+  continuation tokens bound to the same operation/repo/target, except
+  `org team`, which is one request with no continuation.
+  The REST comment and review reads return verbatim arrays, `pr threads`
+  returns the GraphQL `reviewThreads` nodes, and none of these mutable
+  listings is a SHA-pinned snapshot; only `pr threads` provides
   resolved/outdated thread state. Native `pr view --comments` and
   `issue comments` cover conversation comments instead of inline discussions.
 - **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and

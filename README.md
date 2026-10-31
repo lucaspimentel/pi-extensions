@@ -16,10 +16,11 @@ Project-local (writes to `.pi/settings.json`):
 pi install -l git:github.com/lucaspimentel/pi-extensions
 ```
 
-Pin to a specific ref so `pi update` won't bump it:
+Pin to a specific ref so `pi update` won't bump it (any branch, tag, or commit
+SHA; this repository publishes no tags):
 
 ```bash
-pi install git:github.com/lucaspimentel/pi-extensions@v0.1.0
+pi install git:github.com/lucaspimentel/pi-extensions@<commit-sha>
 ```
 
 Try without installing:
@@ -70,7 +71,8 @@ pi-extensions/
 ├── prompts/              # package-level prompt templates (prompts/*.md)
 ├── extensions/
 │   ├── *.ts              # single-file extensions
-│   └── */                # multi-file extensions (web, pi-tool-permissions, idle-summary, ...)
+│   ├── */                # multi-file extensions (web, pi-tool-permissions, idle-summary, ...)
+│   └── shared/           # modules imported by several extensions (model pin, model selection, bounded spawn)
 └── tests/                # node-runnable test harnesses (*.test.mts)
 ```
 
