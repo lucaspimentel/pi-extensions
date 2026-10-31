@@ -137,9 +137,9 @@ cited from `TODO.md` and was not re-verified.
   string so the schema stays flat like `git_read`'s):
   - `pr view`, `pr diff`, `pr list`, `pr checks`, `issue view`, `issue list`,
     `auth status`, `run list`, `run view`
-- Eleven narrowly scoped GitHub API operations share the same tool with
-  structured parameters instead of an args array (ten implemented today;
-  `job logs` is designed but not yet implemented, see "job logs"):
+- Narrowly scoped GitHub API operations share the same tool with
+  structured parameters instead of an args array (all are implemented except
+  `job logs`, which is designed but not yet implemented, see "job logs"):
   `repo contents`, `repo tree`, `commit checks`, `advisory view`,
   `check annotations`, `repo metadata`, `pr comments`, `pr reviews`,
   `issue comments`, `pr threads`, and `job logs` (see "GitHub API
@@ -260,12 +260,12 @@ Value validation (native commands):
 
 ## GitHub API operations
 
-The eleven designed structured operations (`repo contents`, `repo tree`,
+The designed structured operations (`repo contents`, `repo tree`,
 `commit checks`, `advisory view`, `check annotations`, `repo metadata`,
 `pr comments`, `pr reviews`, `issue comments`, `pr threads`, `job logs`)
 make read-only requests to api.github.com ONLY, always inside `gh`, with a
-fixed tool-authored argv (see "API runner"); ten are implemented today and
-`job logs` is designed but not yet implemented. Every operation but
+fixed tool-authored argv (see "API runner"); all are implemented except
+`job logs`, which is designed but not yet implemented. Every operation but
 `job logs` returns JSON; `pr threads` sends a tool-authored GraphQL POST
 instead of a REST GET, and `job logs` returns a job's log as text. They name
 an explicit repository, so they are exempt from the
@@ -906,7 +906,9 @@ hints (settled: passthrough only).
 `includeIf`). A ddoghq EMU repo 403s while the personal account is active
 and vice versa; the tool inherits whatever `gh auth` state exists and
 surfaces the API error verbatim. Switching accounts remains a manual user
-step (see dd-tools/docs/git-multi-account-setup.md).
+step (see dd-tools/docs/git-multi-account-setup.md). API operations always
+use the ambient `gh` active account and accept no account selector, so a
+read that needs a secondary account must stay on the host shell.
 
 Note on `auth status` JSON output: gh's `--json` mode always exits 0 unless
 there is a fatal error (per gh's `statusRun`: "In machine-friendly mode, we
