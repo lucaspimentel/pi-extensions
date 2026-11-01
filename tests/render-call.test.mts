@@ -1,4 +1,4 @@
-// Test harness for the renderCall methods added to the web and slack tools.
+// Test harness for the renderCall methods added to the web tools.
 //
 // Imports the REAL default exports, drives them with a mock `pi` that captures
 // registered tool definitions, then calls each tool's renderCall with sample
@@ -7,7 +7,6 @@
 //
 // Run: node tests/render-call.test.mts
 import webExtension from "../extensions/web/index.ts";
-import slackExtension from "../extensions/slack-via-claude.ts";
 
 // ── Capture registered tools ──────────────────────────────────────────────────
 const tools = new Map<string, any>();
@@ -23,7 +22,6 @@ function loadExtension(ext: (pi: any) => void) {
 }
 
 loadExtension(webExtension);
-loadExtension(slackExtension);
 
 // ── Mock theme: wrap text with visible role markers ───────────────────────────
 // fg(role, text) -> ⟨role⟩text⟨/role⟩   so assertions can verify which role was
@@ -94,37 +92,6 @@ expect("web_search", { query: "x", timeRange: "month" },
 // streaming / empty query -> placeholder
 expect("web_search", {},
 	`⟨toolTitle⟩**Web Search**⟨/toolTitle⟩ ⟨toolOutput⟩...⟨/toolOutput⟩`);
-
-// ── slack_search ──────────────────────────────────────────────────────────────
-console.log("\n── slack_search ──────────────────────────────────────────────────");
-expect("slack_search", { query: "deploy failed" },
-	`⟨toolTitle⟩**Search Slack**⟨/toolTitle⟩ ⟨toolOutput⟩"deploy failed"⟨/toolOutput⟩`);
-expect("slack_search", {},
-	`⟨toolTitle⟩**Search Slack**⟨/toolTitle⟩ ⟨toolOutput⟩...⟨/toolOutput⟩`);
-
-// ── slack_read_channel ────────────────────────────────────────────────────────
-console.log("\n── slack_read_channel ────────────────────────────────────────────");
-expect("slack_read_channel", { channel: "general" },
-	`⟨toolTitle⟩**Read Slack**⟨/toolTitle⟩ ⟨toolOutput⟩#general⟨/toolOutput⟩`);
-expect("slack_read_channel", { channel: "general", limit: 50 },
-	`⟨toolTitle⟩**Read Slack**⟨/toolTitle⟩ ⟨toolOutput⟩#general⟨/toolOutput⟩⟨muted⟩ (limit 50)⟨/muted⟩`);
-// default limit (unset) -> no suffix
-expect("slack_read_channel", { channel: "general", limit: 20 },
-	`⟨toolTitle⟩**Read Slack**⟨/toolTitle⟩ ⟨toolOutput⟩#general⟨/toolOutput⟩⟨muted⟩ (limit 20)⟨/muted⟩`);
-// streaming / empty channel -> placeholder
-expect("slack_read_channel", {},
-	`⟨toolTitle⟩**Read Slack**⟨/toolTitle⟩ ⟨toolOutput⟩...⟨/toolOutput⟩`);
-
-// ── slack_read_thread ──────────────────────────────────────────────────────────
-console.log("\n── slack_read_thread ──────────────────────────────────────────────");
-expect("slack_read_thread", { channel: "general", thread_ts: "1234567890.123456" },
-	`⟨toolTitle⟩**Read Slack thread**⟨/toolTitle⟩ ⟨toolOutput⟩#general⟨/toolOutput⟩⟨muted⟩ @1234567890.123456⟨/muted⟩`);
-// streaming channel -> placeholder, no thread suffix
-expect("slack_read_thread", {},
-	`⟨toolTitle⟩**Read Slack thread**⟨/toolTitle⟩ ⟨toolOutput⟩...⟨/toolOutput⟩`);
-// channel present but thread_ts streaming -> no @ suffix
-expect("slack_read_thread", { channel: "general" },
-	`⟨toolTitle⟩**Read Slack thread**⟨/toolTitle⟩ ⟨toolOutput⟩#general⟨/toolOutput⟩`);
 
 // ── Summary ────────────────────────────────────────────────────────────────────
 console.log("\n────────────────────────────────────────────────────────────────");

@@ -1,11 +1,9 @@
 /**
  * Shared model helpers: display labels, dedupe, and the interactive picker
- * list used by guard, idle-summary, session-name-llm and pi-tool-permissions.
+ * list used by guard, idle-summary and session-name-llm.
  *
  * Model resolution for guard, idle-summary and session-name-llm is the global
- * pin in `./model-pin.ts` (pinned model, else the session model). The
- * cost-ranking helpers that pi-tool-permissions' classifier auto-select uses
- * live in `../pi-tool-permissions/rules.ts`, which is the only consumer.
+ * pin in `./model-pin.ts` (pinned model, else the session model).
  *
  * Type-only imports only, so this module (like the files that re-export it)
  * is safe to import from a plain JS test runner via type-stripping — no TUI

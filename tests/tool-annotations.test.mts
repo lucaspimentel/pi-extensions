@@ -1,5 +1,5 @@
-// Registration metadata tests: invoke the actual web, session-search, and
-// slack-via-claude extension factories with a minimal fake pi API and inspect
+// Registration metadata tests: invoke the actual web and session-search
+// extension factories with a minimal fake pi API and inspect
 // the captured tool definitions. No network, no subprocesses, no worker code,
 // and no session searches over the real sessions directory: filesystem-touching
 // cases point PI_CODING_AGENT_DIR and SESSION_SEARCH_INDEX_FILE at fixtures.
@@ -9,8 +9,6 @@
 // cache, index, or log file is ever written):
 //   web_fetch, web_search                    read-only, open-world
 //   session_search, session_excerpt           read-only, closed domain
-//   slack_search / slack_read_channel /
-//     slack_read_thread                      read-only, open-world
 //   guard-owned python, node                 write-capable, open-world
 //   (covered in tests/guard-harness.test.mts)
 //
@@ -23,7 +21,6 @@ import { test } from "node:test";
 
 import webExtension from "../extensions/web/index.ts";
 import sessionSearchExtension from "../extensions/session-search/index.ts";
-import slackViaClaudeExtension from "../extensions/slack-via-claude.ts";
 
 interface CapturedTool {
 	name: string;
@@ -210,18 +207,6 @@ test("the /session-search load-context action reuses the shared excerpt flow", a
 		if (previousIndex === undefined) delete process.env.SESSION_SEARCH_INDEX_FILE;
 		else process.env.SESSION_SEARCH_INDEX_FILE = previousIndex;
 		rmSync(tmp, { recursive: true, force: true });
-	}
-});
-
-test("slack-via-claude declares read-only open-world metadata on all three tools", () => {
-	const { pi, tools } = makePi();
-	slackViaClaudeExtension(pi as never);
-	assert.deepEqual(
-		tools.map((t) => t.name).sort(),
-		["slack_read_channel", "slack_read_thread", "slack_search"],
-	);
-	for (const tool of tools) {
-		assert.deepEqual(tool.annotations, READ_ONLY_OPEN_WORLD, tool.name);
 	}
 });
 

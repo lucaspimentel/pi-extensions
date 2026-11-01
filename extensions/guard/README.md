@@ -10,8 +10,7 @@ non-owned `write`/`edit` calls are also enforced since 2026-10-16 (block on
 deny, approval dialog on prompt); every other tool call stays observe-only**
 (decisions on `guard:decision`, nothing blocked or prompted), except the
 grep/ffgrep secret-mask `tool_result` filter below. **Step 5 adds subagent
-profile inheritance** (below). pi-tool-permissions stays loaded and
-enforcing until switchover (step 6); the old standalone python/node
+profile inheritance** (below). The old standalone python/node
 extensions were unregistered from the manifest on 2026-10-21 (guard's
 ported copies are the only registered python/node tools). The standalone
 implementations and their tests were deleted on 2026-10-28 after porting
@@ -263,8 +262,7 @@ Registration details:
   preview (the edited root must cover the requesting path and pass the
   existing grant/mount restrictions), session grants stay one-stage, grants
   are validated, mounted read-only, restart workers, report the state loss,
-  and return **without replaying the code**. Legacy pi-tool-permissions
-  grants are not mirrored during coexistence.
+  and return **without replaying the code**.
 - Non-interactive contexts (print mode, subagent children) deny prompts;
   sandboxed work stays free.
 
