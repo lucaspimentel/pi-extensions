@@ -13,7 +13,7 @@ Pi core packages (`pi-coding-agent`, `pi-ai`, `pi-tui`, `pi-agent-core`, `typebo
 ```bash
 npm ci                    # install (CI uses this)
 npx tsc --noEmit          # typecheck (covers extensions/**/*.ts only; tests are not typechecked)
-npm run test:ci           # full suite, same as CI (Node 22 and 26)
+npm run test:ci           # CI suite (Node 22 and 26)
 npm run test:guard        # guard suite (also runs the git-read and gh-read tests)
 npm run test:gh-read      # also: test:git-read, test:jira, test:timestamps
 node --test tests/<name>.test.mts   # single test file
@@ -22,7 +22,7 @@ node --test --test-name-pattern="<substring>" tests/<name>.test.mts   # single t
 
 - Tests are `.mts` files run directly by Node (type stripping, no build step). Some guard tests are plain scripts run with `node tests/<file>.mts` instead of `node --test`; `package.json` scripts show which.
 - **A new test file must be added to the `test:ci` script in `package.json`** (an explicit file list, not a glob), or CI will not run it. Add it to `test:guard` / the per-extension script too when relevant.
-- When running tests from inside a pi session with guard active, prefix with `env -u PI_GUARD_INHERIT` (a subagent-inherited profile variable that otherwise changes guard behavior), and run node through `host_bash` since node is not on guard's sandboxed PATH.
+- When running tests from inside a pi session with guard active, prefix with `env -u PI_GUARD_INHERIT` (a subagent-inherited profile variable that otherwise changes guard behavior). Use `host_bash` if node is unavailable on the sandboxed PATH.
 - `wt-tab-status` has its own legacy `.mjs` suite under its extension directory (`node run-all.mjs`); it is not part of `test:ci` apart from the `wt-tab-status-*` files in `tests/`.
 - CI also installs `libseccomp-dev` because the guard sandbox compiles `extensions/guard/sandbox/launcher.c`.
 
@@ -36,9 +36,9 @@ node --test --test-name-pattern="<substring>" tests/<name>.test.mts   # single t
 
 ### Big pieces
 
-- **guard** (`extensions/guard/`): sandbox-first permission system. Registers `bash`, `host_bash`, `python`, `node` on a bubblewrap + seccomp sandbox (`sandbox/`), with policy decision logic in `policy/` (profiles, rules, classifier, protected paths, inheritance) and tool implementations in `tools/`. Subagents inherit the parent profile via the `PI_GUARD_INHERIT` env var. See `extensions/guard/README.md` and `docs/guard-design.md`.
+- **guard** (`extensions/guard/`): sandbox-first permission system. Registers `bash`, `host_bash`, `python`, `node`; sandboxed execution uses bubblewrap + seccomp (`sandbox/`), while `host_bash` runs on the host. Policy decision logic in `policy/` (profiles, rules, classifier, protected paths, inheritance) and tool implementations in `tools/`. Subagents inherit the parent profile via the `PI_GUARD_INHERIT` env var. See `extensions/guard/README.md` and `docs/guard-design.md`.
 - **gh-read / git-read**: model-facing read-only tools that run an allowlisted subcommand as an argv-array child process, never through a shell. Each has `validate.ts` (allowlists and argument validation), `spawn.ts` (bounded execution), and `index.ts` (tool schema, description, `promptGuidelines`). gh-read adds `api.ts`/`api-spawn.ts`/`jq.ts`/`log-spawn.ts` for structured API operations with bounded paging and output caps. Adding an operation touches validation, schema, dispatch, prompt guidance, tests, README, and the design doc together (TODO.md lists the exact anchors).
-- **subagent**: delegates to agents defined in `extensions/subagent/agents/` with isolated context; per-agent model pins come from `~/.pi/agent/subagent.json`.
+- **subagent**: delegates to agents defined in `extensions/subagent/agents/` with isolated context; per-agent model pins come from `subagent.json` in pi's agent directory (default `~/.pi/agent/`).
 - Several extensions read per-user config from `~/.pi/agent/` (model pins, state files); they are resolved at runtime, not stored here.
 
 ## Conventions
