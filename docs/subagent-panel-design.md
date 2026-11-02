@@ -1,8 +1,9 @@
 # `subagent` panel fan-out: N read-only models, one judge merge
 
 Status: design settled 2026-10-29 (interview-driven; see "Decisions" below).
-Not implemented. Step 1 is an unresolved spike that gates the `/panel` command
-design; everything else in this document is decided.
+Not implemented. Step 1 (the `/panel` command spike) is resolved: a command
+handler cannot land a tool result, so `/panel` ships as a prompt template.
+Everything else in this document is decided.
 
 Everything lands in `extensions/subagent/`. The standalone `model-panel`
 extension is explicitly deferred, not cancelled: see "Deferred".
@@ -38,7 +39,9 @@ usage-reporting machinery.
 ## Verified facts
 
 Facts gathered from pi 1.4.0 (`@earendil-works/pi-coding-agent`) and this repo
-before the design was settled:
+before the design was settled, and re-verified against 1.5.0, which is the
+installed release (`pi --version` on 2026-10-29; `~/.pi/agent/install/releases/`
+holds 1.4.0 and 1.5.0):
 
 - Child dispatch is a real `pi` process: `["--mode","json","-p","--no-session"]`
   plus `--model`, `--tools`, `--thinking`, `--append-system-prompt`
@@ -66,9 +69,35 @@ before the design was settled:
 - `pi.appendEntry(customType, data)` plus `registerEntryRenderer` produce
   transcript entries that never enter LLM context (`types.d.ts:1253`,
   `:1271-1273`).
-- Nested tool execution from a command handler is the unproven part:
-  `ExtensionToolContext.executeTool` is backed only in tool-execution contexts
-  ("Without it, nested calls fail", `types.d.ts:269-277`).
+- A command handler cannot land a tool result (verified 2026-10-29 against
+  pi 1.5.0, the installed release). `ExtensionCommandContext extends
+  ExtensionContext` with session-control methods only (`types.d.ts:306-330`),
+  and `ExtensionRunner.createCommandContext()` adds no `tools` and no
+  `executeTool()` (`dist/core/extensions/runner.js:724-760`): both come solely
+  from `createToolContext()` (`:696-723`), whose nested-call action is wired in
+  `agent-session.js:2863-2864` where no command context can reach it.
+  `ExtensionAPI` exposes no nested execution either, `ToolInfo` is a `Pick`
+  without `execute` (`types.d.ts:1600`), and `ReadonlySessionManager` is a
+  `Pick` with no append (`session-manager.d.ts:178`). Even where nested calls
+  exist they are absent from the transcript by design ("It does not appear in
+  the transcript; a bounded record of it is kept as `nestedCalls` on the
+  calling tool's result message", `types.d.ts:292-295`), and
+  `_tryExecuteExtensionCommand` awaits the handler and returns only "handled",
+  so nothing a handler returns reaches the transcript
+  (`agent-session.js:1716-1734`).
+- The channels a command handler does have are not tool results.
+  `sendMessage` with `registerMessageRenderer` yields a custom-message
+  transcript row (`types.d.ts:1280-1284`, `:1273`), and `appendEntry` with
+  `registerEntryRenderer` yields a custom entry that never enters LLM context
+  (`:1295`, `:1277`); neither carries tool `details` and neither runs the
+  `subagent` tool renderer. A throwaway `/panel-spike` command, run in RPC
+  mode with only that probe loaded (`--mode rpc -ne -e <probe> --no-session
+  --offline`), reported `hasExecuteTool: false`, `hasToolsArray: false`,
+  `getAllToolsHasExecute: false`, a `contextKeys` list matching
+  `createCommandContext` exactly, a successful
+  `message_start`/`message_end` pair for the custom message, one
+  `entry_appended` record, zero `tool_execution_*` records, and the RPC
+  response `{"id":"spike1","disposition":"handled"}`.
 - `ctx.scopedModels` and `ctx.modelRegistry` expose the models this session can
   actually use (`types.d.ts:225-232`), which is what preset validation keys on.
 - Prompt templates expand arguments before the text reaches the agent, and an
@@ -212,22 +241,23 @@ Result shape:
 
 ## `/panel` command
 
-Step 1 is a spike, because the mechanism is genuinely unproven: can a command
-handler run the panel and land a real tool result outside an agent run, or is
-`executeTool()` unavailable there (`types.d.ts:269-277`)?
+Step 1 is resolved (2026-10-29, pi 1.5.0): a command handler cannot execute a
+tool or produce a tool result, so `/panel` ships as a prompt template.
 
-- If the spike succeeds: `/panel <preset> <text>` is an extension command that
-  drives the same panel core, so the prompt reaches panelists byte for byte and
-  the result arrives through the normal tool pipeline with details and renderer.
-- If the spike fails: ship a `/panel` prompt template that instructs the model
-  to call `subagent({panel, task})`, accepting model-mediated rewording, and
-  defer the command to `TODO.md`.
-- Either way: no args lists the configured presets; a preset name is required
-  (no default preset is guessed, and a bare first token that names no preset is
-  an error suggesting the closest one); `getArgumentCompletions` completes
-  preset names on the command path; the implementation waits for idle, since
-  commands run even mid-stream; and any injected result is labeled as panel
-  output rather than appearing as the user's own message.
+- `extensions/subagent/prompts/panel.md` takes `<preset> <text>` and
+  instructs the model to call `subagent({panel, task})` with the text passed
+  unchanged. The prompt therefore reaches panelists through the model, which
+  may reword it, and the result arrives mid-run as a normal tool result with
+  `details` and the existing renderer, which is what the command path could
+  not provide.
+- A preset name is required: no default preset is guessed, and with fewer than
+  two arguments the template asks the model to report the presets named in the
+  tool description rather than pick one. Preset discoverability comes from that
+  catalog, because a template cannot list presets dynamically and
+  `getArgumentCompletions` exists only for extension commands, so the "no
+  arguments lists the presets" behavior is not available on this path.
+- Any injected result is labeled as panel output rather than appearing as the
+  user's own message.
 
 ## Read-only guarantees
 
@@ -259,8 +289,10 @@ renderer (`:1160-1250`) rather than introducing a new comparison view.
 
 ## Verification plan
 
-1. Spike nested execution from a command handler; record the result in this
-   document and in `TODO.md` either way.
+1. Spike nested execution from a command handler: done (2026-10-29, pi 1.5.0).
+   No nested execution and no tool-result path exist in a command context; the
+   finding is recorded in `## Verified facts` and in `TODO.md`, and `/panel`
+   is a prompt template as a result.
 2. Panel config parsing and validation as pure functions: malformed panels, the
    4-model cap, duplicate ids, unknown agent, inline-override precedence.
 3. Spawn assertions through the existing `setSpawnOverride` seam
@@ -302,4 +334,7 @@ Tracked in `TODO.md`, with rationale:
 - Combining `panel` with `tasks`/`chain` (panel then hand the merge to a worker).
 - A per-call cost cap or estimate.
 - Panel-specific `appendEntry` transcript rendering for the command path.
-- `/panel` as an extension command if the spike fails.
+- `/panel` as an extension command: it needs nested tool execution and a
+  tool-result entry, neither of which a command handler has (verified 2026-10-29
+  against pi 1.5.0); revisit only if pi exposes one. The prompt-template path is
+  what ships instead.
