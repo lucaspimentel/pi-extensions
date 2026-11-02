@@ -1,5 +1,5 @@
 // Tests for gh-read argument validation (extensions/gh-read/validate.ts).
-// Pure unit tests: argv construction for all six subcommands, value-flag
+// Pure unit tests: argv construction for every native subcommand, value-flag
 // bounds, the -R regex, --json field shape, --jq and filter token rules,
 // positional rules, tool-authored token appending for auth status, and all
 // rejections with error-message contents.
@@ -36,7 +36,7 @@ function validateRejects(subcommand: (typeof SUBCOMMANDS)[number], args: string[
 
 // ── Subcommand union ─────────────────────────────────────────────────────────
 
-test("subcommand union is the settled native nine", () => {
+test("subcommand union is the settled native set", () => {
 	assert.deepEqual([...SUBCOMMANDS], [
 		"pr view",
 		"pr diff",
@@ -921,6 +921,64 @@ test("issue comments: unknown, mixed, and redirection-shaped fields rejected bef
 	// Bypassing the schema (direct structured params) still fails closed.
 	apiRejects({ subcommand: "issue comments", repo: "o/r", issue: "1" }, ["issue"]);
 	apiRejects({ subcommand: "issue comments", repo: "o/r", issue: 1, args: ["--json"] }, ["structured parameters, not an args array"]);
+});
+
+// ── issue timeline (API operation) validation ───────────────────────────────
+
+test("issue timeline: required exact repo and positive safe integer issue", () => {
+	for (const issue of [1, Number.MAX_SAFE_INTEGER]) {
+		assert.deepEqual(apiOk({ subcommand: "issue timeline", repo: "OWNER/REPO", issue }), {
+			ok: true,
+			op: "issue timeline",
+			repo: "OWNER/REPO",
+			issue,
+		});
+	}
+	for (const repo of [undefined, "", "owner", "o/r/x", "https://github.com/o/r", "github.com/o/r", 42, null]) {
+		apiRejects({ subcommand: "issue timeline", repo, issue: 1 }, ["repo"]);
+	}
+	apiRejects({ subcommand: "issue timeline", repo: "o/r" }, ["issue is required"]);
+	for (const issue of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, "1", "https://github.com/o/r/issues/1", "main", null, true, false, [1], { number: 1 }]) {
+		apiRejects({ subcommand: "issue timeline", repo: "o/r", issue }, ["issue"]);
+	}
+});
+
+test("issue timeline: continuation and jq transport validation", () => {
+	const base = { subcommand: "issue timeline", repo: "o/r", issue: 1 };
+	const token = Buffer.from('{"v":1}').toString("base64url");
+	assert.equal(apiOk({ ...base, continuation: token, jq: "length" }).continuation, token);
+	for (const continuation of ["", "!", 1, null, "a".repeat(4097), Buffer.from('[]').toString("base64url"), Buffer.from('{"v":2}').toString("base64url"), Buffer.from('no json').toString("base64url")]) {
+		apiRejects({ ...base, continuation }, ["continuation"]);
+	}
+	for (const jq of ["", ".a\u0000b", ".\nb", 1, null, false]) apiRejects({ ...base, jq }, ["jq"]);
+});
+
+test("issue timeline: unknown, mixed, and redirection-shaped fields rejected before target validation", () => {
+	for (const field of ["pr", "args", "path", "ref", "start_line", "end_line", "recursive", "id", "type", "check_run_id", "page", "per_page", "endpoint", "host", "2>&1", "redirect", "unknown"]) {
+		apiRejects({ subcommand: "issue timeline", repo: "o/r", issue: 1, [field]: field === "args" ? [] : "x" }, [field]);
+	}
+	// issue is accepted only by the issue-target operations; every other
+	// operation rejects it, and issue timeline rejects a pr target.
+	for (const unrelated of [
+		{ subcommand: "repo metadata", repo: "o/r" },
+		{ subcommand: "repo contents", repo: "o/r", path: "" },
+		{ subcommand: "repo tree", repo: "o/r" },
+		{ subcommand: "commit checks", repo: "o/r", ref: "main" },
+		{ subcommand: "advisory view", id: "CVE-2026-1234" },
+		{ subcommand: "check annotations", repo: "o/r", check_run_id: 1 },
+		{ subcommand: "pr comments", repo: "o/r", pr: 1 },
+		{ subcommand: "pr reviews", repo: "o/r", pr: 1 },
+	]) apiRejects({ ...unrelated, issue: 1 }, ["unknown field 'issue'"]);
+	for (const native of ["pr view", "issue view", "run list"]) {
+		const checked = validateToolParams({ subcommand: native, args: [], issue: 1 });
+		assert.equal(checked.ok, false);
+		if (!checked.ok) assert.ok(checked.reason.includes("unknown field 'issue'"));
+	}
+	apiRejects({ subcommand: "issue timeline", repo: "o/r", issue: 1, pr: 1 }, ["unknown field 'pr'"]);
+	assert.equal(apiOk({ subcommand: "issue comments", repo: "o/r", issue: 1 }).op, "issue comments");
+	// Bypassing the schema (direct structured params) still fails closed.
+	apiRejects({ subcommand: "issue timeline", repo: "o/r", issue: "1" }, ["issue"]);
+	apiRejects({ subcommand: "issue timeline", repo: "o/r", issue: 1, args: ["--json"] }, ["structured parameters, not an args array"]);
 });
 
 // ── pr threads (API operation) validation ───────────────────────────────────

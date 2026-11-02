@@ -66,7 +66,7 @@ that 405-line sample; it is not a complete decomposition of the sample.
 | Shape | Count | `gh_read` status |
 |---|---|---|
 | `gh api user --jq .login` | 148 | covered by `auth status` |
-| `issues/{n}/timeline` | 14-21 | uncovered |
+| `issues/{n}/timeline` | 14-21 | covered by `issue timeline` |
 | `pulls/{n}/reviews` | 13 | covered by `pr reviews` |
 | comments by id | 13 | uncovered |
 | `branches` | 12 | uncovered |
@@ -96,10 +96,10 @@ Guidance added:
   `auth status` bullet).
 - A mapping from raw endpoints to operation names (`pulls/{n}/reviews` is
   `pr reviews`, `pulls/{n}/comments` is `pr comments`,
-  `issues/{n}/comments` is `issue comments`, `git/trees/HEAD` is `repo tree`,
-  default branch is `repo metadata`, and the tool-authored GraphQL
-  review-thread read is `pr threads`), folded into the API-operations
-  bullet.
+  `issues/{n}/comments` is `issue comments`, `issues/{n}/timeline` is
+  `issue timeline`, `git/trees/HEAD` is `repo tree`, default branch is
+  `repo metadata`, and the tool-authored GraphQL review-thread read is
+  `pr threads`), folded into the API-operations bullet.
   Commits are deliberately not named: `commit checks` returns check runs, and
   commit details are an open TODO.
 - A bullet for shapes with no dedicated operation: changed-file list
@@ -116,11 +116,11 @@ Guidance added:
   may prompt for depending on the profile. The 60+ review-reply POSTs mean
   `gh_read` can never make PR-review publication shell-free.
 
-Not covered by guidance: the issue/PR timeline (a TODO operation, so no
-workaround is claimed), `search/issues`, `commits`, `branches`, and generic
+Not covered by guidance: `search/issues`, `commits`, `branches`, and generic
 `graphql` reads other than the review-thread read. `gh pr-threads` is named
 only here; the guidance now points at `pr threads` for the review-thread
-read.
+read. The issue/PR timeline is no longer uncovered: it is the
+`issue timeline` operation.
 
 Verification (2026-10-30, against DataDog/dd-trace-dotnet#9397):
 `pr diff --name-only` returned 8 files; `pr view --json files,changedFiles`
@@ -142,8 +142,8 @@ cited from `TODO.md` and was not re-verified.
   `job logs`, which is designed but not yet implemented, see "job logs"):
   `repo contents`, `repo tree`, `commit checks`, `advisory view`,
   `check annotations`, `repo metadata`, `pr comments`, `pr reviews`,
-  `issue comments`, `pr threads`, `org team`, and `job logs` (see "GitHub API
-  operations").
+  `issue comments`, `issue timeline`, `pr threads`, `org team`, and `job logs`
+  (see "GitHub API operations").
   Mixing shapes is rejected in both directions: native subcommands reject
   structured fields, API operations reject `args`.
 - Command construction happens in validate.ts during validation: it emits the
@@ -262,8 +262,8 @@ Value validation (native commands):
 
 The designed structured operations (`repo contents`, `repo tree`,
 `commit checks`, `advisory view`, `check annotations`, `repo metadata`,
-`pr comments`, `pr reviews`, `issue comments`, `pr threads`, `org team`,
-`job logs`)
+`pr comments`, `pr reviews`, `issue comments`, `issue timeline`, `pr threads`,
+`org team`, `job logs`)
 make read-only requests to api.github.com ONLY, always inside `gh`, with a
 fixed tool-authored argv (see "API runner"); all are implemented except
 `job logs`, which is designed but not yet implemented. Every operation but
@@ -660,6 +660,85 @@ is deliberately NOT added here; it is recorded as a separate follow-up in
 `check annotations` remains a single-page operation with its existing
 exactly-100-items incompleteness notice; it does not adopt PR pagination.
 
+### issue timeline
+
+Required explicit `repo` (`OWNER/REPO` on github.com) and `issue`
+(a positive safe-integer issue number, never coerced from a string, branch,
+or URL). Only `jq` and `continuation` are optional. `pr`, `args`, branch
+names, URLs, endpoint/page controls (`path`, `ref`, `page`, `per_page`), and
+any other unrelated structured field (including redirection-shaped names
+such as `2>&1`) are rejected before spawning. There is no worktree gate, no
+ref resolution, and no SHA pinning. Because GitHub shares the issue-number
+space, a PR number reads that PR's timeline through the same `issue` field,
+and the tool never requests a `/pulls/` path.
+
+Tool-authored GET
+`repos/{owner}/{repo}/issues/{issue}/timeline?per_page=100&page=<n>`.
+The response must be a JSON array and is returned verbatim: `id`, `event`,
+`actor`/`user`, `created_at`, `body`, commit messages, and unknown nested
+members pass through without projection, dedup, or thread reconstruction.
+Timeline items overlap other reads: `commented` items repeat comments
+returned by `issue comments`, `reviewed` items repeat review bodies from
+`pr reviews`, and `committed` items carry commit messages no other operation
+exposes; on a pull request the review, review-request, and commit events
+appear only here. That overlap is documented, never deduplicated (26 of the
+68 items in the sampled busy PR carry no `id` at all, so dedup has no stable
+key).
+
+It reuses the shared bounded discussion-read engine unchanged: array-body
+validation with non-array/invalid JSON as errors, at most 10 pages x 100
+items per invocation, strict tool-owned Link validation and request
+reconstruction, independent target-bound continuation, retained pages with
+the failed page as the retry position, nonerror budget/deadline stops,
+jq once on the newly fetched array, and the 50 KiB display cap. Two standing
+notices are initialized before continuation matching so they survive handler
+errors, jq-empty/scalar/error output, and display clipping: the merge-overlap
+notice above and the shared mutability wording (a mutable, offset-paged
+listing that may miss or duplicate items, with completion describing the
+observed traversal, not a historical snapshot).
+
+The result carries an `events` inventory computed from the fetched batch
+BEFORE jq, so a narrowing filter cannot hide it: counts of distinct `event`
+values, sorted by count descending then name ascending, capped at 12 entries
+with a `+N more` remainder, omitted when the batch is empty, and rendered
+identically in the metadata head and in tool details. Metadata reports
+`repo`, `issue`, `source_complete`, `items_returned` (before jq),
+`pages_fetched`, `resumed`, `events`, `incomplete_reason`/`source_error`, and
+`continuation`. Only when the display is actually clipped does the text carry
+the clip pointer `display truncated at 50 KiB; narrow with jq before
+re-reading, e.g. filter on .event (see the events inventory above)`.
+
+```json
+{"subcommand":"issue timeline","repo":"DataDog/dd-trace-dotnet","issue":9397,"jq":"[.[] | select(.event == \"reviewed\" or .event == \"commented\") | {event, actor: (.actor.login // .user.login), at: .created_at, body}]"}
+```
+
+The coalesce in that example is required: verified on a real PR that
+`reviewed` items carry `user` and NOT `actor`, while `commented` items carry
+`actor`. Deliberately NOT included: no dedup, no field projection or compact
+mode, no caller-controlled page bound, no PR-detection request, and no
+`since`/`event` filters beyond jq.
+
+Live verification (2026-11-02, gh 2.103.3, real `GhApiRunner` over the real
+network, `runApiOperation` reached through `validateToolParams`; the live
+`gh_read` tool registered in a running session is the pre-timeline build and
+was not restarted, so it rejects the new subcommand):
+
+- `issue timeline` repo DataDog/dd-trace-dotnet issue 9397 (a busy PR):
+  `items_returned=68`, `pages_fetched=1`, `source_complete=true`, no
+  `source_error`, no continuation, and the display clipped at 50 KiB with
+  the clip pointer present. The `events` inventory was
+  `committed: 24, reviewed: 9, commented: 6, head_ref_force_pushed: 6, review_requested: 5, mentioned: 4, renamed: 3, cross-referenced: 2, subscribed: 2, auto_squash_enabled: 1, closed: 1, head_ref_deleted: 1, +4 more`.
+- The same read with the documented narrowing jq returned
+  `items_returned=68` (metadata counts stay unfiltered), kept the full
+  `events` inventory, and did not clip.
+- `issue timeline` repo DataDog/dd-trace-dotnet issue 9563 (a plain issue,
+  `pull_request == null`): `items_returned=2`, `pages_fetched=1`,
+  `source_complete=true`, `events: subscribed: 2`, `output_truncated=false`.
+- Raw capture of the same 68-item timeline confirmed the field rules behind
+  the example and the no-dedup note: 26 of 68 items carry no `id`, all 9
+  `reviewed` items carry `user` and none carries `actor`, and all 6
+  `commented` items carry `actor`.
+
 ### job logs
 
 Required explicit `repo` (`OWNER/REPO` on github.com) and `job_id`. `job_id`
@@ -811,8 +890,9 @@ continuation stay outside filtered output.
 
 PR continuation payloads carry `v: 1`, `op` (`pr comments` or `pr reviews`),
 `repo`, numeric `pr`, `perPage: 100`, and `source: {page, done: false}`.
-issue-comments payloads are the same shape with `op: "issue comments"` and a
-numeric `issue` instead of `pr`. The `pr threads` payload is cursor-based,
+issue-comments and issue-timeline payloads are the same shape with
+`op: "issue comments"` and `op: "issue timeline"` and a numeric `issue`
+instead of `pr`. The `pr threads` payload is cursor-based,
 not offset-based: `{v:1, op:"pr threads", repo, pr, first:100, cursor}` (see
 "pr threads"). Before any request, the decoder requires a
 non-array source object and a positive safe-integer page, then the handler
@@ -825,7 +905,9 @@ unchanged; the version is not bumped.
 
 PR metadata includes `repo`, `pr`, `source_complete`, `items_returned`
 (before jq), `pages_fetched`, and `resumed: true` on resumption. Issue
-comments metadata is identical with `issue` in place of `pr`. Incomplete
+comments metadata is identical with `issue` in place of `pr`; issue timeline
+metadata is the same plus the `events` inventory, and it appends the clip
+pointer to the text only when the display was clipped. Incomplete
 reads include `continuation` plus `incomplete_reason` for nonerror stops or
 `source_error` for failures. HTTP, interruption, JSON, extraction, and
 invalid-Link failures preserve accepted items and set `isError`; no failed
@@ -1178,7 +1260,12 @@ Settled in the grill-me review:
   reads (endpoint named), fail-closed validation with zero spawns, exact
   fixed GET argv outside a worktree with no git gate, `details.subcommand`,
   issue metadata, raw REST fields passed through, and continuation resume
-  plus cross-operation rejection. Read-only/idempotent/open-world tool
+  plus cross-operation rejection. Issue-timeline coverage: the
+  `issue timeline` schema literal plus the shared numeric `issue` field,
+  description/snippet/guideline assertions (the endpoint mapping and the
+  timeline endpoint named), the exact tool-authored timeline GET argv outside
+  a worktree with no git gate, the `events` inventory in details, and
+  fail-closed validation with zero spawns. Read-only/idempotent/open-world tool
   annotations remain unchanged. Job-logs routing: the `job logs` schema
   literal plus a `job_id` field accepting digits strings and safe numbers,
   the tool-authored `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` GET
@@ -1202,11 +1289,12 @@ Settled in the grill-me review:
   `issue comments`) classify as `remote-read`; configured class overrides
   win.
 - Prompt guidance: `tests/gh-read-tool.test.mts` asserts per-topic guideline
-  substrings (auth status instead of `gh api user`, operation-name mapping,
-  `pr diff --name-only`, `files,changedFiles`, `pull_request_review_id`,
-  `html_url` plus `select(.id ==`, thread-state "do not derive it" together
-  with the `pr threads` pointer, the `host_bash` write boundary) and the
-  14-bullet count.
+  substrings (auth status instead of `gh api user`, operation-name mapping
+  including `issues/{n}/timeline` is `issue timeline`, `pr diff --name-only`,
+  `files,changedFiles`, `pull_request_review_id`, `html_url` plus
+  `select(.id ==`, thread-state "do not derive it" together with the
+  `pr threads` pointer, the `host_bash` write boundary) and the 14-bullet
+  count.
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 
@@ -1223,6 +1311,10 @@ Settled in the grill-me review:
   and an independent bounded continuation, without a worktree and without
   any `pr` metadata or `/pulls/` request; the result distinguishes itself
   from inline PR review reads and never claims review-thread state.
+- The same agent can fetch an issue's or PR's timeline with `issue timeline`
+  using explicit `repo` + numeric `issue`, verbatim events, an `events`
+  inventory, and an independent bounded continuation, without a worktree and
+  without any `pr` metadata or `/pulls/` request.
 - The same agent can fetch a PR's review threads with resolved/outdated
   state via `pr threads`, using explicit `repo` + numeric `pr` and a cursor
   continuation, outside a worktree and without any caller-supplied GraphQL

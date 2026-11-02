@@ -786,6 +786,86 @@ test("execute api pr reviews: a later-page failure is an error that retains comp
 	setApiSpawnOverride(null);
 });
 
+test("gh_read registers the issue timeline literal, the numeric issue field, and event guidance", () => {
+	const tool = register();
+	const schemaText = JSON.stringify(tool.parameters);
+	assert.ok(schemaText.includes('"const":"issue timeline"'), "schema literal 'issue timeline'");
+	const schema = tool.parameters as { properties: Record<string, unknown> };
+	assert.equal((schema.properties["issue"] as { type?: string } | undefined)?.type, "number", "issue is a numeric schema field");
+	assert.ok(tool.description.includes("issue timeline"));
+	assert.ok(tool.promptSnippet.includes("issue timeline"), "promptSnippet names the operation");
+	assert.ok(tool.promptGuidelines.some((line) => line.includes("issues/{n}/timeline") && line.includes("'issue timeline'")), "endpoint-mapping guidance");
+	assert.ok(tool.promptGuidelines.some((line) => line.includes("repos/{owner}/{repo}/issues/{issue}/timeline")), "timeline endpoint guidance");
+	assert.equal(tool.promptGuidelines.length, 14, "guideline count");
+});
+
+test("execute api issue timeline: tool-authored timeline GET, no git gate, verbatim event array", async () => {
+	const tool = register();
+	const argsList: string[][] = [];
+	setSpawnOverride(() => {
+		throw new Error("no git gate or ref resolution may spawn on the API path");
+	});
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		const child = fakeChild();
+		argsList.push([...args]);
+		queueMicrotask(() => {
+			httpOk(child, JSON.stringify([
+				{ id: 101, event: "commented", actor: { login: "lucaspimentel" }, created_at: "2026-10-01T00:00:00Z", body: "conversation", unknown: { nested: true } },
+				{ id: 102, event: "reviewed", user: { login: "andrewlock" }, state: "APPROVED", body: "lgtm" },
+			]));
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "issue timeline", repo: "owner/repo", issue: 9 }, undefined, null, { cwd: "/not-a-worktree" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(argsList.length, 1, "exactly one gh api child; no ref resolution");
+	assert.deepEqual(argsList[0], ["api", "--hostname", "github.com", "--method", "GET", "--header", "Accept: application/vnd.github+json", "--header", "X-GitHub-Api-Version: 2022-11-28", "--include", "repos/owner/repo/issues/9/timeline?per_page=100&page=1"]);
+	assert.ok(!argsList[0]!.some((arg) => arg.includes("/pulls/")), "timeline reads never hit the pulls endpoint");
+	assert.ok(result.content[0].text.includes('"login":"lucaspimentel"'), "raw REST fields pass through");
+	assert.ok(result.content[0].text.includes('"user":{"login":"andrewlock"}'), "reviewed items keep their user field");
+	assert.ok(result.content[0].text.includes('"unknown":{"nested":true}'), "unknown nested fields survive");
+	assert.equal(result.details["subcommand"], "issue timeline");
+	assert.equal(result.details["issue"], 9);
+	assert.equal(result.details["pr"], undefined, "timeline reads never emit pr metadata");
+	assert.equal(result.details["events"], "commented: 1, reviewed: 1");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
+test("execute: rejected issue timeline params fail closed with zero spawns", async () => {
+	const tool = register();
+	let spawns = 0;
+	setSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	setApiSpawnOverride(() => {
+		spawns += 1;
+		return fakeChild();
+	});
+	for (const bad of [
+		{ subcommand: "issue timeline", repo: "owner/repo" }, // missing issue
+		{ subcommand: "issue timeline", repo: "owner/repo", issue: "9" }, // string issue never coerced
+		{ subcommand: "issue timeline", repo: "owner/repo", issue: "https://github.com/owner/repo/issues/9" }, // URL never coerced
+		{ subcommand: "issue timeline", repo: "owner/repo", issue: "main" }, // branch never coerced
+		{ subcommand: "issue timeline", repo: "owner/repo", issue: 0 }, // below the positive range
+		{ subcommand: "issue timeline", repo: "owner/repo", issue: 1.5 }, // fraction
+		{ subcommand: "issue timeline", issue: 9 }, // missing repo
+		{ subcommand: "issue timeline", repo: "owner/repo", issue: 9, pr: 9 }, // pr is not the issue target
+		{ subcommand: "issue timeline", repo: "owner/repo", issue: 9, args: [] }, // structured ops reject args
+		{ subcommand: "issue timeline", repo: "owner/repo", issue: 9, ref: "main" }, // unrelated structured field
+		{ subcommand: "issue timeline", repo: "owner/repo", issue: 9, "2>&1": true }, // redirection-shaped field
+	]) {
+		const result = await tool.execute("id", bad, undefined, null, { cwd: "/repo" });
+		assert.equal(result.isError, true, JSON.stringify(bad));
+		assert.ok(result.content[0].text.startsWith("gh_read: "), JSON.stringify(bad));
+	}
+	assert.equal(spawns, 0, "no child process for rejected invocations");
+	setSpawnOverride(null);
+	setApiSpawnOverride(null);
+});
+
 // ── pr threads (GraphQL review threads) ─────────────────────────────────────
 
 const threadsPayload = (hasNextPage: boolean, endCursor: string | null): string =>

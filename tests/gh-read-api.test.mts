@@ -665,6 +665,246 @@ for (const { subcommand, pr, capture, pathname } of CANONICAL_PR_READS) {
 	});
 }
 
+// ── issue timeline: conversation-adjacent events on issues and PRs ───────────
+
+const TIMELINE_ENDPOINT = "repos/OWNER/REPO/issues/123/timeline";
+const timelineParams = { subcommand: "issue timeline", repo: "OWNER/REPO", issue: 123 } as const;
+const timelineData = (result: ApiToolResult) => JSON.parse(result.content[0].text.split("\ndata:\n")[1]!);
+const timelineToken = (overrides: Record<string, unknown> = {}) => Buffer.from(JSON.stringify({ v: 1, op: "issue timeline", repo: timelineParams.repo, issue: timelineParams.issue, perPage: PAGE_SIZE, source: { page: 11, done: false }, ...overrides })).toString("base64url");
+const timelinePosition = (result: ApiToolResult) => JSON.parse(Buffer.from(result.details.continuation as string, "base64url").toString("utf8"));
+
+// Literal v1 fixture: this exact string must keep decoding.
+const LITERAL_TIMELINE_TOKEN = "eyJ2IjoxLCJvcCI6Imlzc3VlIHRpbWVsaW5lIiwicmVwbyI6Ik9XTkVSL1JFUE8iLCJpc3N1ZSI6MTIzLCJwZXJQYWdlIjoxMDAsInNvdXJjZSI6eyJwYWdlIjoyLCJkb25lIjpmYWxzZX19";
+
+const TIMELINE_EVENTS = [
+	{ id: 1, event: "commented", actor: { login: "alice" }, created_at: "2026-01-01T00:00:00Z", body: "conversation" },
+	{ id: 2, event: "reviewed", user: { login: "bob" }, created_at: "2026-01-02T00:00:00Z", state: "APPROVED", body: "lgtm" },
+	{ id: 3, event: "committed", created_at: "2026-01-03T00:00:00Z", message: "fix the thing", sha: SHA },
+];
+
+test("issue timeline: empty and verbatim arrays from the timeline endpoint without ref resolution or PR requests", async () => {
+	for (const data of [[], TIMELINE_EVENTS]) {
+		const api = requester([() => response(JSON.stringify(data))]);
+		const result = await run(timelineParams, api);
+		assert.equal(result.isError, undefined);
+		assert.deepEqual(api.requests, [`${TIMELINE_ENDPOINT}?per_page=100&page=1`]);
+		assert.ok(result.content[0].text.endsWith(JSON.stringify(data)));
+		assert.equal(result.details.source_complete, true);
+		assert.equal(result.details.items_returned, data.length);
+		assert.equal(result.details.repo, "OWNER/REPO");
+		assert.equal(result.details.issue, 123);
+		assert.equal(result.details.pr, undefined, "timeline reads never emit pr metadata");
+		assert.ok(!api.requests.some((path) => path.includes("/pulls/")));
+	}
+});
+
+test("issue timeline: sequential pages preserve order and duplicates over a captured canonical link", async () => {
+	assertCanonicalCapture(CAPTURED_LINKS.timeline, "/repositories/101895131/issues/3744/timeline");
+	const endpoint = "repos/OWNER/REPO/issues/3744/timeline";
+	const item = { id: 1, event: "commented", body: "dup" };
+	const api = requester([
+		() => response(JSON.stringify([item]), CAPTURED_LINKS.timeline),
+		() => response(JSON.stringify([item])),
+	]);
+	const result = await run({ subcommand: "issue timeline", repo: "OWNER/REPO", issue: 3744 }, api);
+	assert.deepEqual(api.requests, [1, 2].map((page) => `${endpoint}?per_page=100&page=${page}`));
+	assert.deepEqual(timelineData(result), [item, item]);
+	assert.equal(result.details.pages_fetched, 2);
+	assert.equal(result.details.source_complete, true);
+	assert.ok(!api.requests.some((path) => path.includes("/repositories/")));
+});
+
+test("issue timeline: ten-page bound, exact token shape, and resume returning only the new batch", async () => {
+	const api = requester(Array.from({ length: MAX_PAGES_PER_SOURCE }, (_, i) => () => response(JSON.stringify([{ id: i + 1, event: "commented" }]), linkHeader(i + 2, TIMELINE_ENDPOINT, "per_page=100"))));
+	const first = await run(timelineParams, api);
+	assert.equal(first.isError, undefined);
+	assert.equal(first.details.source_complete, false);
+	assert.equal(first.details.pages_fetched, 10);
+	assert.equal(first.details.items_returned, 10);
+	assert.match(first.details.incomplete_reason as string, /page limit/);
+	assert.deepEqual(timelinePosition(first), { v: 1, op: "issue timeline", repo: "OWNER/REPO", issue: 123, perPage: PAGE_SIZE, source: { page: 11, done: false } });
+	assert.equal(first.content[0].text.match(/^continuation:/gm)?.length, 1);
+	const next = requester([() => response('[{"id":11,"event":"closed"}]')]);
+	const resumed = await run({ ...timelineParams, continuation: first.details.continuation }, next);
+	assert.deepEqual(next.requests, [`${TIMELINE_ENDPOINT}?per_page=100&page=11`]);
+	assert.deepEqual(timelineData(resumed), [{ id: 11, event: "closed" }]);
+	assert.equal(resumed.details.resumed, true);
+	assert.equal(resumed.details.source_complete, true);
+	assert.equal(resumed.details.continuation, undefined);
+	assert.match(resumed.content[0].text, /only the newly fetched batch/);
+});
+
+test("issue timeline: literal v1 tokens resume; cross-operation and cross-target tokens reject before any request", async () => {
+	const resumed = await run({ ...timelineParams, continuation: LITERAL_TIMELINE_TOKEN }, requester([() => response("[]")]));
+	assert.equal(resumed.details.resumed, true);
+	assert.equal(resumed.details.items_returned, 0);
+
+	for (const continuation of [LITERAL_ISSUE_TOKEN, LITERAL_PR_TOKEN, timelineToken({ op: "issue comments" }), timelineToken({ issue: 999 }), timelineToken({ repo: "OTHER/REPO" })]) {
+		const api = requester([]);
+		const result = await run({ ...timelineParams, continuation }, api);
+		assert.equal(result.isError, true, continuation);
+		assert.equal(api.requests.length, 0, continuation);
+		assert.match(result.content[0].text, /continuation does not match this invocation/);
+	}
+	// The issue-comments operation rejects a timeline token.
+	const cross = requester([]);
+	const crossResult = await run({ ...issueParams, continuation: LITERAL_TIMELINE_TOKEN }, cross);
+	assert.equal(crossResult.isError, true);
+	assert.equal(cross.requests.length, 0);
+});
+
+test("issue timeline: invalid continuation target and page invariants reject with zero requests", async () => {
+	const variants: Array<Record<string, unknown>> = [
+		{ op: "pr comments" }, { op: "issue timeline " }, { op: 1 },
+		{ repo: "other/repo" }, { repo: 123 },
+		{ issue: 124 }, { issue: "123" }, { issue: 0 }, { issue: -1 }, { issue: 1.5 }, { issue: Number.MAX_SAFE_INTEGER + 1 }, { issue: undefined },
+		{ perPage: 99 }, { perPage: "100" },
+		{ source: null }, { source: [] }, { source: {} }, { source: { page: 1 } }, { source: { done: false } },
+		...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2", null, true].map((page) => ({ source: { page, done: false } })),
+		{ source: { page: 2, done: true } }, { source: { page: 2, done: "false" } },
+	];
+	for (const variant of variants) {
+		const api = requester([]);
+		const result = await run({ ...timelineParams, continuation: timelineToken(variant) }, api);
+		assert.equal(result.isError, true, JSON.stringify(variant));
+		assert.equal(api.requests.length, 0, JSON.stringify(variant));
+	}
+});
+
+test("issue timeline: unsafe next links never requested and accepted items survive", async () => {
+	for (const url of [
+		`https://evil.example/${TIMELINE_ENDPOINT}?per_page=100&page=2`,
+		`https://api.github.com/${TIMELINE_ENDPOINT.replace("123", "124")}?per_page=100&page=2`,
+		`https://api.github.com/repositories/abc/issues/123/timeline?per_page=100&page=2`,
+		`https://api.github.com/repositories/101895131/issues/124/timeline?per_page=100&page=2`,
+		`https://api.github.com/repositories/101895131/issues/123/timeline?per_page=100&page=2&extra=1`,
+		`https://api.github.com/repositories/101895131/issues/123/timeline?per_page=50&page=2`,
+		...[1, 3].map((page) => `https://api.github.com/repositories/101895131/issues/123/timeline?per_page=100&page=${page}`),
+	]) {
+		const api = requester([() => response('[{"id":1,"event":"commented"}]', `Link: <${url}>; rel="next"\r\n`)]);
+		const result = await run(timelineParams, api);
+		assert.equal(result.isError, true, url);
+		assert.equal(api.requests.length, 1, url);
+		assert.equal(api.requests[0], `${TIMELINE_ENDPOINT}?per_page=100&page=1`);
+		assert.deepEqual(timelineData(result), [{ id: 1, event: "commented" }]);
+		assert.equal(timelinePosition(result).source.page, 2);
+		assert.match(result.details.source_error as string, /next-link validation failed/);
+	}
+});
+
+test("issue timeline: events inventory is sorted, capped at 12, and omitted when the batch is empty", async () => {
+	const batch = [
+		...Array.from({ length: 3 }, (_, i) => ({ id: i + 1, event: "commented" })),
+		...Array.from({ length: 2 }, (_, i) => ({ id: 10 + i, event: "labeled" })),
+		{ id: 20, event: "closed" },
+		{ id: 21, event: "assigned" },
+		{ id: 22, event: "referenced" },
+		{ id: 23, event: "reviewed" },
+		{ id: 24, event: "committed" },
+		{ id: 25, event: "mentioned" },
+		{ id: 26, event: "unlabeled" },
+		{ id: 27, event: "renamed" },
+		{ id: 28, event: "milestoned" },
+		{ id: 29, event: "demilestoned" },
+		{ id: 30, event: "cross-referenced" },
+		{ id: 31, event: "review_requested" },
+		{ id: 32, event: "review_dismissed" },
+		{ id: 33, note: "no event field" },
+	];
+	const result = await run(timelineParams, requester([() => response(JSON.stringify(batch))]));
+	const events = result.details.events as string;
+	assert.match(events, /^commented: 3, labeled: 2, /);
+	const entries = events.split(", ");
+	assert.equal(entries.length, 13, "12 distinct events plus the remainder marker");
+	assert.equal(entries.at(-1), "+3 more");
+	assert.match(result.content[0].text, /^events: commented: 3, labeled: 2, /m, "the head line and details render identically");
+
+	const empty = await run(timelineParams, requester([() => response("[]")]));
+	assert.equal(empty.details.events, undefined);
+});
+
+test("issue timeline: the events inventory is computed before jq, so a narrowing filter still shows it", async () => {
+	const batch = [{ id: 1, event: "commented" }, { id: 2, event: "committed" }];
+	const result = await run({ ...timelineParams, jq: '.[] | select(.event == "commented")' }, requester([() => response(JSON.stringify(batch))]), {
+		jqRun: async (expression, document) => {
+			assert.equal(expression, '.[] | select(.event == "commented")');
+			assert.deepEqual(JSON.parse(document), batch);
+			return { kind: "result", output: '{"id":1,"event":"commented"}\n', outputTruncated: false, outputBytes: 30 };
+		},
+	});
+	assert.equal(result.details.items_returned, 2);
+	assert.equal(result.details.events, "commented: 1, committed: 1");
+	assert.match(result.content[0].text, /^events: commented: 1, committed: 1$/m);
+});
+
+test("issue timeline: the two standing notices survive scalar, empty, invalid-continuation, failed-jq, and clipped output", async () => {
+	const expectNotices = (result: ApiToolResult) => {
+		assert.match(result.content[0].text, /'commented' items repeat comments returned by 'issue comments'/);
+		assert.match(result.content[0].text, /review, review-request, and commit events appear only here/);
+		assert.match(result.content[0].text, /offset paging may miss or duplicate items/);
+		assert.match(result.content[0].text, /observed traversal, not a historical snapshot/);
+	};
+	for (const output of ["42\n", ""]) {
+		const result = await run({ ...timelineParams, jq: "length" }, requester([() => response("[]")]), {
+			jqRun: async () => ({ kind: "result", output, outputTruncated: false, outputBytes: output.length }),
+		});
+		expectNotices(result);
+	}
+	const badContinuation = await run({ ...timelineParams, continuation: timelineToken({ issue: 999 }) }, requester([]));
+	assert.equal(badContinuation.isError, true);
+	expectNotices(badContinuation);
+	const failedJq = await run({ ...timelineParams, jq: "bad" }, requester([() => response("[]")]), { jqRun: async () => ({ kind: "error", reason: "compile error" }) });
+	assert.equal(failedJq.isError, true);
+	expectNotices(failedJq);
+	const clipped = await run(timelineParams, requester([() => response(JSON.stringify([{ id: 1, event: "commented", body: "界🙂".repeat(API_DISPLAY_CAP) }]))]));
+	assert.equal(clipped.details.output_truncated, true);
+	expectNotices(clipped);
+});
+
+test("issue timeline: the clip pointer appears only when the display was clipped", async () => {
+	const huge = await run(timelineParams, requester([() => response(JSON.stringify([{ id: 1, event: "commented", body: "界🙂".repeat(API_DISPLAY_CAP) }]))]));
+	assert.equal(huge.details.output_truncated, true);
+	assert.match(huge.content[0].text, /notice: display truncated at 50 KiB; narrow with jq before re-reading, e\.g\. filter on \.event \(see the events inventory above\)/);
+	assert.ok(Buffer.byteLength(huge.content[0].text, "utf8") <= API_DISPLAY_CAP);
+
+	const normal = await run(timelineParams, requester([() => response('[{"id":1,"event":"commented"}]')]));
+	assert.equal(normal.details.output_truncated, false);
+	assert.ok(!normal.content[0].text.includes("display truncated at 50 KiB"));
+});
+
+test("issue timeline: jq applies once to the assembled new array; metadata and counts stay unfiltered", async () => {
+	for (const partial of [false, true]) {
+		const api = requester([
+			() => response('[{"id":1,"event":"commented"}]', linkHeader(2, TIMELINE_ENDPOINT, "per_page=100")),
+			() => partial ? error("forbidden", 403) : response('[{"id":2,"event":"reviewed"}]'),
+		]);
+		let calls = 0;
+		const result = await run({ ...timelineParams, jq: "length" }, api, {
+			jqRun: async (expression, document) => {
+				calls++;
+				assert.equal(expression, "length");
+				assert.deepEqual(JSON.parse(document), partial ? [{ id: 1, event: "commented" }] : [{ id: 1, event: "commented" }, { id: 2, event: "reviewed" }]);
+				return { kind: "result", output: "1\n", outputTruncated: false, outputBytes: 2 };
+			},
+		});
+		assert.equal(calls, 1);
+		assert.equal(result.details.items_returned, partial ? 1 : 2);
+		assert.equal(result.details.source_complete, !partial);
+		assert.equal(typeof result.details.continuation, partial ? "string" : "undefined");
+		assert.equal(result.details.events, partial ? "commented: 1" : "commented: 1, reviewed: 1");
+	}
+});
+
+test("issue timeline: a PR number reads the PR timeline through the same issue endpoint", async () => {
+	const api = requester([() => response('[{"id":1,"event":"review_requested"}]')]);
+	const result = await run({ subcommand: "issue timeline", repo: "OWNER/REPO", issue: 9397 }, api);
+	assert.deepEqual(api.requests, ["repos/OWNER/REPO/issues/9397/timeline?per_page=100&page=1"]);
+	assert.ok(!api.requests.some((path) => path.includes("/pulls/")));
+	assert.equal(result.details.issue, 9397);
+	assert.equal(result.details.pr, undefined);
+	assert.equal(result.details.events, "review_requested: 1");
+});
+
 // ── Contents: ref resolution and pinning ─────────────────────────────────────
 
 test("contents: omitted ref resolves default branch then a full SHA, and pins the read", async () => {

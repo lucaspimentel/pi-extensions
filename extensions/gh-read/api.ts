@@ -1,10 +1,10 @@
 /**
  * gh-read API operations: pinned repository contents and trees, combined
  * commit checks, exact advisory lookup, check-run annotations, repository
- * metadata, mutable PR comments/reviews, PR review threads (resolved and
- * outdated included) over a tool-authored GraphQL POST, and one organization
- * team by org + slug. Operation orchestration and result rendering live
- * together in this module.
+ * metadata, mutable PR comments/reviews and issue comments/issue timeline,
+ * PR review threads (resolved and outdated included) over a tool-authored
+ * GraphQL POST, and one organization team by org + slug. Operation
+ * orchestration and result rendering live together in this module.
  *
  * Contract highlights (docs/gh-read-design.md, "GitHub API operations"):
  * - Omitted refs resolve through repository default-branch metadata, then
@@ -135,6 +135,11 @@ function prReviewsEndpoint(repo: string, pr: number, page: number): string {
 function issueCommentsEndpoint(repo: string, issue: number, page: number): string {
 	const [owner, name] = splitRepo(repo);
 	return `repos/${owner}/${name}/issues/${issue}/comments?${buildQuery([["per_page", PAGE_SIZE], ["page", page]])}`;
+}
+
+function issueTimelineEndpoint(repo: string, issue: number, page: number): string {
+	const [owner, name] = splitRepo(repo);
+	return `repos/${owner}/${name}/issues/${issue}/timeline?${buildQuery([["per_page", PAGE_SIZE], ["page", page]])}`;
 }
 
 function treeEndpoint(repo: string, treeSha: string, recursive: boolean): string {
@@ -386,11 +391,32 @@ function decodeIssueCommentsContinuation(record: Record<string, unknown>): Issue
 	return record as unknown as IssueCommentsContinuation;
 }
 
+interface IssueTimelineContinuation {
+	v: 1;
+	op: "issue timeline";
+	repo: string;
+	issue: number;
+	perPage: number;
+	source: SourceState;
+}
+
+function decodeIssueTimelineContinuation(record: Record<string, unknown>): IssueTimelineContinuation | null {
+	if (record["v"] !== 1 || record["op"] !== "issue timeline") return null;
+	if (typeof record["repo"] !== "string" || typeof record["issue"] !== "number" || !Number.isSafeInteger(record["issue"]) || record["issue"] < 1) return null;
+	if (record["perPage"] !== PAGE_SIZE) return null;
+	const source = record["source"];
+	if (typeof source !== "object" || source === null || Array.isArray(source)) return null;
+	const state = source as Record<string, unknown>;
+	if (typeof state["page"] !== "number" || !Number.isSafeInteger(state["page"]) || state["page"] < 1 || state["done"] !== false) return null;
+	return record as unknown as IssueTimelineContinuation;
+}
+
 type ContinuationPayload =
 	| CommitChecksContinuation
 	| AdvisoryContinuation
 	| PrReadContinuation
 	| IssueCommentsContinuation
+	| IssueTimelineContinuation
 	| PrThreadsContinuation;
 
 function encodeContinuation(payload: ContinuationPayload): { ok: true; token: string } | { ok: false; reason: string } {
@@ -410,6 +436,7 @@ function decodeContinuation(token: string): ContinuationPayload | null {
 		if (record["op"] === "commit checks" || record["op"] === "advisory view") return parsed as ContinuationPayload;
 		if (record["op"] === "pr comments" || record["op"] === "pr reviews") return decodePrReadContinuation(record);
 		if (record["op"] === "issue comments") return decodeIssueCommentsContinuation(record);
+		if (record["op"] === "issue timeline") return decodeIssueTimelineContinuation(record);
 		if (record["op"] === "pr threads") return decodePrThreadsContinuation(record);
 		return null;
 	} catch {
@@ -558,13 +585,17 @@ interface RenderOptions {
 	isError: boolean;
 	/** Extra notice lines rendered above the data block. */
 	notices?: string[];
+	/** Appended as a notice line only when the display is actually clipped. */
+	clipNotice?: string;
 }
 
 /**
  * Renders metadata lines plus the data block under API_DISPLAY_CAP. The
  * metadata block is always complete; on overflow the data becomes an
  * explicitly incomplete UTF-8-safe prefix preview with narrowing guidance.
- * Nothing beyond the displayed text is retained anywhere.
+ * An optional clipNotice is appended only on overflow, and its bytes are
+ * reserved in the head budget so the preview stays honest. Nothing beyond
+ * the displayed text is retained anywhere.
  */
 function renderResult(summary: string, metadata: ReadonlyArray<[string, string | number | boolean | null]>, dataText: string, options: RenderOptions): ApiToolResult {
 	const lines: string[] = [summary];
@@ -579,7 +610,8 @@ function renderResult(summary: string, metadata: ReadonlyArray<[string, string |
 	const overflowNotice =
 		"[gh_read: the API result exceeds 50 KiB. Showing an incomplete UTF-8-safe prefix, NOT complete JSON. Narrow the request (jq filter, line range, subtree path, shallower recursion) and re-run.]";
 
-	const headBytes = Buffer.byteLength(head, "utf8") + Buffer.byteLength(dataLabel, "utf8") + 2 + Buffer.byteLength(overflowNotice, "utf8") + 1;
+	const clipLine = options.clipNotice !== undefined ? `\nnotice: ${options.clipNotice}` : "";
+	const headBytes = Buffer.byteLength(head, "utf8") + Buffer.byteLength(dataLabel, "utf8") + 2 + Buffer.byteLength(overflowNotice, "utf8") + 1 + Buffer.byteLength(clipLine, "utf8");
 	let data = dataText;
 	let outputTruncated = false;
 	if (headBytes + Buffer.byteLength(dataText, "utf8") > API_DISPLAY_CAP) {
@@ -588,7 +620,7 @@ function renderResult(summary: string, metadata: ReadonlyArray<[string, string |
 		data = utf8SafePrefix(dataText, budget);
 	}
 
-	const text = outputTruncated ? `${head}\n${dataLabel}\n${data}\n${overflowNotice}` : `${head}\n${dataLabel}\n${data}`;
+	const text = outputTruncated ? `${head}\n${dataLabel}\n${data}\n${overflowNotice}${clipLine}` : `${head}\n${dataLabel}\n${data}`;
 	const details: Record<string, unknown> = {
 		output_truncated: outputTruncated,
 	};
@@ -872,6 +904,7 @@ async function renderData(
 	isError: boolean,
 	requester: ApiRequester,
 	deps?: ApiOperationDeps,
+	renderOptions?: { clipNotice?: string },
 ): Promise<ApiToolResult> {
 	if (invocation.jq !== undefined) {
 		const document = JSON.stringify(data);
@@ -887,9 +920,9 @@ async function renderData(
 		const jqNotices = [...notices];
 		if (jqResult.outputTruncated) jqNotices.push(`jq output exceeded the ${1024 * 1024}-byte capture cap and was clipped`);
 		if (jqResult.output.length === 0) jqNotices.push("jq produced no output values: empty filtered result");
-		return renderResult(summary, metadata, jqResult.output, { isError, notices: jqNotices });
+		return renderResult(summary, metadata, jqResult.output, { isError, notices: jqNotices, clipNotice: renderOptions?.clipNotice });
 	}
-	return renderResult(summary, metadata, JSON.stringify(data), { isError, notices });
+	return renderResult(summary, metadata, JSON.stringify(data), { isError, notices, clipNotice: renderOptions?.clipNotice });
 }
 
 /** Preflight + execute wiring under the requester's shared deadline. */
@@ -1353,6 +1386,102 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 	return await renderData(invocation, summary, metadata, result.items, notices, isError, requester, deps);
 }
 
+// ── Operation: issue timeline ──────────────────────────────────────────────
+
+/**
+ * Inventory of the distinct `event` values in a fetched timeline batch,
+ * computed BEFORE jq so a narrowing filter cannot hide it. Sorted by count
+ * descending then name ascending, capped at 12 entries with a `+N more`
+ * remainder; null (metadata omitted) when the batch has no event-named
+ * string values.
+ */
+function eventInventory(items: unknown[]): string | null {
+	const counts = new Map<string, number>();
+	for (const item of items) {
+		if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+		const event = (item as Record<string, unknown>)["event"];
+		if (typeof event !== "string" || event.length === 0) continue;
+		counts.set(event, (counts.get(event) ?? 0) + 1);
+	}
+	if (counts.size === 0) return null;
+	const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+	const shown = sorted.slice(0, 12).map(([name, count]) => `${name}: ${count}`);
+	const remaining = sorted.length - shown.length;
+	if (remaining > 0) shown.push(`+${remaining} more`);
+	return shown.join(", ");
+}
+
+/**
+ * Conversation-adjacent timeline read for an issue OR a PR number (a PR
+ * number reads that PR's timeline through the same issue field). Offset
+ * paging over one tool-authored endpoint; the two standing notices are
+ * pushed before any continuation matching so they survive handler errors,
+ * jq-empty/scalar/error output, and display clipping.
+ */
+async function opIssueTimeline(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
+	const repo = invocation.repo!;
+	const issue = invocation.issue!;
+	const summary = `gh_read api: issue timeline ${repo} issue ${issue}`;
+	const metadata: Array<[string, string | number | boolean | null]> = [["repo", repo], ["issue", issue]];
+	// Standing notices BEFORE any continuation matching.
+	const notices: string[] = [
+		"timeline items overlap other reads: 'commented' items repeat comments returned by 'issue comments', 'reviewed' items repeat review bodies from 'pr reviews', and 'committed' items carry commit messages no other operation exposes; on a pull request the review, review-request, and commit events appear only here",
+		"the timeline is a mutable read, not a commit-pinned or transactional snapshot; offset paging may miss or duplicate items, and completion describes the observed traversal, not a historical snapshot",
+	];
+	let page = 1;
+	if (invocation.continuation !== undefined) {
+		const payload = decodeContinuation(invocation.continuation);
+		if (payload === null || payload.op !== "issue timeline" || payload.repo !== repo || payload.issue !== issue) {
+			return renderResult(summary, metadata, "", {
+				isError: true,
+				notices: [...notices, "continuation does not match this invocation (operation, repo, issue, or page invariants differ)"],
+			});
+		}
+		page = payload.source.page;
+		metadata.push(["resumed", true]);
+		notices.push("a resumed result contains only the newly fetched batch, not items returned by earlier invocations");
+	}
+	// Check the deadline between responses without changing the runner's
+	// interrupted-response errors or the other operations' paging behavior.
+	const clock = deps?.clock ?? defaultClock;
+	const pagedRequester: ApiRequester = {
+		request: async (path) => clock.now() >= requester.deadline()
+			? { kind: "stop", reason: "shared deadline exceeded between responses" }
+			: await requester.request(path),
+		graphql: async (query, variables) => clock.now() >= requester.deadline()
+			? { kind: "stop", reason: "shared deadline exceeded between responses" }
+			: await requester.graphql(query, variables),
+		capturedBytes: () => requester.capturedBytes(),
+		budgetExhausted: () => requester.budgetExhausted(),
+		deadline: () => requester.deadline(),
+	};
+	const result = await fetchPagedSource(
+		pagedRequester,
+		(p) => ({ endpoint: issueTimelineEndpoint(repo, issue, p), query: [["per_page", PAGE_SIZE], ["page", p]] }),
+		(body) => Array.isArray(body) ? body : "issue timeline response was not a JSON array",
+		{ page, done: false },
+	);
+	let isError = result.error !== undefined;
+	metadata.push(["source_complete", result.done], ["items_returned", result.items.length], ["pages_fetched", result.pagesFetched]);
+	if (result.error !== undefined) metadata.push(["source_error", result.error.reason]);
+	if (result.stopReason !== undefined) metadata.push(["incomplete_reason", result.stopReason]);
+	// Computed from the fetched batch BEFORE jq, so a narrowing filter cannot
+	// suppress the inventory.
+	const events = eventInventory(result.items);
+	if (events !== null) metadata.push(["events", events]);
+	if (!result.done) {
+		const encoded = encodeContinuation({ v: 1, op: "issue timeline", repo, issue, perPage: PAGE_SIZE, source: { page: result.page, done: false } });
+		if (encoded.ok) metadata.push(["continuation", encoded.token]);
+		else {
+			isError = true;
+			notices.push(`continuation could not be encoded: ${encoded.reason}`);
+		}
+	}
+	return await renderData(invocation, summary, metadata, result.items, notices, isError, requester, deps, {
+		clipNotice: "display truncated at 50 KiB; narrow with jq before re-reading, e.g. filter on .event (see the events inventory above)",
+	});
+}
+
 // ── Operation: PR review threads (tool-authored GraphQL) ─────────────────
 
 /**
@@ -1692,6 +1821,8 @@ async function dispatchOperation(
 		case "pr reviews":
 		case "issue comments":
 			return await opDiscussionRead(invocation, requester, deps);
+		case "issue timeline":
+			return await opIssueTimeline(invocation, requester, deps);
 		case "pr threads":
 			return await opPrThreads(invocation, requester, deps);
 		case "org team":
