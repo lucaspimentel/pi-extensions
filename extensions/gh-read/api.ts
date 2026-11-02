@@ -194,11 +194,59 @@ function nextLinkFromHeaders(headers: string): string | null {
 }
 
 /**
+ * GitHub serves some paged repo-scoped collections from the canonical
+ * `/repositories/<numeric-id>/<tail>` form rather than the requested
+ * `/repos/{owner}/{repo}/...` path. The numeric id is never read or verified:
+ * only the tail after the repo prefix is compared, and requests are always
+ * rebuilt from the tool-owned template. The legacy combined-status source
+ * additionally renames its tail, so the ONE declared alias maps
+ * `commits/<sha>/status` to `status/<sha>`.
+ */
+function requestedRepoTail(pathname: string): string | null {
+	const segments = pathname.split("/");
+	// ["", "repos", owner, name, ...tail]
+	if (segments.length < 5 || segments[1] !== "repos") return null;
+	return segments.slice(4).join("/");
+}
+
+/** Declared canonical-tail aliases for a requested repo-scoped tail. */
+function canonicalTailAliases(requestedTail: string): readonly string[] {
+	const match = /^commits\/([^/]+)\/status$/.exec(requestedTail);
+	return match !== null ? [`status/${match[1]!}`] : [];
+}
+
+/**
+ * Accepts a next-link path when it is the exact requested path, or GitHub's
+ * canonical `/repositories/<digits>/<tail>` form whose tail is byte-identical
+ * to the requested path minus the `repos/{owner}/{repo}` prefix (or one of
+ * the declared tail aliases above). The numeric id itself is ignored.
+ */
+function nextLinkPathAccepted(linkPathname: string, expectedPath: string): { ok: true } | { ok: false; reason: string } {
+	if (linkPathname === expectedPath) return { ok: true };
+	const tail = requestedRepoTail(expectedPath);
+	if (tail !== null) {
+		const match = /^\/repositories\/(\d+)\/(.+)$/.exec(linkPathname);
+		if (match !== null) {
+			const canonicalTail = match[2]!;
+			if (canonicalTail === tail || canonicalTailAliases(tail).includes(canonicalTail)) {
+				return { ok: true };
+			}
+		}
+	}
+	return {
+		ok: false,
+		reason: `next link path '${linkPathname}' does not match '${expectedPath}' or its canonical '/repositories/<id>/<tail>' form`,
+	};
+}
+
+/**
  * Validates a next-link against the current request and extracts ONLY the
  * page number. The origin must be api.github.com on https, the endpoint path
- * must equal the current one, every invariant query parameter must be
- * present and unchanged, no unexpected parameter may appear, and the page
- * must be exactly current + 1 (cycles, foreign URLs, and ambiguous links are
+ * must be either the current one or GitHub's canonical
+ * `/repositories/<digits>/<tail>` form with a byte-identical tail (plus the
+ * declared statuses alias), every invariant query parameter must be present
+ * and unchanged, no unexpected parameter may appear, and the page must be
+ * exactly current + 1 (cycles, foreign URLs, and ambiguous links are
  * rejected). Requests are always reconstructed from tool-owned templates;
  * the URL itself is never fetched.
  */
@@ -217,9 +265,9 @@ function validateNextPage(
 	if (parsed.origin !== "https://api.github.com") {
 		return { ok: false, reason: `next link origin '${parsed.origin}' is not https://api.github.com` };
 	}
-	const expectedPath = `/${currentEndpoint.split("?")[0]}`;
-	if (parsed.pathname !== expectedPath) {
-		return { ok: false, reason: `next link path '${parsed.pathname}' does not match '${expectedPath}'` };
+	const pathCheck = nextLinkPathAccepted(parsed.pathname, `/${currentEndpoint.split("?")[0]}`);
+	if (!pathCheck.ok) {
+		return { ok: false, reason: pathCheck.reason };
 	}
 	const invariants = new Map(currentQuery.filter(([key]) => key !== "page").map(([key, value]) => [key, String(value)]));
 	const seen = new Set<string>();

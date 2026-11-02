@@ -88,6 +88,55 @@ function linkHeader(nextPage: number, endpoint: string, query: string): string {
 	return `Link: <https://api.github.com/${endpoint}?${query}&page=${nextPage}>; rel="next"\r\n`;
 }
 
+/**
+ * Canonical next-link form: GitHub serves some paged repo-scoped collections
+ * from /repositories/<numeric-id>/<tail> instead of /repos/{owner}/{repo}/...
+ * The id is never read or verified, so the tests build the canonical path from
+ * the captured id and tail while keeping the tool-owned query.
+ */
+function canonicalLinkHeader(nextPage: number, repoId: string, tail: string, query: string): string {
+	return `Link: <https://api.github.com/repositories/${repoId}/${tail}?${query}&page=${nextPage}>; rel="next"\r\n`;
+}
+
+// ── Captured Link headers (verbatim) ─────────────────────────────────────────
+// Captured 2026-11-02 with gh 2.103.3 against api.github.com using
+// `curl -s -D - -o /dev/null <url>` for the raw headers (gh api --include is
+// not in this session's host allow rules). Source requests and the canonical
+// targets GitHub returned:
+//   issues comments     repos/DataDog/dd-trace-dotnet/issues/3744/comments?per_page=100&page=1
+//   pulls comments      repos/DataDog/dd-trace-dotnet/pulls/3744/comments?per_page=100&page=1
+//   pulls reviews       repos/DataDog/dd-trace-dotnet/pulls/9397/reviews?per_page=1&page=1
+//   timeline            repos/DataDog/dd-trace-dotnet/issues/3744/timeline?per_page=100&page=1
+//   commits check-runs  repos/DataDog/dd-trace-js/commits/1b569333e5792aec156de3149f3ca344810e58b2/check-runs?filter=latest&per_page=100&page=1
+//   commit status       repos/DataDog/dd-trace-dotnet/commits/338ed6edbe86a70fb9c944244c932f1653b18365/status?per_page=1&page=1
+// The commit-status capture is the one that shows the differing tail: the
+// legacy commits/<sha>/status source is served from status/<sha>.
+// pullReviews was captured at per_page=1 because no public target with more
+// than 100 reviews was found; its canonical path and id come from the capture
+// and the accepted query is the tool's per_page=100.
+const CAPTURED_LINKS = {
+	issueComments: `link: <https://api.github.com/repositories/101895131/issues/3744/comments?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/101895131/issues/3744/comments?per_page=100&page=2>; rel="last"`,
+	pullComments: `link: <https://api.github.com/repositories/101895131/pulls/3744/comments?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/101895131/pulls/3744/comments?per_page=100&page=2>; rel="last"`,
+	pullReviews: `link: <https://api.github.com/repositories/101895131/pulls/9397/reviews?per_page=1&page=2>; rel="next", <https://api.github.com/repositories/101895131/pulls/9397/reviews?per_page=1&page=15>; rel="last"`,
+	timeline: `link: <https://api.github.com/repositories/101895131/issues/3744/timeline?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/101895131/issues/3744/timeline?per_page=100&page=4>; rel="last"`,
+	checkRuns: `link: <https://api.github.com/repositories/117877090/commits/1b569333e5792aec156de3149f3ca344810e58b2/check-runs?filter=latest&per_page=100&page=2>; rel="next", <https://api.github.com/repositories/117877090/commits/1b569333e5792aec156de3149f3ca344810e58b2/check-runs?filter=latest&per_page=100&page=7>; rel="last"`,
+	commitStatus: `link: <https://api.github.com/repositories/101895131/status/338ed6edbe86a70fb9c944244c932f1653b18365?per_page=1&page=2>; rel="next", <https://api.github.com/repositories/101895131/status/338ed6edbe86a70fb9c944244c932f1653b18365?per_page=1&page=132>; rel="last"`,
+} as const;
+
+/** Commit whose check-runs Link header was captured at per_page=100. */
+const CHECK_RUNS_CAPTURED_SHA = "1b569333e5792aec156de3149f3ca344810e58b2";
+/** Commit whose combined-status Link header was captured (tail status/<sha>). */
+const STATUS_CAPTURED_SHA = "338ed6edbe86a70fb9c944244c932f1653b18365";
+
+/** Asserts a captured Link header's canonical target path is exactly this one. */
+function assertCanonicalCapture(capture: string, pathname: string): void {
+	const match = /<(https:\/\/api\.github\.com\/[^>]+)>/.exec(capture);
+	assert.ok(match, `no URL in captured Link header: ${capture}`);
+	const parsed = new URL(match[1]!);
+	assert.equal(parsed.origin, "https://api.github.com");
+	assert.equal(parsed.pathname, pathname);
+}
+
 for (const subcommand of ["pr comments", "pr reviews"] as const) {
 	const endpoint = `repos/OWNER/REPO/pulls/123/${subcommand.split(" ")[1]}`;
 	const params = { subcommand, repo: "OWNER/REPO", pr: 123 };
@@ -549,6 +598,73 @@ test("issue comments: distinction and mutability notices survive scalar, empty, 
 	expectNotices(clipped);
 });
 
+test("issue comments: captured canonical next link is accepted; legacy repo path still accepted", async () => {
+	assertCanonicalCapture(CAPTURED_LINKS.issueComments, "/repositories/101895131/issues/3744/comments");
+	const endpoint = "repos/OWNER/REPO/issues/3744/comments";
+	const params = { subcommand: "issue comments", repo: "OWNER/REPO", issue: 3744 } as const;
+	// The captured canonical next link is the literal input; page 2 is fetched
+	// from the tool template, never from the canonical URL.
+	const canonical = requester([
+		() => response('[{"id":1}]', CAPTURED_LINKS.issueComments),
+		() => response('[{"id":2}]'),
+	]);
+	const result = await run(params, canonical);
+	assert.deepEqual(canonical.requests, [1, 2].map((page) => `${endpoint}?per_page=100&page=${page}`));
+	assert.ok(!canonical.requests.some((path) => path.includes("/repositories/")), "the canonical URL is never requested verbatim");
+	assert.deepEqual(issueData(result), [{ id: 1 }, { id: 2 }]);
+	assert.equal(result.details.source_complete, true);
+	assert.equal(result.details.pages_fetched, 2);
+
+	// The legacy /repos/{owner}/{repo}/... form is still accepted.
+	const legacy = requester([
+		() => response('[{"id":1}]', linkHeader(2, endpoint, "per_page=100")),
+		() => response('[{"id":2}]'),
+	]);
+	const legacyResult = await run(params, legacy);
+	assert.deepEqual(legacy.requests, [1, 2].map((page) => `${endpoint}?per_page=100&page=${page}`));
+	assert.equal(legacyResult.details.source_complete, true);
+});
+
+test("issue comments: canonical links with a wrong tail, non-digit id, or extra segment are rejected", async () => {
+	for (const url of [
+		`https://api.github.com/repositories/101895131/issues/3745/comments?per_page=100&page=2`,
+		`https://api.github.com/repositories/abc/issues/3744/comments?per_page=100&page=2`,
+		`https://api.github.com/repositories/101895131/issues/3744/comments/extra?per_page=100&page=2`,
+	]) {
+		const api = requester([() => response('[{"id":1}]', `Link: <${url}>; rel="next"\r\n`)]);
+		const result = await run({ subcommand: "issue comments", repo: "OWNER/REPO", issue: 3744 }, api);
+		assert.equal(result.isError, true, url);
+		assert.equal(api.requests.length, 1, url);
+		assert.equal(api.requests[0], `repos/OWNER/REPO/issues/3744/comments?per_page=100&page=1`);
+		assert.match(result.details.source_error as string, /next-link validation failed/);
+	}
+});
+
+const CANONICAL_PR_READS = [
+	{ subcommand: "pr comments", pr: 3744, capture: CAPTURED_LINKS.pullComments, pathname: "/repositories/101895131/pulls/3744/comments" },
+	{ subcommand: "pr reviews", pr: 9397, capture: CAPTURED_LINKS.pullReviews, pathname: "/repositories/101895131/pulls/9397/reviews" },
+] as const;
+
+for (const { subcommand, pr, capture, pathname } of CANONICAL_PR_READS) {
+	test(`${subcommand}: captured canonical next link is accepted`, async () => {
+		assertCanonicalCapture(capture, pathname);
+		const endpoint = `repos/OWNER/REPO/pulls/${pr}/${subcommand.split(" ")[1]}`;
+		// pullComments was captured at the tool's per_page=100; pullReviews was
+		// captured at per_page=1, so its canonical id and tail come from the
+		// capture while the accepted query is the tool's.
+		const link = subcommand === "pr comments" ? capture : canonicalLinkHeader(2, "101895131", `pulls/${pr}/reviews`, "per_page=100");
+		const api = requester([
+			() => response('[{"id":1}]', link),
+			() => response('[{"id":2}]'),
+		]);
+		const result = await run({ subcommand, repo: "OWNER/REPO", pr }, api);
+		assert.deepEqual(api.requests, [1, 2].map((page) => `${endpoint}?per_page=100&page=${page}`));
+		assert.ok(!api.requests.some((path) => path.includes("/repositories/")));
+		assert.equal(result.details.source_complete, true);
+		assert.equal(result.details.items_returned, 2);
+	});
+}
+
 // ── Contents: ref resolution and pinning ─────────────────────────────────────
 
 test("contents: omitted ref resolves default branch then a full SHA, and pins the read", async () => {
@@ -960,6 +1076,62 @@ test("commit checks: continuation mismatched to the invocation is rejected", asy
 	assert.equal(result.isError, true);
 	assert.ok(result.content[0].text.includes("does not match this invocation"));
 	assert.equal(mismatched.requests.length, 0, "mismatched continuations never spawn requests");
+});
+
+test("commit checks: the captured canonical check-runs link and the statuses tail alias are accepted", async () => {
+	assertCanonicalCapture(CAPTURED_LINKS.checkRuns, `/repositories/117877090/commits/${CHECK_RUNS_CAPTURED_SHA}/check-runs`);
+	const checkScript = requester([
+		() => response(JSON.stringify({ check_runs: [CHECK_RUN] }), CAPTURED_LINKS.checkRuns),
+		() => response(JSON.stringify({ check_runs: [{ ...CHECK_RUN, id: 2 }] })),
+		() => response(JSON.stringify({ statuses: [STATUS] })),
+	]);
+	const checked = await run({ subcommand: "commit checks", repo: "o/r", ref: CHECK_RUNS_CAPTURED_SHA }, checkScript);
+	assert.equal(checked.isError, undefined);
+	assert.equal(checkScript.requests[0]!.endsWith("page=1"), true);
+	assert.equal(checkScript.requests[1]!.endsWith("page=2"), true);
+	assert.ok(!checkScript.requests.some((path) => path.includes("/repositories/")), "the canonical URL is never requested verbatim");
+
+	// The legacy commits/<sha>/status source is served from status/<sha>.
+	assertCanonicalCapture(CAPTURED_LINKS.commitStatus, `/repositories/101895131/status/${STATUS_CAPTURED_SHA}`);
+	const statusScript = requester([
+		() => response(JSON.stringify({ check_runs: [] })),
+		() => response(JSON.stringify({ statuses: [STATUS] }), canonicalLinkHeader(2, "101895131", `status/${SHA}`, `per_page=${PAGE_SIZE}`)),
+		() => response(JSON.stringify({ statuses: [{ ...STATUS, id: 2 }] })),
+	]);
+	const statusResult = await run({ subcommand: "commit checks", repo: "o/r", ref: SHA }, statusScript);
+	assert.equal(statusResult.isError, undefined);
+	assert.ok(statusScript.requests[2]!.includes(`/status?per_page=${PAGE_SIZE}&page=2`), statusScript.requests.join(", "));
+	assert.ok(!statusScript.requests.some((path) => path.includes("/repositories/")));
+});
+
+test("commit checks: canonical links with a wrong tail, non-digit id, extra parameter, wrong page, or a cycle are rejected", async () => {
+	const tail = `commits/${SHA}/check-runs`;
+	for (const badLink of [
+		canonicalLinkHeader(2, "101895131", `commits/${SHA2}/check-runs`, `filter=latest&per_page=${PAGE_SIZE}`),
+		canonicalLinkHeader(2, "abc", tail, `filter=latest&per_page=${PAGE_SIZE}`),
+		`Link: <https://api.github.com/repositories/101895131/${tail}?filter=latest&per_page=${PAGE_SIZE}&injected=1&page=2>; rel="next"\r\n`,
+		canonicalLinkHeader(3, "101895131", tail, `filter=latest&per_page=${PAGE_SIZE}`),
+		canonicalLinkHeader(1, "101895131", tail, `filter=latest&per_page=${PAGE_SIZE}`),
+	]) {
+		const script = requester([
+			() => response(JSON.stringify({ check_runs: [CHECK_RUN] }), badLink),
+			() => response(JSON.stringify({ statuses: [STATUS] })),
+		]);
+		const result = await run({ subcommand: "commit checks", repo: "o/r", ref: SHA }, script);
+		assert.equal(result.isError, true, badLink);
+		assert.ok(result.content[0].text.includes("next-link validation failed"), badLink);
+		assert.ok(!script.requests.some((requestPath) => requestPath.includes("/repositories/") || requestPath.includes("injected=1")), badLink);
+	}
+
+	// A canonical statuses tail for a different SHA is not the declared alias.
+	const statusesBadLink = canonicalLinkHeader(2, "101895131", `status/${SHA2}`, `per_page=${PAGE_SIZE}`);
+	const script = requester([
+		() => response(JSON.stringify({ check_runs: [] })),
+		() => response(JSON.stringify({ statuses: [STATUS] }), statusesBadLink),
+	]);
+	const result = await run({ subcommand: "commit checks", repo: "o/r", ref: SHA }, script);
+	assert.equal(result.isError, true, statusesBadLink);
+	assert.ok(result.content[0].text.includes("next-link validation failed"));
 });
 
 // ── Advisory view ────────────────────────────────────────────────────────────

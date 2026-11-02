@@ -334,11 +334,19 @@ context, newest occurrence wins). Output assembles
 never substituted, mergeability is never inferred, and aggregate green is
 never claimed. Auto-pagination runs at most 10 pages x 100 items per
 source per invocation via strictly validated `Link` headers: origin must
-be https://api.github.com, the path must match, every invariant query
-parameter must be present and unchanged, no unexpected parameter may
-appear, and the page must be exactly current + 1; requests are always
-reconstructed from tool-owned templates, and foreign URLs, cycles, and
-ambiguous links are rejected as per-source errors. Stops between complete
+be https://api.github.com, the next-link path must be either the exact
+requested `/repos/{owner}/{repo}/...` path or GitHub's canonical
+`/repositories/<digits>/<tail>` form whose tail is byte-identical to the
+requested path minus the `repos/{owner}/{repo}` prefix (plus the one
+declared alias below), every invariant query parameter must be present
+and unchanged, no unexpected parameter may appear, and the page must be
+exactly current + 1. Only the page number is ever extracted from a link;
+requests are always reconstructed from tool-owned templates, and the
+numeric repository id in a canonical link is never read or verified.
+Foreign URLs, cycles, wrong tails, and ambiguous links are rejected as
+per-source errors. The legacy combined-status source renames its tail:
+`commits/<sha>/status` is served from `status/<sha>`, so that one alias
+is declared for the statuses source only. Stops between complete
 responses (page or budget limits) are nonerror incompleteness;
 interrupted/truncated responses are errors. A versioned, size-bounded
 continuation token carries the operation, target/query, pinned SHA, and
@@ -349,6 +357,47 @@ positions are retained. Note: check results are mutable CI state, not a
 transactional snapshot; GitHub also bounds which check suites it returns
 for old commits (service-side), so local completion does not prove
 historical completeness.
+
+
+Live verification (2026-11-02, gh 2.103.3): every paged source observed
+serves its next link in the canonical `/repositories/<digits>/...` form.
+Raw headers captured with `curl -s -D - -o /dev/null <url>` against
+api.github.com (`gh api --include` is not in this session's host allow
+rules). Verbatim `Link:` lines:
+
+- `repos/DataDog/dd-trace-dotnet/issues/3744/comments?per_page=100&page=1`
+  -> `<https://api.github.com/repositories/101895131/issues/3744/comments?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/101895131/issues/3744/comments?per_page=100&page=2>; rel="last"`
+- `repos/DataDog/dd-trace-dotnet/pulls/3744/comments?per_page=100&page=1`
+  -> `<https://api.github.com/repositories/101895131/pulls/3744/comments?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/101895131/pulls/3744/comments?per_page=100&page=2>; rel="last"`
+- `repos/DataDog/dd-trace-dotnet/pulls/9397/reviews?per_page=1&page=1`
+  -> `<https://api.github.com/repositories/101895131/pulls/9397/reviews?per_page=1&page=2>; rel="next", <https://api.github.com/repositories/101895131/pulls/9397/reviews?per_page=1&page=15>; rel="last"`
+- `repos/DataDog/dd-trace-dotnet/issues/3744/timeline?per_page=100&page=1`
+  -> `<https://api.github.com/repositories/101895131/issues/3744/timeline?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/101895131/issues/3744/timeline?per_page=100&page=4>; rel="last"`
+- `repos/DataDog/dd-trace-js/commits/1b569333e5792aec156de3149f3ca344810e58b2/check-runs?filter=latest&per_page=100&page=1`
+  -> `<https://api.github.com/repositories/117877090/commits/1b569333e5792aec156de3149f3ca344810e58b2/check-runs?filter=latest&per_page=100&page=2>; rel="next", <https://api.github.com/repositories/117877090/commits/1b569333e5792aec156de3149f3ca344810e58b2/check-runs?filter=latest&per_page=100&page=7>; rel="last"` (669 check runs total)
+- `repos/DataDog/dd-trace-dotnet/commits/338ed6edbe86a70fb9c944244c932f1653b18365/status?per_page=1&page=1`
+  -> `<https://api.github.com/repositories/101895131/status/338ed6edbe86a70fb9c944244c932f1653b18365?per_page=1&page=2>; rel="next", <https://api.github.com/repositories/101895131/status/338ed6edbe86a70fb9c944244c932f1653b18365?per_page=1&page=132>; rel="last"` (132 pages at per_page=1; the assumed `commits/<sha>/status` -> `status/<sha>` alias is confirmed by the captured tail)
+
+The reviews capture is per_page=1 because no public target with more than
+100 reviews was found for that shape (its canonical path and id are still
+the capture's); the other five captures use the tool's per_page=100 and
+carry a real next link.
+
+Tool-path results against the fixed code (real `GhApiRunner`, real
+network, `runApiOperation` reached through `validateToolParams`; the live
+`gh_read` tool registered in a running session is the pre-fix build and
+was not restarted):
+
+- `issue comments` repo DataDog/dd-trace-dotnet issue 3744:
+  `items_returned=117`, `pages_fetched=2`, `source_complete=true`, no
+  `source_error`, no continuation, and the 50 KiB display clipped as
+  expected for 117 large comments.
+- `commit checks` repo DataDog/dd-trace-dotnet ref
+  338ed6edbe86a70fb9c944244c932f1653b18365: `checks_complete=true` (20
+  check runs) and `statuses_complete=true` (132 statuses over 2 pages at
+  per_page=100) with no `checks_error`/`statuses_error` and no
+  continuation, so the statuses source followed the canonical
+  `status/<sha>` alias instead of failing.
 
 ### advisory view
 
@@ -1046,9 +1095,13 @@ Settled in the grill-me review:
   symlink following (one level, broken/non-file/root-escape), submodules,
   trees (recursive query omission in shallow mode, subtree filters,
   upstream truncation preserved), combined checks (pinned SHA, status
-  dedupe, sequential Link paging, malicious/foreign/mutating/misordered
-  next-link rejection, page-limit stops with continuations, failed-source
-  data retention, resume without re-resolution, mismatch rejection),
+  dedupe, sequential Link paging, captured-canonical-Link acceptance in both
+  the `/repos/{owner}/{repo}/...` and `/repositories/<digits>/<tail>` forms
+  including the declared `commits/<sha>/status` -> `status/<sha>` alias,
+  next-link rejection for foreign origins, wrong tails, non-digit ids, extra
+  parameters, wrong pages, and cycles, page-limit stops with continuations,
+  failed-source data retention, resume without re-resolution, mismatch
+  rejection),
   advisories (direct GHSA, CVE defaults and types, empty results,
   continuation matching), jq applied once to the final batch, and the
   50 KiB display cap with incomplete-prefix labeling. Check annotations:
