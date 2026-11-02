@@ -132,10 +132,12 @@ how a preset happens to use it.
   `agent` field, which is a configuration fact: any read-only delegate may be a
   preset's agent.
 
-Role is inherited through the normal agent precedence chain by name, exactly
-like prompts and tools: the most specific explicit `role` declaration wins
-(project over user over bundled), and when no file in the chain declares one the
-bundled agent's role applies. The judge therefore stays `internal` for an
+Role resolves through the agent precedence chain by name, with one deliberate
+difference from prompts and tools: those are taken wholly from the most
+specific file that defines the agent, whereas an absent `role` falls back down
+the chain. So the most specific explicit `role` declaration wins (project over
+user over bundled), and the bundled agent's role applies when no file in the
+chain declares one. The judge therefore stays `internal` for an
 override at `~/.pi/agent/agents/judge.md` until that file declares
 `role: delegate`, and a user or project agent with no bundled counterpart can
 declare `role: internal` itself.

@@ -24,7 +24,7 @@ import {
 	writeAgent,
 } from "./subagent-harness.mts";
 
-const BUNDLED = ["planner", "researcher", "reviewer", "scout", "worker"];
+const BUNDLED = ["judge", "panelist", "planner", "researcher", "reviewer", "scout", "worker"];
 const BASE_OPENING = "Delegate tasks to specialized subagents with isolated context.";
 
 function assertSortedAppearance(text: string, names: string[]): void {

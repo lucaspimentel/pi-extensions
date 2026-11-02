@@ -17,9 +17,41 @@ import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/
 
 export type AgentScope = "user" | "project" | "both";
 export type AgentSource = "user" | "project" | "bundled";
+export type AgentRole = "delegate" | "internal";
+
+/** Configured values, before normalization or effective defaults. */
+export interface RawPanelConfig {
+	models: string[];
+	agent: string | null;
+	judge: string | null;
+	judgeExplicit: boolean;
+}
+
+/** Validated configuration used to resolve a panel at call time. */
+export interface PanelConfig {
+	name: string;
+	models: string[];
+	agent: string;
+	/** Undefined inherits the judge model; null skips merging. */
+	judge?: string | null;
+	raw: RawPanelConfig;
+	/** Nonfatal warnings, not reasons to reject this preset. */
+	diagnostics: string[];
+}
+
+export interface IgnoredPanel {
+	name: string;
+	reason: string;
+}
+
+export interface PanelParseResult {
+	panels: PanelConfig[];
+	ignoredPanels: IgnoredPanel[];
+}
 
 export interface AgentConfig {
 	name: string;
+	role: AgentRole;
 	description: string;
 	tools?: string[];
 	model?: string;
@@ -28,7 +60,7 @@ export interface AgentConfig {
 	filePath: string;
 }
 
-export interface AgentDiscoveryResult {
+export interface AgentDiscoveryResult extends PanelParseResult {
 	agents: AgentConfig[];
 	projectAgentsDir: string | null;
 }
@@ -46,7 +78,11 @@ type AgentFrontmatter = {
 	description?: unknown;
 	tools?: unknown;
 	model?: unknown;
+	role?: unknown;
 };
+
+// Keep undeclared roles unresolved until the scope-aware precedence merge.
+type LoadedAgentConfig = Omit<AgentConfig, "role"> & { role?: AgentRole };
 
 /**
  * Normalize a frontmatter `tools` value to a list of tool names.
@@ -69,8 +105,8 @@ function parseToolList(value: unknown): string[] | undefined {
 	return tools.length > 0 ? tools : undefined;
 }
 
-function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
-	const agents: AgentConfig[] = [];
+function loadAgentsFromDir(dir: string, source: AgentSource): LoadedAgentConfig[] {
+	const agents: LoadedAgentConfig[] = [];
 
 	if (!fs.existsSync(dir)) {
 		return agents;
@@ -103,6 +139,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 
 		agents.push({
 			name: frontmatter.name,
+			role: frontmatter.role === "delegate" || frontmatter.role === "internal" ? frontmatter.role : undefined,
 			description: frontmatter.description,
 			tools: parseToolList(frontmatter.tools),
 			model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
@@ -152,18 +189,34 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	// defaults, not a trust boundary. User agents override them by name, and
 	// project agents override both (matching upstream's project-over-user rule).
 	const agentMap = new Map<string, AgentConfig>();
-	for (const agent of loadAgentsFromDir(bundledDir, "bundled")) agentMap.set(agent.name, agent);
+	const merge = (agent: LoadedAgentConfig) => {
+		const role = agent.role ?? agentMap.get(agent.name)?.role ?? "delegate";
+		agentMap.set(agent.name, { ...agent, role });
+	};
+	for (const agent of loadAgentsFromDir(bundledDir, "bundled")) merge(agent);
 
 	if (scope !== "project") {
-		for (const agent of loadAgentsFromDir(userDir, "user")) agentMap.set(agent.name, agent);
+		for (const agent of loadAgentsFromDir(userDir, "user")) merge(agent);
 	}
 	if (scope !== "user" && projectAgentsDir) {
-		for (const agent of loadAgentsFromDir(projectAgentsDir, "project")) agentMap.set(agent.name, agent);
+		for (const agent of loadAgentsFromDir(projectAgentsDir, "project")) merge(agent);
 	}
 
-	applyModelOverrides(agentMap);
+	const configPath = path.join(getAgentDir(), "subagent.json");
+	const raw = readConfiguration(configPath);
+	applyModelOverrides(agentMap, raw, configPath);
+	const result = parsePanels((raw as { panels?: unknown } | null)?.panels);
+	for (const panel of result.panels) {
+		if (!agentMap.has(panel.agent)) {
+			panel.diagnostics.push(
+				`[subagent] panels.${JSON.stringify(panel.name)}: no agent named ${JSON.stringify(panel.agent)}; preset retained`,
+			);
+		}
+		for (const diagnostic of panel.diagnostics) console.warn(diagnostic);
+	}
+	for (const ignored of result.ignoredPanels) console.warn(ignored.reason);
 
-	return { agents: Array.from(agentMap.values()), projectAgentsDir };
+	return { agents: Array.from(agentMap.values()), projectAgentsDir, ...result };
 }
 
 /**
@@ -178,18 +231,18 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
  * model loses to the override, which is the point of configuring it).
  * Malformed files and entries are warned about and ignored.
  */
-function applyModelOverrides(agentMap: Map<string, AgentConfig>): void {
-	const configPath = path.join(getAgentDir(), "subagent.json");
-	let raw: unknown;
+function readConfiguration(configPath: string): unknown {
 	try {
-		raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+		return JSON.parse(fs.readFileSync(configPath, "utf-8"));
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-			console.warn(`[subagent] could not read ${configPath}; model overrides ignored`);
+			console.warn(`[subagent] could not read ${configPath}; configuration ignored`);
 		}
-		return;
+		return undefined;
 	}
+}
 
+function applyModelOverrides(agentMap: Map<string, AgentConfig>, raw: unknown, configPath: string): void {
 	const models = (raw as { models?: unknown } | null)?.models;
 	if (typeof models !== "object" || models === null) {
 		if (models !== undefined) {
@@ -212,6 +265,68 @@ function applyModelOverrides(agentMap: Map<string, AgentConfig>): void {
 	}
 }
 
+/** Parse the panels value without I/O, availability checks, or input mutation. */
+export function parsePanels(raw: unknown): PanelParseResult {
+	const panels: PanelConfig[] = [];
+	const ignoredPanels: IgnoredPanel[] = [];
+	if (raw === undefined) return { panels, ignoredPanels };
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		ignoredPanels.push({ name: "panels", reason: '[subagent] "panels" should be an object of preset name -> panel' });
+		return { panels, ignoredPanels };
+	}
+
+	for (const [name, value] of Object.entries(raw)) {
+		const prefix = `[subagent] panels.${JSON.stringify(name)}:`;
+		const reject = (reason: string) => ignoredPanels.push({ name, reason: `${prefix} ${reason}` });
+		if (typeof value !== "object" || value === null || Array.isArray(value)) {
+			reject("preset should be an object");
+			continue;
+		}
+		const entry = value as Record<string, unknown>;
+		if (!Array.isArray(entry.models) || entry.models.length === 0) {
+			reject('"models" should contain 1 to 4 non-empty model strings');
+			continue;
+		}
+		if (entry.models.length > 4) {
+			reject('"models" exceeds the cap of 4 entries');
+			continue;
+		}
+		if (!Array.from(entry.models).every((model) => typeof model === "string" && !!model.trim())) {
+			reject('"models" should contain 1 to 4 non-empty model strings');
+			continue;
+		}
+		const agentExplicit = Object.hasOwn(entry, "agent");
+		if (agentExplicit && (typeof entry.agent !== "string" || !entry.agent.trim())) {
+			reject('"agent" should be a non-empty agent name');
+			continue;
+		}
+		const judgeExplicit = Object.hasOwn(entry, "judge");
+		if (judgeExplicit && entry.judge !== null && (typeof entry.judge !== "string" || !entry.judge.trim())) {
+			reject('"judge" should be a non-empty model string, "none", or null');
+			continue;
+		}
+		const configuredModels = entry.models as string[];
+		const normalizedModels = configuredModels.map((model) => model.trim());
+		const models = [...new Set(normalizedModels)];
+		const rawJudge = judgeExplicit ? (entry.judge as string | null) : null;
+		const judge = rawJudge === null || rawJudge.trim() === "none" ? null : rawJudge.trim();
+		panels.push({
+			name,
+			models,
+			agent: agentExplicit ? (entry.agent as string).trim() : "panelist",
+			judge: judgeExplicit ? judge : undefined,
+			raw: {
+				models: [...configuredModels],
+				agent: agentExplicit ? (entry.agent as string) : null,
+				judge: rawJudge,
+				judgeExplicit,
+			},
+			diagnostics: models.length < configuredModels.length ? [`${prefix} duplicate model IDs removed; preset retained`] : [],
+		});
+	}
+	return { panels, ignoredPanels };
+}
+
 /**
  * Deterministic name ordering for every model-facing agent list. A plain `<`
  * comparison (not `localeCompare`) keeps the output byte-stable across
@@ -220,6 +335,40 @@ function applyModelOverrides(agentMap: Map<string, AgentConfig>): void {
  */
 export function sortAgentsByName(agents: AgentConfig[]): AgentConfig[] {
 	return [...agents].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/** Compact normalized panel catalog, omitted entirely when no presets are usable. */
+export function formatPanelCatalog(panels: PanelConfig[], maxItems = 10): string {
+	if (panels.length === 0) return "";
+	const listed = sortPanelsByName(panels).slice(0, maxItems);
+	const remaining = panels.length - listed.length;
+	const text = listed
+		.map((panel) => {
+			const judge = panel.raw.judgeExplicit ? ` (judge: ${panel.judge ?? "none"})` : "";
+			const agent = panel.agent !== "panelist" ? ` (agent: ${panel.agent})` : "";
+			return `${panel.name}: ${panel.models.join(" + ")}${judge}${agent}`;
+		})
+		.join("; ");
+	return `${text}${remaining > 0 ? ` (+${remaining} more)` : ""}`;
+}
+
+/** Prose listing for the model and for humans; `PanelConfig.raw` stays raw. */
+export function formatPanelList(panels: PanelConfig[], maxItems = 100): { text: string; remaining: number } {
+	const listed = sortPanelsByName(panels).slice(0, maxItems);
+	return {
+		text:
+			listed
+				.map((panel) => {
+					const judge = panel.raw.judgeExplicit ? (panel.judge === null ? "none" : panel.judge) : "session model";
+					return `${panel.name}: ${panel.agent} | ${panel.models.join(" + ")} | judge: ${judge}`;
+				})
+				.join("\n") || "none",
+		remaining: panels.length - listed.length,
+	};
+}
+
+function sortPanelsByName(panels: PanelConfig[]): PanelConfig[] {
+	return [...panels].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 /** Compact `name (source)` list used by the spawn path's error text. */
