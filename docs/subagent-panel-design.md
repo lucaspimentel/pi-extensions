@@ -1,9 +1,14 @@
 # `subagent` panel fan-out: N read-only models, one judge merge
 
 Status: design settled 2026-10-29 (interview-driven; see "Decisions" below).
-Not implemented. Step 1 (the `/panel` command spike) is resolved: a command
-handler cannot land a tool result, so `/panel` ships as a prompt template.
-Everything else in this document is decided.
+Implemented on 2026-11-02: Step 2, the `panels` config, agent `role`, and the
+bundled `panelist`/`judge` agents (`4bd6ae1`), and Step 3, the panel tool
+surface, the read-only fan-out, the `subagent_list` payload, and the `/panel`
+prompt template (`492b41f`), both with the suite green. Step 1 (the `/panel`
+command spike) is resolved: a command handler cannot land a tool result, so
+`/panel` ships as a prompt template. Outstanding: the judge half of Step 4, all
+of Step 5 (display), and the judge-side checks in Step 6. Everything else in
+this document is decided.
 
 Addition (2026-11-02, second interview round; see "Agent roles", "Config",
 "Tool contract", "`subagent_list` contract", and "Verification plan"): the judge
@@ -107,7 +112,8 @@ holds 1.4.0 and 1.5.0):
   `entry_appended` record, zero `tool_execution_*` records, and the RPC
   response `{"id":"spike1","disposition":"handled"}`.
 - `ctx.scopedModels` and `ctx.modelRegistry` expose the models this session can
-  actually use (`types.d.ts:225-232`), which is what preset validation keys on.
+  actually use (`types.d.ts:225-232`). Preset and inline model validation keys on
+  the scoped list, since it is the set the session was configured for.
 - Prompt templates expand arguments before the text reaches the agent, and an
   extension command with the same name wins over a same-named template
   (`docs/prompt-templates.md` in the pi install).
@@ -209,20 +215,20 @@ New `subagent` parameters:
 
 | Param | Meaning |
 | --- | --- |
-| `panel` | Preset name. Expands to N panelists plus a judge. |
+| `panel` | Preset name. Expands to N panelists, and to the judge once the merge lands. Requires `task`. |
 | `models` | Inline override of the preset's model list, for this call only. |
-| `judge` | Inline override of the preset's judge (`"none"` allowed). |
-| `agent` | Inline override of the preset's agent. |
-| `task` | The task text, as in single mode. |
-| `model` | New optional per-task `model` on a single task or on `tasks[]` entries, for manual pairs without a preset. |
+| `judge` | Inline override of the preset's judge; `"none"` or `null` disables the merge. |
+| `agent` | Inline override of the preset's agent; with no `panel` it is the single mode's agent. |
+| `task` | The task text, as in single mode, shared by every panelist. |
+| `model` | New optional per-child `model` on a single task, a `tasks[]` entry, or a `chain[]` step, for manual pairs without a preset. |
 
 - `panel` is mutually exclusive with `agent`/`task` (single), `tasks`, and
   `chain`. Supplying more than one mode is an error naming the conflicting
   fields.
 - `models`, `judge`, and `agent` are overrides of a named preset and are
   rejected without `panel`: a one-off pair with no preset is expressed with the
-  new per-task `model` on a single task or `tasks[]` entry instead. The 4-model
-  cap applies to the effective list after overrides.
+  new per-child `model` on a single task, a `tasks[]` entry, or a `chain[]`
+  step instead. The 4-model cap applies to the effective list after overrides.
 - A preset's `agent` resolves through the same discovery as every other agent
   (bundled, then user, then project, per `agentScope`), so naming a project
   agent requires `agentScope: "both"` or `"project"`, the existing
@@ -232,9 +238,12 @@ New `subagent` parameters:
   check the default `panelist` resolution runs, and a directly dispatched
   internal agent is refused before any spawn with an error naming the agent and
   pointing at the panel path (see "Agent roles").
-- Model ids are validated against `ctx.scopedModels`/`ctx.modelRegistry` before
-  any child spawns. An unknown preset, an unusable model, or an unknown agent
-  fails with the valid options listed. Nothing spawns on a typo.
+- Model ids are validated against `ctx.scopedModels` before any child spawns, as
+  the implementation does: an empty scoped list means no scoping is configured,
+  so any non-blank id is accepted, and a model that is scoped but has no usable
+  credential is still left to fail in the child. An unknown preset, an unusable
+  model, or an unknown agent fails with the valid options listed, as a tool
+  error. Nothing spawns on a typo.
 - The tool description gains a byte-stable panel section modeled on
   `formatAgentCatalog` (`agents.ts:237`): plain name sort, up to 10 presets,
   models joined with `" + "`, `(judge: X)` only when explicitly configured,
@@ -329,6 +338,10 @@ Judge output is a prompt convention, not a schema: `SHARED` / `<MODEL> ONLY` /
 using a short label per model (full id on first use). A judge that ignores the
 convention degrades to a merged review rather than failing the call.
 
+Until the judge half of Step 4 lands, a panel call returns labeled
+per-panelist sections with per-panelist usage and a notice that the merge is not
+implemented yet; the content described below is what the judge step produces.
+
 Judge tools: the code-reading set (read, ffgrep, fffind, ls, git_read, gh_read),
 narrower than the panelists' researcher-grade set, so a CONFLICT can be settled
 by opening the file or diff without making every merge pay for web/Slack/memory
@@ -406,8 +419,8 @@ renderer (`:1160-1250`) rather than introducing a new comparison view.
 
 ## Code and test layout
 
-None of this is implemented by this change; it is the layout the implementation
-follows.
+Steps 2 and 3 implemented the pure functions, the harness extraction, and the
+tool wiring described below. The judge wiring is what remains.
 
 - Pure functions live in `extensions/subagent/agents.ts`, beside the ones they
   mirror: `parsePanels` next to `applyModelOverrides` (`:181`), and
@@ -443,17 +456,19 @@ follows.
    inline-override precedence, raw-versus-resolved values in the
    `subagent_list` payload, role parsing and inheritance through the agent
    precedence chain, and the `formatPanelCatalog`/`formatPanelList` rendering
-   (cap, `(+N more)` suffix, byte-stability).
+   (cap, `(+N more)` suffix, byte-stability). Done with Step 2.
 3. Spawn assertions through the `setSpawnOverride` seam (`index.ts:319`) with
    the harness imported from `tests/subagent-harness.mts`, staying in
    `tests/subagent-tool.test.mts`: one child per panelist with its own
-   `--model`, the judge child's argv and tool set, timeout kill, survivor merge
-   labeling, judge retry-then-fallback, `judge: "none"`, mutual-exclusion
-   errors, write-tool preset refusal, internal-agent refusal both on direct
-   dispatch and as a preset's `agent`, rejection of `models`/`judge`/`agent`
-   without `panel`, the project-agent confirmation under `agentScope: "both"`,
-   and catalog byte-stability, including that a config without panels appends no
-   panel sentence.
+   `--model`, mutual-exclusion errors, write-tool preset refusal, internal-agent
+   refusal both on direct dispatch and as a preset's `agent`, rejection of
+   `models`/`judge`/`agent` without `panel`, the project-agent confirmation
+   under `agentScope: "both"`, catalog byte-stability including that a config
+   without panels appends no panel sentence, per-child `model` in the legacy
+   modes, and guard snapshots. Done with Step 3. Still to come from this item:
+   the judge child's argv and tool set, `judge: "none"`, the judge-input cap and
+   tool-call summaries, timeout kill, survivor-merge labeling, and judge
+   retry-then-fallback.
 4. Renderer assertions for collapsed versus expanded result views.
 5. One live run on a cheap pair (`baseten/glm-5-3-flash` +
    `baseten/deepseek-v4-1-flash`) to confirm a real merge produces the section
