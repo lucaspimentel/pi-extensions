@@ -239,12 +239,13 @@ New `subagent` parameters:
   `formatAgentCatalog` (`agents.ts:237`): plain name sort, up to 10 presets,
   models joined with `" + "`, `(judge: X)` only when explicitly configured,
   `(agent: Y)` only when not the default panelist, and a `(+N more)` suffix past
-  the cap. The section appears only when at least one panel is configured: with
-  no `panels` key, or only ignored ones, the description is byte-identical to
-  today's, with no panel sentence and no `Panels: none` placeholder. The
-  description lists dispatchable agents only, in the agent catalog and in the
-  panel section alike (see "Agent roles"). No timestamps, so prompt caching is
-  not churned.
+  the cap. The section appears only when at least one panel resolves to a
+  dispatchable agent: with no `panels` key, or only ignored ones, no panel
+  sentence and no `Panels: none` placeholder are appended, so the description
+  differs from an unconfigured session only through the agent catalog itself.
+  The description lists dispatchable agents only, in the agent catalog and in
+  the panel section alike (see "Agent roles"). No timestamps, so prompt caching
+  is not churned.
 - The panel catalog rides the same per-request rewrite as the agent catalog:
   pure `formatPanelCatalog` lives in `agents.ts` (see "Code and test layout")
   and `index.ts` appends its result to the description that `prepareLoadout`
@@ -369,8 +370,14 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
 - A preset whose agent declares `write`/`edit`/`bash`, or declares no `tools:`
   line at all (which means the default tool set, including those), is refused
   with the offending tools named. `worker` is therefore not a valid panelist
-  agent, and read-only cannot be configured away.
-- Panelists never receive `subagent`, so panels cannot nest.
+  agent, and read-only cannot be configured away. The check reads the declared
+  tool names, so a preset cannot widen a panelist beyond its declaration;
+  whether an individual declared tool is genuinely read-only is not verified.
+- Panelists never receive `subagent`, so panels cannot nest, and the panel path
+  passes the resolved tool list for every child rather than letting the agent's
+  declaration stand alone. When nothing survives resolution the child is
+  launched with `--no-tools` instead of falling back to the default tool set,
+  which is the behavior a fully dropped list used to get.
 - Tool names the session did not register are still dropped at spawn time, with
   substitutes only for `ffgrep`/`fffind`. With the researcher-grade set this
   means web/Slack/session/memory sources can silently differ between sessions;
@@ -378,6 +385,11 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
 
 ## Failure semantics
 
+- Validation failures are tool errors that list the valid options: an unknown
+  preset (the configured preset names), an unusable model (the usable ids), an
+  unknown or internal agent (the dispatchable agent names), a rejected panelist
+  declaration (the offending tools), and the mode conflicts. The single, tasks,
+  and chain validation failures return errors too, which they did not before.
 - Panelist failure: survivors are merged and the result is labeled as a
   single-model (or partial) merge, with the failing model and its error text.
   One provider outage never discards the other answers.
@@ -440,8 +452,8 @@ follows.
    errors, write-tool preset refusal, internal-agent refusal both on direct
    dispatch and as a preset's `agent`, rejection of `models`/`judge`/`agent`
    without `panel`, the project-agent confirmation under `agentScope: "both"`,
-   and byte-stability of the description catalog including the empty-panels
-   byte-identity.
+   and catalog byte-stability, including that a config without panels appends no
+   panel sentence.
 4. Renderer assertions for collapsed versus expanded result views.
 5. One live run on a cheap pair (`baseten/glm-5-3-flash` +
    `baseten/deepseek-v4-1-flash`) to confirm a real merge produces the section

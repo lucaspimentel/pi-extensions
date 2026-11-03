@@ -8,6 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import subagentExtension, { setAgentListCwd, setSpawnOverride } from "../extensions/subagent/index.ts";
+import { SUBAGENT_SNAPSHOT_ACK, SUBAGENT_SNAPSHOT_REQUEST } from "../extensions/subagent/guard-snapshot.ts";
 
 export interface ToolResult {
 	content: Array<{ type: string; text: string }>;
@@ -15,13 +16,17 @@ export interface ToolResult {
 	structuredContent?: {
 		agentScope: string;
 		projectAgentsDir: string | null;
-		agents: Array<{ name: string; source: string; description: string; model: string | null; tools: string[] }>;
+		agents: Array<{ name: string; role: string; source: string; description: string; model: string | null; tools: string[] }>;
+		panels: Array<{ name: string; agent: string | null; models: string[]; judge: string | null }>;
+		ignoredPanels: Array<{ name: string; reason: string }>;
 	};
 	isError?: boolean;
 }
 
 export interface TestCtx {
 	cwd: string;
+	scopedModels?: Array<{ model: { provider: string; id: string } }>;
+	ui?: { confirm(title: string, message: string): Promise<boolean> };
 	model?: unknown;
 	thinkingLevel?: unknown;
 	hasUI?: boolean;
@@ -53,6 +58,7 @@ export interface Harness {
 	handlers: Record<string, Array<(event: unknown, ctx: TestCtx) => unknown>>;
 	tools: Map<string, RegisteredTool>;
 	emitted: string[];
+	events: { on(channel: string, handler: (data: any) => void): () => void; emit(channel: string, data: unknown): void };
 }
 
 export interface SpawnMode {
@@ -110,7 +116,7 @@ export function installThrowingSpawn(): SpawnMode {
 }
 
 /** Records dispatches without bypassing the harness's normal guard handshake. */
-export function installRecordingSpawn(): RecordingSpawnMode {
+export function installRecordingSpawn(beforeClose?: (spawn: CapturedSpawn, index: number) => number | void): RecordingSpawnMode {
 	const spawns: CapturedSpawn[] = [];
 	const mode = installSpawn(((command: string, args: readonly string[], options: SpawnOptions) => {
 		const child = new EventEmitter() as CapturedSpawn["child"];
@@ -128,7 +134,8 @@ export function installRecordingSpawn(): RecordingSpawnMode {
 			child,
 		});
 		// Deferred so the executor has attached its close handler first.
-		queueMicrotask(() => child.emit("close", 0));
+		const index = spawns.length - 1;
+		queueMicrotask(() => child.emit("close", beforeClose?.(spawns[index], index) ?? 0));
 		return child;
 	}) as never);
 	return { ...mode, spawns };
@@ -137,13 +144,30 @@ export function installRecordingSpawn(): RecordingSpawnMode {
 // Protect importers before any harness is constructed or executed.
 installThrowingSpawn();
 
-export function makeHarness(): Harness {
-	const h: Harness = { handlers: {}, tools: new Map(), emitted: [] };
-	const listeners: Record<string, Array<(data: unknown) => void>> = {};
+export function makeHarness(fixtures: {
+	tools?: string[];
+	settings?: Record<string, unknown>;
+	guard?: boolean;
+} = {}): Harness {
+	const listeners: Record<string, Array<(data: any) => void>> = {};
+	const events = {
+		on(channel: string, handler: (data: any) => void) {
+			(listeners[channel] ??= []).push(handler);
+			return () => { listeners[channel] = listeners[channel].filter((fn) => fn !== handler); };
+		},
+		emit(channel: string, data: unknown) {
+			h.emitted.push(channel);
+			for (const fn of [...(listeners[channel] ?? [])]) fn(data);
+		},
+	};
+	const h: Harness = { handlers: {}, tools: new Map(), emitted: [], events };
+	if (fixtures.guard) events.on(SUBAGENT_SNAPSHOT_REQUEST, (request) => {
+		events.emit(SUBAGENT_SNAPSHOT_ACK, { version: 1, id: request.id, ok: true, profile: "research" });
+	});
 	const api = {
 		on(event: string, handler: (event: unknown, ctx: TestCtx) => unknown) {
 			(h.handlers[event] ??= []).push(handler);
-			return () => {};
+			return () => { h.handlers[event] = h.handlers[event].filter((fn) => fn !== handler); };
 		},
 		registerTool: (tool: RegisteredTool) => h.tools.set(tool.name, tool),
 		registerCommand: () => {},
@@ -151,24 +175,16 @@ export function makeHarness(): Harness {
 		registerFlag: () => {},
 		getCommands: () => [],
 		getActiveTools: () => [],
-		getAllTools: () => [],
-		events: {
-			on(channel: string, handler: (data: unknown) => void) {
-				(listeners[channel] ??= []).push(handler);
-				return () => {};
-			},
-			emit(channel: string, data: unknown) {
-				h.emitted.push(channel);
-				for (const fn of [...(listeners[channel] ?? [])]) fn(data);
-			},
-		},
+		getAllTools: () => (fixtures.tools ?? []).map((name) => ({ name })),
+		getSettings: () => fixtures.settings ?? {},
+		events,
 	};
 	(subagentExtension as unknown as (api: unknown) => void)(api);
 	return h;
 }
 
-export function toolCtx(cwd: string): TestCtx {
-	return { cwd, model: undefined, thinkingLevel: undefined, hasUI: false, isProjectTrusted: () => true };
+export function toolCtx(cwd: string, overrides: Partial<TestCtx> = {}): TestCtx {
+	return { cwd, scopedModels: [], model: undefined, thinkingLevel: undefined, hasUI: false, isProjectTrusted: () => true, ...overrides };
 }
 
 export const tempDirs: string[] = [];
@@ -214,10 +230,10 @@ export async function runList(h: Harness, cwd: string, params: Record<string, un
 	return tool.execute("id", params, undefined, undefined, toolCtx(cwd));
 }
 
-export async function runSubagent(h: Harness, cwd: string, params: Record<string, unknown>): Promise<ToolResult> {
+export async function runSubagent(h: Harness, cwd: string, params: Record<string, unknown>, context: Partial<TestCtx> = {}): Promise<ToolResult> {
 	const tool = h.tools.get("subagent");
 	assert.ok(tool, "subagent must be registered");
-	return tool.execute("id", params, undefined, undefined, toolCtx(cwd));
+	return tool.execute("id", params, undefined, undefined, toolCtx(cwd, context));
 }
 
 /** Terminal cleanup only; do not construct or execute harnesses afterward. */

@@ -410,7 +410,7 @@ export function formatAgentList(agents: AgentConfig[], maxItems: number): { text
 		text: listed
 			.map(
 				(a) =>
-					`${a.name} (${a.source}): ${a.description} | model: ${a.model ?? "inherit"} | tools: ${a.tools?.join(", ") ?? "default"}`,
+					`${a.name} (${a.source})${a.role === "internal" ? " [internal]" : ""}: ${a.description} | model: ${a.model ?? "inherit"} | tools: ${a.tools?.join(", ") ?? "default"}`,
 			)
 			.join("\n"),
 		remaining,
