@@ -4,11 +4,14 @@ Status: design settled 2026-10-29 (interview-driven; see "Decisions" below).
 Implemented on 2026-11-02: Step 2, the `panels` config, agent `role`, and the
 bundled `panelist`/`judge` agents (`4bd6ae1`), and Step 3, the panel tool
 surface, the read-only fan-out, the `subagent_list` payload, and the `/panel`
-prompt template (`492b41f`), both with the suite green. Step 1 (the `/panel`
-command spike) is resolved: a command handler cannot land a tool result, so
-`/panel` ships as a prompt template. Outstanding: the judge half of Step 4, all
-of Step 5 (display), and the judge-side checks in Step 6. Everything else in
-this document is decided.
+prompt template (`492b41f`). Step 4 (the judge spawn and merge) is implemented:
+the judge dispatch, the bounded judge input with per-call tool summaries, the
+opt-in 10-minute per-child timeout, the retry/fallback matrix, the separate
+judge attempt records, the notices, and the content/usage assembly. Step 1 (the
+`/panel` command spike) is resolved: a command handler cannot land a tool
+result, so `/panel` ships as a prompt template. Outstanding: Step 5 (expanded
+display) and the renderer plus live checks in Step 6. Everything else in this
+document is decided.
 
 Addition (2026-11-02, second interview round; see "Agent roles", "Config",
 "Tool contract", "`subagent_list` contract", and "Verification plan"): the judge
@@ -301,33 +304,67 @@ Panelists reuse `runSingleAgent`'s path with explicit models:
   changes.
 - Tools are the preset agent's declared names intersected with what the session
   registered (`resolveAgentTools`, `:66-78`).
-- Wall-clock timeout of 10 minutes per child, implemented as a per-child timer
-  that invokes the same kill sequence abort uses (SIGTERM, then SIGKILL after
-  5s, `:528-534`) rather than the parent `AbortSignal`; a timed-out child is
-  reported as a failed panelist labeled with the timeout, not a thrown error.
-- Each child's final answer is capped at `PER_TASK_OUTPUT_CAP` before it enters
-  the judge prompt.
-- Guard: one fresh snapshot per spawn, N+1 snapshots per panel, unchanged
-  semantics and unchanged refusal behavior (`:443-457`).
+- Wall-clock timeout of 10 minutes per child, opt-in through a `timeoutMs`
+  field on `runSingleAgent`'s child options, so the legacy modes stay unbounded.
+  It fires one shared, idempotent kill controller that the abort path uses too:
+  SIGTERM immediately, then SIGKILL after 5 s only if the child has not actually
+  exited (tracked through `exit`/`close`, never `proc.killed`, which SIGTERM
+  already sets). A timed-out child is a failed result with a nonzero exit,
+  `terminationReason: "timeout"`, the error `timed out after 10 minutes`, and
+  its collected messages and usage intact, not a thrown error.
+- Each panelist's final answer is capped at `PER_TASK_OUTPUT_CAP` before it
+  enters the judge prompt; headers, the repeated task, and diagnostic labels are
+  outside that budget, and there is no aggregate ceiling on the judge input.
+- Guard: one fresh snapshot per spawn, so N snapshots for a panel of N plus one
+  per judge attempt, fewer when a pre-spawn refusal never reaches the snapshot;
+  unchanged semantics and unchanged refusal behavior (`:443-457`).
 - Concurrency: panelists spawn through `mapWithConcurrencyLimit` with the
   existing `MAX_CONCURRENCY`; with the 4-model cap a panel never queues.
 
-The judge is spawned by the same code path, with `agents/judge.md` as its system
-prompt, the code-reading tool set, and the framed panel output as its task. The
-judge prompt is a normal bundled agent file, listed by agent discovery and
-overridable from `~/.pi/agent/agents/judge.md`, and its model resolves as
-described in "Config".
+The judge is spawned by the same code path with `agents/judge.md` as its system
+prompt. Its task is the panelist blocks verbatim (`promptMode: "verbatim"`, no
+`Task: ` prefix, no format restatement); its tool list is the fixed code-reading
+set resolved by the panel path itself, never the override agent's declaration;
+its model and thinking level are the resolved effective ones; and every attempt
+carries the parent guard snapshot and its own fresh inheritance nonce. The judge
+prompt is a normal bundled agent file, listed by agent discovery and overridable
+from `~/.pi/agent/agents/judge.md`.
 
 ## Merge contract
 
-Judge input, one block per panelist:
+Judge input, one block per panelist in effective configured order:
 
 ```
 ### PANELIST <model id>
 task: <the task text>
 tools: read src/Foo.cs, gh_read pr diff, ffgrep BuildSampleRate
+status: completed
 <final answer, capped at 50 KiB>
 ```
+
+A failed panelist keeps its slot, its error, and any partial text under an
+explicit incomplete label:
+
+```
+### PANELIST <model id>
+task: <the task text>
+tools: (none)
+status: failed
+error: <short failure reason>
+[Incomplete partial answer:]
+<partial text, capped at 50 KiB; may be empty>
+```
+
+The `PANELIST` header, the repeated task, the `status` line, and the diagnostic
+labels are outside the 50 KiB answer budget, and the input has no aggregate
+ceiling. `tools` is a bounded summary of what that panelist actually called:
+known tools render their identifying arguments (the file path for a read, search
+patterns, Git/GitHub operation arguments), each displayed argument trimmed to
+about 80 characters, unknown tools fall back to a small deterministic scalar
+selection, repetitions collapse with counts (so repeated reads of one file
+become `read src/Foo.cs x3`), a failure appears only when a correlated tool
+result reported `isError`, and only the first 20 distinct entries are listed
+with a `(+N more)` suffix. It never includes tool-result bodies or transcripts.
 
 Included: the final answer plus a summary of the tools each panelist actually
 called, which is what lets the judge tell a checked finding from an assumed one
@@ -336,27 +373,41 @@ without paying for full transcripts.
 Judge output is a prompt convention, not a schema: `SHARED` / `<MODEL> ONLY` /
 `CONFLICTS` sections, each finding carrying a `file:line` and its attribution,
 using a short label per model (full id on first use). A judge that ignores the
-convention degrades to a merged review rather than failing the call.
-
-Until the judge half of Step 4 lands, a panel call returns labeled
-per-panelist sections with per-panelist usage and a notice that the merge is not
-implemented yet; the content described below is what the judge step produces.
+convention degrades to a plain merged review rather than failing the call;
+nonconforming but nonempty prose is still the merged content.
 
 Judge tools: the code-reading set (read, ffgrep, fffind, ls, git_read, gh_read),
 narrower than the panelists' researcher-grade set, so a CONFLICT can be settled
 by opening the file or diff without making every merge pay for web/Slack/memory
 work. The panel path passes this list itself, so an override of
-`agents/judge.md` that omits its `tools:` line cannot widen the judge.
+`agents/judge.md` that omits or widens its `tools:` line cannot change it, and
+`subagent` is never in the list.
 
 Result shape:
 
-- Tool content: merged review, then per-panelist usage lines and the judge usage
-  line (turns, tokens, cost), plus a total line for parity with the parallel
-  view's collapsed `Total:` (`:1245-1246`).
-- Tool details: every panelist's full messages, its raw review text, its
-  tool-call summary, the judge's raw output, and the panel config actually used.
-- `judge: "none"`: content is the labeled per-panelist sections with a
-  "merge skipped" notice and no judge usage line.
+- Tool content, in order: one plain header line naming the preset, the effective
+  model count, and the judge (or `none`); the applicable short notices (see
+  below); the capped merged review, or the capped labeled per-model sections
+  when there is no merge; one usage line per successful panelist labeled with
+  its effective requested model; an error line per failed panelist plus its
+  usage when any usage field is nonzero; one judge usage line, aggregating both
+  attempts and noting the retry, with the failure reason when no merge was
+  produced; and a `Total:` across every panelist and every judge attempt.
+  Context tokens are never summed, so the total has no `ctx:` field.
+- Tool details: `mode: "panel"`, the effective panel config, every panelist's
+  full messages, its uncapped final text (`output`), its tool-call summary, the
+  judge as a separate top-level record with its raw output, usage, and every
+  attempt (each keeping its messages, stderr, error, and uncapped output), the
+  notices, and the uncapped successful merged text. Panelist records carry no
+  `step`.
+- `judge: "none"` (or `null`): no judge spawn, a `merge-skipped` notice, the
+  labeled per-panelist sections, and no judge usage line.
+
+Notices are short one-line reasons (`merge-skipped`, `merge-failed`,
+`merge-aborted`, `partial-merge`, `single-model-merge`, `no-survivors`); full
+diagnostics stay in `details`. A produced merge of one survivor is labeled
+`single-model-merge`, and any failure among the panelists adds `partial-merge`
+naming each failing model with a short error.
 
 ## `/panel` command
 
@@ -388,9 +439,11 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
   whether an individual declared tool is genuinely read-only is not verified.
 - Panelists never receive `subagent`, so panels cannot nest, and the panel path
   passes the resolved tool list for every child rather than letting the agent's
-  declaration stand alone. When nothing survives resolution the child is
-  launched with `--no-tools` instead of falling back to the default tool set,
-  which is the behavior a fully dropped list used to get.
+  declaration stand alone. The judge is passed the fixed code-reading list the
+  same way, so an override declaration can narrow it in effect (by making a
+  tool unavailable) but never widen it. When nothing survives resolution the
+  child is launched with `--no-tools` instead of falling back to the default
+  tool set, which is the behavior a fully dropped list used to get.
 - Tool names the session did not register are still dropped at spawn time, with
   substitutes only for `ffgrep`/`fffind`. With the researcher-grade set this
   means web/Slack/session/memory sources can silently differ between sessions;
@@ -403,46 +456,83 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
   unknown or internal agent (the dispatchable agent names), a rejected panelist
   declaration (the offending tools), and the mode conflicts. The single, tasks,
   and chain validation failures return errors too, which they did not before.
-- Panelist failure: survivors are merged and the result is labeled as a
-  single-model (or partial) merge, with the failing model and its error text.
-  One provider outage never discards the other answers.
-- Zero successful panelists: no judge call; the failures are returned.
-- Judge failure: one retry, then the per-panelist sections with a notice that
-  the merge failed. Paid-for panel output is never discarded.
-- Abort: Ctrl+C kills all children through the existing signal path.
+- Panelist failure: survivors are still merged and the result is labeled as a
+  `single-model-merge` and/or `partial-merge` notice, naming the failing model
+  and a short error; one provider outage never discards the other answers.
+- Zero successful panelists: no judge call; the failures are returned with a
+  `no-survivors` notice and an error result.
+- Judge failure: exactly one retry with identical input, model, thinking level,
+  and tools, each attempt taking its own fresh guard snapshot. A retry is not
+  attempted after a timeout or an abort, and an already-aborted signal before
+  the retry produces the merge-aborted fallback instead. When both attempts
+  fail, the content falls back to the labeled per-panelist sections with a
+  `merge-failed` (or `merge-aborted`) notice; paid-for panel output is never
+  discarded.
+- Judge attempt failure is a nonzero/error result, a captured spawn error, a
+  guard refusal, or a whitespace-only exit-zero answer; the empty answer is
+  recorded as a failure rather than as the `(no output)` placeholder.
+- Abort: Ctrl+C kills all children through the existing signal path. Panelist
+  aborts keep the default throwing behavior, while the judge phase is
+  abort-as-result, so an abort during or before the merge still returns the
+  panelists' answers and the judge's partial output under a `merge-aborted`
+  notice.
 
 ## Display
 
 Collapsed tool row shows the merged review with per-panelist and judge usage
 lines; expanding reveals each raw review. This mirrors the existing parallel
-renderer (`:1160-1250`) rather than introducing a new comparison view.
+renderer (`:1160-1250`) rather than introducing a new comparison view. Step 4
+ships only the minimal rendering: the panel branch dims the first (header) line
+with `theme.fg("dim", ...)` and leaves the model-facing content ANSI-free.
+Expanded raw-review browsing is Step 5.
 
 ## Code and test layout
 
-Steps 2 and 3 implemented the pure functions, the harness extraction, and the
-tool wiring described below. The judge wiring is what remains.
+Steps 2 to 4 implemented the pure functions, the harness extraction, the tool
+wiring, and the judge orchestration described below.
 
 - Pure functions live in `extensions/subagent/agents.ts`, beside the ones they
   mirror: `parsePanels` next to `applyModelOverrides` (`:181`), and
   `formatPanelCatalog`/`formatPanelList` next to `formatAgentCatalog` (`:237`)
   and `formatAgentList` (`:256`). They take values and return strings or
   objects, never touching the filesystem or the console, so tests import
-  `agents.ts` directly and need no fake pi.
+  `agents.ts` directly and need no fake pi. `applyModelOverrides` returns the
+  accepted, normalized override map, and `discoverAgents` exposes it as
+  `configuredModels` so judge resolution can tell a configuration override from
+  an agent frontmatter pin.
+- `extensions/subagent/panel.ts` holds the other pure panel helpers:
+  `buildToolCallSummary`, `buildPanelistBlock`, `buildPanelJudgeInput`, and the
+  shared `truncateTaskOutput`/`PER_TASK_OUTPUT_CAP` used by both the judge input
+  and the legacy parallel renderer. No I/O and no console, so
+  `tests/subagent-panels.test.mts` imports it directly.
 - `extensions/subagent/index.ts` appends the panel catalog to the loadout that
   `prepareLoadout` returns, next to the agent catalog, and holds the tool-level
-  wiring: parameter validation, the refusals in "Agent roles", and the
-  `subagent_list` payload.
+  wiring: parameter validation, the refusals in "Agent roles", the
+  `subagent_list` payload, the panelist fan-out, the judge state machine with
+  its single retry, the shared child kill controller, and the content, notice,
+  and usage assembly (`aggregateUsage`, `buildPanelNotices`,
+  `formatLabeledPanelReviews`, `formatPanelContent`).
 - The fake-pi harness moves out of `tests/subagent-tool.test.mts` into
   `tests/subagent-harness.mts` in its own commit, before the panel work. The new
   file has no `.test.` suffix, is imported rather than run, and is deliberately
-  not on the `test:ci` list. It owns both spawn modes: a throwing mode for tests
-  that must never spawn and a recording mode that returns the recorded argv/env
-  with a restore, so the "any spawn is a failure" guarantee survives the move.
+  not on the `test:ci` list. It owns three spawn modes: a throwing mode for
+  tests that must never spawn, a recording mode that returns the recorded
+  argv/env with a restore, and `installControlledSpawn` for the judge lifecycle
+  tests, whose children stay alive until the test emits stdout, stderr, an
+  error, an exit, or a close. Its captured child records every signal passed to
+  `kill` and keeps `killed = true` after SIGTERM, so the escalation path cannot
+  rely on that flag. A `waitFor` helper yields on `setImmediate`, which node:test
+  mock timers for `setTimeout` never intercept, and bounds itself with a real
+  wall-clock deadline rather than an iteration count, since a few thousand
+  immediate ticks can drain while a spawn still waits on its temp prompt file
+  under full-suite load.
 - A new `tests/subagent-panels.test.mts` (added to the `test:ci` list in
   `package.json`) holds the pure parsing, validation, override-precedence,
-  role-inheritance, and catalog-rendering tests. Spawn, mutual-exclusion, and
-  description assertions stay in `tests/subagent-tool.test.mts`, whose
-  bundled-agent list grows by `judge` and `panelist`.
+  configured-model provenance, role-inheritance, catalog-rendering, judge-input,
+  truncation, and tool-summary tests. Spawn, mutual-exclusion, judge dispatch,
+  retry/fallback, abort/timeout, and description assertions stay in
+  `tests/subagent-tool.test.mts`, whose bundled-agent list grows by `judge` and
+  `panelist`.
 
 ## Verification plan
 
@@ -465,18 +555,30 @@ tool wiring described below. The judge wiring is what remains.
    `models`/`judge`/`agent` without `panel`, the project-agent confirmation
    under `agentScope: "both"`, catalog byte-stability including that a config
    without panels appends no panel sentence, per-child `model` in the legacy
-   modes, and guard snapshots. Done with Step 3. Still to come from this item:
-   the judge child's argv and tool set, `judge: "none"`, the judge-input cap and
-   tool-call summaries, timeout kill, survivor-merge labeling, and judge
-   retry-then-fallback.
-4. Renderer assertions for collapsed versus expanded result views.
+   modes, and guard snapshots. Done with Step 3. Completed by Step 4: the judge
+   child's argv (verbatim blocks, no `Task: ` prefix), its fixed tool set under
+   hostile or absent override declarations, `judge: "none"`/`null`, the
+   configured-model precedence with a frontmatter pin that adds no level, the
+   appended judge prompt inspected mid-spawn, guard snapshots and nonces per
+   attempt, partial and single-survivor merge labeling, zero survivors, the
+   retry matrix (ordinary failure, emitted spawn error, synchronous spawn
+   throw, guard refusal, empty or whitespace-only answer), terminal timeout,
+   abort during and before the merge, usage and total accounting, nonconforming
+   judge prose, merged-output truncation, and the child lifecycle cases
+   (10-minute SIGTERM, SIGKILL five seconds later while `killed` is already
+   true, a real exit during the grace period preventing SIGKILL, null-code
+   signal exits, timer/listener cleanup, the legacy modes never acquiring the
+   timer, and abort reusing the same escalation).
+4. Renderer assertions for collapsed versus expanded result views. Not done:
+   Step 4 ships only the minimal dim-header panel branch.
 5. One live run on a cheap pair (`baseten/glm-5-3-flash` +
    `baseten/deepseek-v4-1-flash`) to confirm a real merge produces the section
-   structure and usage lines.
+   structure and usage lines. Not done; deferred to Step 6.
 6. Full suite via `env -u PI_GUARD_INHERIT npm run test:ci` through `host_bash`
    (node is not on guard's sandboxed PATH), plus `extensions/subagent/README.md`
-   (the `role` concept, the `panels` config, and the new `subagent_list` fields)
-   and the repo `README.md`.
+   (the panel surface, the `role` concept, the `panels` config, and the
+   `subagent_list` fields) and the repo `README.md`, both updated with Step 4.
+   The renderer checks and the live run remain.
 
 ## Decisions made without asking
 
@@ -485,7 +587,11 @@ Called by the implementer, open to revision:
 - More than 4 models in a preset is a hard error; duplicates are deduped with a
   warning rather than rejected.
 - The catalog lists at most 10 presets, mirroring `formatAgentCatalog`'s shape.
-- Timeout is a fixed 10 minutes per child (no preset field for it).
+- Timeout is a fixed 10 minutes per panel child (no preset field for it), and it
+  is terminal: a timed-out judge is never retried.
+- The judge retries exactly once after an ordinary failure, with identical
+  input, model, thinking level, and tools, and each attempt takes its own fresh
+  guard snapshot.
 - `judge: "none"` and `judge` absent are distinct: absent falls through to the
   per-agent `models.judge` override and then the session model, while `none`
   means no merge at all.

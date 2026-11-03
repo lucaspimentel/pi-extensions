@@ -65,11 +65,21 @@ export interface SpawnMode {
 	restore(): void;
 }
 
+export interface CapturedChild extends EventEmitter {
+	stdout: EventEmitter;
+	stderr: EventEmitter;
+	/** Set on the first kill call, SIGTERM included, so escalation cannot use it. */
+	killed: boolean;
+	/** Every signal passed to `kill`, in order. */
+	killedWith: string[];
+	kill(signal?: string): boolean;
+}
+
 export interface CapturedSpawn {
 	command: string;
 	args: string[];
 	options: SpawnOptions;
-	child: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; killed: boolean; kill: () => boolean };
+	child: CapturedChild;
 }
 
 export interface RecordingSpawnMode extends SpawnMode {
@@ -115,30 +125,83 @@ export function installThrowingSpawn(): SpawnMode {
 	return installSpawn(throwingSpawn);
 }
 
+function makeCapturedChild(): CapturedChild {
+	const child = new EventEmitter() as CapturedChild;
+	child.stdout = new EventEmitter();
+	child.stderr = new EventEmitter();
+	child.killed = false;
+	child.killedWith = [];
+	child.kill = (signal?: string) => {
+		child.killed = true;
+		if (signal) child.killedWith.push(signal);
+		return true;
+	};
+	return child;
+}
+
+function captureSpawn(command: string, args: readonly string[], options: SpawnOptions): CapturedSpawn {
+	return {
+		command,
+		args: [...args],
+		options: { ...options, env: options.env === undefined ? undefined : { ...options.env } },
+		child: makeCapturedChild(),
+	};
+}
+
 /** Records dispatches without bypassing the harness's normal guard handshake. */
 export function installRecordingSpawn(beforeClose?: (spawn: CapturedSpawn, index: number) => number | void): RecordingSpawnMode {
 	const spawns: CapturedSpawn[] = [];
 	const mode = installSpawn(((command: string, args: readonly string[], options: SpawnOptions) => {
-		const child = new EventEmitter() as CapturedSpawn["child"];
-		child.stdout = new EventEmitter();
-		child.stderr = new EventEmitter();
-		child.killed = false;
-		child.kill = () => {
-			child.killed = true;
-			return true;
-		};
-		spawns.push({
-			command,
-			args: [...args],
-			options: { ...options, env: options.env === undefined ? undefined : { ...options.env } },
-			child,
-		});
+		const spawn = captureSpawn(command, args, options);
+		spawns.push(spawn);
 		// Deferred so the executor has attached its close handler first.
 		const index = spawns.length - 1;
-		queueMicrotask(() => child.emit("close", beforeClose?.(spawns[index], index) ?? 0));
-		return child;
+		queueMicrotask(() => spawn.child.emit("close", beforeClose?.(spawns[index], index) ?? 0));
+		return spawn.child;
 	}) as never);
 	return { ...mode, spawns };
+}
+
+/**
+ * Recording mode whose children stay alive until a test explicitly emits
+ * stdout, stderr, `error`, `exit`, or `close`. Used by the panel lifecycle
+ * tests together with node:test mock timers, so no real clock is involved.
+ *
+ * Unlike `installRecordingSpawn`, `onSpawn` runs synchronously inside the spawn
+ * override, before the executor attaches its stdout/close listeners, and may
+ * throw to simulate a spawn failure. Emit output from the test after awaiting
+ * `waitFor(() => mode.spawns.length === n)`, which lets those listeners attach.
+ */
+export function installControlledSpawn(onSpawn?: (spawn: CapturedSpawn, index: number) => void): RecordingSpawnMode {
+	const spawns: CapturedSpawn[] = [];
+	const mode = installSpawn(((command: string, args: readonly string[], options: SpawnOptions) => {
+		const spawn = captureSpawn(command, args, options);
+		spawns.push(spawn);
+		onSpawn?.(spawn, spawns.length - 1);
+		return spawn.child;
+	}) as never);
+	return { ...mode, spawns };
+}
+
+/**
+ * Yield the event loop until `predicate` holds or `deadlineMs` of real time has
+ * passed. Yields with `setImmediate`, never `setTimeout`, so node:test mock
+ * timers for `setTimeout` cannot deadlock it. The budget is wall clock rather
+ * than a fixed iteration count: a few thousand immediate ticks can drain in
+ * milliseconds while a spawn is still waiting on its temp prompt file or a
+ * guard snapshot, which made these waits fail only under full-suite load.
+ */
+export async function waitFor(
+	predicate: () => boolean,
+	message = "condition never became true",
+	deadlineMs = 10_000,
+): Promise<void> {
+	const deadline = Date.now() + deadlineMs;
+	for (;;) {
+		if (predicate()) return;
+		if (Date.now() > deadline) throw new Error(message);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
 }
 
 // Protect importers before any harness is constructed or executed.

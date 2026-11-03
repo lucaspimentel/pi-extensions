@@ -11,6 +11,14 @@ import {
 	parsePanels,
 } from "../extensions/subagent/agents.ts";
 import type { AgentScope } from "../extensions/subagent/agents.ts";
+import {
+	buildPanelJudgeInput,
+	buildPanelistBlock,
+	buildToolCallSummary,
+	PER_TASK_OUTPUT_CAP,
+	truncateTaskOutput,
+	type PanelReviewInput,
+} from "../extensions/subagent/panel.ts";
 
 function fixture(run: (f: {
 	cwd: string;
@@ -354,3 +362,209 @@ test("formatting is byte stable, uses plain name ordering, and never mutates fro
 	assert.deepEqual(formatPanelList([...panels].reverse()), formatPanelList(panels));
 	assert.deepEqual(panels, before);
 });
+
+// ── Judge input blocks and the per-call tool summary (pure) ───────────────────
+
+function toolCallAssistant(calls: Array<{ id: string; name: string; args?: Record<string, unknown> }>): any {
+	return {
+		role: "assistant",
+		content: calls.map((call) => ({ type: "toolCall", id: call.id, name: call.name, arguments: call.args ?? {} })),
+	};
+}
+
+function toolResultMessage(id: string, isError = false): any {
+	return { role: "toolResult", toolCallId: id, toolName: "t", content: [], isError, timestamp: 0 };
+}
+
+test("judge input blocks have the settled structure, repeat the task, and keep configured order", () => {
+	const reviews: PanelReviewInput[] = [
+		{ model: "p/a", task: "Do the thing", toolCallSummary: "read src/a.ts", status: "completed", output: "Answer A" },
+		{ model: "p/b", task: "Do the thing", toolCallSummary: "(none)", status: "failed", output: "Partial B", error: "provider boom" },
+		{ model: "p/c", task: "Do the thing", toolCallSummary: "ffgrep BuildSampleRate", status: "completed", output: "Answer C" },
+	];
+	const input = buildPanelJudgeInput(reviews);
+	assert.equal(
+		input,
+		[
+			"### PANELIST p/a",
+			"task: Do the thing",
+			"tools: read src/a.ts",
+			"status: completed",
+			"",
+			"Answer A",
+			"",
+			"### PANELIST p/b",
+			"task: Do the thing",
+			"tools: (none)",
+			"status: failed",
+			"error: provider boom",
+			"[Incomplete partial answer:]",
+			"Partial B",
+			"",
+			"### PANELIST p/c",
+			"task: Do the thing",
+			"tools: ffgrep BuildSampleRate",
+			"status: completed",
+			"",
+			"Answer C",
+		].join("\n"),
+	);
+	assert.equal(input.split("task: Do the thing").length - 1, 3, "task repeated once per block");
+	assert.ok(input.indexOf("PANELIST p/a") < input.indexOf("PANELIST p/b"));
+	assert.ok(input.indexOf("PANELIST p/b") < input.indexOf("PANELIST p/c"));
+	assert.equal(input.includes("PANELIST"), true);
+	assert.equal(buildPanelJudgeInput([reviews[2], reviews[0]]), `${buildPanelistBlock(reviews[2])}\n\n${buildPanelistBlock(reviews[0])}`);
+	assert.equal(buildPanelJudgeInput([]), "");
+});
+
+test("the block header uses the effective requested label and a failed block labels its partial answer", () => {
+	const review: PanelReviewInput = {
+		model: "effective/model",
+		task: "t",
+		toolCallSummary: "(none)",
+		status: "failed",
+		output: "half an answer",
+		error: "timed out after 10 minutes",
+	};
+	const block = buildPanelistBlock(review);
+	assert.ok(block.startsWith("### PANELIST effective/model\ntask: t\ntools: (none)\nstatus: failed\nerror: timed out after 10 minutes\n"));
+	assert.ok(block.includes("[Incomplete partial answer:]\nhalf an answer"));
+	const empty: PanelReviewInput = { ...review, output: "" };
+	assert.ok(buildPanelistBlock(empty).endsWith("[Incomplete partial answer:]\n"));
+});
+
+test("answers are capped at the shared 50 KiB budget with the legacy truncation annotation", () => {
+	const exact = "A".repeat(PER_TASK_OUTPUT_CAP);
+	assert.equal(truncateTaskOutput(exact), exact, "exactly at the cap is unchanged");
+
+	const oversized = `${exact}A`;
+	const truncated = truncateTaskOutput(oversized);
+	assert.equal(truncated.slice(0, PER_TASK_OUTPUT_CAP), exact);
+	assert.ok(truncated.includes("[Output truncated: 1 bytes omitted. Full output preserved in tool details.]"));
+	assert.equal(oversized.length, PER_TASK_OUTPUT_CAP + 1, "the input string is untouched");
+
+	const multibyte = "é".repeat(PER_TASK_OUTPUT_CAP);
+	const clipped = truncateTaskOutput(multibyte);
+	const [kept, annotation] = clipped.split("\n\n[Output truncated: ");
+	assert.equal(Buffer.byteLength(kept, "utf8"), PER_TASK_OUTPUT_CAP);
+	assert.equal(kept, "é".repeat(PER_TASK_OUTPUT_CAP / 2), "whole code points only");
+	assert.ok(annotation.startsWith(`${PER_TASK_OUTPUT_CAP} bytes omitted.`));
+	assert.equal(multibyte.length, PER_TASK_OUTPUT_CAP, "the input string is untouched");
+});
+
+test("capping preserves the original review strings", () => {
+	const output = "A".repeat(PER_TASK_OUTPUT_CAP + 500);
+	const review: PanelReviewInput = Object.freeze({ model: "m", task: "t", toolCallSummary: "(none)", status: "completed", output });
+	const block = buildPanelistBlock(review);
+	assert.equal(review.output, output);
+	assert.ok(block.includes(`[Output truncated: 500 bytes omitted.`));
+});
+
+test("the judge input has no aggregate ceiling: each answer is capped independently", () => {
+	const big = "A".repeat(60 * 1024);
+	const input = buildPanelJudgeInput([
+		{ model: "p/a", task: "t", toolCallSummary: "(none)", status: "completed", output: big },
+		{ model: "p/b", task: "t", toolCallSummary: "(none)", status: "completed", output: big },
+	]);
+	assert.ok(Buffer.byteLength(input, "utf8") > 100 * 1024, "combined size exceeds the per-answer cap");
+	assert.equal(input.split("[Output truncated:").length - 1, 2);
+});
+
+test("tool summaries group repetitions with counts in first-use order", () => {
+	const messages = [
+		toolCallAssistant([
+			{ id: "1", name: "ffgrep", args: { pattern: "BuildSampleRate", path: "src" } },
+			{ id: "2", name: "read", args: { file_path: "src/a.ts" } },
+			{ id: "3", name: "ffgrep", args: { pattern: "BuildSampleRate", path: "src" } },
+		]),
+		toolResultMessage("1"),
+		toolResultMessage("2"),
+		toolResultMessage("3"),
+	];
+	assert.equal(buildToolCallSummary(messages), "ffgrep BuildSampleRate src x2, read src/a.ts");
+});
+
+test("differing arguments stay distinct even when display truncation hides the difference", () => {
+	const prefix = "x".repeat(200);
+	const messages = [
+		toolCallAssistant([
+			{ id: "1", name: "read", args: { file_path: `${prefix}a.ts` } },
+			{ id: "2", name: "read", args: { file_path: `${prefix}b.ts` } },
+		]),
+	];
+	const summary = buildToolCallSummary(messages);
+	assert.equal(summary.includes(" x2"), false, "untruncated key arguments keep the calls apart");
+	assert.equal(summary.split("read ").length - 1, 2);
+});
+
+test("failures are attributed only through a correlated tool result", () => {
+	const messages = [
+		toolCallAssistant([
+			{ id: "1", name: "ffgrep", args: { pattern: "build" } },
+			{ id: "2", name: "ffgrep", args: { pattern: "build" } },
+			{ id: "3", name: "read", args: { file_path: "src/a.ts" } },
+			{ id: "4", name: "ffgrep", args: { pattern: "build" } },
+		]),
+		toolResultMessage("1", true),
+		toolResultMessage("2", false),
+		// 3 and 4 have no result at all, so they are not failures.
+	];
+	assert.equal(buildToolCallSummary(messages), "ffgrep build x3 (1 failed), read src/a.ts");
+});
+
+test("the summary renders the first 20 distinct entries and a remainder count", () => {
+	const calls = Array.from({ length: 25 }, (_, i) => ({
+		id: `call-${i}`,
+		name: "read",
+		args: { file_path: `src/file-${String(i).padStart(2, "0")}.ts` },
+	}));
+	const summary = buildToolCallSummary([toolCallAssistant(calls)]);
+	assert.equal(summary.split(", ").length, 20, "exactly 20 distinct entries are rendered");
+	assert.ok(summary.endsWith(" (+5 more)"), "the 5 remaining distinct entries are counted");
+	assert.ok(summary.includes("read src/file-00.ts"));
+	assert.equal(summary.includes("read src/file-20.ts"), false);
+});
+
+test("displayed arguments are trimmed to the presentation cap", () => {
+	const long = "p".repeat(150);
+	const summary = buildToolCallSummary([toolCallAssistant([{ id: "1", name: "read", args: { file_path: long } }])]);
+	assert.equal(summary, `read ${"p".repeat(80)}...`);
+});
+
+test("unknown tools use a deterministic small fallback selection", () => {
+	const messages = [
+		toolCallAssistant([
+			{ id: "1", name: "custom_tool", args: { zeta: "z", alpha: 2, beta: true, gamma: "g", delta: "d", complex: { nested: 1 } } },
+		]),
+	];
+	assert.equal(buildToolCallSummary(messages), "custom_tool alpha=2 beta=true delta=d gamma=g");
+});
+
+test("summaries are never built from tool-result bodies or a whole transcript", () => {
+	assert.equal(buildToolCallSummary([]), "(none)");
+	const messages = [
+		toolCallAssistant([{ id: "1", name: "read", args: { file_path: "src/secret.ts" } }]),
+		{
+			role: "toolResult",
+			toolCallId: "1",
+			toolName: "read",
+			content: [{ type: "text", text: "SECRET BODY" }],
+			isError: false,
+			timestamp: 0,
+		},
+	];
+	const summary = buildToolCallSummary(messages);
+	assert.equal(summary, "read src/secret.ts");
+	assert.equal(summary.includes("SECRET"), false);
+});
+
+test("configuredModels exposes accepted configuration overrides only, never frontmatter pins", { concurrency: false }, () => fixture((f) => {
+	agent(f.user, "judge", "model: frontmatter/judge\n");
+	agent(f.user, "scout", "model: frontmatter/scout\n");
+	assert.deepEqual(f.discover().configuredModels, {}, "a frontmatter pin is not a configured override");
+	f.config({ models: { judge: " configured/judge ", scout: "configured/scout", absent: "x", worker: " " } });
+	const result = f.discover();
+	assert.deepEqual(result.configuredModels, { judge: "configured/judge", scout: "configured/scout" });
+	assert.equal(result.agents.find((a) => a.name === "judge")?.model, "configured/judge");
+	assert.equal(result.agents.find((a) => a.name === "worker")?.model, undefined);
+}));

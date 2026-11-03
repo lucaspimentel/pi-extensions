@@ -63,6 +63,13 @@ export interface AgentConfig {
 export interface AgentDiscoveryResult extends PanelParseResult {
 	agents: AgentConfig[];
 	projectAgentsDir: string | null;
+	/**
+	 * Accepted, normalized `models` overrides from `subagent.json` by agent name.
+	 * Separate from `AgentConfig.model` because that field also carries a
+	 * frontmatter pin, and the judge precedence chain must distinguish the two:
+	 * a frontmatter pin is not an extra level between the preset and the session.
+	 */
+	configuredModels: Record<string, string>;
 }
 
 /**
@@ -204,7 +211,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 
 	const configPath = path.join(getAgentDir(), "subagent.json");
 	const raw = readConfiguration(configPath);
-	applyModelOverrides(agentMap, raw, configPath);
+	const configuredModels = applyModelOverrides(agentMap, raw, configPath);
 	const result = parsePanels((raw as { panels?: unknown } | null)?.panels);
 	for (const panel of result.panels) {
 		if (!agentMap.has(panel.agent)) {
@@ -216,7 +223,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	}
 	for (const ignored of result.ignoredPanels) console.warn(ignored.reason);
 
-	return { agents: Array.from(agentMap.values()), projectAgentsDir, ...result };
+	return { agents: Array.from(agentMap.values()), projectAgentsDir, configuredModels, ...result };
 }
 
 /**
@@ -242,13 +249,20 @@ function readConfiguration(configPath: string): unknown {
 	}
 }
 
-function applyModelOverrides(agentMap: Map<string, AgentConfig>, raw: unknown, configPath: string): void {
+/**
+ * Applies the per-agent overrides in place and returns the accepted, trimmed
+ * map. The return value is what the judge precedence chain reads, because it
+ * is the only place that distinguishes a configured override from a
+ * frontmatter pin.
+ */
+function applyModelOverrides(agentMap: Map<string, AgentConfig>, raw: unknown, configPath: string): Record<string, string> {
+	const accepted: Record<string, string> = {};
 	const models = (raw as { models?: unknown } | null)?.models;
 	if (typeof models !== "object" || models === null) {
 		if (models !== undefined) {
 			console.warn(`[subagent] ${configPath}: "models" should be an object of agent name -> model`);
 		}
-		return;
+		return accepted;
 	}
 
 	for (const [name, model] of Object.entries(models as Record<string, unknown>)) {
@@ -262,7 +276,9 @@ function applyModelOverrides(agentMap: Map<string, AgentConfig>, raw: unknown, c
 			continue;
 		}
 		agent.model = model.trim();
+		accepted[name] = model.trim();
 	}
+	return accepted;
 }
 
 /** Parse the panels value without I/O, availability checks, or input mutation. */

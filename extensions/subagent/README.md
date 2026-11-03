@@ -17,6 +17,10 @@ streaming, usage display, security model).
 - **Model overrides**: all agents inherit the dispatching session's model. Pin
   per-agent models in `~/.pi/agent/subagent.json` (see below) without
   duplicating agent files.
+- **Panels**: `subagent({ panel, task })` fans one task across a named preset's
+  read-only models and merges the answers with a judge model, with per-model
+  attribution, a bounded judge input, a retry-then-fallback path, and a fixed
+  10-minute per-child timeout. See "Panels".
 - **Agent discovery**: the `subagent` tool describes the discovered scope-`user`
   agents, rewritten per request, and the `subagent_list` tool returns the full
   catalog (source, model, tools) without spawning. See "Discovering agents".
@@ -69,6 +73,8 @@ streaming, usage display, security model).
 | `worker`  | (all default)                                                                                                                                     | inherit  |
 | `reviewer` | read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, session_excerpt, memory_read, memory_search, memory_status | inherit |
 | `researcher` | read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, session_excerpt, memory_read, memory_search, memory_status | inherit |
+| `panelist` | read, ffgrep, fffind, ls, git_read, gh_read, web_fetch, web_search, slack_search, slack_read_channel, slack_read_thread, session_search, session_excerpt, memory_read, memory_search, memory_status | inherit |
+| `judge` (internal) | read, ffgrep, fffind, ls, git_read, gh_read | inherit |
 
 Notes:
 
@@ -135,6 +141,82 @@ The model is given the discovered agents without a separate call:
   guard snapshot; project agents appear only when the scope includes them. It
   declares `outputSchema` (and matching `structuredContent`), so codemode gets
   structured data, and `readOnlyHint`, so it is allowed during planning.
+
+## Panels
+
+`subagent({panel, task})` runs one task across a named preset's read-only models
+and merges the answers with a judge. Presets live in `~/.pi/agent/subagent.json`:
+
+```json
+{
+  "panels": {
+    "review": {
+      "agent": "reviewer",
+      "models": ["anthropic/claude-opus-5-5", "openai/openai/gpt-6.1-sol"],
+      "judge": "anthropic/claude-sonnet-5-5"
+    },
+    "ask": { "models": ["google/gemini-4-argon", "baseten/kimi-k3"] }
+  }
+}
+```
+
+- `agent` defaults to the bundled `panelist`, and `models` takes 1 to 4 ids;
+  duplicates are deduped with a warning, and a malformed preset is warned about
+  and ignored. `subagent_list` reports the raw `panels` config and the
+  `ignoredPanels` reasons.
+- `judge` is optional and resolves in this order: the inline `judge` argument,
+  the preset's `judge`, the per-agent `models.judge` override, then the
+  dispatching session's model. `judge: "none"` (or `null`) skips the merge and
+  returns labeled per-model sections. A `model:` pin in a `judge.md` override is
+  not part of that chain.
+- `/panel <preset> <text>` is a prompt template that calls the tool with the
+  text passed unchanged.
+
+What a call does:
+
+- Panelists spawn in parallel (4 concurrent) with their own `--model`, their
+  resolved read-only tool list, the per-model thinking level from settings or
+  the session level, a common cwd, and a fresh guard snapshot each. A panelist
+  agent that declares `write`/`edit`/`bash`, or declares no `tools:` line, is
+  refused before any confirmation or spawn.
+- Each panel child has a fixed 10-minute wall-clock timeout behind an opt-in
+  `runSingleAgent` option, so the legacy single/tasks/chain modes stay
+  unbounded. One shared, idempotent kill controller sends SIGTERM and then
+  SIGKILL five seconds later only if the child has not actually exited (it
+  tracks `exit`/`close`, not `proc.killed`, which SIGTERM already sets). A
+  timed-out child is a failure (`timed out after 10 minutes`, nonzero exit,
+  `terminationReason: "timeout"`) with its partial output and usage intact.
+- The judge runs `runSingleAgent` with agent `judge`, the fixed code-reading
+  tool list (read, ffgrep, fffind, ls, git_read, gh_read; never `subagent`),
+  the resolved judge model and thinking level, and the panelist blocks as its
+  task: the exact `### PANELIST <model>` header, the repeated task, a bounded
+  tool-use summary, the status, and the answer (each answer capped at 50 KiB).
+  A failed panelist keeps its block with its error and its partial text under an
+  explicit incomplete label.
+- A failed judge attempt (nonzero or error exit, captured spawn error, guard
+  refusal, or a whitespace-only exit-zero answer) is retried exactly once with
+  identical input, model, thinking level, and tools, each attempt taking its own
+  fresh guard snapshot. A timeout or abort is terminal; an abort before the
+  retry produces the merge-aborted fallback instead. After two failures the
+  content falls back to the labeled per-model sections. Panelist answers are
+  never discarded.
+- Zero surviving panelists skip the judge and return an error result.
+- Content is one header line, the applicable short notices (`merge-skipped`,
+  `merge-failed`, `merge-aborted`, `partial-merge`, `single-model-merge`,
+  `no-survivors`), the merged review or the labeled sections, per-model usage
+  lines, an error line plus usage for each failed panelist, the judge usage line
+  (noting the retry), and a `Total:` across every panelist and every judge
+  attempt. Context tokens are never summed, so the total has no `ctx:` field.
+- Details keep each panelist's full messages, uncapped answer, and tool-call
+  summary under `results`, the judge with every attempt's raw output under
+  `judge`, plus the effective panel config, the notices, and the uncapped merged
+  text. Panelist records carry no `step`. Only the collapsed header line is dim
+  today; expanded raw-review browsing is not implemented yet.
+
+Tool availability is a runtime property, not a declaration. `resolveAgentTools`
+drops every declared name the dispatching session did not register, and only
+`ffgrep`/`fffind` have substitutes, so the same preset can see fewer tools in a
+session without the optional search package or the git/GitHub/Slack extensions.
 
 ## Choosing an agent
 

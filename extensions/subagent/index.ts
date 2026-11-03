@@ -15,12 +15,12 @@
  *   - Single: { agent: "name", task: "..." }
  *   - Parallel: { tasks: [{ agent: "name", task: "..." }, ...] }
  *   - Chain: { chain: [{ agent: "name", task: "... {previous} ..." }, ...] }
- *   - Panel: { panel: "preset", task: "..." } (read-only fan-out, no merge yet)
+ *   - Panel: { panel: "preset", task: "..." } (read-only fan-out merged by a judge)
  *
  * Uses JSON mode to capture structured output from subagents.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -52,11 +52,23 @@ import {
 } from "./agents.ts";
 import { INHERIT_ENV, serializeInheritance } from "../guard/policy/inheritance.ts";
 import { queryGuardSnapshot, type GuardSnapshot } from "./guard-snapshot.ts";
+import {
+	buildPanelJudgeInput,
+	buildToolCallSummary,
+	truncateTaskOutput,
+	type PanelReviewInput,
+} from "./panel.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
-const PER_TASK_OUTPUT_CAP = 50 * 1024;
+/** Opt-in per-child wall-clock timeout for the panel phase (panelists and judge). */
+const PANEL_CHILD_TIMEOUT_MS = 10 * 60 * 1000;
+/** Grace period between SIGTERM and SIGKILL when terminating a child. */
+const CHILD_KILL_GRACE_MS = 5 * 1000;
+/** Fixed code-reading tool set for the judge, passed by the panel path itself. */
+const JUDGE_TOOL_NAMES = ["read", "ffgrep", "fffind", "ls", "git_read", "gh_read"];
+const ERROR_REASON_CAP = 160;
 
 /**
  * Preferred tool -> built-in substitute, applied when the preferred tool is not
@@ -182,6 +194,9 @@ interface UsageStats {
 	turns: number;
 }
 
+/** Usage without `contextTokens`: never summed across children. */
+type UsageTotals = Pick<UsageStats, "input" | "output" | "cacheRead" | "cacheWrite" | "cost" | "turns">;
+
 interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "bundled" | "unknown";
@@ -194,6 +209,8 @@ interface SingleResult {
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
+	terminationReason?: "timeout" | "aborted";
+	exitSignal?: NodeJS.Signals;
 }
 
 interface EffectivePanel {
@@ -203,13 +220,61 @@ interface EffectivePanel {
 	judge: { agent: string; model?: string } | null;
 }
 
-interface SubagentDetails {
-	mode: "single" | "parallel" | "chain" | "panel";
-	panel?: EffectivePanel;
+/** A panelist record: `results` in panel mode, never the judge. */
+interface PanelistResult extends Omit<SingleResult, "step"> {
+	model: string;
+	output: string;
+	toolCallSummary: string;
+}
+
+/** One judge invocation, kept raw even when it failed. */
+interface JudgeAttempt extends Omit<SingleResult, "step"> {
+	output: string;
+}
+
+interface PanelJudgeResult {
+	agent: "judge";
+	model?: string;
+	output: string;
+	usage: UsageTotals;
+	attempts: JudgeAttempt[];
+}
+
+type PanelNoticeKind =
+	| "merge-skipped"
+	| "merge-failed"
+	| "merge-aborted"
+	| "partial-merge"
+	| "single-model-merge"
+	| "no-survivors";
+
+interface PanelNotice {
+	kind: PanelNoticeKind;
+	reason: string;
+}
+
+interface BaseSubagentDetails {
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
+}
+
+interface DelegateDetails extends BaseSubagentDetails {
+	mode: "single" | "parallel" | "chain";
 	results: SingleResult[];
 }
+
+interface PanelDetails extends BaseSubagentDetails {
+	mode: "panel";
+	/** Omitted for preflight failures, where no preset was accepted. */
+	panel?: EffectivePanel;
+	/** Panelists only: the judge lives in `judge`. */
+	results: PanelistResult[];
+	judge: PanelJudgeResult | null;
+	notices: PanelNotice[];
+	mergedOutput: string | null;
+}
+
+type SubagentDetails = DelegateDetails | PanelDetails;
 
 function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -234,15 +299,180 @@ function getResultOutput(result: SingleResult): string {
 	return getFinalOutput(result.messages) || "(no output)";
 }
 
+/** Legacy parallel truncation now delegates to the shared panel helper. */
 function truncateParallelOutput(output: string): string {
-	const byteLength = Buffer.byteLength(output, "utf8");
-	if (byteLength <= PER_TASK_OUTPUT_CAP) return output;
+	return truncateTaskOutput(output);
+}
 
-	let truncated = output.slice(0, PER_TASK_OUTPUT_CAP);
-	while (Buffer.byteLength(truncated, "utf8") > PER_TASK_OUTPUT_CAP) {
-		truncated = truncated.slice(0, -1);
+/** Sum the additive usage fields. `contextTokens` is per child and never summed. */
+function aggregateUsage(usages: readonly UsageStats[]): UsageTotals {
+	const total: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+	for (const usage of usages) {
+		total.input += usage.input;
+		total.output += usage.output;
+		total.cacheRead += usage.cacheRead;
+		total.cacheWrite += usage.cacheWrite;
+		total.cost += usage.cost;
+		total.turns += usage.turns;
 	}
-	return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted. Full output preserved in tool details.]`;
+	return total;
+}
+
+/** One bounded, whitespace-normalized line for content; details keep the raw text. */
+function boundedLine(text: string, cap = ERROR_REASON_CAP): string {
+	const normalized = text.replace(/\s+/g, " ").trim();
+	if (!normalized) return "(no details)";
+	return normalized.length > cap ? `${normalized.slice(0, cap)}...` : normalized;
+}
+
+/** Short, actionable failure reason for content and the judge input. */
+function failureReason(result: SingleResult): string {
+	const reason =
+		result.errorMessage ||
+		result.stderr.trim() ||
+		(result.terminationReason === "timeout"
+			? "timed out after 10 minutes"
+			: result.terminationReason === "aborted"
+				? "aborted"
+				: result.stopReason || "failed");
+	return boundedLine(reason);
+}
+
+function hasNonzeroUsage(usage: UsageStats): boolean {
+	return Boolean(usage.input || usage.output || usage.cacheRead || usage.cacheWrite || usage.cost || usage.turns);
+}
+
+function usageText(usage: UsageStats | UsageTotals): string {
+	return formatUsageStats(usage) || "no usage";
+}
+
+/** A judge attempt is a failure on a nonzero exit or an empty (whitespace-only) answer. */
+function judgeAttemptFailed(result: SingleResult): boolean {
+	return isFailedResult(result) || !getFinalOutput(result.messages).trim();
+}
+
+function toJudgeAttempt(result: SingleResult): JudgeAttempt {
+	const { step: _step, ...rest } = result;
+	return { ...rest, output: getFinalOutput(result.messages) };
+}
+
+function buildJudgeResult(output: string, model: string | undefined, attempts: JudgeAttempt[]): PanelJudgeResult {
+	return { agent: "judge", model, output, usage: aggregateUsage(attempts.map((attempt) => attempt.usage)), attempts };
+}
+
+/** The last judge attempt holds a usable merge. */
+function judgeIsMerged(judge: PanelJudgeResult): boolean {
+	const last = judge.attempts.at(-1);
+	return Boolean(last && !isFailedResult(last) && judge.output.trim());
+}
+
+/**
+ * Panel notices: the fallback reasons plus the survivor labels. Merge labels
+ * only describe a produced merge; when the judge did not merge, the labeled
+ * per-model sections already carry the failures.
+ */
+function buildPanelNotices(
+	panel: EffectivePanel,
+	results: readonly PanelistResult[],
+	judge: PanelJudgeResult | null,
+	aborted: boolean,
+): PanelNotice[] {
+	const failed = results.filter(isFailedResult);
+	const survivors = results.filter((result) => !isFailedResult(result));
+	if (results.length > 0 && survivors.length === 0) {
+		return [
+			{
+				kind: "no-survivors",
+				reason: boundedLine(
+					`all ${results.length} panelists failed: ${failed.map((result) => `${result.model} (${failureReason(result)})`).join("; ")}`,
+				),
+			},
+		];
+	}
+
+	const notices: PanelNotice[] = [];
+	const merged = judge !== null && judgeIsMerged(judge);
+	if (!merged) {
+		if (judge === null && panel.judge === null) {
+			notices.push({ kind: "merge-skipped", reason: 'judge is "none"; per-model sections follow' });
+		} else if (aborted) {
+			notices.push({ kind: "merge-aborted", reason: "the judge was aborted" });
+		} else {
+			const lastAttempt = judge?.attempts.at(-1);
+			notices.push({
+				kind: "merge-failed",
+				reason: lastAttempt ? failureReason(lastAttempt) : "the judge did not produce a merge",
+			});
+		}
+	}
+	if (merged && survivors.length === 1) {
+		notices.push({ kind: "single-model-merge", reason: boundedLine(`only ${survivors[0].model} answered`) });
+	}
+	if (merged && failed.length > 0) {
+		notices.push({
+			kind: "partial-merge",
+			reason: boundedLine(
+				`${failed.length} of ${results.length} panelists failed: ${failed.map((result) => `${result.model} (${failureReason(result)})`).join("; ")}`,
+			),
+		});
+	}
+	return notices;
+}
+
+/** Capped labeled sections, the fallback whenever there is no merged review. */
+function formatLabeledPanelReviews(results: readonly PanelistResult[]): string {
+	return results
+		.map((result) => {
+			const status = isFailedResult(result)
+				? `failed${result.stopReason && result.stopReason !== "end" ? ` (${result.stopReason})` : ""}`
+				: "completed";
+			const body = isFailedResult(result)
+				? result.errorMessage || result.stderr || result.output || "(no output)"
+				: result.output || "(no output)";
+			return `### [${result.model}] ${status}\n\n${truncateTaskOutput(body)}`;
+		})
+		.join("\n\n---\n\n");
+}
+
+/**
+ * Model-facing panel content: a plain header, applicable notices, the merged
+ * review or the labeled fallback sections, per-model usage, the judge usage
+ * line, and one total across every panelist and every judge attempt. Never
+ * contains ANSI sequences; dim styling lives in the renderer.
+ */
+function formatPanelContent(details: PanelDetails): string {
+	const panel = details.panel;
+	const judge = details.judge;
+	const judgeLabel = judge ? judge.model ?? "session model" : "none";
+	const modelCount = details.results.length;
+	const lines = [`Panel ${panel?.name ?? "(unknown)"} (${modelCount} model${modelCount === 1 ? "" : "s"}; judge: ${judgeLabel})`];
+	for (const notice of details.notices) lines.push(`${notice.kind}: ${notice.reason}`);
+	lines.push("");
+	lines.push(details.mergedOutput !== null ? truncateTaskOutput(details.mergedOutput) : formatLabeledPanelReviews(details.results));
+
+	const usageLines: string[] = [];
+	for (const result of details.results) {
+		if (!isFailedResult(result)) usageLines.push(`- ${result.model}: ${usageText(result.usage)}`);
+	}
+	for (const result of details.results) {
+		if (!isFailedResult(result)) continue;
+		usageLines.push(`- ${result.model} failed: ${failureReason(result)}`);
+		if (hasNonzeroUsage(result.usage)) usageLines.push(`  usage: ${usageText(result.usage)}`);
+	}
+	if (judge) {
+		const retryNote = judge.attempts.length > 1 ? ` (${judge.attempts.length} attempts)` : "";
+		const lastAttempt = judge.attempts.at(-1);
+		const failure = !judgeIsMerged(judge) && lastAttempt ? ` failed: ${failureReason(lastAttempt)}` : "";
+		usageLines.push(`- judge ${judge.model ?? "session model"}: ${usageText(judge.usage)}${retryNote}${failure}`);
+	}
+	if (usageLines.length > 0) lines.push("", ...usageLines);
+
+	const totals = aggregateUsage([
+		...details.results.map((result) => result.usage),
+		...(judge?.attempts ?? []).map((attempt) => attempt.usage),
+	]);
+	lines.push("", `Total: ${usageText(totals)}`);
+	return lines.join("\n");
 }
 
 type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
@@ -368,9 +598,65 @@ interface DispatchDefaults {
 }
 
 interface ChildOptions {
-	model?: string;
+	/** `null` suppresses agent/session fallback; `undefined` inherits as before. */
+	model?: string | null;
 	thinkingLevel?: ThinkingLevel;
 	tools?: string[];
+	/** Opt-in wall-clock timeout; fires the shared kill sequence on expiry. */
+	timeoutMs?: number;
+	/** `verbatim` passes the task as the whole final argv entry (judge input). */
+	promptMode?: "task" | "verbatim";
+	/** `result` converts spawn/prompt failures into failed results. */
+	failureMode?: "throw" | "result";
+	/** `result` returns a failed aborted result instead of throwing. */
+	abortMode?: "throw" | "result";
+}
+
+interface ChildKillController {
+	terminate(): void;
+	dispose(): void;
+}
+
+/**
+ * One shared termination sequence for abort and timeout: idempotent SIGTERM,
+ * then SIGKILL after `CHILD_KILL_GRACE_MS` only if the child has not actually
+ * exited. `proc.killed` becomes true on SIGTERM and must never gate escalation.
+ */
+function createChildKillController(proc: ChildProcess): ChildKillController {
+	let terminated = false;
+	let exited = false;
+	let escalation: NodeJS.Timeout | undefined;
+	let disposed = false;
+	const markExited = () => {
+		exited = true;
+		if (escalation) {
+			clearTimeout(escalation);
+			escalation = undefined;
+		}
+	};
+	proc.once("exit", markExited);
+	proc.once("close", markExited);
+	return {
+		terminate() {
+			if (terminated || disposed || exited) return;
+			terminated = true;
+			proc.kill("SIGTERM");
+			escalation = setTimeout(() => {
+				escalation = undefined;
+				if (!exited) proc.kill("SIGKILL");
+			}, CHILD_KILL_GRACE_MS);
+		},
+		dispose() {
+			if (disposed) return;
+			disposed = true;
+			if (escalation) {
+				clearTimeout(escalation);
+				escalation = undefined;
+			}
+			proc.removeListener("exit", markExited);
+			proc.removeListener("close", markExited);
+		},
+	};
 }
 
 async function runSingleAgent(
@@ -406,7 +692,7 @@ async function runSingleAgent(
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	const inheritsDispatchConfig = !agent.model;
-	const model = child.model ?? agent.model ?? dispatchDefaults.model;
+	const model = child.model === null ? undefined : child.model ?? agent.model ?? dispatchDefaults.model;
 	if (model) args.push("--model", model);
 	const thinking = child.thinkingLevel ?? (inheritsDispatchConfig ? dispatchDefaults.thinkingLevel : undefined);
 	if (thinking) args.push("--thinking", thinking);
@@ -442,6 +728,11 @@ async function runSingleAgent(
 		}
 	};
 
+	// Declared outside the try so the failure-mode catch can tell a deliberate
+	// abort/timeout throw apart from a spawn or prompt-preparation failure.
+	let wasAborted = false;
+	let timedOut = false;
+
 	try {
 		if (agent.systemPrompt.trim()) {
 			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
@@ -450,15 +741,21 @@ async function runSingleAgent(
 			args.push("--append-system-prompt", tmpPromptPath);
 		}
 
-		args.push(`Task: ${task}`);
-		let wasAborted = false;
+		args.push(child.promptMode === "verbatim" ? task : `Task: ${task}`);
 
 		// Guard step 5: fail-closed dispatch. Every child carries the child
 		// startup gate and a fresh snapshot of the parent's effective profile,
 		// taken after all asynchronous prompt preparation and immediately
 		// before spawn, with no await in between. An unavailable or unsafe
 		// parent guard refuses the dispatch instead of defaulting to default.
-		if (signal?.aborted) throw new Error("Subagent was aborted");
+		if (signal?.aborted) {
+			wasAborted = true;
+			if (child.abortMode !== "result") throw new Error("Subagent was aborted");
+			currentResult.exitCode = 1;
+			currentResult.terminationReason = "aborted";
+			currentResult.errorMessage = "Subagent was aborted";
+			return currentResult;
+		}
 		const bootstrapPath = bootstrapOverride ?? guard.bootstrapPath;
 		if (!fs.existsSync(bootstrapPath)) {
 			return refusedResult(agentName, agent.source, task, step, `child startup gate not found: ${bootstrapPath}`);
@@ -485,6 +782,26 @@ async function runSingleAgent(
 				env: childEnv,
 			});
 			let buffer = "";
+			let settled = false;
+			let timeoutTimer: NodeJS.Timeout | undefined;
+			const killController = createChildKillController(proc);
+
+			const killProc = () => {
+				wasAborted = true;
+				killController.terminate();
+			};
+
+			const settle = (code: number) => {
+				if (settled) return;
+				settled = true;
+				if (timeoutTimer) {
+					clearTimeout(timeoutTimer);
+					timeoutTimer = undefined;
+				}
+				signal?.removeEventListener("abort", killProc);
+				killController.dispose();
+				resolve(code);
+			};
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -534,30 +851,54 @@ async function runSingleAgent(
 				currentResult.stderr += data.toString();
 			});
 
-			proc.on("close", (code) => {
+			proc.on("close", (code, exitSignal) => {
 				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
+				if (exitSignal) currentResult.exitSignal = exitSignal;
+				settle(code ?? (exitSignal ? 1 : 0));
 			});
 
-			proc.on("error", () => {
-				resolve(1);
+			proc.on("error", (error) => {
+				currentResult.exitCode = 1;
+				if (!currentResult.errorMessage) {
+					currentResult.errorMessage = error instanceof Error ? error.message : String(error);
+				}
+				settle(1);
 			});
 
 			if (signal) {
-				const killProc = () => {
-					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
-				};
 				if (signal.aborted) killProc();
 				else signal.addEventListener("abort", killProc, { once: true });
+			}
+
+			if (child.timeoutMs !== undefined) {
+				timeoutTimer = setTimeout(() => {
+					timeoutTimer = undefined;
+					timedOut = true;
+					killController.terminate();
+				}, child.timeoutMs);
 			}
 		});
 
 		currentResult.exitCode = exitCode;
-		if (wasAborted) throw new Error("Subagent was aborted");
+		if (timedOut) {
+			currentResult.terminationReason = "timeout";
+			currentResult.errorMessage = "timed out after 10 minutes";
+			if (currentResult.exitCode === 0) currentResult.exitCode = 1;
+		}
+		if (wasAborted) {
+			currentResult.terminationReason = "aborted";
+			if (currentResult.exitCode === 0) currentResult.exitCode = 1;
+			if (!currentResult.errorMessage) currentResult.errorMessage = "Subagent was aborted";
+		}
+		if (wasAborted && child.abortMode !== "result") throw new Error("Subagent was aborted");
+		if (timedOut && child.failureMode !== "result") throw new Error("timed out after 10 minutes");
+		return currentResult;
+	} catch (error) {
+		if (child.failureMode !== "result" || wasAborted || timedOut) throw error;
+		currentResult.exitCode = currentResult.exitCode === 0 ? 1 : currentResult.exitCode;
+		if (!currentResult.errorMessage) {
+			currentResult.errorMessage = error instanceof Error ? error.message : String(error);
+		}
 		return currentResult;
 	} finally {
 		if (tmpPromptPath)
@@ -753,15 +1094,23 @@ export default function (pi: ExtensionAPI) {
 			const participants: AgentConfig[] = [];
 			const dispatchable = sortAgentsByName(agents.filter((a) => a.role !== "internal"));
 			const available = formatAgentNames(dispatchable);
+			// Legacy modes keep the original detail shape. Panel mode never calls this:
+			// the panel block builds PanelDetails with panelists and the judge.
 			const makeDetails =
 				(mode: SubagentDetails["mode"]) =>
-				(results: SingleResult[]): SubagentDetails => ({
-					mode,
-					agentScope,
-					projectAgentsDir: discovery.projectAgentsDir,
-					results,
-					...(mode === "panel" && panel ? { panel } : {}),
-				});
+				(results: SingleResult[]): SubagentDetails =>
+					mode === "panel"
+						? {
+								mode: "panel",
+								agentScope,
+								projectAgentsDir: discovery.projectAgentsDir,
+								...(panel ? { panel } : {}),
+								results: [],
+								judge: null,
+								notices: [],
+								mergedOutput: null,
+							}
+						: { mode, agentScope, projectAgentsDir: discovery.projectAgentsDir, results };
 			const invalid = (text: string) => ({
 				content: [{ type: "text" as const, text: `${text}\nAvailable agents: ${available}` }],
 				details: makeDetails(mode)([]),
@@ -808,7 +1157,7 @@ export default function (pi: ExtensionAPI) {
 				if (selectedJudge !== null && selectedJudge?.trim() !== "none") {
 					const error = agentError("judge", "panel.judge", true);
 					if (error) return invalid(error);
-					const model = selectedJudge?.trim() ?? agents.find((a) => a.name === "judge")?.model ?? dispatchDefaults.model;
+					const model = selectedJudge?.trim() ?? discovery.configuredModels.judge ?? dispatchDefaults.model;
 					if (model !== undefined) {
 						const error = modelError(model, "judge");
 						if (error) return invalid(error);
@@ -850,33 +1199,187 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (panel) {
+				// Panelists are read-only, run with explicit model/thinking/tools, and get a
+				// fresh guard snapshot per spawn. Their answers are always kept, whether or
+				// not the judge merges them.
 				const effective = panel;
 				const settings = pi.getSettings();
+				const panelistSource = agents.find((a) => a.name === effective.agent)!.source;
 				const allResults: SingleResult[] = effective.models.map((model) => ({
-					agent: effective.agent, agentSource: agents.find((a) => a.name === effective.agent)!.source,
-					task: params.task!, exitCode: -1, messages: [], stderr: "", model,
+					agent: effective.agent,
+					agentSource: panelistSource,
+					task: params.task!,
+					exitCode: -1,
+					messages: [],
+					stderr: "",
+					model,
 					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 				}));
-				const emit = () => onUpdate?.({
-					content: [{ type: "text", text: `Panel ${effective.name}: ${allResults.filter((r) => r.exitCode !== -1).length}/${allResults.length} done` }],
-					details: makeDetails("panel")([...allResults]),
-				});
-				const results = await mapWithConcurrencyLimit(effective.models, MAX_CONCURRENCY, async (model, index) => {
-					const result = await runSingleAgent(ctx.cwd, dispatchDefaults, agents, availableTools,
-						effective.agent, params.task!, params.cwd, undefined, signal,
+				// A streamed result already reports exit code 0, so completion is tracked
+				// separately from the result's own fields.
+				const settled = new Set<number>();
+				const judgeAttempts: JudgeAttempt[] = [];
+				let currentJudge: PanelJudgeResult | null = null;
+
+				const toPanelistResult = (result: SingleResult): PanelistResult => {
+					const { step: _step, ...rest } = result;
+					return {
+						...rest,
+						model: result.model ?? "unknown",
+						output: getFinalOutput(result.messages),
+						toolCallSummary: buildToolCallSummary(result.messages),
+					};
+				};
+				const makePanelDetails = (results: SingleResult[], judge: PanelJudgeResult | null = currentJudge): PanelDetails => {
+					const panelists = results.map(toPanelistResult);
+					return {
+						mode: "panel",
+						agentScope,
+						projectAgentsDir: discovery.projectAgentsDir,
+						panel: effective,
+						results: panelists,
+						judge,
+						notices: buildPanelNotices(effective, panelists, judge, false),
+						mergedOutput: judge && judgeIsMerged(judge) ? judge.output : null,
+					};
+				};
+				const emit = () =>
+					onUpdate?.({
+						content: [{ type: "text" as const, text: `Panel ${effective.name}: ${settled.size}/${allResults.length} done` }],
+						details: makePanelDetails(allResults),
+					});
+
+				await mapWithConcurrencyLimit(effective.models, MAX_CONCURRENCY, async (model, index) => {
+					const result = await runSingleAgent(
+						ctx.cwd,
+						dispatchDefaults,
+						agents,
+						availableTools,
+						effective.agent,
+						params.task!,
+						params.cwd,
+						undefined,
+						signal,
 						(partial) => {
-							if (partial.details?.results[0]) { allResults[index] = partial.details.results[0]; emit(); }
-						}, makeDetails("panel"), guardDispatch,
-						{ model, thinkingLevel: settings.modelThinkingLevels?.[model] ?? ctx.thinkingLevel, tools: panelTools });
+							const streamed = partial.details?.results[0];
+							if (streamed && !settled.has(index)) {
+								allResults[index] = streamed;
+								emit();
+							}
+						},
+						(partialResults) => makePanelDetails(partialResults),
+						guardDispatch,
+						{
+							model,
+							thinkingLevel: settings.modelThinkingLevels?.[model] ?? ctx.thinkingLevel,
+							tools: panelTools,
+							timeoutMs: PANEL_CHILD_TIMEOUT_MS,
+							failureMode: "result",
+						},
+					);
 					allResults[index] = result;
+					settled.add(index);
 					emit();
 					return result;
 				});
-				const summaries = results.map((r, i) => `### [${effective.models[i]}] ${isFailedResult(r) ? "failed" : "completed"}\n\n${getResultOutput(r)}\n\nUsage: ${formatUsageStats(r.usage, effective.models[i])}`);
+
+				const panelists = allResults.map(toPanelistResult);
+				const survivors = panelists.filter((result) => !isFailedResult(result));
+				const reviews: PanelReviewInput[] = panelists.map((result) => ({
+					model: result.model,
+					task: params.task!,
+					toolCallSummary: result.toolCallSummary,
+					status: isFailedResult(result) ? "failed" : "completed",
+					output: result.output,
+					error: isFailedResult(result) ? failureReason(result) : undefined,
+				}));
+
+				let aborted = false;
+				let mergedOutput: string | null = null;
+				let judge: PanelJudgeResult | null = null;
+				// Zero survivors: no judge call, the failures are returned as an error.
+				// Judge disabled (`judge: "none"`): no call, merge-skipped notice.
+				if (survivors.length > 0 && effective.judge) {
+					const judgeModel = effective.judge.model;
+					// The judge tool set is fixed here, never read from the override agent's
+					// declaration, so an override cannot widen it.
+					const judgeTools = resolveAgentTools(JUDGE_TOOL_NAMES, availableTools) ?? [];
+					const judgeThinking =
+						judgeModel !== undefined ? settings.modelThinkingLevels?.[judgeModel] ?? ctx.thinkingLevel : ctx.thinkingLevel;
+					const judgeInput = buildPanelJudgeInput(reviews);
+					const attemptJudge = async (): Promise<SingleResult> =>
+						runSingleAgent(
+							ctx.cwd,
+							dispatchDefaults,
+							agents,
+							availableTools,
+							"judge",
+							judgeInput,
+							params.cwd,
+							undefined,
+							signal,
+							(partial) => {
+								const streamed = partial.details?.results[0];
+								if (!streamed) return;
+								currentJudge = buildJudgeResult(getFinalOutput(streamed.messages), judgeModel, [...judgeAttempts, toJudgeAttempt(streamed)]);
+								emit();
+							},
+							(partialResults) => {
+								const streamed = partialResults[0];
+								const streamedJudge = streamed
+									? buildJudgeResult(getFinalOutput(streamed.messages), judgeModel, [...judgeAttempts, toJudgeAttempt(streamed)])
+									: currentJudge;
+								return makePanelDetails(allResults, streamedJudge);
+							},
+							guardDispatch,
+							{
+								model: judgeModel ?? null,
+								thinkingLevel: judgeThinking,
+								tools: judgeTools,
+								timeoutMs: PANEL_CHILD_TIMEOUT_MS,
+								promptMode: "verbatim",
+								failureMode: "result",
+								abortMode: "result",
+							},
+						);
+
+					const first = await attemptJudge();
+					judgeAttempts.push(toJudgeAttempt(first));
+					currentJudge = buildJudgeResult(getFinalOutput(first.messages), judgeModel, judgeAttempts);
+					let finalAttempt: SingleResult | null = first;
+					// Exactly one retry after an ordinary failure. Timeout and abort are
+					// terminal, and an already-aborted signal skips the retry entirely.
+					if (judgeAttemptFailed(first) && !first.terminationReason) {
+						if (signal?.aborted) {
+							aborted = true;
+							finalAttempt = null;
+						} else {
+							emit();
+							const second = await attemptJudge();
+							judgeAttempts.push(toJudgeAttempt(second));
+							currentJudge = buildJudgeResult(getFinalOutput(second.messages), judgeModel, judgeAttempts);
+							finalAttempt = second;
+						}
+					}
+					if (judgeAttempts.some((attempt) => attempt.terminationReason === "aborted")) aborted = true;
+					if (finalAttempt && !judgeAttemptFailed(finalAttempt)) mergedOutput = getFinalOutput(finalAttempt.messages);
+					judge = buildJudgeResult(finalAttempt ? getFinalOutput(finalAttempt.messages) : "", judgeModel, judgeAttempts);
+				}
+
+				const details: PanelDetails = {
+					mode: "panel",
+					agentScope,
+					projectAgentsDir: discovery.projectAgentsDir,
+					panel: effective,
+					results: panelists,
+					judge,
+					notices: buildPanelNotices(effective, panelists, judge, aborted),
+					mergedOutput,
+				};
 				return {
-					content: [{ type: "text", text: `Panel ${effective.name}\nMerge skipped because the merge step is not implemented in this stage.\n\n${summaries.join("\n\n---\n\n")}` }],
-					details: makeDetails("panel")(results),
-					isError: results.every(isFailedResult),
+					content: [{ type: "text" as const, text: formatPanelContent(details) }],
+					details,
+					isError: survivors.length === 0,
 				};
 			}
 
@@ -1119,6 +1622,18 @@ export default function (pi: ExtensionAPI) {
 				return text.trimEnd();
 			};
 
+			if (details.mode === "panel") {
+				// Minimal Step 4 rendering: dim only the header line. Merged content and
+				// raw-review expansion remain Step 5 work, and the model-facing content
+				// stays free of ANSI sequences.
+				const text = result.content[0];
+				const body = text?.type === "text" ? text.text : "(no output)";
+				const newline = body.indexOf("\n");
+				const header = newline < 0 ? body : body.slice(0, newline);
+				const rest = newline < 0 ? "" : body.slice(newline);
+				return new Text(theme.fg("dim", header) + rest, 0, 0);
+			}
+
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
 				const isError = isFailedResult(r);
@@ -1177,18 +1692,6 @@ export default function (pi: ExtensionAPI) {
 				return new Text(text, 0, 0);
 			}
 
-			const aggregateUsage = (results: SingleResult[]) => {
-				const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
-				for (const r of results) {
-					total.input += r.usage.input;
-					total.output += r.usage.output;
-					total.cacheRead += r.usage.cacheRead;
-					total.cacheWrite += r.usage.cacheWrite;
-					total.cost += r.usage.cost;
-					total.turns += r.usage.turns;
-				}
-				return total;
-			};
 
 			if (details.mode === "chain") {
 				const successCount = details.results.filter((r) => r.exitCode === 0).length;
@@ -1245,7 +1748,7 @@ export default function (pi: ExtensionAPI) {
 						if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
 					}
 
-					const usageStr = formatUsageStats(aggregateUsage(details.results));
+					const usageStr = formatUsageStats(aggregateUsage(details.results.map((r) => r.usage)));
 					if (usageStr) {
 						container.addChild(new Spacer(1));
 						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
@@ -1266,7 +1769,7 @@ export default function (pi: ExtensionAPI) {
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
-				const usageStr = formatUsageStats(aggregateUsage(details.results));
+				const usageStr = formatUsageStats(aggregateUsage(details.results.map((r) => r.usage)));
 				if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
 				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				return new Text(text, 0, 0);
@@ -1330,7 +1833,7 @@ export default function (pi: ExtensionAPI) {
 						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
 					}
 
-					const usageStr = formatUsageStats(aggregateUsage(details.results));
+					const usageStr = formatUsageStats(aggregateUsage(details.results.map((r) => r.usage)));
 					if (usageStr) {
 						container.addChild(new Spacer(1));
 						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
@@ -1354,7 +1857,7 @@ export default function (pi: ExtensionAPI) {
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
 				if (!isRunning) {
-					const usageStr = formatUsageStats(aggregateUsage(details.results));
+					const usageStr = formatUsageStats(aggregateUsage(details.results.map((r) => r.usage)));
 					if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
 				}
 				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
