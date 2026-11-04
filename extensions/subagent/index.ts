@@ -369,14 +369,18 @@ function judgeIsMerged(judge: PanelJudgeResult): boolean {
 /**
  * Panel notices: the fallback reasons plus the survivor labels. Merge labels
  * only describe a produced merge; when the judge did not merge, the labeled
- * per-model sections already carry the failures.
+ * per-model sections already carry the failures. Notices describe a finished
+ * run: while any panelist or the judge is still in flight, a survivor count or
+ * a merge verdict is not yet meaningful, so the list is empty.
  */
 function buildPanelNotices(
 	panel: EffectivePanel,
 	results: readonly PanelistResult[],
 	judge: PanelJudgeResult | null,
 	aborted: boolean,
+	running: boolean,
 ): PanelNotice[] {
+	if (running) return [];
 	const failed = results.filter(isFailedResult);
 	const survivors = results.filter((result) => !isFailedResult(result));
 	if (results.length > 0 && survivors.length === 0) {
@@ -1220,6 +1224,9 @@ export default function (pi: ExtensionAPI) {
 				const settled = new Set<number>();
 				const judgeAttempts: JudgeAttempt[] = [];
 				let currentJudge: PanelJudgeResult | null = null;
+				// The judge phase is complete only after its attempts settle; until then
+				// every streamed emit keeps notices empty.
+				let judgeSettled = false;
 
 				const toPanelistResult = (result: SingleResult): PanelistResult => {
 					const { step: _step, ...rest } = result;
@@ -1232,6 +1239,7 @@ export default function (pi: ExtensionAPI) {
 				};
 				const makePanelDetails = (results: SingleResult[], judge: PanelJudgeResult | null = currentJudge): PanelDetails => {
 					const panelists = results.map(toPanelistResult);
+					const running = settled.size < allResults.length || (effective.judge !== null && !judgeSettled);
 					return {
 						mode: "panel",
 						agentScope,
@@ -1239,7 +1247,7 @@ export default function (pi: ExtensionAPI) {
 						panel: effective,
 						results: panelists,
 						judge,
-						notices: buildPanelNotices(effective, panelists, judge, false),
+						notices: buildPanelNotices(effective, panelists, judge, false, running),
 						mergedOutput: judge && judgeIsMerged(judge) ? judge.output : null,
 					};
 				};
@@ -1263,7 +1271,10 @@ export default function (pi: ExtensionAPI) {
 						(partial) => {
 							const streamed = partial.details?.results[0];
 							if (streamed && !settled.has(index)) {
-								allResults[index] = streamed;
+								// A streamed child already reports exit code 0, so the slot stays
+								// pending until the final result lands; otherwise a mid-run render
+								// counts a still-running panelist as done.
+								allResults[index] = { ...streamed, exitCode: -1 };
 								emit();
 							}
 						},
@@ -1364,6 +1375,7 @@ export default function (pi: ExtensionAPI) {
 					if (judgeAttempts.some((attempt) => attempt.terminationReason === "aborted")) aborted = true;
 					if (finalAttempt && !judgeAttemptFailed(finalAttempt)) mergedOutput = getFinalOutput(finalAttempt.messages);
 					judge = buildJudgeResult(finalAttempt ? getFinalOutput(finalAttempt.messages) : "", judgeModel, judgeAttempts);
+					judgeSettled = true;
 				}
 
 				const details: PanelDetails = {
@@ -1373,7 +1385,7 @@ export default function (pi: ExtensionAPI) {
 					panel: effective,
 					results: panelists,
 					judge,
-					notices: buildPanelNotices(effective, panelists, judge, aborted),
+					notices: buildPanelNotices(effective, panelists, judge, aborted, false),
 					mergedOutput,
 				};
 				return {

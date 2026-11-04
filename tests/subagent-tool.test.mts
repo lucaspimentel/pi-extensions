@@ -1218,6 +1218,73 @@ test("streaming updates keep panelists in results and put the judge at the top l
 	});
 });
 
+/** Start a controlled panel run, optionally capturing its streaming emits. */
+function startPanelRun(
+	h: Harness,
+	cwd: string,
+	updates?: any[],
+): { recording: ReturnType<typeof installControlledSpawn>; promise: Promise<any> } {
+	const recording = installControlledSpawn();
+	const promise = h.tools.get("subagent")!.execute(
+		"id",
+		{ panel: "pair", task: "shared task" },
+		undefined,
+		updates ? (partial: any) => updates.push(partial) : undefined,
+		toolCtx(cwd),
+	) as Promise<any>;
+	return { recording, promise };
+}
+
+test("streaming panel emits carry no notices; the finished result carries the real ones", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		const h = makeHarness({ guard: true, tools: ["read"] });
+
+		// One survivor then a failed merge: merge-failed must not appear mid-run.
+		{
+			const updates: any[] = [];
+			const { recording, promise } = startPanelRun(h, cwd, updates);
+			try {
+				await waitFor(() => recording.spawns.length === 2, "both panelists spawn");
+				const panelistA = recording.spawns.find((spawn) => flag(spawn.args, "--model") === "p/a")!;
+				// A streamed child reports exit code 0 of its own, so the slot must stay
+				// pending until its final result; otherwise a mid-run row counts it done.
+				panelistA.child.stdout.emit("data", assistantLine("partial a"));
+				await waitFor(() => updates.length > 0, "no streamed update");
+				assert.equal(
+					updates[updates.length - 1].details.results[0].exitCode,
+					-1,
+					"a panelist that has only streamed stays pending",
+				);
+				emitAnswer(panelistA, "answer A");
+				failAnswer(recording.spawns.find((spawn) => flag(spawn.args, "--model") === "p/org/b")!, "b exploded");
+				await waitFor(() => recording.spawns.length === 3, "judge never spawned");
+				failAnswer(recording.spawns[2], "judge exploded");
+				await waitFor(() => recording.spawns.length === 4, "judge retry never spawned");
+				failAnswer(recording.spawns[3], "judge exploded");
+				const result = await promise;
+				assert.ok(updates.length > 0, "at least one streaming emit");
+				for (const update of updates) assert.deepEqual(update.details.notices, [], "mid-run notices stay empty");
+				assert.deepEqual(result.details.notices.map((notice: any) => notice.kind), ["merge-failed"]);
+			} finally { recording.restore(); }
+		}
+
+		// Every panelist fails: no-survivors must not appear before the run ends.
+		{
+			const updates: any[] = [];
+			const { recording, promise } = startPanelRun(h, cwd, updates);
+			try {
+				await waitFor(() => recording.spawns.length === 2, "both panelists spawn");
+				for (const spawn of recording.spawns) failAnswer(spawn, "panelist exploded");
+				const result = await promise;
+				assert.ok(updates.length > 0, "at least one streaming emit");
+				for (const update of updates) assert.deepEqual(update.details.notices, [], "mid-run notices stay empty");
+				assert.deepEqual(result.details.notices.map((notice: any) => notice.kind), ["no-survivors"]);
+			} finally { recording.restore(); }
+		}
+	});
+});
+
 // ── Child lifecycle: timeout, escalation, signal exits, and abort ─────────────
 
 test("the ten-minute timeout sends SIGTERM then SIGKILL five seconds later while killed is true", async (t) => {
