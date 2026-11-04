@@ -364,7 +364,11 @@ about 80 characters, unknown tools fall back to a small deterministic scalar
 selection, repetitions collapse with counts (so repeated reads of one file
 become `read src/Foo.cs x3`), a failure appears only when a correlated tool
 result reported `isError`, and only the first 20 distinct entries are listed
-with a `(+N more)` suffix. It never includes tool-result bodies or transcripts.
+with a `(+N more)` suffix. An argument that arrives as an array, such as a Git
+invocation's revs and pathspecs or a `gh_read` operation's flags, is joined into
+that entry so two calls differing only in their arguments stay distinct; a
+non-scalar entry inside such an array is skipped rather than given an invented
+representation, so two calls differing only there still share an entry. It never includes tool-result bodies or transcripts.
 
 Included: the final answer plus a summary of the tools each panelist actually
 called, which is what lets the judge tell a checked finding from an assumed one

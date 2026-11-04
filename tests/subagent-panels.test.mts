@@ -497,6 +497,48 @@ test("differing arguments stay distinct even when display truncation hides the d
 	assert.equal(summary.split("read ").length - 1, 2);
 });
 
+test("distinct Git operation arguments stay distinct", () => {
+	const messages = [
+		toolCallAssistant([
+			{ id: "1", name: "git_read", args: { subcommand: "show", args: ["HEAD:a.ts"] } },
+			{ id: "2", name: "git_read", args: { subcommand: "show", args: ["HEAD:b.ts"] } },
+			{ id: "3", name: "git_read", args: { subcommand: "show", args: ["HEAD:a.ts"] } },
+		]),
+	];
+	assert.equal(buildToolCallSummary(messages), "git_read show HEAD:a.ts x2, git_read show HEAD:b.ts");
+});
+
+test("distinct GitHub operation arguments stay distinct", () => {
+	const messages = [
+		toolCallAssistant([
+			{ id: "1", name: "gh_read", args: { subcommand: "pr diff", pr: 123, args: ["--name-only"] } },
+			{ id: "2", name: "gh_read", args: { subcommand: "pr diff", pr: 123, args: ["--stat"] } },
+		]),
+	];
+	assert.equal(buildToolCallSummary(messages), "gh_read pr diff 123 --name-only, gh_read pr diff 123 --stat");
+});
+
+test("array arguments render their scalar entries and ignore the rest", () => {
+	const messages = [
+		toolCallAssistant([
+			{ id: "1", name: "git_read", args: { subcommand: "diff", args: ["HEAD~1", 2, true, { opaque: 1 }] } },
+		]),
+	];
+	assert.equal(buildToolCallSummary(messages), "git_read diff HEAD~1 2 true");
+});
+
+test("an argument array with no scalar entry contributes nothing", () => {
+	const messages = [
+		toolCallAssistant([
+			{ id: "1", name: "git_read", args: { subcommand: "show", args: [{ opaque: 1 }] } },
+			{ id: "2", name: "git_read", args: { subcommand: "show", args: [{ opaque: 2 }] } },
+		]),
+	];
+	// Non-scalar entries are deliberately not rendered, so these two calls still
+	// share an entry rather than gaining an invented representation.
+	assert.equal(buildToolCallSummary(messages), "git_read show x2");
+});
+
 test("failures are attributed only through a correlated tool result", () => {
 	const messages = [
 		toolCallAssistant([

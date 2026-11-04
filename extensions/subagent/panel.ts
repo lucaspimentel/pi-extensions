@@ -47,7 +47,7 @@ const KNOWN_TOOL_FIELDS: Record<string, string[]> = {
 	find: ["pattern", "path"],
 	bash: ["command"],
 	git_read: ["subcommand", "rev", "ref", "path", "args"],
-	gh_read: ["subcommand", "repo", "pr", "issue", "ref", "path", "branch", "slug", "jq"],
+	gh_read: ["subcommand", "repo", "pr", "issue", "ref", "path", "branch", "slug", "jq", "args"],
 };
 
 /** Collapse every whitespace run so summaries stay on one line and byte-stable. */
@@ -58,6 +58,14 @@ function canonicalize(value: string): string {
 function primitiveArgument(value: unknown): string | undefined {
 	if (typeof value === "string") return value;
 	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	// Git and GitHub operation arguments arrive as arrays (`args: ["HEAD~1",
+	// "--", "src/"]`), and they carry what the call actually inspected. They have
+	// to reach the grouping key, or two calls that differ only in their arguments
+	// collapse into one entry and the judge cannot tell them apart.
+	if (Array.isArray(value)) {
+		const parts = value.map(primitiveArgument).filter((part): part is string => part !== undefined);
+		return parts.length > 0 ? parts.join(" ") : undefined;
+	}
 	return undefined;
 }
 
