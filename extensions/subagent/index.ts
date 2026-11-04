@@ -1140,7 +1140,20 @@ export default function (pi: ExtensionAPI) {
 			};
 			if (hasPanel) {
 				const preset = discovery.panels.find((p) => p.name === params.panel);
-				if (!preset) return invalid(`Unknown panel "${params.panel}". Configured presets: ${discovery.panels.map((p) => p.name).sort().join(", ") || "none"}.`);
+				if (!preset) {
+					const configured = discovery.panels.map((p) => p.name).sort();
+					if (configured.length > 0) {
+						return invalid(`Unknown panel "${params.panel}". Configured presets: ${configured.join(", ")} (from ${discovery.configPath}).`);
+					}
+					if (discovery.ignoredPanels.length > 0) {
+						return invalid(
+							`No usable panel preset "${params.panel}" in ${discovery.configPath}. Every preset there was ignored: ${discovery.ignoredPanels.map((p) => p.reason).join("; ")}`,
+						);
+					}
+					return invalid(
+						`No panel presets are configured. Add a "panels" object to ${discovery.configPath} with a preset name, its "models" (1 to 4 model ids), and an optional "judge" model id (see the subagent extension README).`,
+					);
+				}
 				const rawModels = params.models ?? preset.models;
 				if (!rawModels.length || rawModels.length > 4 || rawModels.some((m) => !m.trim())) return invalid("Parameter models must contain 1 to 4 nonblank model IDs.");
 				const models = [...new Set(rawModels.map((m) => m.trim()))];

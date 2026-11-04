@@ -456,8 +456,10 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
 ## Failure semantics
 
 - Validation failures are tool errors that list the valid options: an unknown
-  preset (the configured preset names), an unusable model (the usable ids), an
-  unknown or internal agent (the dispatchable agent names), a rejected panelist
+  preset (the configured preset names, or the `subagent.json` path a user has to
+  edit when no preset is configured or every preset in it was ignored), an
+  unusable model (the usable ids), an unknown or internal agent (the
+  dispatchable agent names), a rejected panelist
   declaration (the offending tools), and the mode conflicts. The single, tasks,
   and chain validation failures return errors too, which they did not before.
 - Panelist failure: survivors are still merged and the result is labeled as a

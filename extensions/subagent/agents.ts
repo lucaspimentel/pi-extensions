@@ -64,6 +64,12 @@ export interface AgentDiscoveryResult extends PanelParseResult {
 	agents: AgentConfig[];
 	projectAgentsDir: string | null;
 	/**
+	 * Resolved `<agentDir>/subagent.json` path. Exposed so panel validation can
+	 * name the file a user has to edit when no preset is configured or usable,
+	 * instead of only saying that nothing is configured.
+	 */
+	configPath: string;
+	/**
 	 * Accepted, normalized `models` overrides from `subagent.json` by agent name.
 	 * Separate from `AgentConfig.model` because that field also carries a
 	 * frontmatter pin, and the judge precedence chain must distinguish the two:
@@ -223,7 +229,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	}
 	for (const ignored of result.ignoredPanels) console.warn(ignored.reason);
 
-	return { agents: Array.from(agentMap.values()), projectAgentsDir, configuredModels, ...result };
+	return { agents: Array.from(agentMap.values()), projectAgentsDir, configPath, configuredModels, ...result };
 }
 
 /**

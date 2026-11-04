@@ -1653,6 +1653,39 @@ test("harness event unsubscription works and snapshot acknowledgements are corre
 	assert.deepEqual(acks, [{ version: 1, id: "correlated", ok: true, profile: "research" }]);
 });
 
+test("panel validation names the config file when no preset is usable", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const recording = installRecordingSpawn();
+		const configPath = path.join(agentDir, "subagent.json");
+		try {
+			// No config at all: the error has to say where a preset would go.
+			const missing = await runSubagent(h, cwd, { panel: "review", task: "x" }, { scopedModels });
+			assert.equal(missing.isError, true);
+			assert.match(missing.content[0].text, /No panel presets are configured\./);
+			assert.ok(missing.content[0].text.includes(configPath), "names the config file to create");
+			assert.match(missing.content[0].text, /"panels" object/);
+			assert.match(missing.content[0].text, /1 to 4 model ids/);
+
+			// Presets configured but all rejected: name the file and the reasons.
+			configure(agentDir, { panels: { broken: { models: [] } } });
+			const ignored = await runSubagent(h, cwd, { panel: "broken", task: "x" }, { scopedModels });
+			assert.equal(ignored.isError, true);
+			assert.match(ignored.content[0].text, /No usable panel preset "broken"/);
+			assert.ok(ignored.content[0].text.includes(configPath), "names the config file that holds the ignored preset");
+			assert.match(ignored.content[0].text, /"models" should contain 1 to 4 non-empty model strings/);
+
+			// A configured preset still reports its name and the file it came from.
+			configure(agentDir, { panels: { pair: { models: ["p/a"] } } });
+			const unknown = await runSubagent(h, cwd, { panel: "missing", task: "x" }, { scopedModels });
+			assert.match(unknown.content[0].text, /Unknown panel "missing"\. Configured presets: pair/);
+			assert.ok(unknown.content[0].text.includes(`(from ${configPath})`), "names where the presets come from");
+
+			assert.equal(recording.spawns.length, 0, "no validation failure spawns a child");
+		} finally { recording.restore(); }
+	});
+});
+
 test("panel template requires preset and task and uses positional expansion without guessing a default", () => {
 	const template = fs.readFileSync(new URL("../extensions/subagent/prompts/panel.md", import.meta.url), "utf8");
 	assert.ok(template.includes('argument-hint: "<preset> <text>"'));
@@ -1662,6 +1695,7 @@ test("panel template requires preset and task and uses positional expansion with
 	assert.ok(template.includes("Do not rewrite the expanded task"));
 	assert.ok(template.includes("tool-description catalog"));
 	assert.ok(template.includes("Never guess a default preset"));
+	assert.ok(template.includes("subagent.json"), "the no-preset path says where presets are configured");
 });
 
 // ── Cleanup ───────────────────────────────────────────────────────────────────
