@@ -210,8 +210,14 @@ What a call does:
 - Details keep each panelist's full messages, uncapped answer, and tool-call
   summary under `results`, the judge with every attempt's raw output under
   `judge`, plus the effective panel config, the notices, and the uncapped merged
-  text. Panelist records carry no `step`. Only the collapsed header line is dim
-  today; expanded raw-review browsing is not implemented yet.
+  text. Panelist records carry no `step`.
+- Display: the collapsed row reproduces the model-facing content with only its
+  metadata lines dimmed (the header, the notices, and the trailing usage block),
+  always ending with `(Ctrl+O to expand)`. Expanding shows the merged review
+  when there is one, then a section per panelist (mark, tool calls, error line
+  and answer, usage) and the judge with every attempt, then a `Total:`. A
+  running panel shows progress from details instead, with `⏳` for pending
+  sections and no expand hint.
 
 Tool availability is a runtime property, not a declaration. `resolveAgentTools`
 drops every declared name the dispatching session did not register, and only

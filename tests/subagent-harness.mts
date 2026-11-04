@@ -45,6 +45,13 @@ export interface RegisteredTool {
 	prepareLoadout?: (
 		loadout: unknown,
 	) => { descriptions?: Record<string, string>; hiddenDeclarations?: readonly string[] } | undefined;
+	renderCall?: (args: unknown, theme: unknown, context: unknown) => { render(width: number): string[] };
+	renderResult?: (
+		result: { content: Array<{ type: string; text?: string }>; details?: unknown },
+		options: { expanded: boolean; isPartial: boolean },
+		theme: unknown,
+		context: unknown,
+	) => { render(width: number): string[] };
 	execute: (
 		id: string,
 		params: Record<string, unknown>,

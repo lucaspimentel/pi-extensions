@@ -9,9 +9,9 @@ the judge dispatch, the bounded judge input with per-call tool summaries, the
 opt-in 10-minute per-child timeout, the retry/fallback matrix, the separate
 judge attempt records, the notices, and the content/usage assembly. Step 1 (the
 `/panel` command spike) is resolved: a command handler cannot land a tool
-result, so `/panel` ships as a prompt template. Outstanding: Step 5 (expanded
-display) and the renderer plus live checks in Step 6. Everything else in this
-document is decided.
+result, so `/panel` ships as a prompt template. Step 5 (the collapsed and
+expanded display) is implemented; the live run in Step 6 is what remains.
+Everything else in this document is decided.
 
 Addition (2026-11-02, second interview round; see "Agent roles", "Config",
 "Tool contract", "`subagent_list` contract", and "Verification plan"): the judge
@@ -479,12 +479,44 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
 
 ## Display
 
-Collapsed tool row shows the merged review with per-panelist and judge usage
-lines; expanding reveals each raw review. This mirrors the existing parallel
-renderer (`:1160-1250`) rather than introducing a new comparison view. Step 4
-ships only the minimal rendering: the panel branch dims the first (header) line
-with `theme.fg("dim", ...)` and leaves the model-facing content ANSI-free.
-Expanded raw-review browsing is Step 5.
+The panel tool row mirrors the other modes. While the panel runs, the
+collapsed row is derived from `details`, never from the model-facing content: a
+`⏳` header carrying `<n>/<total> done, <k> running`, one line per model with
+only a mark (`✓`, `✗`, `⏳`), and, once `details.judge` exists, a
+`⏳ judge <model> merging…` line that notes the attempt when a retry is under
+way. There is no expand hint until the run finishes. A panelist that has only
+streamed still counts as running: its slot in `details` keeps `exitCode: -1`
+until its final result lands, even though the child process itself already
+reports exit code 0, so the row and the notice gate never mistake a streaming
+panelist for a finished one. `isPartial` marks a streaming emit as well, which
+keeps the row in progress while the judge alone is still working.
+
+When it finishes, the collapsed row is a status icon (`✓` merged, `◐` unmerged
+with survivors, `✗` zero survivors) followed by the model-facing content
+reproduced verbatim, with dim styling on only its metadata lines: the header,
+the notice lines that follow it, and the trailing usage block plus `Total:`,
+found by walking back from the final `Total:` line to the blank line that
+precedes the usage run. The row always ends with `(Ctrl+O to expand)`.
+
+Expanding renders a container: the status icon and header, the dim notice
+lines, a dim `Task:` line printed once, and, only when a merge was produced, a
+`─── merged review ───` label with the merge as `Markdown`. Each panelist then
+gets a section (`─── <model> ✓/✗/⏳`, its tool calls as `→ …`, a dim error line
+and an incompletely labeled answer when it failed, its answer as `Markdown`, and
+its usage line, which is omitted while the panelist is still pending), followed
+by the judge section (`─── judge <model> ✓/✗/⏳`,
+with `(N attempts)` and per-attempt `attempt N` labels only when there was more
+than one attempt, a dim error line for a failed attempt, the tools it called,
+its raw output as `Markdown`, and its summed usage), and a final `Total:` across
+every panelist and every judge attempt. When nothing merged, the merge slot is
+skipped entirely, since the per-model sections carry that text with more detail.
+A running panel renders the same container from whatever exists, pending
+sections marked `⏳`.
+
+Only the renderer adds styling; the model-facing content stays ANSI-free.
+Notices describe finished runs only: `buildPanelNotices` returns an empty list
+while any panelist is unsettled or the judge phase is in flight, so a mid-run
+emit never reports a survivor count or a merge verdict.
 
 ## Code and test layout
 
@@ -569,8 +601,11 @@ wiring, and the judge orchestration described below.
    true, a real exit during the grace period preventing SIGKILL, null-code
    signal exits, timer/listener cleanup, the legacy modes never acquiring the
    timer, and abort reusing the same escalation).
-4. Renderer assertions for collapsed versus expanded result views. Not done:
-   Step 4 ships only the minimal dim-header panel branch.
+4. Renderer assertions for collapsed versus expanded result views. Done with
+   Step 5: exact ANSI-stripped text through a theme stub with visible role
+   markers for the merged collapsed and expanded views, the running collapsed
+   and expanded views, the unmerged expanded view (merge slot skipped), a
+   zero-panelist fallback, and the judge retry, plus the mid-run notice gate.
 5. One live run on a cheap pair (`baseten/glm-5-3-flash` +
    `baseten/deepseek-v4-1-flash`) to confirm a real merge produces the section
    structure and usage lines. Not done; deferred to Step 6.
@@ -578,7 +613,7 @@ wiring, and the judge orchestration described below.
    (node is not on guard's sandboxed PATH), plus `extensions/subagent/README.md`
    (the panel surface, the `role` concept, the `panels` config, and the
    `subagent_list` fields) and the repo `README.md`, both updated with Step 4.
-   The renderer checks and the live run remain.
+   The live run remains.
 
 ## Decisions made without asking
 

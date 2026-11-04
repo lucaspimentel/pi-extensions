@@ -1218,6 +1218,30 @@ test("streaming updates keep panelists in results and put the judge at the top l
 	});
 });
 
+// ── Panel renderer (display of the finished and running result) ────────────
+// The theme stub makes every role visible in the rendered text, so an exact
+// assertion pins both the content and which lines are dimmed.
+const renderTheme = {
+	fg: (role: string, value: string) => `[${role}]${value}`,
+	bold: (value: string) => `[bold]${value}`,
+} as any;
+
+function stripAnsi(text: string): string {
+	return text.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function renderPanel(h: Harness, result: unknown, options: { expanded: boolean; isPartial?: boolean }, width = 160): string[] {
+	const tool = h.tools.get("subagent");
+	assert.ok(tool?.renderResult, "subagent renderResult is registered");
+	const component = tool.renderResult!(
+		result as any,
+		{ expanded: options.expanded, isPartial: options.isPartial ?? false },
+		renderTheme,
+		{},
+	);
+	return (component.render(width) as string[]).map((line) => stripAnsi(line).trimEnd());
+}
+
 /** Start a controlled panel run, optionally capturing its streaming emits. */
 function startPanelRun(
 	h: Harness,
@@ -1234,6 +1258,200 @@ function startPanelRun(
 	) as Promise<any>;
 	return { recording, promise };
 }
+
+test("the collapsed panel row reproduces the merged content with only metadata lines dimmed", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		panelConfig(agentDir, { judge: "p/judge" });
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const { result, recording } = await runAnsweredPanel(h, cwd);
+		try {
+			assert.equal(result.content[0].text.includes("\u001b"), false, "model-facing content stays ANSI-free");
+			assert.deepEqual(renderPanel(h, result, { expanded: false }), [
+				"[success]✓ [dim]Panel pair (1 model; judge: p/judge)",
+				"[dim]single-model-merge: only p/a answered",
+				"",
+				"merged review",
+				"",
+				"[dim]- p/a: 1 turn ↑1 ↓1 $0.0001 ctx:2",
+				"[dim]- judge p/judge: 1 turn ↑1 ↓1 $0.0001",
+				"",
+				"[dim]Total: 2 turns ↑2 ↓2 $0.0002",
+				"[muted](Ctrl+O to expand)",
+			]);
+		} finally { recording.restore(); }
+	});
+});
+
+test("the expanded panel row shows the merged review, one section per panelist, the judge, and the total", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		panelConfig(agentDir, { judge: "p/judge" });
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const { result, recording } = await runAnsweredPanel(h, cwd);
+		try {
+			assert.deepEqual(renderPanel(h, result, { expanded: true }), [
+				"[success]✓ [toolTitle][bold]Panel pair[muted] (1 model; judge: p/judge)",
+				"[dim]single-model-merge: only p/a answered",
+				"",
+				"[dim]Task: shared task",
+				"",
+				"[muted]─── merged review ───",
+				"merged review",
+				"",
+				"[muted]─── [accent]p/a [success]✓",
+				"",
+				"panelist answer",
+				"[dim]1 turn ↑1 ↓1 $0.0001 ctx:2",
+				"",
+				"[muted]─── [accent]judge p/judge [success]✓",
+				"",
+				"merged review",
+				"[dim]1 turn ↑1 ↓1 $0.0001",
+				"",
+				"[dim]Total: 2 turns ↑2 ↓2 $0.0002",
+			]);
+		} finally { recording.restore(); }
+	});
+});
+
+test("a running panel derives progress from details, marking pending models and the judge", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const updates: any[] = [];
+		const { recording, promise } = startPanelRun(h, cwd, updates);
+		try {
+			await waitFor(() => recording.spawns.length === 2, "both panelists spawn");
+			const a = recording.spawns.find((spawn) => flag(spawn.args, "--model") === "p/a")!;
+			a.child.stdout.emit("data", assistantLine("partial a"));
+			await waitFor(() => updates.length > 0, "no streamed update");
+			const update = updates[updates.length - 1];
+			assert.deepEqual(renderPanel(h, update, { expanded: false, isPartial: true }), [
+				"[warning]⏳ [toolTitle][bold]Panel pair[muted] (2 models; judge: p/judge)[accent] 0/2 done, 2 running",
+				"[warning]⏳ [accent]p/a",
+				"[warning]⏳ [accent]p/org/b",
+			]);
+			assert.deepEqual(renderPanel(h, update, { expanded: true, isPartial: true }), [
+				"[warning]⏳ [toolTitle][bold]Panel pair[muted] (2 models; judge: p/judge)",
+				"",
+				"[dim]Task: shared task",
+				"",
+				"[muted]─── [accent]p/a [warning]⏳",
+				"",
+				"partial a",
+				"",
+				"[muted]─── [accent]p/org/b [warning]⏳",
+				"",
+				"[dim]Total: 1 turn ↑1 ↓1 $0.0001",
+			]);
+			for (const spawn of recording.spawns) emitAnswer(spawn, `${flag(spawn.args, "--model")} answer`);
+			await waitFor(() => recording.spawns.length === 3, "judge never spawned");
+			emitAnswer(recording.spawns[2], "merged review");
+			await promise;
+		} finally { recording.restore(); }
+	});
+});
+
+test("an unmerged panel skips the merge slot and marks the judge failed with each attempt", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const { recording, promise } = startPanelRun(h, cwd);
+		try {
+			await waitFor(() => recording.spawns.length === 2, "both panelists spawn");
+			for (const spawn of recording.spawns) emitAnswer(spawn, `${flag(spawn.args, "--model")} answer`);
+			await waitFor(() => recording.spawns.length === 3, "judge never spawned");
+			failAnswer(recording.spawns[2], "judge exploded");
+			await waitFor(() => recording.spawns.length === 4, "judge retry never spawned");
+			failAnswer(recording.spawns[3], "judge exploded again");
+			const lines = renderPanel(h, await promise, { expanded: true });
+			assert.deepEqual(lines, [
+				"[warning]◐ [toolTitle][bold]Panel pair[muted] (2 models; judge: p/judge)",
+				"[dim]merge-failed: judge exploded again",
+				"",
+				"[dim]Task: shared task",
+				"",
+				"[muted]─── [accent]p/a [success]✓",
+				"",
+				"p/a answer",
+				"[dim]1 turn ↑1 ↓1 $0.0001 ctx:2",
+				"",
+				"[muted]─── [accent]p/org/b [success]✓",
+				"",
+				"p/org/b answer",
+				"[dim]1 turn ↑1 ↓1 $0.0001 ctx:2",
+				"",
+				"[muted]─── [accent]judge p/judge [error]✗[muted] (2 attempts)",
+				"[muted]attempt 1",
+				"[dim]Error: judge exploded",
+				"[muted]attempt 2",
+				"[dim]Error: judge exploded again",
+				"[dim]no usage",
+				"",
+				"[dim]Total: 2 turns ↑2 ↓2 $0.0002",
+			]);
+			assert.equal(lines.some((line) => line.includes("merged review")), false, "the merge slot is skipped");
+		} finally { recording.restore(); }
+	});
+});
+
+test("the judge retry is labeled and each attempt keeps its error", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		panelConfig(agentDir, { judge: "p/judge" });
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const { recording, promise } = startPanelRun(h, cwd);
+		try {
+			await waitFor(() => recording.spawns.length === 1, "panelist never spawned");
+			emitAnswer(recording.spawns[0], "panelist answer");
+			await waitFor(() => recording.spawns.length === 2, "judge never spawned");
+			failAnswer(recording.spawns[1], "judge exploded");
+			await waitFor(() => recording.spawns.length === 3, "judge retry never spawned");
+			emitAnswer(recording.spawns[2], "merged review attempt");
+			assert.deepEqual(renderPanel(h, await promise, { expanded: true }), [
+				"[success]✓ [toolTitle][bold]Panel pair[muted] (1 model; judge: p/judge)",
+				"[dim]single-model-merge: only p/a answered",
+				"",
+				"[dim]Task: shared task",
+				"",
+				"[muted]─── merged review ───",
+				"merged review attempt",
+				"",
+				"[muted]─── [accent]p/a [success]✓",
+				"",
+				"panelist answer",
+				"[dim]1 turn ↑1 ↓1 $0.0001 ctx:2",
+				"",
+				"[muted]─── [accent]judge p/judge [success]✓[muted] (2 attempts)",
+				"[muted]attempt 1",
+				"[dim]Error: judge exploded",
+				"[muted]attempt 2",
+				"",
+				"merged review attempt",
+				"[dim]1 turn ↑1 ↓1 $0.0001",
+				"",
+				"[dim]Total: 2 turns ↑2 ↓2 $0.0002",
+			]);
+		} finally { recording.restore(); }
+	});
+});
+
+test("a panel with no panelist results falls back to the model-facing content", () => {
+	const h = makeHarness();
+	const result = {
+		content: [{ type: "text", text: "Panel (unknown): preflight failure" }],
+		details: {
+			mode: "panel",
+			agentScope: "user",
+			projectAgentsDir: null,
+			panel: undefined,
+			results: [],
+			judge: null,
+			notices: [],
+			mergedOutput: null,
+		},
+	};
+	assert.deepEqual(renderPanel(h, result, { expanded: false }), ["Panel (unknown): preflight failure"]);
+	assert.deepEqual(renderPanel(h, result, { expanded: true }), ["Panel (unknown): preflight failure"]);
+});
 
 test("streaming panel emits carry no notices; the finished result carries the real ones", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {

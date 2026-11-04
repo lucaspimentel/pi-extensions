@@ -1609,7 +1609,7 @@ export default function (pi: ExtensionAPI) {
 			return new Text(text, 0, 0);
 		},
 
-		renderResult(result, { expanded }, theme, _context) {
+		renderResult(result, { expanded, isPartial }, theme, _context) {
 			const details = result.details as SubagentDetails | undefined;
 			if (!details || details.results.length === 0) {
 				const text = result.content[0];
@@ -1635,15 +1635,149 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			if (details.mode === "panel") {
-				// Minimal Step 4 rendering: dim only the header line. Merged content and
-				// raw-review expansion remain Step 5 work, and the model-facing content
-				// stays free of ANSI sequences.
-				const text = result.content[0];
-				const body = text?.type === "text" ? text.text : "(no output)";
-				const newline = body.indexOf("\n");
-				const header = newline < 0 ? body : body.slice(0, newline);
-				const rest = newline < 0 ? "" : body.slice(newline);
-				return new Text(theme.fg("dim", header) + rest, 0, 0);
+				const panel = details.panel;
+				const judge = details.judge;
+				const modelCount = details.results.length;
+				const judgeLabel = judge
+					? judge.model ?? "session model"
+					: panel?.judge
+						? panel.judge.model ?? "session model"
+						: "none";
+				const plural = modelCount === 1 ? "" : "s";
+				const name = panel?.name ?? "(unknown)";
+				const header = `${theme.fg("toolTitle", theme.bold(`Panel ${name}`))}${theme.fg("muted", ` (${modelCount} model${plural}; judge: ${judgeLabel})`)}`;
+				const running = isPartial || details.results.some((result) => result.exitCode === -1);
+				const settledCount = details.results.filter((result) => result.exitCode !== -1).length;
+				const survivorCount = details.results.filter(
+					(result) => result.exitCode !== -1 && !isFailedResult(result),
+				).length;
+				const merged = details.mergedOutput !== null;
+				const noSurvivors = survivorCount === 0 && settledCount === modelCount;
+				const statusIcon = running
+					? theme.fg("warning", "⏳")
+					: merged
+						? theme.fg("success", "✓")
+						: noSurvivors
+							? theme.fg("error", "✗")
+							: theme.fg("warning", "◐");
+				const panelistMark = (result: PanelistResult) =>
+					result.exitCode === -1
+						? theme.fg("warning", "⏳")
+						: isFailedResult(result)
+							? theme.fg("error", "✗")
+							: theme.fg("success", "✓");
+
+				if (!expanded) {
+					// Running: derived from details, never from the model-facing content.
+					if (running) {
+						let text = `${theme.fg("warning", "⏳")} ${header}${theme.fg("accent", ` ${settledCount}/${modelCount} done, ${modelCount - settledCount} running`)}`;
+						for (const result of details.results) text += `\n${panelistMark(result)} ${theme.fg("accent", result.model)}`;
+						if (judge) {
+							const attempt = judge.attempts.length > 1 ? theme.fg("dim", ` (attempt ${judge.attempts.length})`) : "";
+							text += `\n${theme.fg("warning", "⏳")} ${theme.fg("accent", `judge ${judgeLabel}`)}${theme.fg("dim", " merging…")}${attempt}`;
+						}
+						return new Text(text, 0, 0);
+					}
+
+					// Collapsed finished: the model-facing content reproduced verbatim with only
+					// its metadata lines dimmed (header, notices, and the trailing usage block).
+					const raw = result.content[0];
+					const body = raw?.type === "text" ? raw.text : "(no output)";
+					const lines = body.split("\n");
+					const dimmed = new Set<number>();
+					dimmed.add(0);
+					for (let index = 1; index <= details.notices.length && index < lines.length; index++) dimmed.add(index);
+					const last = lines.length - 1;
+					if (last >= 0 && lines[last].startsWith("Total: ")) {
+						dimmed.add(last);
+						let index = last - 1;
+						if (index >= 0 && lines[index] === "") index--;
+						while (index >= 0 && lines[index] !== "") {
+							dimmed.add(index);
+							index--;
+						}
+					}
+					const styled = lines
+						.map((line, index) => (dimmed.has(index) ? theme.fg("dim", line) : line))
+						.join("\n");
+					return new Text(`${statusIcon} ${styled}\n${theme.fg("muted", "(Ctrl+O to expand)")}`, 0, 0);
+				}
+
+				// Expanded (running or finished): one section per panelist, then the judge
+				// with every attempt, then the total.
+				const container = new Container();
+				container.addChild(new Text(`${statusIcon} ${header}`, 0, 0));
+				for (const notice of details.notices)
+					container.addChild(new Text(theme.fg("dim", `${notice.kind}: ${notice.reason}`), 0, 0));
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("dim", `Task: ${details.results[0]?.task ?? ""}`), 0, 0));
+				if (merged) {
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("muted", "─── merged review ───"), 0, 0));
+					container.addChild(new Markdown(details.mergedOutput!.trim(), 0, 0, mdTheme));
+				}
+
+				for (const result of details.results) {
+					const pending = result.exitCode === -1;
+					const failed = !pending && isFailedResult(result);
+					container.addChild(new Spacer(1));
+					container.addChild(
+						new Text(`${theme.fg("muted", "─── ")}${theme.fg("accent", result.model)} ${panelistMark(result)}`, 0, 0),
+					);
+					for (const item of getDisplayItems(result.messages)) {
+						if (item.type === "toolCall")
+							container.addChild(
+								new Text(theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0),
+							);
+					}
+					if (failed) container.addChild(new Text(theme.fg("dim", `Error: ${failureReason(result)}`), 0, 0));
+					if (result.output) {
+						container.addChild(new Spacer(1));
+						if (failed) container.addChild(new Text(theme.fg("dim", "[Incomplete partial answer:]"), 0, 0));
+						container.addChild(new Markdown(result.output.trim(), 0, 0, mdTheme));
+					}
+					// A pending panelist has no usage to report yet; "no usage" would be a
+					// statement about a run that has not finished.
+					if (!pending) container.addChild(new Text(theme.fg("dim", usageText(result.usage)), 0, 0));
+				}
+
+				if (judge) {
+					const attempts = judge.attempts.length;
+					const judgeMark = running ? theme.fg("warning", "⏳") : merged ? theme.fg("success", "✓") : theme.fg("error", "✗");
+					const attemptLabel = attempts > 1 ? theme.fg("muted", ` (${attempts} attempts)`) : "";
+					container.addChild(new Spacer(1));
+					container.addChild(
+						new Text(
+							`${theme.fg("muted", "─── ")}${theme.fg("accent", `judge ${judgeLabel}`)} ${judgeMark}${attemptLabel}`,
+							0,
+							0,
+						),
+					);
+					for (let index = 0; index < attempts; index++) {
+						const attempt = judge.attempts[index];
+						if (attempts > 1) container.addChild(new Text(theme.fg("muted", `attempt ${index + 1}`), 0, 0));
+						if (isFailedResult(attempt)) container.addChild(new Text(theme.fg("dim", `Error: ${failureReason(attempt)}`), 0, 0));
+						for (const item of getDisplayItems(attempt.messages)) {
+							if (item.type === "toolCall")
+								container.addChild(
+									new Text(theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0),
+								);
+						}
+						if (attempt.output) {
+							container.addChild(new Spacer(1));
+							container.addChild(new Markdown(attempt.output.trim(), 0, 0, mdTheme));
+						}
+					}
+					container.addChild(new Text(theme.fg("dim", usageText(judge.usage)), 0, 0));
+				}
+
+				const totals = aggregateUsage([
+					...details.results.map((result) => result.usage),
+					...(judge?.attempts ?? []).map((attempt) => attempt.usage),
+				]);
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("dim", `Total: ${usageText(totals)}`), 0, 0));
+				return container;
 			}
 
 			if (details.mode === "single" && details.results.length === 1) {
