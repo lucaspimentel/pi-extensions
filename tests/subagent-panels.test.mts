@@ -484,7 +484,7 @@ test("tool summaries group repetitions with counts in first-use order", () => {
 	assert.equal(buildToolCallSummary(messages), "ffgrep BuildSampleRate src x2, read src/a.ts");
 });
 
-test("differing arguments stay distinct even when display truncation hides the difference", () => {
+test("differing arguments stay distinct and keep the end that names them", () => {
 	const prefix = "x".repeat(200);
 	const messages = [
 		toolCallAssistant([
@@ -494,7 +494,25 @@ test("differing arguments stay distinct even when display truncation hides the d
 	];
 	const summary = buildToolCallSummary(messages);
 	assert.equal(summary.includes(" x2"), false, "untruncated key arguments keep the calls apart");
-	assert.equal(summary.split("read ").length - 1, 2);
+	const entries = summary.split(", ");
+	assert.equal(entries.length, 2);
+	assert.notEqual(entries[0], entries[1], "the kept tail tells the two files apart");
+	assert.ok(entries[0].endsWith("a.ts") && entries[1].endsWith("b.ts"));
+});
+
+test("a long absolute path keeps its file name instead of its directory prefix", () => {
+	const dir =
+		"/home/lucas/source/datadog/serverless-components--lpimentel-mock-intake-disable-captures/crates/datadog-mock-intake";
+	const messages = [
+		toolCallAssistant([
+			{ id: "1", name: "read", args: { path: `${dir}/src/lib.rs` } },
+			{ id: "2", name: "read", args: { path: `${dir}/Cargo.toml` } },
+		]),
+	];
+	assert.equal(
+		buildToolCallSummary(messages),
+		"read /home/lucas/source/datadog/...ble-captures/crates/datadog-mock-intake/src/lib.rs, read /home/lucas/source/datadog/...ble-captures/crates/datadog-mock-intake/Cargo.toml",
+	);
 });
 
 test("distinct Git operation arguments stay distinct", () => {
@@ -567,10 +585,11 @@ test("the summary renders the first 20 distinct entries and a remainder count", 
 	assert.equal(summary.includes("read src/file-20.ts"), false);
 });
 
-test("displayed arguments are trimmed to the presentation cap", () => {
-	const long = "p".repeat(150);
+test("displayed arguments are elided to the presentation cap without losing the end", () => {
+	const long = `${"p".repeat(146)}tail`;
 	const summary = buildToolCallSummary([toolCallAssistant([{ id: "1", name: "read", args: { file_path: long } }])]);
-	assert.equal(summary, `read ${"p".repeat(80)}...`);
+	assert.equal(summary, `read ${"p".repeat(27)}...${"p".repeat(46)}tail`);
+	assert.equal(summary.length, "read ".length + 80, "the argument still fits the cap, ellipsis included");
 });
 
 test("unknown tools use a deterministic small fallback selection", () => {

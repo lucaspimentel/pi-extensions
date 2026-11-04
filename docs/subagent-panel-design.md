@@ -359,12 +359,14 @@ The `PANELIST` header, the repeated task, the `status` line, and the diagnostic
 labels are outside the 50 KiB answer budget, and the input has no aggregate
 ceiling. `tools` is a bounded summary of what that panelist actually called:
 known tools render their identifying arguments (the file path for a read, search
-patterns, Git/GitHub operation arguments), each displayed argument trimmed to
-about 80 characters, unknown tools fall back to a small deterministic scalar
-selection, repetitions collapse with counts (so repeated reads of one file
-become `read src/Foo.cs x3`), a failure appears only when a correlated tool
-result reported `isError`, and only the first 20 distinct entries are listed
-with a `(+N more)` suffix. An argument that arrives as an array, such as a Git
+patterns, Git/GitHub operation arguments), each displayed argument bounded to
+about 80 characters by eliding its middle, so the head keeps the argument's
+shape and the tail keeps the file name or the end of a pattern that a right-edge
+cut used to remove, which rendered distinct files as identical entries. Unknown
+tools fall back to a small deterministic scalar selection, repetitions collapse
+with counts (so repeated reads of one file become `read src/Foo.cs x3`), a
+failure appears only when a correlated tool result reported `isError`, and only
+the first 20 distinct entries are listed with a `(+N more)` suffix. An argument that arrives as an array, such as a Git
 invocation's revs and pathspecs or a `gh_read` operation's flags, is joined into
 that entry so two calls differing only in their arguments stay distinct; a
 non-scalar entry inside such an array is skipped rather than given an invented

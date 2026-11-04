@@ -18,6 +18,14 @@ export const TOOL_SUMMARY_ENTRY_CAP = 20;
 /** Displayed-character cap for one tool-call argument. */
 export const TOOL_SUMMARY_ARGUMENT_CAP = 80;
 
+/**
+ * Characters kept from the end of an over-long argument. The tail is what
+ * identifies the call: a file name for a path, the last alternatives for a
+ * pattern. Cutting only the right edge dropped it, so distinct files sharing a
+ * long directory prefix rendered as identical entries.
+ */
+export const TOOL_SUMMARY_ARGUMENT_TAIL_CAP = 50;
+
 /** One panelist's contribution to the judge input. */
 export interface PanelReviewInput {
 	model: string;
@@ -98,7 +106,12 @@ function renderToolCallDisplay(name: string, values: string[]): string {
 	if (values.length === 0) return name;
 	const shown = values.map((value) => {
 		const text = canonicalize(value);
-		return text.length > TOOL_SUMMARY_ARGUMENT_CAP ? `${text.slice(0, TOOL_SUMMARY_ARGUMENT_CAP)}...` : text;
+		if (text.length <= TOOL_SUMMARY_ARGUMENT_CAP) return text;
+		// Elide the middle rather than the right edge: the head keeps the
+		// argument's shape and the tail keeps what names the call, so two long
+		// arguments that differ only at the end stay readable and distinct.
+		const tail = text.slice(-TOOL_SUMMARY_ARGUMENT_TAIL_CAP);
+		return `${text.slice(0, TOOL_SUMMARY_ARGUMENT_CAP - tail.length - 3)}...${tail}`;
 	});
 	return `${name} ${shown.join(" ")}`;
 }
