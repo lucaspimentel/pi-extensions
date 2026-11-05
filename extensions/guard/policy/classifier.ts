@@ -75,15 +75,6 @@ export const DEFAULT_CLASSIFIER = {
 };
 
 /**
- * Status-bar label for the auto profile. Shows the resolved classifier model
- * id (e.g. `claude-haiku-4-5`); when no model is available, reports
- * `auto (no classifier)` so it is clear that fallthroughs stub to prompt.
- */
-export function classifierStatusLabel(model: Model<Api> | undefined): string {
-	return model ? `auto: ${modelLabel(model)}` : "auto (no classifier)";
-}
-
-/**
  * Attribution for a classifier verdict, embedded in decision reasons:
  * `classifier <modelId>: <reason>`, `classifier <modelId>`, or
  * `classifier: <reason>` depending on what is present. Empty when neither.

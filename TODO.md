@@ -114,7 +114,6 @@ Design: [`docs/guard-design.md`](docs/guard-design.md) (settled 2026-10-02, assu
 guard, idle-summary and session-name-llm now share one global model pin (`"model": "provider/modelId"` in `~/.pi/agent/<ext>.json`, `extensions/shared/model-pin.ts`): the pinned model when found and authed, else the session model.
 
 - [ ] guard's `userConfigPath` (`extensions/guard/policy/config.ts:116`) builds `~/.pi/agent/guard.json` from `homedir()` and ignores `PI_CODING_AGENT_DIR`, while idle-summary and session-name-llm use `getAgentDir()`. Switching changes guard's test isolation (the guard suites override `HOME`), so it needs its own change.
-- [ ] `classifierStatusLabel` (`extensions/guard/policy/classifier.ts:82`) is dead code: nothing imports it, and the footer uses `profileFooterLabel`.
 - [ ] `subagent.json`'s per-agent `models` map is a separate model-override dialect; merge it into the shared pin format later.
 
 ## Batch B: small independent fixes (agreed 2026-10-02)
