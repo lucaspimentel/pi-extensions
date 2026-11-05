@@ -101,7 +101,8 @@ Guidance added:
   `repo metadata`, and the tool-authored GraphQL review-thread read is
   `pr threads`), folded into the API-operations bullet.
   Commits are deliberately not named: `commit checks` returns check runs, and
-  commit details are an open TODO.
+  commit details are an open TODO (the 2026-11-03 refresh below measures 22
+  commit reads across 9 sessions).
 - A bullet for shapes with no dedicated operation: changed-file list
   (`pr diff --name-only`, or `pr view --json files,changedFiles` comparing
   the length of `files` with `changedFiles` to detect a truncated list), one
@@ -120,7 +121,9 @@ Not covered by guidance: `search/issues`, `commits`, `branches`, and generic
 `graphql` reads other than the review-thread read. `gh pr-threads` is named
 only here; the guidance now points at `pr threads` for the review-thread
 read. The issue/PR timeline is no longer uncovered: it is the
-`issue timeline` operation.
+`issue timeline` operation. The 2026-11-03 refresh below sizes what is left:
+commits 22 reads across 9 sessions, releases and tags 13 across 6, branches 11
+across 3, comments by id 8 across 5.
 
 Verification (2026-10-30, against DataDog/dd-trace-dotnet#9397):
 `pr diff --name-only` returned 8 files; `pr view --json files,changedFiles`
@@ -129,6 +132,32 @@ comment 4287875152 was recovered from its `html_url` and matched in the
 parent listing. The `-R OWNER/REPO` form of `pr diff --name-only` was also run and returned
 the same 8 paths. The silent 100-file cap behind `pr view --json files` is
 cited from `TODO.md` and was not re-verified.
+
+### Corpus refresh (2026-11-03)
+
+A second sweep with the method of the 2026-10-29 corpus above, over session
+JSONL dated 2026-10-* / 2026-11-*: `command`/`code` fields only, endpoint
+tokens normalized and aggregated in duckdb, current session excluded, with 53
+prose mentions and 28 mutating calls (`-X`/`--method POST|PATCH` with
+`-f`/`--input`) excluded because `gh_read` never writes. It sizes the shapes
+this doc still leaves uncovered, in the order the refreshed counts rank them:
+
+| Shape | Reads | Sessions |
+|---|---|---|
+| commits (`commits/{ref}`, `commits?path=`) | 22 | 9 |
+| releases and tags (`releases`, `releases/latest`, `tags`, `git/ref/tags/*`) | 13 | 6 |
+| branches | 11 | 3 |
+| `compare/{base}...{head}` | 8 | 3 |
+| comments by id (`pulls/comments/{id}`, `issues/comments/{id}`) | 8 | 5 |
+| `actions/jobs/{id}` (job metadata and job logs) | 7 | 6 |
+
+The comments-by-id count is lower than the ~13 recorded on 2026-10-29, and
+the job-family count is the same order as the 13 `actions/jobs/{n}/logs`
+occurrences found then, so neither bullet loses standing. Ranking rationale:
+the commit and branch reads are single-object operations that resolve in one
+request with a contract that already has precedent (`org team`,
+`repo metadata`), which outranks the multi-request list variants (releases and
+tags, `search`) and the by-id pair.
 
 ## Invocation contract
 
@@ -1347,10 +1376,11 @@ Settled in the grill-me review:
   (`pr edit`, `issue comment` are out; so is `pr checkout`, which mutates
   the worktree).
 - No `gh api` in the `gh_read` allowlist (direct, with caller flags), no
-  `gh search`, no `gh release`; this scopes the tool's allowlist, not agent
-  behavior, so the prompt guidance above still discourages shelling out to
-  raw `gh api` through `host_bash`. The `gh run` surface stays limited to the
-  read-only `run list`/`run view` pair: `gh run watch`, `gh run rerun`,
+  `gh search`, no `gh release` (the 2026-11-03 corpus refresh measures 13
+  release and tag reads across 6 sessions); this scopes the tool's allowlist,
+  not agent behavior, so the prompt guidance above still discourages shelling
+  out to raw `gh api` through `host_bash`. The `gh run` surface stays limited
+  to the read-only `run list`/`run view` pair: `gh run watch`, `gh run rerun`,
   `gh run download`, and `--exit-status` remain excluded. Expand the
   allowlist only on demonstrated need, one design-review cycle per addition.
 - No run-level or all-jobs log reads: `/actions/runs/{id}/logs` returns a ZIP
