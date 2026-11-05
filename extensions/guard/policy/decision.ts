@@ -567,6 +567,30 @@ export function explainHostShellCommand(
 }
 
 /**
+ * The rungs the host-shell approval dialog may offer as a computed profile
+ * switch. The ladder is NOT a permission ordering (default can allow what auto
+ * denies through classification), so this is an eligibility allow-list, not a
+ * promise that each rung qualifies: yolo and unrestricted are never offered.
+ */
+export const SWITCH_CANDIDATES: readonly Profile[] = ["allow-edits", "auto", "trusted"];
+
+/**
+ * The computed profile-switch rungs for one host-shell call: the pinned
+ * candidate set filtered to the rungs that would allow this exact call under a
+ * pure re-decision, excluding the current profile. Pure and synchronous: it
+ * never resolves an auto "classify" cell (no classifier calls here), so a
+ * prompting call can only ever qualify "trusted" with the current cells; that
+ * collapse is asserted in tests/guard-policy.test.mts.
+ */
+export function qualifyingSwitchRungs(
+	call: Extract<GuardCall, { kind: "host-shell" }>,
+	policy: PolicyState,
+): Profile[] {
+	return SWITCH_CANDIDATES.filter((rung) =>
+		rung !== policy.profile && explainHostShellCommand(call, { ...policy, profile: rung }).decision.action === "allow");
+}
+
+/**
  * The sessions directory the session-search extension reads, resolved the same
  * way that extension resolves it for the production case (no explicit home
  * argument): PI_CODING_AGENT_DIR wins when set, else ~/.pi/agent, plus

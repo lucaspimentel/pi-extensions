@@ -942,6 +942,31 @@ test("command dialogs queue behind a permission prompt and never replace it", as
 	});
 });
 
+test("the computed switch applies after the lease and cancels a queued command dialog", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-dialogs-switch-");
+		const ctx = harnessCtx(h, cwd);
+		await startSession(h, ctx);
+		const selector = installSelector(ctx);
+		const approval = h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_DIALOGS_UNSET" }, undefined, undefined, ctx);
+		void approval.catch(() => {});
+		await selector.waitFor(1);
+		// The profile picker queues behind the open approval lease.
+		const picker = h.commandHandlers.get("guard")!("profile", ctx);
+		void picker.catch(() => {});
+		await tick();
+		await tick();
+		assert.equal(selector.maxConcurrent(), 1, "the picker never replaces the approval prompt");
+		selector.answer("Switch to trusted (this session only)");
+		const result = await approval;
+		assert.equal(result.structuredContent.exit_code, 0, "the switch applied after the lease, so the post-transition epoch executes the call");
+		await picker;
+		assert.ok(h.notifications.some((n) => /profile selection (expired|cancelled)/.test(n)), "the transition invalidated the queued picker");
+		assert.ok(h.notifications.some((n) => /Profile: trusted \(this session only\)/.test(n)), "the session-only switch notice is emitted");
+	});
+});
+
 test("session replacement cancels the migration confirmation; a fresh confirmation writes", async () => {
 	await withTempHome(async () => {
 		const h = makeHarness();

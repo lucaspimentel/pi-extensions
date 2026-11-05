@@ -18,7 +18,7 @@ import { detectSandboxMode } from "./sandbox/detect.ts";
 import { PROTECTED_TOP_LEVEL, SCAN_MATCH_CAP_DEFAULT, SCAN_TIMEOUT_MS_DEFAULT } from "./sandbox/spec.ts";
 import { effectivePruneNames } from "./sandbox/scan.ts";
 import { clearUserModelPin, discoveryCollisionWarningsFor, discoveryNoticeText, discoveryWeakeningSignature, leftoverProjectPinKeys, loadConfig, loadUserConfigRaw, PROJECT_CONFIG_REL, resolvedClassifierConfig, setUserModelPin, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
-import { bashRunsOnHost, decide, explainHostShellCommand, pathInsideWriteRoots, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
+import { bashRunsOnHost, decide, explainHostShellCommand, pathInsideWriteRoots, qualifyingSwitchRungs, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
 import { makeIsProtectedPath } from "./policy/protected.ts";
 import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
 import { computeMigration } from "./policy/migrate.ts";
@@ -638,6 +638,13 @@ export default function guard(pi: ExtensionAPI) {
 		// fails closed here, before any dialog, so the action is never offered and
 		// then failed.
 		const sessionAllowSupported = allowPlan !== null && resolveWorkspaceScope(ctx.cwd) !== null;
+		// Eligibility for the computed profile switch: the rungs that would allow
+		// this exact call under a pure re-decision, minus any the inherited
+		// restriction refuses (a child cannot escalate through the dialog).
+		const session = state;
+		const switchRungs = shellCall && session
+			? qualifyingSwitchRungs(shellCall, policy).filter((rung) => profileChangeAllowed(session, rung).ok)
+			: [];
 		const commandText = shellCall ? shellCall.command : typeof input.code === "string" ? input.code : "";
 		// The gate holds the UI lease only across pre-display validation, the
 		// complete interaction, and post-answer validation. Persistence and
@@ -657,6 +664,7 @@ export default function guard(pi: ExtensionAPI) {
 				allowPlan,
 				denySaveSupported,
 				sessionAllowSupported,
+				switchProfileRungs: switchRungs,
 				sessionScopeLabel: ctx.cwd,
 				shell: shellCall?.shell ?? "host-bash",
 				scopes: ["project", "user"],
@@ -804,6 +812,42 @@ export default function guard(pi: ExtensionAPI) {
 			if (freshDecision.action === "allow") return rt.epoch;
 			if (freshDecision.action === "deny") throw new Error(`guard: ${withCodemodeOrigin(freshDecision, nested).reason}`);
 			continue;
+		}
+		if (outcome.kind === "switch-profile") {
+			if (!shellCall) throw new Error("guard: only host-shell calls support the profile switch");
+			assertCallActive(signal);
+			if (rt !== runtime || epoch !== rt.epoch || !state || !config || rt.teardownFailure || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
+				throw new Error("guard: approval expired after a policy change");
+			}
+			const next = { ...state };
+			const applied = setProfile(next, outcome.profile);
+			// Defensive: the offer filter only proposes rungs profileChangeAllowed
+			// accepts, so a refusal here means the offer and the commit disagree.
+			if (!applied.ok) throw new Error(`guard: ${applied.notice}`);
+			// The lease has been released, so this transition cannot cancel its own
+			// dialog. No persistence or command options: like the write/edit switch,
+			// the rungs share worker mode and the launch policy key.
+			try {
+				await transition(next, config, ctx);
+			} catch (err) {
+				throw new Error(`guard: profile transition failed; call denied: ${String(err)}`);
+			}
+			notify(ctx, `Profile: ${outcome.profile} (this session only)`);
+			// Re-decide the ORIGINAL call under the post-transition policy before
+			// approving: the rung qualified through the pure evaluation, and the
+			// fresh decision confirms that after any concurrent change.
+			assertCallActive(signal);
+			if (rt !== runtime || rt.teardownFailure || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
+				throw new Error("guard: approval expired after a policy change");
+			}
+			const freshDecision = await decisionFor(name, input, ctx, policyFor(ctx));
+			assertCallActive(signal);
+			if (rt !== runtime || rt.teardownFailure || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
+				throw new Error("guard: approval expired after a policy change");
+			}
+			if (freshDecision.action === "allow") return rt.epoch;
+			if (freshDecision.action === "deny") throw new Error(`guard: ${withCodemodeOrigin(freshDecision, nested).reason}`);
+			throw new Error(`guard: the call still prompts under profile ${outcome.profile}; denied`);
 		}
 		if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
 		// save-deny: the steering was collected inside the flow before the commit.

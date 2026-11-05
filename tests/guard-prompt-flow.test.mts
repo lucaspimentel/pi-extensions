@@ -14,6 +14,7 @@ import {
 	runExecutionPrompt,
 	runReadGrantPrompt,
 	runWriteEditPrompt,
+	switchProfileLabel,
 	writeEditPromptTitle,
 	type ExecutionFlowOutcome,
 	type PromptFlowIO,
@@ -246,6 +247,39 @@ test("Allow once skips steering entirely", async () => {
 	const outcome = await runExecutionPrompt(baseExecutionDeps({ io }));
 	assert.deepEqual(outcome, { kind: "allow-once" });
 	assert.equal(calls.input.length, 0);
+});
+
+// ── Computed profile switch ───────────────────────────────────────────────
+
+test("the computed profile switch is the last action and returns the chosen rung", async () => {
+	const { io, calls } = makeIO({ select: ["Switch to trusted (this session only)"] });
+	const outcome: ExecutionFlowOutcome = await runExecutionPrompt(baseExecutionDeps({ io, switchProfileRungs: ["trusted"] }));
+	assert.deepEqual(outcome, { kind: "switch-profile", profile: "trusted" });
+	const options = calls.select[0].split("\n@@")[1].split("|");
+	assert.equal(options.at(-1), "Switch to trusted (this session only)", "the switch is appended last");
+	for (const label of ["Allow once", "Save allow for project", "Save allow for user", "Deny once", "Save deny for project", "Save deny for user"]) {
+		assert.ok(options.includes(label), `${label} is still offered`);
+	}
+	assert.equal(switchProfileLabel("trusted"), "Switch to trusted (this session only)");
+});
+
+test("each qualifying rung gets its own action in list order", async () => {
+	const { io, calls } = makeIO({ select: ["Switch to trusted (this session only)"] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, switchProfileRungs: ["allow-edits", "trusted"] }));
+	assert.deepEqual(outcome, { kind: "switch-profile", profile: "trusted" });
+	const options = calls.select[0].split("\n@@")[1];
+	assert.ok(options.indexOf("Switch to allow-edits (this session only)") < options.indexOf("Switch to trusted (this session only)"), options);
+});
+
+test("an unoffered switch label is rejected", async () => {
+	{
+		const { io } = makeIO({ select: ["Switch to trusted (this session only)"] });
+		await assert.rejects(runExecutionPrompt(baseExecutionDeps({ io })), /unexpected approval answer/);
+	}
+	{
+		const { io } = makeIO({ select: ["Switch to trusted (this session only)"] });
+		await assert.rejects(runExecutionPrompt(baseExecutionDeps({ io, switchProfileRungs: ["allow-edits"] })), /unexpected approval answer/);
+	}
 });
 
 // ── Allow save flow ─────────────────────────────────────────────────────────

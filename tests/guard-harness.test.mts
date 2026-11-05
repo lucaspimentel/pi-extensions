@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { detectSandboxMode } from "../extensions/guard/sandbox/detect.ts";
 import { projectConfigPath, userConfigPath } from "../extensions/guard/policy/config.ts";
+import { INHERIT_ENV, serializeInheritance } from "../extensions/guard/policy/inheritance.ts";
 import guardExtension from "../extensions/guard/index.ts";
 
 const tempDirs: string[] = [];
@@ -186,6 +187,19 @@ async function withTempHome<T>(fn: () => Promise<T> | T): Promise<T> {
 				for (const shutdown of h.handlers.session_shutdown ?? []) await shutdown({}, {});
 			}
 		} finally { process.env.HOME = realHome; }
+	}
+}
+
+/** Set PI_GUARD_INHERIT for the duration of fn (the guard factory parses it once). */
+async function withInheritanceEnv<T>(value: string | undefined, fn: () => Promise<T> | T): Promise<T> {
+	const previous = process.env[INHERIT_ENV];
+	if (value === undefined) delete process.env[INHERIT_ENV];
+	else process.env[INHERIT_ENV] = value;
+	try {
+		return await fn();
+	} finally {
+		if (previous === undefined) delete process.env[INHERIT_ENV];
+		else process.env[INHERIT_ENV] = previous;
 	}
 }
 
@@ -709,6 +723,7 @@ test("explicit asks offer once/deny only; fallback saves exact effective rules",
 		ctx.ui.select = async (_title?: string, options?: string[]) => { offered = options ?? []; return "Deny once"; };
 		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo asked" }, undefined, undefined, ctx), /denied/);
 		assert.deepEqual(offered, ["Allow once", "Deny once"], "capability-limited hosts keep once actions only");
+		assert.ok(!offered.some((o) => o.startsWith("Switch to")), "an explicit ask still prompts under trusted, so no rung qualifies");
 		// With owned stages, the explicit ask still permits deny saves but never
 		// allow saves, and the whole-call exact rule saves through editor+preview.
 		const overlays = installOwnedAutopilot(ctx as { ui: Record<string, unknown> }, [2]); // "Save deny for project"
@@ -804,8 +819,52 @@ test("compound suggestions are hidden unless the complete call is authorized", a
 		let offered: string[] = [];
 		ctx.ui.select = async (_title?: string, options?: string[]) => { offered = options ?? []; return "Deny once"; };
 		await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET; echo $GUARD_SECOND_UNSET" }, undefined, undefined, ctx), /denied/);
-		assert.deepEqual(offered, ["Allow once", "Deny once"]);
+		// Saves stay hidden on a capability-limited host, but the computed
+		// profile switch is not a save, so it is still offered (D1).
+		assert.deepEqual(offered, ["Allow once", "Deny once", "Switch to trusted (this session only)"]);
 		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("the computed switch lands the rung, runs the call, and writes no config", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-switch-profile-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		let offered: string[] = [];
+		let selectCalls = 0;
+		ctx.ui.select = async (_title?: string, options?: string[]) => { offered = options ?? []; selectCalls++; return "Switch to trusted (this session only)"; };
+		const result = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
+		assert.equal(result.structuredContent.exit_code, 0, "a stale epoch would reject with 'execution denied'");
+		assert.deepEqual(offered, ["Allow once", "Deny once", "Switch to trusted (this session only)"]);
+		assert.equal(h.notifications.filter((n) => /^Profile: trusted \(this session only\)$/.test(n)).length, 1);
+		const profileEvents = h.emitted.filter(([name]) => name === "guard:profile");
+		assert.equal((profileEvents.at(-1)![1] as { profile: string }).profile, "trusted", "the last profile emission reports the landed rung");
+		assert.equal(fs.existsSync(projectConfigPath(cwd)), false, "the switch is session-only");
+		assert.equal(fs.existsSync(userConfigPath(process.env.HOME!)), false, "the switch is session-only");
+		// The rung persists for the session: the same call no longer prompts.
+		const again = await h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx);
+		assert.equal(again.structuredContent.exit_code, 0);
+		assert.equal(selectCalls, 1, "the second call needed no dialog");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("an inherited session is never offered the computed switch", async () => {
+	await withTempHome(async () => {
+		// The factory parses PI_GUARD_INHERIT once, so it must be set before makeHarness.
+		await withInheritanceEnv(serializeInheritance("default", "nonce-1"), async () => {
+			const h = makeHarness();
+			const cwd = makeTempDir("guard-inherited-switch-");
+			const ctx = harnessCtx(h, cwd);
+			await h.handlers.session_start[0]({}, ctx);
+			let offered: string[] = [];
+			ctx.ui.select = async (_title?: string, options?: string[]) => { offered = options ?? []; return "Deny once"; };
+			await assert.rejects(h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_HARNESS_UNSET" }, undefined, undefined, ctx), /denied/);
+			assert.ok(!offered.some((o) => o.startsWith("Switch to")), `a child cannot escalate through the dialog: ${offered.join(", ")}`);
+			assert.deepEqual(offered, ["Allow once", "Deny once"]);
+		});
 	});
 });
 

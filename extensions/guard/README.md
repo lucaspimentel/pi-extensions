@@ -200,6 +200,21 @@ Registration details:
   esc or an empty selection returns to the action menu, and editor/preview
   cancellation grants nothing and approves the current call once, while
   abort, staleness, or an unresolvable workspace identity fails closed.
+- **Computed profile switch.** A host-shell prompt also offers one
+  `Switch to <rung> (this session only)` action per qualifying rung, computed
+  per call from the pure host-shell evaluation (the rungs that would allow
+  this exact call; never `yolo` or `unrestricted`), appended after the
+  save/deny entries. It is a plain menu choice, not a save: no rule is
+  written and no steering is collected. It is applied only after the dialog
+  lease releases, through the same transition as the profile commands, and the
+  call is re-decided against the post-transition policy before it executes (a
+  decision that no longer resolves as allow denies). The offer is suppressed
+  whenever `profileChangeAllowed` refuses the rung, so a child session never
+  sees a rung outside its inherited restriction. With the current cells only
+  `trusted` can qualify for a call that currently prompts (`default` and
+  `allow-edits` share the `prompt` cell, and `auto`'s `classify` cell is never
+  resolved here), so the action reads `Switch to trusted (this session only)`
+  today. An unoffered label is rejected, never treated as authority.
 - Approval prompts use the pi-tool-permissions prompt format: a friendly
   header ("Allow Bash?", or "Allow Bash subcommand?" for a multi-step
   breakdown), the full command (truncated at 200 characters) or the code for
@@ -350,6 +365,10 @@ filter stays observe-only:
   `default` restores prompting. Children inherit the rung but cannot
   self-escalate into it. In `auto`, the classifier never rules on out-of-root
   writes: they always prompt.
+- **Host-shell prompts** also offer the computed switch above: today that is
+  `Switch to trusted (this session only)` for a call that would otherwise
+  prompt, applied after the lease and re-decided before execution. It is not
+  tied to the `allow-edits` rung and needs no owned editor/picker stages.
 - **unrestricted is never in the cycle**; it is reachable only with
   `/guard profile unrestricted`. Cycling from unrestricted goes to research.
 - In `yolo` and `unrestricted` the workers run raw but `bash` does not: it is

@@ -39,8 +39,10 @@ import {
 	hasDollarExpansionOutsideSingleQuotes,
 	isExfilCapableFetch,
 	maskArgumentVeto,
+	qualifyingSwitchRungs,
 	resolveDecision,
 	sessionSearchRoot,
+	SWITCH_CANDIDATES,
 	type GuardCall,
 	type PolicyState,
 } from "../extensions/guard/policy/decision.ts";
@@ -93,6 +95,10 @@ function makePolicy(overrides: Partial<PolicyState> = {}): PolicyState {
 		interactive: true,
 		...overrides,
 	};
+}
+
+function hostShell(command: string, shell: "host-bash" | "pwsh" = "host-bash"): Extract<GuardCall, { kind: "host-shell" }> {
+	return { kind: "host-shell", shell, command };
 }
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
@@ -246,6 +252,34 @@ test("host shell cell for every profile (rules change nothing here)", () => {
 	for (const profile of ALL_PROFILES) {
 		assert.equal(decideHost(profile, "git push").action, expected[profile], profile);
 	}
+});
+
+test("the computed switch offers only rungs that would allow the same call", () => {
+	// A call that currently prompts under default. Only trusted would allow it:
+	// allow-edits shares default's prompt cell (rules are profile-independent),
+	// and auto's cell is classify, which the pure evaluation never resolves.
+	const prompting = hostShell("curl https://example.com");
+	assert.deepEqual(qualifyingSwitchRungs(prompting, makePolicy({ profile: "default" })), ["trusted"]);
+	// The current profile is never returned.
+	assert.deepEqual(qualifyingSwitchRungs(prompting, makePolicy({ profile: "allow-edits" })), ["trusted"]);
+	assert.deepEqual(qualifyingSwitchRungs(prompting, makePolicy({ profile: "trusted" })), []);
+	// yolo and unrestricted can never be offered as a switch.
+	assert.deepEqual(SWITCH_CANDIDATES, ["allow-edits", "auto", "trusted"]);
+	assert.ok(!SWITCH_CANDIDATES.includes("yolo"));
+	assert.ok(!SWITCH_CANDIDATES.includes("unrestricted"));
+});
+
+test("the computed switch suppresses explicit asks, ambiguous compounds, and yolo", () => {
+	// An explicit ask prompts under every rung, so nothing qualifies.
+	const ask = makePolicy({ config: makeConfig({ hostBash: { ask: ["HostBash(echo asked)"] } }) });
+	assert.deepEqual(qualifyingSwitchRungs(hostShell("echo asked"), ask), []);
+	// A compound whose whole call matches an ask rule stays suppressed.
+	const askCompound = makePolicy({ config: makeConfig({ hostBash: { ask: ["HostBash(echo a && echo b)"] } }) });
+	assert.deepEqual(qualifyingSwitchRungs(hostShell("echo a && echo b"), askCompound), []);
+	// An ambiguous split prompts under every rung (never a dead option).
+	assert.deepEqual(qualifyingSwitchRungs(hostShell('echo "unterminated'), makePolicy()), []);
+	// A call already allowed under the current trusted profile has no rung.
+	assert.deepEqual(qualifyingSwitchRungs(hostShell("git push"), makePolicy({ profile: "trusted" })), []);
 });
 
 test("write/edit cell for every profile (inside cwd)", () => {

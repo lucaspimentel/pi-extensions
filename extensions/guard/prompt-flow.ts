@@ -20,6 +20,7 @@
 import type { ConfigScope, SuggestedPatch } from "./policy/suggest.ts";
 import { notExactShellRules, type AllowSavePlan } from "./policy/save.ts";
 import type { Decision, GuardCall, HostShellExplanation } from "./policy/decision.ts";
+import type { Profile } from "./policy/profiles.ts";
 import type { GuardPickerStep } from "./ask-components.ts";
 
 /** Injected UI surface. Every method takes the stage's dialog signal. */
@@ -45,7 +46,13 @@ export type ExecutionFlowOutcome =
 	| { kind: "deny-once"; explicit: boolean; steering: SteeringText }
 	| { kind: "save-allow"; scope: ConfigScope; planKind: "whole-call" | "per-step"; rules: string[]; selectedOccurrenceIds: readonly number[]; patch: SuggestedPatch; previewText: string }
 	| { kind: "session-allow"; planKind: "whole-call" | "per-step"; rules: string[]; selectedOccurrenceIds: readonly number[]; previewText: string }
-	| { kind: "save-deny"; scope: ConfigScope; rules: string[]; patch: SuggestedPatch; steering: SteeringText; previewText: string };
+	| { kind: "save-deny"; scope: ConfigScope; rules: string[]; patch: SuggestedPatch; steering: SteeringText; previewText: string }
+	| { kind: "switch-profile"; profile: Profile };
+
+/** The approval-dialog label for a computed profile switch (this session only). */
+export function switchProfileLabel(profile: Profile): string {
+	return `Switch to ${profile} (this session only)`;
+}
 
 export type ReadFlowOutcome =
 	| { kind: "grant-session" }
@@ -262,6 +269,12 @@ export interface ExecutionPromptDeps {
 	sessionAllowSupported?: boolean;
 	/** Display-only label for the session grant's workspace scope. */
 	sessionScopeLabel?: string;
+	/**
+	 * Rungs the caller computed that would allow this exact call; empty/omitted
+	 * hosts never see the action. Appended last in the action menu, after the
+	 * save/deny entries.
+	 */
+	switchProfileRungs?: readonly Profile[];
 	shell: "host-bash" | "pwsh";
 	scopes: readonly ConfigScope[];
 	parseRules(text: string): { ok: true; rules: string[] } | { ok: false; error: string };
@@ -286,6 +299,7 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 	const editorAvailable = typeof io.editor === "function";
 	const title = executionPromptTitle(deps);
 	const sessionLabel = deps.sessionScopeLabel ?? "this workspace";
+	const switchRungs = deps.switchProfileRungs ?? [];
 	for (;;) {
 		const options = [
 			"Allow once",
@@ -293,6 +307,7 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 			...(deps.allowPlan && editorAvailable ? deps.scopes.map((scope) => `Save allow for ${scope}`) : []),
 			"Deny once",
 			...(deps.denySaveSupported && editorAvailable ? deps.scopes.map((scope) => `Save deny for ${scope}`) : []),
+			...switchRungs.map(switchProfileLabel),
 		];
 		const answer = await io.select(title, options, signal);
 		// Initial selector cancellation denies without saving or steering.
@@ -301,6 +316,11 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 		if (answer === "Deny once") {
 			return { kind: "deny-once", explicit: true, steering: await collectSteering(io, signal, `denied: ${deps.command || deps.toolName}`) };
 		}
+		// A computed profile switch is a plain menu choice; an unoffered label
+		// matches no computed label and falls through to the unexpected-answer
+		// throw below (hiding an action is not an authorization check).
+		const rung = switchRungs.find((candidate) => answer === switchProfileLabel(candidate));
+		if (rung !== undefined) return { kind: "switch-profile", profile: rung };
 		if (answer === "Allow for this session" || answer.startsWith("Save allow for ")) {
 			// Hiding an action is not an authorization check: reject an answer the
 			// caller never offered (a forged or scripted action string).
