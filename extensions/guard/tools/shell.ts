@@ -7,8 +7,7 @@ import { spawnSandboxed } from "../sandbox/run.ts";
 import { isPathVisible, type MountEntry } from "../sandbox/bwrap.ts";
 import { effectiveWorkspaceMode } from "../policy/decision.ts";
 import { normalizeRootList } from "../policy/paths.ts";
-import { splitTopLevelShell, stripTimeoutPrefix } from "../policy/shellsplit.ts";
-import { tokenizeSimple } from "../policy/bashtier.ts";
+import type { ShellCommandAnalysis } from "../policy/shellast.ts";
 import { homedir, constants } from "node:os";
 import { RLIMITS_SHELL, type LaunchSpec } from "../sandbox/spec.ts";
 import type { ExecutionContext } from "../runtime.ts";
@@ -157,20 +156,21 @@ const WRAPPER_PREFIXES = new Set(["sudo", "nohup", "env", "exec", "command", "ni
  * reroutes execution, and misses (aliases, functions, unlisted tools) fail
  * open to the generic hint.
  */
-export function hostBoundCommandReason(cmd: string): string | null {
-	const split = splitTopLevelShell(cmd);
-	const parts = split.kind === "compound" ? split.parts : [split.kind === "single" ? (split.effectiveCmd ?? cmd) : cmd];
-	for (const part of parts) {
-		let tokens = tokenizeSimple(stripTimeoutPrefix(part.trim()));
-		// Skip leading VAR=value assignments and wrapper commands.
-		while (tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens = tokens.slice(1);
-		while (tokens.length > 0 && WRAPPER_PREFIXES.has(tokens[0].toLowerCase())) tokens = tokens.slice(1);
-		if (tokens.length === 0) continue;
-		const root = tokens[0].toLowerCase();
+export function hostBoundCommandReason(analysis: ShellCommandAnalysis | null): string | null {
+	if (!analysis?.complete) return null;
+	for (const call of analysis.calls) {
+		let argv = [...call.argv];
+		// Skip leading VAR=value assignments and wrapper commands (the adapter
+		// already unwrapped registry wrappers; this keeps the remaining manual
+		// prefixes honest).
+		while (argv.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0])) argv = argv.slice(1);
+		while (argv.length > 0 && WRAPPER_PREFIXES.has(argv[0].toLowerCase())) argv = argv.slice(1);
+		if (argv.length === 0) continue;
+		const root = argv[0].toLowerCase();
 		if (HOST_BOUND_ROOTS.has(root)) return root;
 		if (root !== "git" && !PKG_NETWORK_ROOTS.has(root)) continue;
 		const subs = root === "git" ? GIT_NETWORK_SUBCOMMANDS : PKG_NETWORK_SUBCOMMANDS;
-		const sub = tokens.slice(1).map((t) => t.toLowerCase()).find((t) => subs.has(t));
+		const sub = argv.slice(1).map((t) => t.toLowerCase()).find((t) => subs.has(t));
 		if (sub !== undefined) return `${root} ${sub}`;
 	}
 	return null;
@@ -296,20 +296,19 @@ const MAX_PATH_CANDIDATES = 3;
  * paths, variables, quoting) fail open to the generic hint.
  */
 export function unmountedPathCandidates(
-	cmd: string,
+	analysis: ShellCommandAnalysis | null,
 	mountedPaths: readonly MountEntry[] | undefined,
 	home: string = homedir(),
 ): string[] {
 	if (mountedPaths === undefined || mountedPaths.length === 0) return [];
-	const split = splitTopLevelShell(cmd);
-	const parts = split.kind === "compound" ? split.parts : [split.kind === "single" ? (split.effectiveCmd ?? cmd) : cmd];
+	if (!analysis?.complete) return [];
 	const found: string[] = [];
-	for (const part of parts) {
-		let tokens = tokenizeSimple(stripTimeoutPrefix(part.trim()));
+	for (const call of analysis.calls) {
+		let argv = [...call.argv];
 		// Skip leading VAR=value assignments and wrapper commands, as hostBoundCommandReason does.
-		while (tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens = tokens.slice(1);
-		while (tokens.length > 0 && WRAPPER_PREFIXES.has(tokens[0].toLowerCase())) tokens = tokens.slice(1);
-		for (const token of tokens) {
+		while (argv.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0])) argv = argv.slice(1);
+		while (argv.length > 0 && WRAPPER_PREFIXES.has(argv[0].toLowerCase())) argv = argv.slice(1);
+		for (const token of argv) {
 			const candidate = extractPathToken(token, home);
 			if (candidate === null || found.includes(candidate)) continue;
 			let flagged = !isPathVisible(mountedPaths, candidate);
@@ -334,12 +333,12 @@ export function unmountedPathCandidates(
  * action at host_bash or the read tool, and still hedges causation; everything
  * else keeps the generic shell hint.
  */
-export function sandboxFailureHint(command: string, mountedPaths?: readonly MountEntry[], home?: string): string {
-	const reason = hostBoundCommandReason(command);
+export function sandboxFailureHint(analysis: ShellCommandAnalysis | null, mountedPaths?: readonly MountEntry[]): string {
+	const reason = hostBoundCommandReason(analysis);
 	if (reason !== null) {
 		return `Guard sandbox: '${reason}' needs network access or host credentials and cannot succeed here. Re-run this command with host_bash (not bash); do not retry with bash.`;
 	}
-	const paths = mountedPaths === undefined ? [] : unmountedPathCandidates(command, mountedPaths, home);
+	const paths = mountedPaths === undefined ? [] : unmountedPathCandidates(analysis, mountedPaths);
 	if (paths.length > 0) {
 		return `Guard sandbox: this command mentions path(s) that are not visible in this sandbox: ${paths.join(", ")}. If the command needs them, use host_bash (or the read tool to read them); do not retry with bash. Other causes are possible. ${SHELL_SANDBOX_FAILURE_HINT}`;
 	}

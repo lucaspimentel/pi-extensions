@@ -33,19 +33,22 @@ import {
 import { DEFAULT_MASK_EXCEPTIONS, DEFAULT_MASK_PATTERNS } from "../extensions/guard/sandbox/spec.ts";
 import {
 	activeConstructReason,
-	decide,
-	decideHostShellCommand,
+	decide as decidePolicy,
+	decideHostShellCommand as decideHostShellCommandPolicy,
 	effectiveWorkspaceMode,
 	hasDollarExpansionOutsideSingleQuotes,
 	isExfilCapableFetch,
 	maskArgumentVeto,
-	qualifyingSwitchRungs,
-	resolveDecision,
+	qualifyingSwitchRungs as qualifyingSwitchRungsPolicy,
+	resolveDecision as resolveDecisionPolicy,
 	sessionSearchRoot,
 	SWITCH_CANDIDATES,
+	type ClassifyStrategy,
+	type Decision,
 	type GuardCall,
 	type PolicyState,
 } from "../extensions/guard/policy/decision.ts";
+import { analyzeSync } from "./shellast-sync.mts";
 import {
 	ALL_PROFILES,
 	nextProfile,
@@ -101,6 +104,22 @@ function hostShell(command: string, shell: "host-bash" | "pwsh" = "host-bash"): 
 	return { kind: "host-shell", shell, command };
 }
 
+// Synchronous test façade over the async shell-ast analysis: shadow the real
+// evaluators so every pre-existing call site keeps working, the analysis is
+// sourced from the same adapter the production path uses.
+function decide(policy: PolicyState, call: GuardCall): Decision {
+	return decidePolicy(policy, call, call.kind === "host-shell" ? analyzeSync(call.command) : null);
+}
+function decideHostShellCommand(call: Extract<GuardCall, { kind: "host-shell" }>, policy: PolicyState): Decision {
+	return decideHostShellCommandPolicy(call, policy, analyzeSync(call.command));
+}
+function qualifyingSwitchRungs(call: Extract<GuardCall, { kind: "host-shell" }>, policy: PolicyState): ReturnType<typeof qualifyingSwitchRungsPolicy> {
+	return qualifyingSwitchRungsPolicy(call, policy, analyzeSync(call.command));
+}
+function resolveDecision(policy: PolicyState, call: GuardCall, classify: ClassifyStrategy) {
+	return resolveDecisionPolicy(policy, call, classify, call.kind === "host-shell" ? analyzeSync(call.command) : null);
+}
+
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 function test(name: string, fn: () => void | Promise<void>) {
 	tests.push({ name, fn });
@@ -145,6 +164,68 @@ test("raw yolo cannot hide denied or asked subcommands behind an innocent prefix
 	const ask = decide(policy, { kind: "host-shell", shell: "host-bash", command: "echo x; git push" });
 	assert.equal(ask.action, "prompt");
 	assert.equal(ask.provenance, "explicit-ask");
+});
+
+test("a multibyte prefix does not corrupt per-step rule subjects (deny stays enforced)", () => {
+	// The byte-offset trap: slicing with JS string indices would yield a subject
+	// of "cho x" for the second step, so the per-step deny rule would no longer
+	// match and the trusted cell would silently allow the command.
+	const config = makeConfig({ hostBash: { deny: ["HostBash(echo x)"] } });
+	assert.equal(decide(makePolicy({ profile: "trusted", config }), hostShell("echo café && echo x")).action, "deny");
+	// Control: without the rule the trusted cell allows the same compound.
+	assert.equal(decide(makePolicy({ profile: "trusted" }), hostShell("echo café && echo x")).action, "allow");
+});
+
+test("an unfaithful projection is never checked against allow rules (allow -> prompt)", () => {
+	// A complete command the tier vetoes is still authorized by a matching allow
+	// rule...
+	const config = makeConfig({ hostBash: { allow: ["HostBash(echo *)"] } });
+	const allowed = (command: string) => decide(makePolicy({ profile: "default", config }), hostShell(command)).action;
+	assert.equal(allowed("echo $HOME"), "allow");
+	// ...but a substitution makes that call's own projection incomplete, so
+	// rules are not consulted for it and the call prompts. This is a deliberate
+	// tightening over the pre-adapter splitter (which matched the single raw
+	// fragment); it is pinned here until the stage-4 decision-diff enumerates it.
+	assert.equal(allowed("echo $(date)"), "prompt");
+});
+
+test("an explicit allow rule never authorizes an incomplete call (per-call pin)", () => {
+	const config = makeConfig({ hostBash: { allow: ["HostBash(echo *)"] } });
+	const policy = makePolicy({ profile: "default", config });
+	// The rule is live: it authorizes a complete echo.
+	assert.equal(decide(policy, hostShell("echo hi")).action, "allow");
+	// It cannot authorize a call whose own span is incomplete (command substitution).
+	assert.equal(decide(policy, hostShell("echo $(date)")).action, "prompt");
+	// Nor can an explicit whole-command-shaped allow rule.
+	const whole = makeConfig({ hostBash: { allow: ["HostBash(echo $(date))"] } });
+	assert.equal(decide(makePolicy({ profile: "default", config: whole }), hostShell("echo $(date)")).action, "prompt");
+});
+
+test("pwsh is one whole-command step: whole-text rules match, per-step rules do not", () => {
+	// A whole-command deny rule denies the compound.
+	const wholeDeny = makeConfig({ hostBash: { deny: ["Pwsh(Get-ChildItem && Set-Location ..)"] } });
+	assert.equal(decide(makePolicy({ profile: "trusted", config: wholeDeny }), hostShell("Get-ChildItem && Set-Location ..", "pwsh")).action, "deny");
+	// A per-step rule no longer matches a compound: the trusted cell governs it.
+	const perStep = makeConfig({ hostBash: { deny: ["Pwsh(Set-Location*)"] } });
+	assert.equal(decide(makePolicy({ profile: "trusted", config: perStep }), hostShell("Get-ChildItem && Set-Location ..", "pwsh")).action, "allow");
+	// A whole-command allow rule authorizes the whole command text.
+	const wholeAllow = makeConfig({ hostBash: { allow: ["Pwsh(Get-ChildItem && Set-Location ..)"] } });
+	assert.equal(decide(makePolicy({ profile: "default", config: wholeAllow }), hostShell("Get-ChildItem && Set-Location ..", "pwsh")).action, "allow");
+});
+
+test("pwsh fails closed on a malformed command instead of reaching a trusted allow cell", () => {
+	// The trusted pwsh cell allows an unruled whole-command step...
+	assert.equal(decide(makePolicy({ profile: "trusted" }), hostShell("Get-ChildItem", "pwsh")).action, "allow");
+	// ...but an unterminated quote is not evaluable and prompts.
+	const malformed = decide(makePolicy({ profile: "trusted" }), hostShell('Get-ChildItem && echo "x', "pwsh"));
+	assert.equal(malformed.action, "prompt");
+	assert.match(malformed.reason, /unterminated quote/);
+});
+
+test("the pwsh cell governs an unruled whole-command step", () => {
+	for (const [profile, action] of [["default", "prompt"], ["trusted", "allow"], ["yolo", "allow"]] as const) {
+		assert.equal(decide(makePolicy({ profile }), hostShell("Get-Process", "pwsh")).action, action, profile);
+	}
 });
 
 test("reduced bash preserves rw outside research; workspace locks always force ro", () => {

@@ -16,6 +16,7 @@ import type { GuardCall, PolicyState } from "./decision.ts";
 import { classificationName } from "./classes.ts";
 import { normalizeMatchPath } from "./paths.ts";
 import { decide } from "./decision.ts";
+import type { ShellCommandAnalysis } from "./shellast.ts";
 
 /** A partial guard.json patch an "always allow" choice would save. */
 export type SuggestedPatch = Partial<GuardConfig>;
@@ -136,15 +137,15 @@ const LIST_KEYS: readonly (keyof GuardConfig)[] = [
 export type ConfigScope = "user" | "project";
 
 /** Save only patches whose effective merge authorizes the complete call. */
-export function effectiveAllowSuggestion(call: GuardCall, policy: PolicyState): SuggestedPatch | null {
-	if (decide(policy, call).provenance === "explicit-ask") return null;
+export function effectiveAllowSuggestion(call: GuardCall, policy: PolicyState, analysis: ShellCommandAnalysis | null): SuggestedPatch | null {
+	if (decide(policy, call, analysis).provenance === "explicit-ask") return null;
 	const patch = suggestRule(call, policy);
 	if (!patch?.hostBash?.allow) return null;
 	const config: ResolvedGuardConfig = {
 		...policy.config,
 		hostBash: { ...policy.config.hostBash, allow: dedupe([...policy.config.hostBash.allow, ...patch.hostBash.allow]) },
 	};
-	return decide({ ...policy, config }, call).action === "allow" ? patch : null;
+	return decide({ ...policy, config }, call, analysis).action === "allow" ? patch : null;
 }
 
 export interface AddToScopeResult {

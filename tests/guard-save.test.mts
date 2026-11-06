@@ -9,7 +9,7 @@ import { test } from "node:test";
 
 import { mergeConfig, type GuardConfig } from "../extensions/guard/policy/config.ts";
 import {
-	explainHostShellCommand,
+	explainHostShellCommand as explainHostShellCommandPolicy,
 	type GuardCall,
 	type PolicyState,
 } from "../extensions/guard/policy/decision.ts";
@@ -20,11 +20,12 @@ import {
 	parseReadRootInput,
 	parseShellRuleLine,
 	parseShellRuleLines,
-	planAllowSave,
+	planAllowSave as planAllowSavePolicy,
 	planDenyRules,
-	validateShellAllowSave,
-	validateShellSave,
+	validateShellAllowSave as validateShellAllowSavePolicy,
+	validateShellSave as validateShellSavePolicy,
 } from "../extensions/guard/policy/save.ts";
+import { analysisForSync } from "./shellast-sync.mts";
 import { compilePattern, parseRule } from "../extensions/guard/policy/rules.ts";
 
 function makeConfig(overrides: Partial<GuardConfig> = {}, cwd = "/home/user/proj"): ReturnType<typeof mergeConfig> {
@@ -45,6 +46,20 @@ function makePolicy(overrides: Partial<PolicyState> = {}): PolicyState {
 }
 
 const shellCall = (command: string, shell: "host-bash" | "pwsh" = "host-bash"): Extract<GuardCall, { kind: "host-shell" }> => ({ kind: "host-shell", shell, command });
+
+// Synchronous test façade over the async shell-ast analysis (see shellast-sync.mts).
+function explainHostShellCommand(call: Extract<GuardCall, { kind: "host-shell" }>, policy: PolicyState) {
+	return explainHostShellCommandPolicy(call, policy, analysisForSync(call));
+}
+function validateShellSave(call: Extract<GuardCall, { kind: "host-shell" }>, policy: PolicyState, intent: "allow" | "deny", rules: readonly string[]) {
+	return validateShellSavePolicy(call, policy, intent, rules, analysisForSync(call));
+}
+function validateShellAllowSave(call: Extract<GuardCall, { kind: "host-shell" }>, policy: PolicyState, rules: readonly string[], ids: readonly number[]) {
+	return validateShellAllowSavePolicy(call, policy, rules, ids, analysisForSync(call));
+}
+function planAllowSave(call: Extract<GuardCall, { kind: "host-shell" }>, policy: PolicyState, explanation: Parameters<typeof planAllowSavePolicy>[2]) {
+	return planAllowSavePolicy(call, policy, explanation, analysisForSync(call));
+}
 
 // ── Rule line parsing ───────────────────────────────────────────────────────
 
@@ -134,16 +149,26 @@ test("a reliable breakdown plans per-step rules, even for a single-command promp
 	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: "HostBash(curl https://example.com)" }]);
 });
 
-test("an unreliable breakdown keeps the whole-call suggestion when it provably works", () => {
+test("an unavailable breakdown (pwsh) keeps the whole-call suggestion when it provably works", () => {
 	const policy = makePolicy();
-	const call = shellCall("echo $(compute)");
+	const call = shellCall("Get-ChildItem", "pwsh");
 	const explanation = explainHostShellCommand(call, policy);
-	assert.equal(explanation.breakdown.available, false, "command substitution makes the breakdown unavailable");
+	assert.equal(explanation.breakdown.available, false, "pwsh never has a per-step breakdown");
 	const plan = planAllowSave(call, policy, explanation);
 	assert.ok(plan);
 	assert.equal(plan.kind, "whole-call");
 	assert.ok(plan.kind === "whole-call");
-	assert.deepEqual(plan.rules, ["HostBash(echo $(compute))"]);
+	assert.deepEqual(plan.rules, ["Pwsh(Get-ChildItem)"]);
+});
+
+test("a host-bash command with an incomplete analysis cannot be allow-saved", () => {
+	const policy = makePolicy();
+	const call = shellCall("echo $(compute)");
+	const explanation = explainHostShellCommand(call, policy);
+	assert.equal(explanation.breakdown.available, false, "command substitution makes the breakdown unavailable");
+	// The incomplete call prompts regardless of the saved rule, so no allow
+	// suggestion can prove the whole call: nothing is offered.
+	assert.equal(planAllowSave(call, policy, explanation), null);
 });
 
 test("a whole-call suggestion for a compound command is retired on a reliable breakdown", () => {
@@ -298,7 +323,8 @@ test("deny plan mapping stays pure: gating by reliability happens at the flow le
 	assert.equal(explanation.breakdown.available, false, "the flow opens a blank manual editor for this case");
 	// planDenyRules itself is a pure mapper over existing steps; the flow must
 	// only call it when the breakdown picker is offered (reliable parsing).
-	assert.deepEqual(planDenyRules(call, explanation, [0]), [exactDenyRule("pwsh", "echo $(compute)")]);
+	// Pwsh is one whole-command step, so occurrence 0 is the whole command.
+	assert.deepEqual(planDenyRules(call, explanation, [0]), [exactDenyRule("pwsh", "echo $(compute) && curl https://example.com")]);
 });
 
 // ── Read-root input parsing ─────────────────────────────────────────────────

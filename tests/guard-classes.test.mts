@@ -17,9 +17,18 @@ import {
 	pupRunClass,
 	type ToolClass,
 } from "../extensions/guard/policy/classes.ts";
-import { suggestRule, suggestRemoteReadRule, readGrantSuggestion, addToConfigScope, effectiveAllowSuggestion, countPatchChanges } from "../extensions/guard/policy/suggest.ts";
-import { decide, type GuardCall, type PolicyState } from "../extensions/guard/policy/decision.ts";
+import { suggestRule, suggestRemoteReadRule, readGrantSuggestion, addToConfigScope, effectiveAllowSuggestion as effectiveAllowSuggestionPolicy, countPatchChanges } from "../extensions/guard/policy/suggest.ts";
+import { decide as decidePolicy, type GuardCall, type PolicyState, type Decision } from "../extensions/guard/policy/decision.ts";
+import { analyzeSync, analysisForSync } from "./shellast-sync.mts";
 import { parseRule, ruleMatches } from "../extensions/guard/policy/rules.ts";
+
+// Synchronous test façade over the async shell-ast analysis (see shellast-sync.mts).
+function decide(policy: PolicyState, call: GuardCall): Decision {
+	return decidePolicy(policy, call, analysisForSync(call));
+}
+function effectiveAllowSuggestion(call: GuardCall, policy: PolicyState) {
+	return effectiveAllowSuggestionPolicy(call, policy, analysisForSync(call));
+}
 
 const tempDirs: string[] = [];
 function makeTempDir(prefix: string): string {

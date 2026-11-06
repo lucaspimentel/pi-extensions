@@ -10,12 +10,19 @@ import assert from "node:assert/strict";
 import { mergeConfig } from "../extensions/guard/policy/config.ts";
 import {
 	bashRunsOnHost,
-	decide,
+	decide as decidePolicy,
 	decideLocalWrite,
 	effectiveWorkspaceMode,
+	type Decision,
 	type GuardCall,
 	type PolicyState,
 } from "../extensions/guard/policy/decision.ts";
+import { analysisForSync } from "./shellast-sync.mts";
+
+// Synchronous test façade over the async shell-ast analysis (see shellast-sync.mts).
+function decide(policy: PolicyState, call: GuardCall): Decision {
+	return decidePolicy(policy, call, analysisForSync(call));
+}
 import {
 	GUARD_STATE_BLOCKED_INHERITANCE,
 	GUARD_STATE_BLOCKED_TEARDOWN,

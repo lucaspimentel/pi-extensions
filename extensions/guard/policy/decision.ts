@@ -48,14 +48,8 @@ import { parseRule, ruleMatches, rulePatternAllowsRedirect, compilePattern } fro
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { normalizeMatchPath, normalizeRootList } from "./paths.ts";
-import {
-	assessBreakdownReliability,
-	splitTopLevelShell,
-	stripStructuralKeywords,
-	stripTimeoutPrefix,
-	stripTrailingHarmlessRedirects,
-	type BreakdownReliability,
-} from "./shellsplit.ts";
+import { stripTimeoutPrefix, stripTrailingHarmlessRedirects, type BreakdownReliability } from "./shell-text.ts";
+import { shellAnalysisCauseReason, shellAstStatus, type ShellCommandAnalysis } from "./shellast.ts";
 import type { ResolvedGuardConfig } from "./config.ts";
 import { makeIsProtectedPath } from "./protected.ts";
 import {
@@ -377,14 +371,39 @@ export interface HostShellExplanation {
 }
 
 /**
- * Decide one (already split) host shell subcommand, for the
- * default/auto/trusted precedence: deny > ask > tier > redirect-aware allow
- * rules > redirect requirement > cell. Returns the decision plus the exact
- * matching subjects so suggestions can anchor to what the evaluator matched.
+ * One evaluable step handed to evaluateHostShellSub. `subject` is the exact
+ * string deny/ask rules match against; `argv`/`hasParameterExpansion`/
+ * `pureAssignment` drive the tightened read-only tier (Stage 3 moves the tier
+ * onto argv; Stage 2 still judges the subject string). `incompleteReason` is
+ * non-null when the step cannot be evaluated (its own subtree was flagged, or
+ * a pwsh command is malformed): it prompts before the tier and every allow
+ * rule, so no rule can authorize an incomplete step.
  */
-function evaluateHostShellSub(command: string, policy: PolicyState, shell: "host-bash" | "pwsh", tierEligible: boolean): { decision: Decision; subject: string; allowSubject: string; requiresRedirectAwareAllow: boolean } {
+interface EvaluableStep {
+	subject: string;
+	argv: readonly string[];
+	hasParameterExpansion: boolean;
+	pureAssignment: boolean;
+	incompleteReason: string | null;
+}
+
+/**
+ * Decide one host shell step, for the default/auto/trusted precedence:
+ * deny > ask > yolo > incomplete (prompt) > tier > redirect-aware allow
+ * rules > redirect requirement > plain allow rules > cell. Returns the
+ * decision plus the exact matching subjects so suggestions can anchor to
+ * what the evaluator matched.
+ *
+ * `step.incompleteReason` non-null means the step's own projection is
+ * unfaithful. It prompts there, BEFORE the tier and every allow rule, so an
+ * explicit allow rule (or the tier) can never authorize a step that contains
+ * a construct guard cannot evaluate; its complete siblings are unaffected.
+ * Deny and ask rules still apply first, so a deny rule on an incomplete step
+ * still denies.
+ */
+function evaluateHostShellSub(step: EvaluableStep, policy: PolicyState, shell: "host-bash" | "pwsh"): { decision: Decision; subject: string; allowSubject: string; requiresRedirectAwareAllow: boolean } {
 	const { config, profile } = policy;
-	const cmd = stripTimeoutPrefix(stripLineContinuations(command).trim());
+	const cmd = stripTimeoutPrefix(stripLineContinuations(step.subject).trim());
 	const subject = cmd;
 	const requiresRedirectAwareAllow = hasTopLevelFileRedirect(cmd, config.writeRoots, { cwd: config.cwd });
 	// Plain allow rules match the redirect-stripped subject; a step that needs
@@ -396,39 +415,30 @@ function evaluateHostShellSub(command: string, policy: PolicyState, shell: "host
 	const askRule = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
 	if (askRule !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'`, provenance: "explicit-ask" }, subject, allowSubject, requiresRedirectAwareAllow };
 	if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, subject, allowSubject, requiresRedirectAwareAllow };
-	// Tightened read-only tier (host_bash only; host vetoes first). Skipped
-	// entirely when the whole command contains a structural construct whose
-	// head was discarded during step projection: the fragments evaluated here
-	// do not stand for what bash will actually run.
-	if (shell === "host-bash" && tierEligible) {
+	// An unfaithful step prompts here: no tier or allow rule may authorize it.
+	if (step.incompleteReason !== null) return { decision: { action: "prompt", reason: step.incompleteReason }, subject, allowSubject, requiresRedirectAwareAllow };
+	// Tightened read-only tier (host_bash only; host vetoes first).
+	if (shell === "host-bash") {
 		const tier = hostTierAllowReason(cmd, config);
 		if (tier !== null) return { decision: { action: "allow", reason: tier }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
 	// Redirect handling: a top-level file redirect (outside the writeRoots
 	// exemptions) may only be authorized by a redirect-aware allow rule (one
 	// whose pattern contains ">"). Broad rules and the profile cell never
-	// authorize a write redirect. When the projection is unfaithful
-	// (tierEligible false: a structural head was discarded), allow rules are
-	// skipped entirely: a rule saved against a projected body fragment must
-	// never authorize a command whose discarded head runs other code.
+	// authorize a write redirect.
 	if (requiresRedirectAwareAllow) {
-		if (tierEligible) {
-			for (const raw of config.hostBash.allow) {
-				const rule = parseRule(raw);
-				if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, ruleToolFor(shell), { command: cmd }, config.cwd)) {
-					return { decision: { action: "allow", reason: `matched redirect-aware allow rule '${raw}'` }, subject, allowSubject, requiresRedirectAwareAllow };
-				}
+		for (const raw of config.hostBash.allow) {
+			const rule = parseRule(raw);
+			if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, ruleToolFor(shell), { command: cmd }, config.cwd)) {
+				return { decision: { action: "allow", reason: `matched redirect-aware allow rule '${raw}'` }, subject, allowSubject, requiresRedirectAwareAllow };
 			}
 		}
-		return { decision: { action: "prompt", reason: tierEligible ? "file redirect requires a redirect-aware allow rule (a pattern containing '>')" : "structural command could not be evaluated (loop or case head discarded)" }, subject, allowSubject, requiresRedirectAwareAllow };
+		return { decision: { action: "prompt", reason: "file redirect requires a redirect-aware allow rule (a pattern containing '>')" }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
-	// Plain allow rules. Skipped when the projection is unfaithful, like the
-	// tier above.
-	if (tierEligible) {
-		const allowRule = matchedHostShellRule(config.hostBash.allow, shell, stripTrailingHarmlessRedirects(cmd), config.cwd);
-		if (allowRule !== undefined) {
-			return { decision: { action: "allow", reason: `matched ${ruleToolFor(shell)} allow rule '${allowRule}'` }, subject, allowSubject, requiresRedirectAwareAllow };
-		}
+	// Plain allow rules.
+	const allowRule = matchedHostShellRule(config.hostBash.allow, shell, stripTrailingHarmlessRedirects(cmd), config.cwd);
+	if (allowRule !== undefined) {
+		return { decision: { action: "allow", reason: `matched ${ruleToolFor(shell)} allow rule '${allowRule}'` }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
 	// Profile cell.
 	return { decision: cellAction(hostShellCell(profile), "host shell"), subject, allowSubject, requiresRedirectAwareAllow };
@@ -444,6 +454,7 @@ function evaluateHostShellSub(command: string, policy: PolicyState, shell: "host
 function evaluateHostShell(
 	call: Extract<GuardCall, { kind: "host-shell" }>,
 	policy: PolicyState,
+	analysis: ShellCommandAnalysis | null,
 ): HostShellExplanation {
 	const { profile, config } = policy;
 	const shell = call.shell;
@@ -471,87 +482,105 @@ function evaluateHostShell(
 	if (rawDeny !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${rawDeny}'` }, steps: [], rawDenyRule: rawDeny, breakdown: { available: false, reason: "a whole-command deny rule matched" } };
 	const rawAsk = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
 
-	const split = splitTopLevelShell(cmd);
-	if (split.kind === "ambiguous") {
-		const ambiguous: BreakdownReliability = { available: false, reason: "the command could not be split unambiguously" };
-		const splitCause = "complex command could not be split for per-subcommand checks";
-		const denyRule = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
-		if (denyRule !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'` }, steps: [], rawDenyRule: denyRule, splitCause, breakdown: ambiguous };
-		if (rawAsk !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" }, steps: [], rawAskRule: rawAsk, splitCause, breakdown: ambiguous };
-		if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, steps: [], splitCause, breakdown: ambiguous };
-		return { decision: { action: "prompt", reason: splitCause }, steps: [], splitCause, breakdown: ambiguous };
+	if (shell === "pwsh") return evaluatePwshCommand(cmd, policy);
+
+	// The whole-command branch is taken ONLY when no reliable call list exists
+	// (analysis null, or a whole-command construct set the analysis cause). A
+	// per-call flag leaves the analysis complete so every call is evaluated
+	// below with its own completeness; the offending step still names itself
+	// when the cause is whole-command.
+	if (analysis == null || analysis.cause !== null) {
+		const reason = analysis?.reason ?? shellAstStatus().diagnostic ?? "the bash parser is unavailable";
+		const offending = analysis?.calls.find((c) => !c.complete)?.subject;
+		const breakdown: BreakdownReliability = offending === undefined ? { available: false, reason } : { available: false, reason, offending };
+		if (rawAsk !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" }, steps: [], rawAskRule: rawAsk, splitCause: reason, breakdown };
+		if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, steps: [], splitCause: reason, breakdown };
+		return { decision: { action: "prompt", reason }, steps: [], splitCause: reason, breakdown };
 	}
-	const stepOf = (occurrenceId: number, display: string, ev: ReturnType<typeof evaluateHostShellSub>): HostShellStep => ({ occurrenceId, display, subject: ev.subject, allowSubject: ev.allowSubject, requiresRedirectAwareAllow: ev.requiresRedirectAwareAllow, decision: ev.decision });
-	if (split.kind === "single") {
-		const effective = split.effectiveCmd ?? cmd;
-		const ev = evaluateHostShellSub(effective, policy, shell, true);
-		const decision = ev.decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt" as const, reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" as const } : ev.decision;
-		// Pair the single fragment with its structurally stripped form so pure
-		// timeout wrappers stay reliable while structural keywords do not.
-		const strippedSingle = stripStructuralKeywords(effective);
-		const reliability = assessBreakdownReliability(shell, strippedSingle === null ? [] : [effective], strippedSingle === null ? [] : [strippedSingle]);
-		return { decision, steps: [stepOf(0, effective, ev)], rawAskRule: rawAsk, breakdown: reliability };
+
+	const evaluations = analysis.calls.map((c) => ({ sub: c.subject, ev: evaluateHostShellSub({ subject: c.subject, argv: c.argv, hasParameterExpansion: c.hasParameterExpansion, pureAssignment: c.pureAssignment, incompleteReason: c.complete ? null : shellAnalysisCauseReason(c.cause ?? "unrecognized-node") }, policy, shell) }));
+	const incompleteCall = analysis.calls.find((c) => !c.complete);
+	const reliability: BreakdownReliability = incompleteCall === undefined
+		? { available: analysis.calls.length > 0 }
+		: { available: false, reason: shellAnalysisCauseReason(incompleteCall.cause ?? "unrecognized-node"), offending: incompleteCall.subject };
+	const toStep = (i: number, e: { sub: string; ev: ReturnType<typeof evaluateHostShellSub> }): HostShellStep => ({ occurrenceId: i, display: e.sub, subject: e.ev.subject, allowSubject: e.ev.allowSubject, requiresRedirectAwareAllow: e.ev.requiresRedirectAwareAllow, decision: e.ev.decision });
+	if (evaluations.length === 1) {
+		const e = evaluations[0];
+		const decision = e.ev.decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt" as const, reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" as const } : e.ev.decision;
+		return { decision, steps: [toStep(0, e)], rawAskRule: rawAsk, breakdown: reliability };
 	}
-	const pairs: Array<{ raw: string; stripped: string }> = [];
-	// A raw part that stripStructuralKeywords discards (a pure iteration/case
-	// head or a bare block keyword) was never evaluated, so the projected steps
-	// do not stand for the whole command: the discarded head can hold the
-	// active construct (`for x in $(touch probe); do echo ok; done`). No step
-	// of such a command may auto-allow via the tier.
-	let structuralCollapse = false;
-	for (const rawSub of split.parts) {
-		const stripped = stripStructuralKeywords(rawSub);
-		if (stripped !== null) pairs.push({ raw: rawSub, stripped });
-		else structuralCollapse = true;
-	}
-	if (pairs.length === 0) {
-		if (structuralCollapse) {
-			// A pure loop/select head may still expand its word list (`for x in
-			// $(touch probe); do done` runs the substitution), so "nothing to
-			// evaluate" must not auto-allow.
-			return { decision: { action: "prompt", reason: "structural command could not be evaluated (loop or case head discarded)" }, steps: [], rawAskRule: rawAsk, breakdown: { available: false, reason: "the command is purely structural and has no evaluable steps" } };
-		}
-		return { decision: { action: "allow", reason: "no commands after structural stripping" }, steps: [], rawAskRule: rawAsk, breakdown: { available: false, reason: "the command is purely structural and has no evaluable steps" } };
-	}
-	const parts = pairs.map((p) => p.stripped);
-	const tierEligible = !structuralCollapse;
-	const reliability = assessBreakdownReliability(shell, pairs.map((p) => p.raw), parts);
-	if (parts.length === 1) {
-		const ev = evaluateHostShellSub(parts[0], policy, shell, tierEligible);
-		const decision = ev.decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt" as const, reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" as const } : ev.decision;
-		return { decision, steps: [stepOf(0, parts[0], ev)], rawAskRule: rawAsk, breakdown: reliability };
-	}
-	const breakdown = pairs.map((p) => ({ sub: p.stripped, ev: evaluateHostShellSub(p.stripped, policy, shell, tierEligible) }));
-	if (!breakdown.some((b) => b.ev.decision.action === "deny") && rawAsk !== undefined) {
-		return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" }, steps: breakdown.map((b, i) => stepOf(i, b.sub, b.ev)), rawAskRule: rawAsk, breakdown: reliability };
+	if (!evaluations.some((e) => e.ev.decision.action === "deny") && rawAsk !== undefined) {
+		return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" }, steps: evaluations.map((e, i) => toStep(i, e)), rawAskRule: rawAsk, breakdown: reliability };
 	}
 	const worst =
-		breakdown.find((b) => b.ev.decision.action === "deny") ??
-		breakdown.find((b) => b.ev.decision.action === "prompt") ??
-		breakdown.find((b) => b.ev.decision.action === "classify") ??
-		breakdown[0];
-	const decision: Decision = { action: worst.ev.decision.action, reason: `subcommand '${worst.sub}': ${worst.ev.decision.reason}`, provenance: breakdown.some((b) => b.ev.decision.provenance === "explicit-ask") ? "explicit-ask" : worst.ev.decision.provenance };
-	return { decision, steps: breakdown.map((b, i) => stepOf(i, b.sub, b.ev)), rawAskRule: rawAsk, failingSub: worst.sub, breakdown: reliability };
+		evaluations.find((e) => e.ev.decision.action === "deny") ??
+		evaluations.find((e) => e.ev.decision.action === "prompt") ??
+		evaluations.find((e) => e.ev.decision.action === "classify") ??
+		evaluations[0];
+	const decision: Decision = { action: worst.ev.decision.action, reason: `subcommand '${worst.sub}': ${worst.ev.decision.reason}`, provenance: evaluations.some((e) => e.ev.decision.provenance === "explicit-ask") ? "explicit-ask" : worst.ev.decision.provenance };
+	return { decision, steps: evaluations.map((e, i) => toStep(i, e)), rawAskRule: rawAsk, failingSub: worst.sub, breakdown: reliability };
 }
 
 /**
- * Decide a host shell call (host_bash or pwsh), splitting compounds so each
- * subcommand is evaluated independently. Aggregation: deny > prompt >
- * classify > allow, attributed to the worst subcommand. Per profile:
+ * Pwsh is evaluated as ONE whole-command step. Guard has no PowerShell
+ * parser, so there is no split, no per-subcommand rules, and no read-only
+ * tier (pwsh never had one): the whole command text is matched by Pwsh
+ * deny/ask/allow rules, yolo allows, and the profile cell governs everything
+ * else (a prompt for default/allow-edits/auto). A malformed command (an
+ * unterminated quote) is the one fail-closed exception: it prompts instead of
+ * reaching an allow cell. The whole-command deny match still runs first in
+ * the caller.
+ */
+function evaluatePwshCommand(cmd: string, policy: PolicyState): HostShellExplanation {
+	const breakdown: BreakdownReliability = { available: false, reason: "PowerShell commands are evaluated as one whole command (no per-step breakdown)" };
+	const malformed = pwshMalformedReason(cmd);
+	const ev = evaluateHostShellSub({ subject: cmd, argv: [], hasParameterExpansion: false, pureAssignment: false, incompleteReason: malformed }, policy, "pwsh");
+	if (malformed !== null) return { decision: ev.decision, steps: [], splitCause: malformed, breakdown };
+	const step: HostShellStep = { occurrenceId: 0, display: cmd, subject: ev.subject, allowSubject: ev.allowSubject, requiresRedirectAwareAllow: ev.requiresRedirectAwareAllow, decision: ev.decision };
+	return { decision: ev.decision, steps: [step], breakdown };
+}
+
+/**
+ * The pwsh syntactic sanity gate: the whole command is one step, so an
+ * unterminated single or double quote means the text cannot be trusted and
+ * must prompt rather than reach an allow cell. This is NOT a split: no parts
+ * are projected and no per-subcommand rule runs. PowerShell's backtick escape
+ * is not modelled; an unmodelled case fails closed (prompts).
+ */
+function pwshMalformedReason(cmd: string): string | null {
+	let inSingle = false;
+	let inDouble = false;
+	let i = 0;
+	while (i < cmd.length) {
+		const ch = cmd[i];
+		if (ch === "\\" && !inSingle) { i += 2; continue; }
+		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
+		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
+		i++;
+	}
+	return inSingle || inDouble ? "the PowerShell command has an unterminated quote" : null;
+}
+
+/**
+ * Decide a host shell call (host_bash or pwsh). Bash compounds are split by
+ * the AST adapter and each call is evaluated independently; pwsh is one
+ * whole-command step. Aggregation: deny > prompt > classify > allow,
+ * attributed to the worst call. Per profile:
  *   research     absolute deny (rules ignored); degraded mode is the one
  *                exception, where host_bash takes the whole-command
  *                read-only tier and allow rules never widen it.
  *   yolo         deny rules block, ask rules prompt, everything else allows.
  *   unrestricted allow, rules ignored.
- *   otherwise    evaluateHostShellSub per subcommand.
- * An ambiguous split prompts, but an explicit deny rule on the raw command
- * still denies (deny rules always win).
+ *   otherwise    evaluateHostShellSub per call.
+ * An analysis-level failure prompts, and a malformed pwsh prompt, but an
+ * explicit deny rule on the raw command still denies (deny rules always win).
  */
 export function decideHostShellCommand(
 	call: Extract<GuardCall, { kind: "host-shell" }>,
 	policy: PolicyState,
+	analysis: ShellCommandAnalysis | null,
 ): Decision {
-	return evaluateHostShell(call, policy).decision;
+	return evaluateHostShell(call, policy, analysis).decision;
 }
 
 /**
@@ -562,8 +591,9 @@ export function decideHostShellCommand(
 export function explainHostShellCommand(
 	call: Extract<GuardCall, { kind: "host-shell" }>,
 	policy: PolicyState,
+	analysis: ShellCommandAnalysis | null,
 ): HostShellExplanation {
-	return evaluateHostShell(call, policy);
+	return evaluateHostShell(call, policy, analysis);
 }
 
 /**
@@ -585,9 +615,10 @@ export const SWITCH_CANDIDATES: readonly Profile[] = ["allow-edits", "auto", "tr
 export function qualifyingSwitchRungs(
 	call: Extract<GuardCall, { kind: "host-shell" }>,
 	policy: PolicyState,
+	analysis: ShellCommandAnalysis | null,
 ): Profile[] {
 	return SWITCH_CANDIDATES.filter((rung) =>
-		rung !== policy.profile && explainHostShellCommand(call, { ...policy, profile: rung }).decision.action === "allow");
+		rung !== policy.profile && explainHostShellCommand(call, { ...policy, profile: rung }, analysis).decision.action === "allow");
 }
 
 /**
@@ -734,7 +765,7 @@ export function bashRunsOnHost(policy: PolicyState): boolean {
  * The pure decision function. Total over all GuardCall shapes and profiles;
  * "classify" results must be resolved through resolveDecision().
  */
-export function decide(policy: PolicyState, call: GuardCall): Decision {
+export function decide(policy: PolicyState, call: GuardCall, analysis: ShellCommandAnalysis | null): Decision {
 	const { profile, config } = policy;
 	if (policy.workspaceLocked && (call.kind === "host-shell" || (call.kind === "sandboxed-exec" && policy.sandboxMode === "degraded"))) {
 		return { action: "deny", reason: "workspace locked: host/raw execution is unavailable until /guard ack" };
@@ -760,7 +791,7 @@ export function decide(policy: PolicyState, call: GuardCall): Decision {
 			return cellAction(sandboxedExecCell(profile), "sandboxed execution (kernel-enforced sandbox)");
 		}
 		case "host-shell":
-			return decideHostShellCommand(call, policy);
+			return decideHostShellCommand(call, policy, analysis);
 		case "local-read":
 			return decideLocalRead(call, policy);
 		case "local-write":
@@ -788,8 +819,9 @@ export async function resolveDecision(
 	policy: PolicyState,
 	call: GuardCall,
 	classify: ClassifyStrategy,
+	analysis: ShellCommandAnalysis | null,
 ): Promise<Decision & { action: "allow" | "prompt" | "deny" }> {
-	const d = decide(policy, call);
+	const d = decide(policy, call, analysis);
 	if (d.action !== "classify") {
 		return { ...finalize(policy, d.action, d.reason), provenance: d.provenance };
 	}

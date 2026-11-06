@@ -13,7 +13,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { isPathVisible, mountTable, type MountEntry } from "../extensions/guard/sandbox/bwrap.ts";
-import { SHELL_SANDBOX_FAILURE_HINT, bashToolDescription, hostBashToolDescription, sandboxBoundaryText, sandboxFailureHint, unmountedPathCandidates, workerToolDescription } from "../extensions/guard/tools/shell.ts";
+import { SHELL_SANDBOX_FAILURE_HINT, bashToolDescription, hostBashToolDescription, sandboxBoundaryText, sandboxFailureHint as sandboxFailureHintPolicy, unmountedPathCandidates as unmountedPathCandidatesPolicy, workerToolDescription } from "../extensions/guard/tools/shell.ts";
+import { analyzeSync } from "./shellast-sync.mts";
+
+// Synchronous test façade: the production path analyses the command once and
+// passes the result; these tests still speak in command strings.
+function unmountedPathCandidates(cmd: string, mountedPaths: Parameters<typeof unmountedPathCandidatesPolicy>[1], home?: string): string[] {
+	return unmountedPathCandidatesPolicy(analyzeSync(cmd), mountedPaths, home);
+}
+function sandboxFailureHint(cmd: string, mountedPaths?: Parameters<typeof sandboxFailureHintPolicy>[1], _home?: string): string {
+	return sandboxFailureHintPolicy(analyzeSync(cmd), mountedPaths);
+}
 
 const HOME = os.homedir();
 
@@ -124,7 +134,10 @@ test("unmountedPathCandidates truncates globs to their directory", () => {
 test("unmountedPathCandidates ignores relative paths, URLs, redirections, and bare ~ arguments", () => {
 	assert.deepEqual(unmountedPathCandidates("grep pattern relative/file.txt", fakeMounts(), HOME), []);
 	assert.deepEqual(unmountedPathCandidates("curl https://example.com/path", fakeMounts(), HOME), []);
-	assert.deepEqual(unmountedPathCandidates("sort < /etc/hostname > out.txt", fakeMounts(), HOME), ["/etc/hostname"]);
+	// Redirect operands are not argv: the shell-ast projection scans command
+	// arguments, not redirection targets, so a path that only appears as a
+	// redirect operand is not probed (advisory-only hint).
+	assert.deepEqual(unmountedPathCandidates("sort < /etc/hostname > out.txt", fakeMounts(), HOME), []);
 	assert.deepEqual(unmountedPathCandidates("cd ~", fakeMounts(), HOME), []);
 });
 

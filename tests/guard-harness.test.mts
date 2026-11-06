@@ -843,6 +843,27 @@ test("sandbox bash and both workers share writable scratch at one real host path
 	});
 });
 
+test("a sandboxed bash failure names an unmounted path in its hint, not the generic fallback", async () => {
+	// Production wiring: executeShell must analyze a sandboxed command for the
+	// hint itself, because analysisFor returns null for sandboxed-exec. If it
+	// does not, both specific hints are unreachable and every failure gets the
+	// generic text.
+	if (sandboxMode === "degraded") return;
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-sandbox-hint-");
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		const probe = "/definitely-not-mounted-guard-probe";
+		const result = await h.registeredTools.get("bash")!.execute("id", { command: `ls ${probe}` }, undefined, undefined, ctx);
+		assert.equal(result.isError, true, "ls on a missing path fails");
+		const text = (result.content as Array<{ text: string }>).map((c) => c.text).join("\n");
+		assert.match(text, /not visible in this sandbox/, "the hint is specific, not the generic fallback");
+		assert.ok(text.includes(probe), "the hint names the unmounted path");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
 test("accepting a save while sandbox work runs waits for teardown before writing protected config", async () => {
 	if (sandboxMode === "degraded") return;
 	await withTempHome(async () => {

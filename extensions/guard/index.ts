@@ -19,6 +19,7 @@ import { PROTECTED_TOP_LEVEL, SCAN_MATCH_CAP_DEFAULT, SCAN_TIMEOUT_MS_DEFAULT } 
 import { effectivePruneNames } from "./sandbox/scan.ts";
 import { clearUserModelPin, discoveryCollisionWarningsFor, discoveryNoticeText, discoveryWeakeningSignature, leftoverProjectPinKeys, loadConfig, loadUserConfigRaw, PROJECT_CONFIG_REL, resolvedClassifierConfig, setUserModelPin, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
 import { bashRunsOnHost, decide, explainHostShellCommand, pathInsideWriteRoots, qualifyingSwitchRungs, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
+import { analyzeHostCommand, preloadShellAst, shellAstStatus, type ShellCommandAnalysis } from "./policy/shellast.ts";
 import { makeIsProtectedPath } from "./policy/protected.ts";
 import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
 import { computeMigration } from "./policy/migrate.ts";
@@ -138,6 +139,9 @@ export default function guard(pi: ExtensionAPI) {
 	// fresh session start.
 	const pinNotifier = createIgnoredPinNotifier();
 	let projectPinKeysNotified = false;
+	// Once-per-session notice for an unavailable bash parser (host shell then
+	// fails closed to a prompt on every command).
+	let shellAstNotified = false;
 
 	function getAnnotations(name: string): ToolAnnotations | undefined {
 		if (annotationSnapshot === null) annotationSnapshot = pi.getAllTools().map((t) => ({ name: t.name, annotations: t.annotations }));
@@ -307,8 +311,14 @@ export default function guard(pi: ExtensionAPI) {
 	function mappedCall(name: string, input: Record<string, unknown>) {
 		return mapToolCallToGuardCall(name, input, effectiveConfig(), getAnnotations);
 	}
-	async function decisionFor(name: string, input: Record<string, unknown>, ctx: ExtensionContext, policy = policyFor(ctx)): Promise<Decision> {
-		return resolveDecision({ ...policy, interactive: ctx.hasUI }, mappedCall(name, input).call, (call) => classify(call, ctx));
+	async function analysisFor(call: GuardCall): Promise<ShellCommandAnalysis | null> {
+		if (call.kind !== "host-shell" || call.shell !== "host-bash") return null;
+		return analyzeHostCommand(call.command);
+	}
+	async function decisionFor(name: string, input: Record<string, unknown>, ctx: ExtensionContext, policy = policyFor(ctx), analysis?: ShellCommandAnalysis | null): Promise<Decision> {
+		const call = mappedCall(name, input).call;
+		const resolved = analysis !== undefined ? analysis : await analysisFor(call);
+		return resolveDecision({ ...policy, interactive: ctx.hasUI }, call, (c) => classify(c, ctx), resolved);
 	}
 	/**
 	 * Revalidate a captured dialog context immediately before display and
@@ -415,6 +425,7 @@ export default function guard(pi: ExtensionAPI) {
 			discoveryNoticeSignature = null;
 			pinNotifier.reset();
 			projectPinKeysNotified = false;
+			shellAstNotified = false;
 		}
 		if (runtime) {
 			dialogs.invalidate("approval expired after a session replacement");
@@ -451,6 +462,11 @@ export default function guard(pi: ExtensionAPI) {
 		});
 		for (const warning of (config as ResolvedGuardConfig & { warnings?: string[] }).warnings ?? []) notify(ctx, warning, "warning");
 		notifyPinIssues(ctx);
+		const shellAst = await preloadShellAst();
+		if (!shellAst.available && !shellAstNotified) {
+			shellAstNotified = true;
+			notify(ctx, `guard: bash parser unavailable; host shell commands will fail closed to a prompt (${shellAst.diagnostic ?? "unknown reason"})`, "warning");
+		}
 		publish(ctx);
 	}
 	pi.on("session_start", async (_event, ctx) => { await startSession(ctx, true); });
@@ -472,6 +488,7 @@ export default function guard(pi: ExtensionAPI) {
 				sandboxMode: state?.sandbox?.mode ?? null,
 				workspaceLocked: state?.workspaceLocked ?? false,
 				inheritedProfile: inherited !== null && "profile" in inherited ? inherited.profile : null,
+				shellAstDiagnostic: shellAstStatus().available ? null : shellAstStatus().diagnostic,
 			});
 		} catch {
 			// The renderer is total; this is belt and braces so a prompt-surface
@@ -515,8 +532,9 @@ export default function guard(pi: ExtensionAPI) {
 			const policy = policyFor(ctx);
 			const mapped = mappedCall(event.toolName, input);
 			const nested = callIsNested(event.toolCallId, event.parentToolCallId);
+			const analysis = await analysisFor(mapped.call);
 			// No classifier or dialog here for owned tools: execute is authoritative.
-			const decision = owned ? decide({ ...policy, interactive: ctx.hasUI }, mapped.call) : await decisionFor(event.toolName, input, ctx, policy);
+			const decision = owned ? decide({ ...policy, interactive: ctx.hasUI }, mapped.call, analysis) : await decisionFor(event.toolName, input, ctx, policy, analysis);
 			const labeled = withCodemodeOrigin(decision, nested);
 			// Pathless local writes (memory_write, scratchpad, ...) stay observe-only.
 			const enforced = enforceWriteEdit && mapped.call.kind === "local-write" && mapped.call.path !== undefined;
@@ -635,12 +653,12 @@ export default function guard(pi: ExtensionAPI) {
 	 * headless deny, and the approval dialog title) carries the codemode origin
 	 * suffix.
 	 */
-	async function authorize(rt: GuardRuntime, name: OwnedExecutor, input: Record<string, unknown>, ctx: ExtensionContext, signal?: AbortSignal, nested = false): Promise<number> {
+	async function authorize(rt: GuardRuntime, name: OwnedExecutor, input: Record<string, unknown>, ctx: ExtensionContext, analysis: ShellCommandAnalysis | null, signal?: AbortSignal, nested = false): Promise<number> {
 		for (;;) {
 			rt.assertAvailable();
 			assertCallActive(signal);
 			const epoch = rt.epoch;
-			const decision = await decisionFor(name, input, ctx);
+			const decision = await decisionFor(name, input, ctx, policyFor(ctx), analysis);
 			assertCallActive(signal);
 			rt.assertAvailable();
 			if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw new Error("guard: approval expired after a policy change");
@@ -660,12 +678,12 @@ export default function guard(pi: ExtensionAPI) {
 		// host-shell shape.
 		const call: GuardCall = mapped.kind === "sandboxed-exec" && name === "bash" ? { kind: "host-shell", shell: "host-bash", command: String(input.command ?? "") } : mapped;
 		const shellCall = call.kind === "host-shell" ? call : null;
-		const explanation = shellCall ? explainHostShellCommand(shellCall, policy) : null;
+		const explanation = shellCall ? explainHostShellCommand(shellCall, policy, analysis) : null;
 		// Persistent saves require the owned editor stages. Capability-limited
 		// hosts keep the once actions; missing capabilities are detected BEFORE
 		// the dialog so save actions are never offered and then fail.
 		const ownedStages = ownedStagesFor(ctx);
-		const allowPlan = shellCall && explanation && ownedStages ? planAllowSave(shellCall, policy, explanation) : null;
+		const allowPlan = shellCall && explanation && ownedStages ? planAllowSave(shellCall, policy, explanation, analysis) : null;
 		const denySaveSupported = shellCall !== null && ownedStages;
 		// Eligibility for "Allow for this session": an eligible allow plan (which
 		// itself requires the owned stages and rejects explicit asks) plus a
@@ -678,7 +696,7 @@ export default function guard(pi: ExtensionAPI) {
 		// restriction refuses (a child cannot escalate through the dialog).
 		const session = state;
 		const switchRungs = shellCall && session
-			? qualifyingSwitchRungs(shellCall, policy).filter((rung) => profileChangeAllowed(session, rung).ok)
+			? qualifyingSwitchRungs(shellCall, policy, analysis).filter((rung) => profileChangeAllowed(session, rung).ok)
 			: [];
 		const commandText = shellCall ? shellCall.command : typeof input.code === "string" ? input.code : "";
 		// The gate holds the UI lease only across pre-display validation, the
@@ -705,13 +723,13 @@ export default function guard(pi: ExtensionAPI) {
 				scopes: ["project", "user"],
 				parseRules: (text) => parseShellRuleLines(text, shellCall?.shell ?? "host-bash"),
 				validateRules: (intent, rules) => shellCall
-					? validateShellSave(shellCall, policy, intent, rules)
+					? validateShellSave(shellCall, policy, intent, rules, analysis)
 					: { ok: false as const, error: "only host-shell calls support rule saves" },
 				// Per-step allow saves validate every selected step against the
 				// merged policy; whole-call allow saves and deny saves keep
 				// validateShellSave. All three checkpoints use the same validators.
 				validateAllowSave: (rules, ids) => shellCall
-					? validateShellAllowSave(shellCall, policy, rules, ids)
+					? validateShellAllowSave(shellCall, policy, rules, ids, analysis)
 					: { ok: false as const, error: "only host-shell calls support rule saves" },
 				denyRulesFor: (ids) => shellCall && explanation ? planDenyRules(shellCall, explanation, ids) : [],
 				destination: (scope) => configDestination(ctx, scope),
@@ -733,8 +751,8 @@ export default function guard(pi: ExtensionAPI) {
 			// contract. Applied at all three checkpoints (in-dialog validation runs
 			// through the dep above; latest/fresh recheck eligibility here).
 			const validateReviewed = (candidate: PolicyState) => outcome.planKind === "per-step"
-				? validateShellAllowSave(shellCall, candidate, outcome.rules, outcome.selectedOccurrenceIds)
-				: validateShellSave(shellCall, candidate, "allow", outcome.rules);
+				? validateShellAllowSave(shellCall, candidate, outcome.rules, outcome.selectedOccurrenceIds, analysis)
+				: validateShellSave(shellCall, candidate, "allow", outcome.rules, analysis);
 			// Re-read current config and revalidate the ACTUAL reviewed patch
 			// (never a regenerated suggestion) against the latest effective policy.
 			const diskConfig = loadConfig(ctx.cwd);
@@ -759,7 +777,7 @@ export default function guard(pi: ExtensionAPI) {
 			// save still prompting continues the loop with a fresh breakdown; a
 			// full save executes without a further prompt.
 			const freshPolicy = policyFor(ctx);
-			const freshExplanation = explainHostShellCommand(shellCall, freshPolicy);
+			const freshExplanation = explainHostShellCommand(shellCall, freshPolicy, analysis);
 			announceSave(ctx, outcome.scope, "allow", outcome.rules.length, freshExplanation);
 			// The saved rules persist through any failure below, but execution never
 			// proceeds on a stale owner: recheck the owner captured at commit.
@@ -768,7 +786,7 @@ export default function guard(pi: ExtensionAPI) {
 				throw new Error("guard: approval expired after a policy change");
 			}
 			rt.assertAvailable();
-			const freshDecision = await decisionFor(name, input, ctx, freshPolicy);
+			const freshDecision = await decisionFor(name, input, ctx, freshPolicy, analysis);
 			assertCallActive(signal);
 			if (rt !== runtime || rt.teardownFailure || rt.epoch !== owningEpoch || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
 				throw new Error("guard: approval expired after a policy change");
@@ -791,8 +809,8 @@ export default function guard(pi: ExtensionAPI) {
 				return current !== null && current.real.some((root) => scope.real.includes(root));
 			};
 			const validateReviewed = (candidate: PolicyState) => outcome.planKind === "per-step"
-				? validateShellAllowSave(shellCall, candidate, outcome.rules, outcome.selectedOccurrenceIds)
-				: validateShellSave(shellCall, candidate, "allow", outcome.rules);
+				? validateShellAllowSave(shellCall, candidate, outcome.rules, outcome.selectedOccurrenceIds, analysis)
+				: validateShellSave(shellCall, candidate, "allow", outcome.rules, analysis);
 			// Same three checkpoints as a persistent allow save: the in-dialog
 			// validation (through the dep above), the latest effective policy, and the
 			// fresh re-read inside the commit barrier. The candidate policy includes
@@ -830,7 +848,7 @@ export default function guard(pi: ExtensionAPI) {
 			// still prompting continues the loop with a fresh breakdown; full
 			// coverage executes without a further prompt.
 			const freshPolicy = policyFor(ctx);
-			const freshExplanation = explainHostShellCommand(shellCall, freshPolicy);
+			const freshExplanation = explainHostShellCommand(shellCall, freshPolicy, analysis);
 			announceSessionAllow(ctx, scope, outcome.rules.length, freshExplanation);
 			// The granted rules stay installed through any failure below, but
 			// execution never proceeds on a stale owner.
@@ -839,7 +857,7 @@ export default function guard(pi: ExtensionAPI) {
 				throw new Error("guard: approval expired after a policy change");
 			}
 			rt.assertAvailable();
-			const freshDecision = await decisionFor(name, input, ctx, freshPolicy);
+			const freshDecision = await decisionFor(name, input, ctx, freshPolicy, analysis);
 			assertCallActive(signal);
 			if (rt !== runtime || rt.teardownFailure || rt.epoch !== owningEpoch || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
 				throw new Error("guard: approval expired after a policy change");
@@ -875,7 +893,7 @@ export default function guard(pi: ExtensionAPI) {
 			if (rt !== runtime || rt.teardownFailure || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
 				throw new Error("guard: approval expired after a policy change");
 			}
-			const freshDecision = await decisionFor(name, input, ctx, policyFor(ctx));
+			const freshDecision = await decisionFor(name, input, ctx, policyFor(ctx), analysis);
 			assertCallActive(signal);
 			if (rt !== runtime || rt.teardownFailure || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
 				throw new Error("guard: approval expired after a policy change");
@@ -887,7 +905,7 @@ export default function guard(pi: ExtensionAPI) {
 		if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
 		// save-deny: the steering was collected inside the flow before the commit.
 		const diskConfig = loadConfig(ctx.cwd);
-		const latestCheck = validateShellSave(shellCall, policyWithSessionOverlays(ctx, diskConfig), "deny", outcome.rules);
+		const latestCheck = validateShellSave(shellCall, policyWithSessionOverlays(ctx, diskConfig), "deny", outcome.rules, analysis);
 		if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer deny the complete call (${latestCheck.error}); nothing saved`);
 		const target = { ...diskConfig, hostBash: { ...diskConfig.hostBash, deny: dedupe([...diskConfig.hostBash.deny, ...outcome.rules]) } };
 		let owningEpoch = epoch;
@@ -895,7 +913,7 @@ export default function guard(pi: ExtensionAPI) {
 			assertCallActive(signal);
 			if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or executed");
 			const fresh = loadConfig(ctx.cwd);
-			const freshCheck = validateShellSave(shellCall, policyWithSessionOverlays(ctx, fresh), "deny", outcome.rules);
+			const freshCheck = validateShellSave(shellCall, policyWithSessionOverlays(ctx, fresh), "deny", outcome.rules, analysis);
 			if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer deny the complete call (${freshCheck.error}); nothing saved`);
 			owningEpoch = rt.epoch;
 			addToConfigScope(outcome.scope, { hostBash: { deny: outcome.rules } }, { cwd: ctx.cwd });
@@ -916,10 +934,11 @@ export default function guard(pi: ExtensionAPI) {
 	async function executeShell(name: "bash" | "host_bash", id: string, input: { command: string; timeout?: number }, signal: AbortSignal | undefined, onUpdate: any, ctx: ExtensionContext): Promise<AgentToolResult<any>> {
 		const rt = runtime;
 		if (!rt) throw new Error("guard session state not initialized");
-		const epoch = await authorize(rt, name, input, ctx, signal, callIsNested(id));
+		const analysis = await analysisFor(mappedCall(name, input).call);
+		const epoch = await authorize(rt, name, input, ctx, analysis, signal, callIsNested(id));
 		const outcome = await rt.run(async (policy) => {
 			if (rt !== runtime || rt.epoch !== epoch) return false;
-			const decision = await decisionFor(name, input, ctx, policy);
+			const decision = await decisionFor(name, input, ctx, policy, analysis);
 			return decision.action !== "deny";
 		}, async (execution) => {
 			// One predicate for both layers: the bash ban in decide() uses the
@@ -930,7 +949,13 @@ export default function guard(pi: ExtensionAPI) {
 			const run = () => tool.execute(id, input, execution.signal, onUpdate);
 			try {
 				const result = host ? await run() : await rt.sandboxBoundary(run, execution.warnings);
-				if (!host && result.isError) return appendWarnings(result, [sandboxFailureHint(input.command, mountedPaths)]);
+				if (!host && result.isError) {
+					// analysisFor returns null for a sandboxed call, so the hint needs
+					// its own analysis of the command: without this both specific
+					// hints (host-bound command, unmounted path) are unreachable.
+					const hintAnalysis = await analyzeHostCommand(input.command);
+					return appendWarnings(result, [sandboxFailureHint(hintAnalysis, mountedPaths)]);
+				}
 				return result;
 			} catch (err) {
 				if (!host) throw new Error(`${err instanceof Error ? err.message : String(err)}\n${SHELL_SANDBOX_FAILURE_HINT}`);
@@ -989,7 +1014,7 @@ export default function guard(pi: ExtensionAPI) {
 		execute: async (id, input, signal, _onUpdate, ctx) => {
 			const rt = runtime;
 			if (!rt) throw new Error("guard session state not initialized");
-			const epoch = await authorize(rt, name, input, ctx, signal, callIsNested(id));
+			const epoch = await authorize(rt, name, input, ctx, null, signal, callIsNested(id));
 			const outcome = await rt.run(async (policy) => rt === runtime && rt.epoch === epoch && (await decisionFor(name, input, ctx, policy)).action === "allow", (execution) => rt.worker(name, input, execution), signal);
 			let data = outcome.result as Record<string, any>;
 			if (data.status === "permission_needed" && typeof data.permissionPath === "string") {
@@ -1462,6 +1487,7 @@ export default function guard(pi: ExtensionAPI) {
 			`persistent host-shell rules: ${config.hostBash.deny.length} deny, ${config.hostBash.ask.length} ask, ${config.hostBash.allow.length} allow`,
 			`session host-shell grants (this session only, never written to config): ${sessionShellRules.list().map((grant) => `${grant.rules.length} allow @ ${grant.scope.workspace}${scopeContains(grant.scope, ctx.cwd) ? "" : " (dormant)"}`).join("; ") || "(none)"}`,
 			...(sessionShellRules.list().some((grant) => scopeContains(grant.scope, ctx.cwd)) ? [`session rules in force here: ${sessionShellRules.rulesFor(ctx.cwd).join(", ")}`] : []),
+			...(shellAstStatus().available ? [] : [`bash parser: UNAVAILABLE (${shellAstStatus().diagnostic ?? "unknown reason"}); host shell commands fail closed to a prompt`]),
 			`read roots: ${cfg.readRoots.join(", ") || "(none)"}`,
 			`write roots: ${cfg.writeRoots.join(", ") || "(none)"}`,
 			`toolClasses overrides: ${Object.keys(cfg.toolClasses).length}`,

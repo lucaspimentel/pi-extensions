@@ -15,6 +15,7 @@
 
 import type { GuardCall, HostShellExplanation, PolicyState } from "./decision.ts";
 import { decide, explainHostShellCommand } from "./decision.ts";
+import type { ShellCommandAnalysis } from "./shellast.ts";
 import type { SuggestedPatch } from "./suggest.ts";
 import { effectiveAllowSuggestion } from "./suggest.ts";
 import { normalizeMatchPath } from "./paths.ts";
@@ -153,8 +154,9 @@ export function validateShellSave(
 	policy: PolicyState,
 	intent: "allow" | "deny",
 	rules: readonly string[],
+	analysis: ShellCommandAnalysis | null,
 ): ValidationResult {
-	const decision = decide(policyWithSlot(policy, intent, rules), call);
+	const decision = decide(policyWithSlot(policy, intent, rules), call, analysis);
 	if (intent === "allow") {
 		if (decision.action === "allow") return { ok: true };
 		return { ok: false, error: `the edited rules would not allow the complete call (still: ${decision.reason})` };
@@ -181,12 +183,13 @@ export function validateShellAllowSave(
 	policy: PolicyState,
 	rules: readonly string[],
 	selectedOccurrenceIds: readonly number[],
+	analysis: ShellCommandAnalysis | null,
 ): ValidationResult {
 	if (selectedOccurrenceIds.length === 0) return { ok: false, error: "no steps selected; select at least one step to allow" };
 	if (new Set(selectedOccurrenceIds).size !== selectedOccurrenceIds.length) {
 		return { ok: false, error: "duplicate step selections; the edited rules changed the step breakdown" };
 	}
-	const merged = explainHostShellCommand(call, policyWithSlot(policy, "allow", rules));
+	const merged = explainHostShellCommand(call, policyWithSlot(policy, "allow", rules), analysis);
 	if (!merged.breakdown.available || merged.steps.length === 0) {
 		return { ok: false, error: "the merged policy could not split the command; per-step validation is unavailable" };
 	}
@@ -228,10 +231,11 @@ export function planAllowSave(
 	call: Extract<GuardCall, { kind: "host-shell" }>,
 	policy: PolicyState,
 	explanation: HostShellExplanation,
+	analysis: ShellCommandAnalysis | null,
 ): AllowSavePlan | null {
 	if (explanation.decision.provenance === "explicit-ask") return null;
 	if (!explanation.breakdown.available) {
-		const whole = effectiveAllowSuggestion(call, policy);
+		const whole = effectiveAllowSuggestion(call, policy, analysis);
 		if (whole?.hostBash?.allow?.length) return { kind: "whole-call", rules: whole.hostBash.allow, patch: whole };
 		return null;
 	}
@@ -239,7 +243,7 @@ export function planAllowSave(
 		.filter((step) => step.decision.action !== "allow")
 		.map((step) => ({ occurrenceId: step.occurrenceId, rule: globAllowRule(call.shell, step.allowSubject) }));
 	if (perStep.length === 0) return null;
-	const validation = validateShellAllowSave(call, policy, perStep.map((entry) => entry.rule), perStep.map((entry) => entry.occurrenceId));
+	const validation = validateShellAllowSave(call, policy, perStep.map((entry) => entry.rule), perStep.map((entry) => entry.occurrenceId), analysis);
 	if (!validation.ok) return null;
 	return { kind: "per-step", perStep };
 }

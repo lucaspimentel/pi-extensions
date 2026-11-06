@@ -22,8 +22,9 @@ import {
 } from "../extensions/guard/prompt-flow.ts";
 import type { AllowSavePlan } from "../extensions/guard/policy/save.ts";
 import { mergeConfig, type GuardConfig } from "../extensions/guard/policy/config.ts";
-import { decide, explainHostShellCommand, type PolicyState } from "../extensions/guard/policy/decision.ts";
-import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, validateShellAllowSave, validateShellSave } from "../extensions/guard/policy/save.ts";
+import { decide as decidePolicy, explainHostShellCommand as explainHostShellCommandPolicy, type Decision, type GuardCall, type PolicyState } from "../extensions/guard/policy/decision.ts";
+import { parseReadRootInput, parseShellRuleLines, planAllowSave as planAllowSavePolicy, planDenyRules as planDenyRulesPolicy, validateShellAllowSave as validateShellAllowSavePolicy, validateShellSave as validateShellSavePolicy } from "../extensions/guard/policy/save.ts";
+import { analysisForSync } from "./shellast-sync.mts";
 
 function makeConfig(overrides: Partial<GuardConfig> = {}, cwd = "/home/user/proj"): ReturnType<typeof mergeConfig> {
 	return mergeConfig(overrides, {}, cwd);
@@ -73,7 +74,27 @@ function ioWithoutStages(script: { select?: (string | undefined)[]; input?: (str
 	return { io, calls: full.calls };
 }
 
-const shellCall = (command: string, shell: "host-bash" | "pwsh" = "host-bash"): Parameters<typeof explainHostShellCommand>[0] => ({ kind: "host-shell", shell, command });
+const shellCall = (command: string, shell: "host-bash" | "pwsh" = "host-bash"): Extract<GuardCall, { kind: "host-shell" }> => ({ kind: "host-shell", shell, command });
+
+// Synchronous test façade over the async shell-ast analysis (see shellast-sync.mts).
+function decide(policy: PolicyState, call: GuardCall): Decision {
+	return decidePolicy(policy, call, analysisForSync(call));
+}
+function explainHostShellCommand(call: Extract<GuardCall, { kind: "host-shell" }>, policy: PolicyState) {
+	return explainHostShellCommandPolicy(call, policy, analysisForSync(call));
+}
+function planAllowSave(call: Extract<GuardCall, { kind: "host-shell" }>, policy: PolicyState, explanation: Parameters<typeof planAllowSavePolicy>[2]) {
+	return planAllowSavePolicy(call, policy, explanation, analysisForSync(call));
+}
+function planDenyRules(call: Extract<GuardCall, { kind: "host-shell" }>, explanation: Parameters<typeof planDenyRulesPolicy>[1], ids: readonly number[]) {
+	return planDenyRulesPolicy(call, explanation, ids);
+}
+function validateShellSave(call: Extract<GuardCall, { kind: "host-shell" }>, policy: PolicyState, intent: "allow" | "deny", rules: readonly string[]) {
+	return validateShellSavePolicy(call, policy, intent, rules, analysisForSync(call));
+}
+function validateShellAllowSave(call: Extract<GuardCall, { kind: "host-shell" }>, policy: PolicyState, rules: readonly string[], ids: readonly number[]) {
+	return validateShellAllowSavePolicy(call, policy, rules, ids, analysisForSync(call));
+}
 
 function realDeps(command = "echo a && curl https://example.com", configOverrides: Partial<GuardConfig> = {}) {
 	const policy = makePolicy({ config: makeConfig(configOverrides) });
@@ -179,12 +200,8 @@ test("a multi-line failing subcommand with an unavailable breakdown keeps the la
 		allowPlan: null,
 	}));
 	const title = calls.select[0].split("\n@@")[0];
-	assert.ok(title.includes("file redirect requires a redirect-aware allow rule"), "the reason prose is present", title);
-	assert.ok(!title.includes("subcommand '"), "the reason no longer quotes the subcommand inline", title);
-	assert.ok(title.includes("Failing step:"), title);
-	assert.ok(title.includes("  cat > wl-debug.mts <<'EOF' (+2 more lines)"), title);
-	assert.ok(!title.includes("Failing step:\n  cat > wl-debug.mts <<'EOF'\nconsole.log(1)"), "the failing step renders one line, not the full subcommand", title);
-	assert.ok(title.includes("Breakdown unavailable:"), title);
+	assert.ok(title.includes("Breakdown unavailable: the command uses a heredoc or here-string"), title);
+	assert.ok(!title.includes("Breakdown:\n"), title);
 });
 
 test("an unavailable breakdown is explicitly marked in the prompt", async () => {
@@ -199,12 +216,7 @@ test("an unavailable breakdown is explicitly marked in the prompt", async () => 
 	}));
 	const title = calls.select[0].split("\n@@")[0];
 	assert.ok(title.includes("Breakdown unavailable:"), title);
-	// The offending fragment (the per-step mismatch part) renders directly
-	// below the reason line with the shared two-space gutter.
-	assert.ok(
-		title.includes("Breakdown unavailable: structural constructs (loops, conditionals) are not reliably attributed to steps\n  Offending step: do curl https://example.com"),
-		title,
-	);
+	assert.ok(title.includes("Breakdown unavailable: the command uses a grouping construct (loop, conditional, or block)"), title);
 	assert.ok(!title.includes("Breakdown:\n"), title);
 });
 
@@ -220,10 +232,7 @@ test("an unavailable breakdown renders the offending fragment for a hidden condi
 		allowPlan: null,
 	}));
 	const title = calls.select[0].split("\n@@")[0];
-	assert.ok(
-		title.includes("Breakdown unavailable: structural constructs (loops, conditionals) are not reliably attributed to steps\n  Offending step: if test -f /tmp/bottlecap-simplify-doctests.log"),
-		title,
-	);
+	assert.ok(title.includes("Breakdown unavailable: the command uses a grouping construct (loop, conditional, or block)"), title);
 	assert.ok(!title.includes("Breakdown:\n"), title);
 });
 
@@ -449,18 +458,15 @@ test("the per-step preview discloses partial saves and full coverage distinctly"
 	}
 });
 
-test("a whole-call plan (unreliable breakdown) never opens the picker and keeps the whole-call rule editor", async () => {
+test("a host-bash command with an incomplete analysis offers no allow-save option", async () => {
 	const real = realDeps("echo $(compute)");
-	assert.ok(real.allowPlan && real.allowPlan.kind === "whole-call");
-	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: [real.allowPlan.rules.join("\n")] });
+	assert.equal(real.allowPlan, null, "an incomplete analysis cannot prove an allow save");
+	const { io, calls } = makeIO({ select: ["Deny once"], input: ["   "] });
 	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: real.call.command, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan }));
-	assert.ok(outcome.kind === "save-allow");
-	assert.equal(outcome.planKind, "whole-call");
-	assert.deepEqual(outcome.selectedOccurrenceIds, []);
-	assert.equal(calls.picker.length, 0, "no picker on the whole-call path");
-	assert.match(calls.editor[0], /@@prefill:HostBash\(echo/);
-	const preview = calls.select[1].split("\n@@")[0];
-	assert.match(preview, /Effect: the rule permits the exact current command/);
+	assert.equal(outcome.kind, "deny-once");
+	assert.ok(!calls.select[0].includes("Save allow for"), calls.select[0]);
+	assert.equal(calls.picker.length, 0, "no picker without a plan");
+	assert.equal(calls.editor.length, 0, "no allow editor without a plan");
 });
 
 test("save allow: a whole-call pwsh suggestion keeps the Pwsh namespace", async () => {
@@ -619,11 +625,21 @@ test("session allow cancels like a persistent save: picker esc returns to the me
 });
 
 test("a whole-call session allow keeps the whole-call rule and preview", async () => {
-	const real = realDeps("echo $(compute)");
-	assert.ok(real.allowPlan && real.allowPlan.kind === "whole-call");
-	const rules = real.allowPlan.rules;
+	const policy = makePolicy();
+	const command = "Get-Thing *.txt";
+	const call = shellCall(command, "pwsh");
+	const explanation = explainHostShellCommand(call, policy);
+	const allowPlan = planAllowSave(call, policy, explanation);
+	assert.ok(allowPlan && allowPlan.kind === "whole-call");
+	const rules = allowPlan.rules;
 	const { io, calls } = makeIO({ select: ["Allow for this session", "Confirm"], editor: [rules.join("\n")] });
-	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: real.call.command, decision: real.explanation.decision, explanation: real.explanation, allowPlan: real.allowPlan, sessionAllowSupported: true }));
+	const outcome = await runExecutionPrompt(baseExecutionDeps({
+		io, command, shell: "pwsh", decision: explanation.decision, explanation, allowPlan, sessionAllowSupported: true,
+		parseRules: (text) => parseShellRuleLines(text, "pwsh"),
+		validateRules: (intent, list) => validateShellSave(call, policy, intent, list),
+		validateAllowSave: (list, ids) => validateShellAllowSave(call, policy, list, ids),
+		denyRulesFor: (ids) => planDenyRules(call, explanation, ids),
+	}));
 	assert.ok(outcome.kind === "session-allow");
 	assert.equal(outcome.planKind, "whole-call");
 	assert.deepEqual(outcome.selectedOccurrenceIds, []);

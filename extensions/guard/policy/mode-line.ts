@@ -46,6 +46,8 @@ export interface GuardStateSectionInput {
 	workspaceLocked: boolean;
 	/** The inherited profile while the constraint is valid, else null. */
 	inheritedProfile: Profile | null;
+	/** The bash parser's load diagnostic, or null/undefined while it is available. */
+	shellAstDiagnostic?: string | null;
 }
 
 /**
@@ -66,6 +68,7 @@ export function renderGuardStateSection(input: GuardStateSectionInput): string |
 	const writes = writesClause(input);
 	if (profile === null || sandbox === null || hostShell === null || writes === null) return GUARD_STATE_FALLBACK;
 	const clauses = [profile, sandbox, hostShell, writes];
+	if (input.shellAstDiagnostic != null) clauses.push(`bash parser unavailable (${input.shellAstDiagnostic}); host shell commands fail closed to a prompt`);
 	if (input.workspaceLocked) clauses.push(GUARD_STATE_LOCK_TAIL);
 	return `guard: ${clauses.join("; ")}`;
 }
