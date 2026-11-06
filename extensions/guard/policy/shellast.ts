@@ -1,7 +1,7 @@
 /**
  * Guard-owned adapter over `@questi0nm4rk/shell-ast@0.8.0`, the bash parser
  * adopted to replace guard's hand-written command splitting and tokenizing
- * (see TODO.md "Adopt @questi0nm4rk/shell-ast").
+ * (see docs/guard-design.md, final measurement and retirement record).
  *
  * The adapter projects one parsed command into a `ShellCommandAnalysis`: an
  * ordered list of `ShellExecCall`s (each with the exact matching subject, the
@@ -37,14 +37,19 @@ import type {
 	Stmt,
 	Visitor,
 	Word,
+	WordPart,
 } from "@questi0nm4rk/shell-ast";
-import { stripLineContinuations, hasTopLevelFileRedirect } from "./bashtier.ts";
+import { stripLineContinuations, hasWritableRedirect, type StructuredRedirect } from "./bashtier.ts";
 import { stripTimeoutPrefix, stripTrailingHarmlessRedirects } from "./shell-text.ts";
 
 type ShellAstModule = typeof import("@questi0nm4rk/shell-ast");
 type Command = NonNullable<Stmt["cmd"]>;
 type DeclClause = Extract<Command, { type: "DeclClause" }>;
 type TestClause = Extract<Command, { type: "TestClause" }>;
+// `ArithmExp`/`BraceExp` are not re-exported by the package's `index.d.ts`;
+// they are reachable through the exported `WordPart` union.
+type ArithmExpNode = Extract<WordPart, { type: "ArithmExp" }>;
+type BraceExpNode = Extract<WordPart, { type: "BraceExp" }>;
 
 /** The pinned wasm digest for `@questi0nm4rk/shell-ast@0.8.0`. */
 export const SHELL_AST_WASM_SHA256 = "8c237a53e577642500387cd584d3072d9cd185d94b2a2a9e0c27308ff0e6dcbf";
@@ -91,6 +96,9 @@ const WHOLE_COMMAND_CAUSES: ReadonlySet<ShellAnalysisCause> = new Set([
 	"background", "grouped", "subshell", "heredoc", "function-definition", "state-change",
 ]);
 
+/** One structured redirect on a call: the operator and its statically resolved target. */
+export interface ShellRedirect extends StructuredRedirect {}
+
 /** One executing command inside a parsed host command. */
 export interface ShellExecCall {
 	occurrenceId: number;
@@ -102,7 +110,9 @@ export interface ShellExecCall {
 	argv: readonly string[];
 	/** Leading assignment words, verbatim. */
 	assignments: readonly string[];
-	/** True when only a redirect-aware allow rule can authorize the step. */
+	/** The call's redirects (op + resolved target), for the tier's write/input gates. */
+	redirects: readonly ShellRedirect[];
+	/** True when only a redirect-aware allow rule can authorize the step (no writeRoots here: the policy layer refines with the config roots). */
 	requiresRedirectAwareAllow: boolean;
 	/** Any ParamExp outside single quotes (the `$` veto). */
 	hasParameterExpansion: boolean;
@@ -286,6 +296,7 @@ function analyzeParsed(mod: ShellAstModule, slice: ByteSlicer, file: ShellFile):
 		allowSubject: entry.requiresRedirectAwareAllow ? entry.subject : stripTrailingHarmlessRedirects(entry.subject),
 		argv: entry.argv,
 		assignments: entry.assignments,
+		redirects: entry.redirects,
 		requiresRedirectAwareAllow: entry.requiresRedirectAwareAllow,
 		hasParameterExpansion: entry.hasParameterExpansion,
 		pureAssignment: entry.argv.length === 0 && entry.assignments.length > 0 && entry.complete,
@@ -321,32 +332,144 @@ function markConstructBearingCalls(raw: RawCall[], events: readonly ConstructEve
 	}
 }
 
+/**
+ * The traversal-coverage guarantee: every node type `@questi0nm4rk/shell-ast`
+ * can emit is classified exactly once, and `buildConstructVisitor` derives the
+ * construct walk from this table. `Record<ShellNode["type"], NodeDisposition>`
+ * makes the classification exhaustive at COMPILE time (a package bump that adds
+ * a node type breaks `tsc`), and `buildConstructVisitor` additionally treats any
+ * node type absent from the table as an `unrecognized-node` cause at RUNTIME,
+ * so a type the walk would otherwise silently treat as a leaf makes the call
+ * incomplete instead of hiding a construct. `tests/guard-shellast.test.mts`
+ * pins the table against the shipped type definitions and induces one command
+ * per type.
+ *
+ * Coverage buckets:
+ *   - "descend":  the analysis visits its children (the package walk, or an
+ *                 explicit `manualRecurse` for a walker leaf that still holds
+ *                 child nodes);
+ *   - "leaf":     a terminal node whose meaning the analysis represents
+ *                 elsewhere (e.g. ParamExp -> hasParameterExpansion) or which
+ *                 carries no executable semantics (a literal, a comment);
+ *   - "cause":    visiting it makes the enclosing call (or the whole command)
+ *                 unprovable, so the policy layer prompts.
+ */
+export type NodeCoverage = "descend" | "leaf" | "cause";
+
+export interface NodeDisposition {
+	coverage: NodeCoverage;
+	/** For `coverage: "cause"`: the incompleteness cause the node raises. */
+	cause?: ShellAnalysisCause;
+	/** For a walker-leaf `descend` node: how to walk its hidden children. */
+	manualRecurse?: (mod: ShellAstModule, node: ShellNode, visitor: Visitor) => void;
+}
+
+export const NODE_DISPOSITIONS: Record<ShellNode["type"], NodeDisposition> = {
+	// Containers the package walk descends into. No analysis action here; Stmt
+	// and DeclClause add a conditional cause in buildConstructVisitor.
+	File: { coverage: "descend" },
+	Stmt: { coverage: "descend" },
+	Redirect: { coverage: "descend" },
+	Word: { coverage: "descend" },
+	Assign: { coverage: "descend" },
+	CallExpr: { coverage: "descend" },
+	BinaryCmd: { coverage: "descend" },
+	TestClause: { coverage: "descend" }, // projected as a `[[` call
+	DeclClause: { coverage: "descend" },
+	DblQuoted: { coverage: "descend" },
+	BinaryArithm: { coverage: "descend" },
+	UnaryArithm: { coverage: "descend" },
+	ParenArithm: { coverage: "descend" },
+	BinaryTest: { coverage: "descend" },
+	UnaryTest: { coverage: "descend" },
+	ParenTest: { coverage: "descend" },
+	CaseItem: { coverage: "descend" },
+	WordIter: { coverage: "descend" },
+	ArrayExpr: { coverage: "descend" },
+	ArrayElem: { coverage: "descend" },
+	// Terminal nodes whose meaning the analysis represents elsewhere, or which
+	// carry no executable semantics at all.
+	Lit: { coverage: "leaf" },
+	SglQuoted: { coverage: "leaf" },
+	ExtGlob: { coverage: "leaf" }, // a glob pattern; no expansion/exec semantics
+	ParamExp: { coverage: "leaf" }, // the `$` veto is ShellExecCall.hasParameterExpansion
+	CStyleLoop: { coverage: "leaf" }, // only reachable under a ForClause (grouped) cause
+	Comment: { coverage: "leaf" }, // never on the walk; no executable semantics
+	// Constructs that make the enclosing call (or the whole command) unprovable.
+	CmdSubst: { coverage: "cause", cause: "command-substitution" },
+	ProcSubst: { coverage: "cause", cause: "process-substitution" },
+	Subshell: { coverage: "cause", cause: "subshell" },
+	IfClause: { coverage: "cause", cause: "grouped" },
+	WhileClause: { coverage: "cause", cause: "grouped" },
+	ForClause: { coverage: "cause", cause: "grouped" },
+	CaseClause: { coverage: "cause", cause: "grouped" },
+	Block: { coverage: "cause", cause: "grouped" },
+	TestDecl: { coverage: "cause", cause: "grouped" },
+	ArithmCmd: { coverage: "cause", cause: "grouped" },
+	FuncDecl: { coverage: "cause", cause: "function-definition" },
+	LetClause: { coverage: "cause", cause: "state-change" },
+	TimeClause: { coverage: "cause", cause: "unrecognized-node" },
+	CoprocClause: { coverage: "cause", cause: "unrecognized-node" },
+	// Walker leaves that hide child nodes: recurse explicitly so a construct
+	// nested inside `$((...))` / `{a,$(cmd)}` stays flagged (fail closed).
+	ArithmExp: { coverage: "descend", manualRecurse: (m, n, v) => { m.walk((n as ArithmExpNode).x, v); } },
+	BraceExp: { coverage: "descend", manualRecurse: (m, n, v) => { for (const e of (n as BraceExpNode).elems) m.walk(e, v); } },
+};
+
+type NodeHandler = (node: ShellNode) => void;
+
+/**
+ * Build the construct visitor from NODE_DISPOSITIONS. Every table entry gets a
+ * handler (even a no-op), so the Proxy can distinguish a known node type from
+ * an unknown one: an unknown `node.type` is pushed as `unrecognized-node`
+ * (fail closed) instead of the package walk silently treating it as a leaf.
+ */
+export function buildConstructVisitor(mod: ShellAstModule, push: (node: ShellNode, cause: ShellAnalysisCause) => void): Visitor {
+	const handlers: Record<string, NodeHandler> = {};
+	for (const type of Object.keys(NODE_DISPOSITIONS) as Array<ShellNode["type"]>) {
+		const disposition = NODE_DISPOSITIONS[type];
+		if (type === "Stmt") {
+			handlers[type] = (node) => {
+				const stmt = node as Stmt;
+				if (stmt.background) push(stmt, "background");
+				for (const r of stmt.redirs) if (isHeredocRedirect(r)) push(r, "heredoc");
+			};
+			continue;
+		}
+		if (type === "DeclClause") {
+			handlers[type] = (node) => { if (!isPureAssignmentDecl(node as DeclClause)) push(node, "state-change"); };
+			continue;
+		}
+		if (disposition.coverage === "cause") {
+			const cause = disposition.cause ?? "unrecognized-node";
+			handlers[type] = (node) => push(node, cause);
+			continue;
+		}
+		if (disposition.manualRecurse !== undefined) {
+			const recurse = disposition.manualRecurse;
+			handlers[type] = (node) => { recurse(mod, node, visitor); };
+			continue;
+		}
+		// "descend" (the walker recurses) or "leaf": a no-op handler keeps the
+		// type known while changing nothing about the traversal.
+		handlers[type] = () => {};
+	}
+	const visitor = new Proxy(handlers, {
+		get(target, prop, receiver) {
+			if (typeof prop === "string" && Object.prototype.hasOwnProperty.call(target, prop)) {
+				return Reflect.get(target, prop, receiver);
+			}
+			return (node: ShellNode) => push(node, "unrecognized-node");
+		},
+	});
+	return visitor as unknown as Visitor;
+}
+
 /** Constructs anywhere in the tree that make the whole command unprovable. */
 function detectConstructs(mod: ShellAstModule, file: ShellFile): ConstructEvent[] {
 	const events: ConstructEvent[] = [];
 	const push = (node: ShellNode, cause: ShellAnalysisCause) => { events.push({ offset: node.pos.offset, cause, node }); };
-	const visitor: Visitor = {
-		CmdSubst: (n) => { push(n, "command-substitution"); },
-		ProcSubst: (n) => { push(n, "process-substitution"); },
-		Subshell: (n) => { push(n, "subshell"); },
-		IfClause: (n) => { push(n, "grouped"); },
-		WhileClause: (n) => { push(n, "grouped"); },
-		ForClause: (n) => { push(n, "grouped"); },
-		CaseClause: (n) => { push(n, "grouped"); },
-		Block: (n) => { push(n, "grouped"); },
-		TestDecl: (n) => { push(n, "grouped"); },
-		ArithmCmd: (n) => { push(n, "grouped"); },
-		FuncDecl: (n) => { push(n, "function-definition"); },
-		LetClause: (n) => { push(n, "state-change"); },
-		TimeClause: (n) => { push(n, "unrecognized-node"); },
-		CoprocClause: (n) => { push(n, "unrecognized-node"); },
-		DeclClause: (n) => { if (!isPureAssignmentDecl(n)) push(n, "state-change"); },
-		Stmt: (n) => {
-			if (n.background) push(n, "background");
-			for (const r of n.redirs) if (isHeredocRedirect(r)) push(r, "heredoc");
-		},
-	};
-	mod.walk(file, visitor);
+	mod.walk(file, buildConstructVisitor(mod, push));
 	events.sort((a, b) => a.offset - b.offset);
 	return events;
 }
@@ -381,6 +504,7 @@ interface RawCall {
 	subject: string;
 	argv: string[];
 	assignments: string[];
+	redirects: ShellRedirect[];
 	requiresRedirectAwareAllow: boolean;
 	hasParameterExpansion: boolean;
 	complete: boolean;
@@ -439,11 +563,13 @@ function makeCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, call: Call
 		}
 	}
 	argv = manualWrapWalk(argv);
+	const redirects = redirectsOf(mod, stmt);
 	return {
 		subject,
 		argv,
 		assignments,
-		requiresRedirectAwareAllow: hasTopLevelFileRedirect(subject),
+		redirects,
+		requiresRedirectAwareAllow: hasWritableRedirect(redirects),
 		hasParameterExpansion: hasParamExpansion(mod, stmt),
 		complete,
 		cause,
@@ -456,11 +582,13 @@ function makeDeclCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, decl: 
 	const span = spanOf(slice, stmt, decl);
 	const subject = stripTimeoutPrefix(span.text);
 	const assignments = decl.args.filter((a) => a.name !== null).map((a) => slice(a.pos.offset, a.end.offset));
+	const redirects = redirectsOf(mod, stmt);
 	return {
 		subject,
 		argv: [],
 		assignments,
-		requiresRedirectAwareAllow: hasTopLevelFileRedirect(subject),
+		redirects,
+		requiresRedirectAwareAllow: hasWritableRedirect(redirects),
 		hasParameterExpansion: hasParamExpansion(mod, stmt),
 		complete: true,
 		cause: null,
@@ -473,17 +601,24 @@ function makeDeclCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, decl: 
 function makeTestCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, test: TestClause): RawCall {
 	const span = spanOf(slice, stmt, test);
 	const subject = stripTimeoutPrefix(span.text);
+	const redirects = redirectsOf(mod, stmt);
 	return {
 		subject,
 		argv: ["[["],
 		assignments: [],
-		requiresRedirectAwareAllow: hasTopLevelFileRedirect(subject),
+		redirects,
+		requiresRedirectAwareAllow: hasWritableRedirect(redirects),
 		hasParameterExpansion: hasParamExpansion(mod, stmt),
 		complete: true,
 		cause: null,
 		start: span.start,
 		end: span.end,
 	};
+}
+
+/** Project a statement's redirects to op + statically resolved target. */
+function redirectsOf(mod: ShellAstModule, stmt: Stmt): ShellRedirect[] {
+	return stmt.redirs.map((r) => ({ op: r.op, target: mod.wordToLit(r.word) }));
 }
 
 function deepestLayer(mod: ShellAstModule, call: CallExprNode) {
@@ -505,14 +640,41 @@ function manualWrapWalk(argv: string[]): string[] {
 		if (current.length === 0) return current;
 		const root = basename(current[0]);
 		if (!MANUAL_WRAPPERS.has(root)) return current;
+		// `command -v X` / `command -V X` are plain introspection queries, NOT
+		// wrappers: unwrapping `command` to `X` would judge the queried name as
+		// if it ran. Leave the whole argv so the tier sees `command` (which is
+		// deliberately not read-only) and prompts.
+		if (root === "command" && commandQueryFlags(current.slice(1))) return current;
 		current = current.slice(1);
 		while (current.length > 0 && current[0].startsWith("-")) current = current.slice(1);
 	}
 	return current;
 }
 
+/**
+ * True when a `command` invocation carries a `-v`/`-V` (possibly clustered)
+ * flag: `command -v X`, `command -V X`, `command -pv X`. Such a call queries a
+ * name instead of executing it. Flags stop at the first non-flag token or `--`.
+ */
+function commandQueryFlags(args: readonly string[]): boolean {
+	for (const tok of args) {
+		if (tok === "--" || !tok.startsWith("-") || tok.length < 2) break;
+		if (/[vV]/.test(tok.slice(1))) return true;
+	}
+	return false;
+}
+
 function hasParamExpansion(mod: ShellAstModule, node: ShellNode): boolean {
 	let found = false;
-	mod.walk(node, { ParamExp: () => { found = true; } });
+	// A `$`-expansion is a ParamExp, an arithmetic expansion `$((...))`, or a
+	// nested one under either. The package's walk treats ArithmExp and BraceExp
+	// as leaves, so recurse into those explicitly; otherwise `$((...))` and
+	// `{a,$X}` would report no expansion and defeat the host `$` veto.
+	const visitor: Visitor = {
+		ParamExp: () => { found = true; },
+		ArithmExp: () => { found = true; },
+		BraceExp: (n) => { for (const e of n.elems) mod.walk(e, visitor); },
+	};
+	mod.walk(node, visitor);
 	return found;
 }

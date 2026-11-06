@@ -159,6 +159,66 @@ export function hasTopLevelFileRedirect(
 }
 
 /**
+ * A redirect projected from the shell AST: the operator plus its statically
+ * resolved target (null when the target word contains an expansion, glob, or
+ * other dynamic part). The AST path judges redirects through this shape and
+ * never re-scans the subject text.
+ */
+export interface StructuredRedirect {
+	op: string;
+	target: string | null;
+}
+
+/** True when `r` is an output redirect that writes a file (descriptor dups/closes are not). */
+function isFileWriteRedirect(r: StructuredRedirect): boolean {
+	switch (r.op) {
+		case ">":
+		case ">>":
+		case ">|":
+		case "&>":
+		case "&>>":
+		case "<>":
+			return true;
+		case ">&":
+			// Descriptor dup/close (`2>&1`, `>&-`) is not a file write; a path target is.
+			return r.target === null || (r.target !== "-" && !/^[0-9]+$/.test(r.target));
+		default:
+			return false;
+	}
+}
+
+/**
+ * The structured-redirect equivalent of `hasTopLevelFileRedirect`: true when
+ * any redirect writes a file outside the allowed targets, with the same exempt
+ * semantics (a `/dev/null` target, a target under an allowed root, a
+ * descriptor dup/close, and dynamic targets never exempt).
+ */
+export function hasWritableRedirect(
+	redirs: readonly StructuredRedirect[],
+	allowRedirectTargets: readonly string[] = [],
+	options: PathNormalizationOptions & { cwd?: string } = {},
+): boolean {
+	for (const r of redirs) {
+		if (!isFileWriteRedirect(r)) continue;
+		if (r.target === null) return true;
+		if (r.target === "/dev/null") continue;
+		if (redirectTargetAllowed(r.target, allowRedirectTargets, options.cwd, options)) continue;
+		return true;
+	}
+	return false;
+}
+
+/**
+ * True when a redirect reads a file (`<`, and the heredoc forms, which are
+ * already whole-command constructs). Descriptor input dups (`<&3`) are not
+ * file reads. The tier screens these conservatively for path-taking commands,
+ * matching the pre-AST behavior where the `<` token failed containment.
+ */
+export function hasBlockingInputRedirect(redirs: readonly StructuredRedirect[]): boolean {
+	return redirs.some((r) => r.op === "<" || r.op === "<<" || r.op === "<<-" || r.op === "<<<");
+}
+
+/**
  * Single-pass scanner shared with `hasTopLevelFileRedirect`: walks `cmd` and
  * removes every *exempt* redirect clause (descriptor dups are left in place;
  * `/dev/null` and allowed-target clauses are cut out) from the returned
@@ -192,9 +252,12 @@ function stripExemptRedirects(
 		const ch = cmd[i];
 		// Backslash escape: skip next char (not inside single quotes)
 		if (ch === "\\" && !inSingle) { i += 2; continue; }
-		// Quote / backtick toggles
+		// Quote / backtick toggles. Each toggle is tested against the OTHER
+		// states, never against its own flag: a self-test (`!inDouble` on the
+		// double-quote branch) makes the closing quote unreachable, so the
+		// scanner stays "inside" the quotes and every later `>` is hidden.
 		if (ch === "'" && !inDouble && !inBacktick) { inSingle = !inSingle; i++; continue; }
-		if (ch === '"' && !inSingle && !inDouble) { inDouble = !inDouble; i++; continue; }
+		if (ch === '"' && !inSingle && !inBacktick) { inDouble = !inDouble; i++; continue; }
 		if (ch === "`" && !inSingle && !inDouble) { inBacktick = !inBacktick; i++; continue; }
 		if (!inSingle && !inDouble && !inBacktick) {
 			// Parenthesis depth: command substitution / subshell. A `>` inside
@@ -323,37 +386,6 @@ function stripExemptRedirects(
 }
 
 /**
- * Simple quote-aware tokenizer for a single shell command (no top-level
- * operators). Strips surrounding single/double quotes from each token;
- * respects backslash escapes.
- */
-export function tokenizeSimple(cmd: string): string[] {
-	const tokens: string[] = [];
-	let current = "";
-	let inSingle = false;
-	let inDouble = false;
-	let i = 0;
-	while (i < cmd.length) {
-		const ch = cmd[i];
-		if (ch === "\\" && !inSingle) {
-			if (i + 1 < cmd.length) { current += cmd[i + 1]; i += 2; } else i++;
-			continue;
-		}
-		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
-		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
-		if ((ch === " " || ch === "\t") && !inSingle && !inDouble) {
-			if (current) { tokens.push(current); current = ""; }
-			i++;
-			continue;
-		}
-		current += ch;
-		i++;
-	}
-	if (current) tokens.push(current);
-	return tokens;
-}
-
-/**
  * Returns true when the tokens represent a `set` invocation whose arguments
  * are only shell options: short flags (`-e`), clustered flags (`-euo`), plus
  * forms (`+x`), long options with their values (`-o pipefail`, `+o
@@ -385,44 +417,38 @@ function isSetOptionsOnly(tokens: string[]): boolean {
 }
 
 /**
- * Returns true when `cmd` is a read-only bash subcommand that is safe to
- * auto-allow.
+ * Returns true when the UNWRAPPED argv is a read-only bash command that is
+ * safe to auto-allow. Judged on argv, never on the subject text; redirect
+ * handling is the caller's job (a non-exempt write redirect blocks the tier
+ * before this is consulted).
  *
  * Rules:
- *  1. Reject if cmd contains a top-level *file* output redirect. Descriptor
- *     dups like `2>&1` and `/dev/null`/write-root targets stay auto-allowable.
- *  2. If the first token is in READONLY_BASH_SAFE_ALWAYS: allow.
- *  2b. If the first token is `set` and every remaining token is a shell
- *      option: allow. Any positional argument: false.
- *  3. If the first token is in READONLY_BASH_WITH_PATHS: allow only when
- *     every non-flag argument resolves to a path inside (or equal to) cwd or
- *     one of the allowed read roots.
+ *  1. If the command is `set` and every remaining token is a shell option
+ *     (and no input redirect is present): allow.
+ *  2. If argv[0] is in READONLY_BASH_SAFE_ALWAYS: allow.
+ *  3. If argv[0] is in READONLY_BASH_WITH_PATHS: allow only when every
+ *     non-flag argument resolves to a path inside (or equal to) cwd or one of
+ *     the allowed read roots. An input redirect blocks the rest of the tier
+ *     (`hasInputRedirect`): its target is not in argv, and the pre-AST tier
+ *     rejected the command for exactly that reason.
  *  4. Anything else: false.
  */
-export function isReadOnlyBashSubcommand(
-	cmd: string,
+export function isReadOnlyBashArgv(
+	argv: readonly string[],
 	cwd: string,
-	options: PathNormalizationOptions = {},
-	allowRedirectTargets: readonly string[] = [],
-	readRoots: readonly string[] = [],
+	readRoots: readonly string[],
+	hasInputRedirect = false,
 ): boolean {
-	const trimmed = cmd.trim();
-	if (!trimmed) return false;
-	// Exempt redirect clauses (allowed targets, /dev/null) are stripped from the
-	// command before tokenizing so their tokens cannot leak into the path-args
-	// check below. A non-exempt top-level file redirect returns null: not read-only.
-	const stripped = stripExemptRedirects(trimmed, allowRedirectTargets, { ...options, cwd });
-	if (stripped === null) return false;
-	const tokens = tokenizeSimple(stripped);
-	if (tokens.length === 0) return false;
-	const cmdName = tokens[0].toLowerCase();
-	if (cmdName === "set") return isSetOptionsOnly(tokens);
+	if (argv.length === 0) return false;
+	const cmdName = argv[0].toLowerCase();
+	if (cmdName === "set") return !hasInputRedirect && isSetOptionsOnly([...argv]);
 	if (READONLY_BASH_SAFE_ALWAYS.has(cmdName)) return true;
+	if (hasInputRedirect) return false;
 	if (READONLY_BASH_WITH_PATHS.has(cmdName)) {
-		const pathArgs = tokens.slice(1).filter((t) => t.length > 0 && !t.startsWith("-"));
+		const pathArgs = argv.slice(1).filter((t) => t.length > 0 && !t.startsWith("-"));
 		// No path args: command implicitly uses cwd, safe
 		if (pathArgs.length === 0) return true;
-		return pathArgs.every((arg) => pathInsideAllowedRoots(arg, cwd, readRoots, options));
+		return pathArgs.every((arg) => pathInsideAllowedRoots(arg, cwd, readRoots));
 	}
 	return false;
 }
@@ -867,137 +893,22 @@ export const DEFAULT_BASH_VALIDATORS: Record<string, string> = {
 };
 
 /**
- * Returns a reason string when `cmd` is approved read-only by one of the
- * validators, or null when it is not covered. Fail-open: a null return means
- * the caller continues down the normal decision pipeline and never denies.
+ * Returns a reason string when the UNWRAPPED argv is approved read-only by one
+ * of the validators, or null when it is not covered. Fed argv, never a
+ * tokenized subject string. Fail-open: a null return means the caller
+ * continues down the normal decision pipeline and never denies.
  */
-export function validatorApprovedBashReason(
-	cmd: string,
+export function validatorApprovedBashArgv(
+	argv: readonly string[],
 	cwd: string,
 	validators: Record<string, string>,
-	allowRedirectTargets: readonly string[] = [],
 	readRoots: readonly string[] = [],
 ): string | null {
-	const trimmed = cmd.trim();
-	if (!trimmed) return null;
-	const stripped = stripExemptRedirects(trimmed, allowRedirectTargets, { cwd });
-	if (stripped === null) return null;
-	const tokens = tokenizeSimple(stripped);
-	if (tokens.length === 0) return null;
-	const cmdName = tokens[0].toLowerCase();
+	if (argv.length === 0) return null;
+	const cmdName = argv[0].toLowerCase();
 	const validatorName = validators[cmdName];
 	if (validatorName === undefined) return null;
 	const validator = BASH_VALIDATORS[validatorName];
 	if (validator === undefined) return null; // unknown validator name: fail open
-	return validator(tokens, cwd, readRoots) ? `validated read-only ${cmdName} (bashValidators.${validatorName})` : null;
-}
-
-/**
- * Bash builtin keywords that may prefix a pure variable assignment without
- * introducing side-effects (e.g. `export FOO=bar`, `declare -r X=1`).
- */
-const ASSIGN_PREFIX_BUILTINS = new Set([
-	"export", "local", "readonly", "declare", "typeset",
-]);
-
-/**
- * Returns true when `cmd` is a *pure* shell variable assignment: one that
- * performs no command, process, or arithmetic substitution and runs no other
- * command. Detection operates on the RAW command string (quote-aware scan,
- * tokens keep their quotes):
- *  1. Reject if `cmd` contains a top-level *file* output redirection.
- *  2. Quote-aware top-level tokenization preserving each token's original
- *     substring; unmatched quotes: false.
- *  3. Strip an optional leading prefix builtin and its flags.
- *  4. Every remaining token must match `^[A-Za-z_][A-Za-z0-9_]*(\+?=)(.*)$`.
- *     A non-assignment token means a trailing command runs: false.
- *  5. Reject unquoted command separators hidden in an assignment token
- *     (e.g. `X=1;reboot`).
- *  6. Reject side-effect vectors in the RHS: backticks, `$(`, `$((`,
- *     process substitution `<(` / `>(`. Bare `$VAR` / `${VAR}` are allowed.
- */
-export function isPureVariableAssignment(
-	cmd: string,
-	allowRedirectTargets: readonly string[] = [],
-	options: PathNormalizationOptions & { cwd?: string } = {},
-): boolean {
-	const s = cmd.trim();
-	if (!s) return false;
-	if (hasTopLevelFileRedirect(s, allowRedirectTargets, options)) return false;
-
-	// Quote-aware top-level tokenization that preserves each token's original
-	// substring (quotes included) so RHS screening can detect `$(` etc.
-	const tokens: string[] = [];
-	let cur = "";
-	let inSingle = false;
-	let inDouble = false;
-	let i = 0;
-	while (i < s.length) {
-		const ch = s[i];
-		if (ch === "\\" && !inSingle) {
-			// Preserve the escape and the escaped char in the token.
-			cur += ch + (s[i + 1] ?? "");
-			i += 2;
-			continue;
-		}
-		if (ch === "'" && !inDouble) { inSingle = !inSingle; cur += ch; i++; continue; }
-		if (ch === '"' && !inSingle) { inDouble = !inDouble; cur += ch; i++; continue; }
-		if ((ch === " " || ch === "\t") && !inSingle && !inDouble) {
-			if (cur) { tokens.push(cur); cur = ""; }
-			i++;
-			continue;
-		}
-		cur += ch;
-		i++;
-	}
-	if (inSingle || inDouble) return false; // unmatched quote: don't guess
-	if (cur) tokens.push(cur);
-	if (tokens.length === 0) return false;
-
-	// Strip an optional leading prefix builtin and its flags.
-	let start = 0;
-	if (ASSIGN_PREFIX_BUILTINS.has(tokens[0])) {
-		start = 1;
-		while (start < tokens.length && tokens[start].startsWith("-")) start++;
-	}
-	if (start >= tokens.length) return false; // e.g. bare `declare -p`: not an assignment
-
-	const assignRe = /^[A-Za-z_][A-Za-z0-9_]*\+?=(.*)$/s;
-	for (let j = start; j < tokens.length; j++) {
-		const tok = tokens[j];
-		const m = tok.match(assignRe);
-		if (!m) return false; // a non-assignment token means a command runs
-		// Reject unquoted command separators in the raw RHS.
-		if (hasUnquotedSeparator(m[1])) return false;
-		// Strip surrounding quotes from the RHS for side-effect screening.
-		let rhs = m[1];
-		if (rhs.length >= 2 && ((rhs[0] === '"' && rhs[rhs.length - 1] === '"') || (rhs[0] === "'" && rhs[rhs.length - 1] === "'"))) {
-			rhs = rhs.slice(1, -1);
-		}
-		// Reject any side-effect vector: backtick command substitution,
-		// `$(...)` command substitution (also covers `$((...))` arithmetic),
-		// or process substitution `>(...)` / `<(...)`.
-		if (/`|\$\(|>\(|<\(/.test(rhs)) return false;
-	}
-	return true;
-}
-
-/**
- * Returns true when `s` contains a shell command separator (`;`, `|`, `&`,
- * or a newline) outside single/double quotes (backslash escapes respected).
- * Quoted separators are literal values (e.g. `X="a;b"`), not commands.
- */
-function hasUnquotedSeparator(s: string): boolean {
-	let inSingle = false;
-	let inDouble = false;
-	let i = 0;
-	while (i < s.length) {
-		const ch = s[i];
-		if (ch === "\\" && !inSingle) { i += 2; continue; }
-		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
-		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
-		if (!inSingle && !inDouble && (ch === ";" || ch === "|" || ch === "&" || ch === "\n" || ch === "\r")) return true;
-		i++;
-	}
-	return false;
+	return validator([...argv], cwd, readRoots) ? `validated read-only ${cmdName} (bashValidators.${validatorName})` : null;
 }

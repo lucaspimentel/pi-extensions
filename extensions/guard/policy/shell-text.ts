@@ -5,9 +5,8 @@
  * substring-level rules are unit-testable on their own and can be reused by
  * the tier's path containment checks.
  *
- * Moved verbatim from policy/shellsplit.ts (2026-11-06 shell-ast adoption).
- * Guard imports these from here directly; shellsplit.ts no longer re-exports
- * them and is reduced to the legacy parser-only splitter.
+ * Retained from the retired hand-written shell parser (2026-11-06).
+ * All callers import these helpers directly from this module.
  */
 
 /**

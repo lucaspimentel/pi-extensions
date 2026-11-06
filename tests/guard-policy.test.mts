@@ -32,11 +32,9 @@ import {
 } from "../extensions/guard/policy/config.ts";
 import { DEFAULT_MASK_EXCEPTIONS, DEFAULT_MASK_PATTERNS } from "../extensions/guard/sandbox/spec.ts";
 import {
-	activeConstructReason,
 	decide as decidePolicy,
 	decideHostShellCommand as decideHostShellCommandPolicy,
 	effectiveWorkspaceMode,
-	hasDollarExpansionOutsideSingleQuotes,
 	isExfilCapableFetch,
 	maskArgumentVeto,
 	qualifyingSwitchRungs as qualifyingSwitchRungsPolicy,
@@ -63,6 +61,7 @@ import {
 	type Profile,
 } from "../extensions/guard/policy/profiles.ts";
 import { makeIsProtectedPath } from "../extensions/guard/policy/protected.ts";
+import { hasTopLevelFileRedirect } from "../extensions/guard/policy/bashtier.ts";
 import {
 	ackWorkspaceLock,
 	cycleProfile,
@@ -671,15 +670,13 @@ test("yolo honors deny and ask rules and allows everything else; unrestricted ig
 test("tightened host tier vetoes: env/printenv, $ expansion, and mask arguments", () => {
 	assert.equal(decideHost("default", "env").action, "prompt");
 	assert.equal(decideHost("default", "printenv").action, "prompt");
-	assert.equal(hasDollarExpansionOutsideSingleQuotes("echo $GITHUB_TOKEN"), true);
-	assert.equal(hasDollarExpansionOutsideSingleQuotes("echo '$HOME'"), false);
-	assert.equal(hasDollarExpansionOutsideSingleQuotes("echo \"$HOME\""), true);
 	assert.equal(decideHost("default", "echo $GITHUB_TOKEN").action, "prompt");
 	assert.equal(decideHost("default", "cat .env").action, "prompt");
 	assert.equal(decideHost("default", "cat server.pem").action, "prompt");
-	assert.equal(maskArgumentVeto("cat .env.example", makeConfig()), null, "built-in exceptions do not veto");
-	assert.equal(maskArgumentVeto("cat .env.dev", makeConfig({ maskExceptions: [".env.dev"] })), null, "config exceptions do not veto");
-	assert.equal(maskArgumentVeto("cat .env.dev", makeConfig()), "command argument matches secret mask pattern (.env.dev)");
+	// The mask veto is fed the unwrapped argv, not a subject string.
+	assert.equal(maskArgumentVeto(["cat", ".env.example"], makeConfig()), null, "built-in exceptions do not veto");
+	assert.equal(maskArgumentVeto(["cat", ".env.dev"], makeConfig({ maskExceptions: [".env.dev"] })), null, "config exceptions do not veto");
+	assert.equal(maskArgumentVeto(["cat", ".env.dev"], makeConfig()), "command argument matches secret mask pattern (.env.dev)");
 	// The vetoes gate the tier only; the profile cell still applies (trusted
 	// allows, default prompts).
 	assert.equal(decideHost("trusted", "cat .env").action, "allow", "trusted cell allows; the veto only removes the tier's free pass");
@@ -739,30 +736,10 @@ test("structural collapse: saved allow rules cannot authorize a discarded head",
 	assert.doesNotMatch(loop.reason, /allow rule/, "the body fragment's allow rule must not fire");
 });
 
-test("host tier fail-closed screen: screen reasons and boundary compat", () => {
-	assert.equal(activeConstructReason("echo hello"), null);
-	assert.equal(activeConstructReason("printf x"), null);
-	assert.equal(activeConstructReason("echo ok;"), null, "a trailing separator is inert");
-	assert.equal(activeConstructReason("git status > /dev/null 2>&1"), null, "redirects and dups are judged by the redirect machinery");
-	assert.equal(activeConstructReason("echo hi >/dev/null"), null);
-	assert.equal(activeConstructReason("ls 2>&1"), null);
-	assert.equal(activeConstructReason("timeout 120 ls"), null);
-	assert.equal(activeConstructReason("cat <<'EOF'"), "heredoc or here-string");
-	assert.equal(activeConstructReason("diff <(ls) <(ls -a)"), "process substitution");
-	assert.equal(activeConstructReason("sleep 5 & echo done"), "background execution");
-	assert.equal(activeConstructReason("echo a && echo b"), "&& control operator");
-	assert.equal(activeConstructReason("echo a | tee f"), "pipeline");
-	assert.equal(activeConstructReason("echo 'it; stays'"), null, "quoted separators are literal");
-	assert.equal(activeConstructReason('echo "(literal)"'), null, "quoted grouping is literal");
-	assert.equal(activeConstructReason("echo \\;"), null, "an escaped separator is a literal argument");
-	assert.equal(activeConstructReason("echo \"\\$HOME\""), null, "an escaped dollar is literal");
-	assert.equal(activeConstructReason("echo {a,b}"), "brace grouping", "unquoted brace expansion is declined");
-	assert.equal(activeConstructReason("(echo hi)"), "subshell or grouping");
-	assert.equal(activeConstructReason("echo 'unmatched"), "unterminated quotes");
-	// Quoted constructs stay inert for the screen while active ones inside
-	// double quotes still flag.
-	assert.equal(activeConstructReason("echo \"$(cat x)\""), "dollar expansion");
-	// Trusted simple commands keep their tier allow despite the screen.
+test("host tier boundary cases: quoted and harmless arguments keep their tier allow", () => {
+	// Behavior boundary cases (the former activeConstructReason unit assertions
+	// were deleted with that function; the fail-closed constructs are pinned by
+	// the AST analysis tests and the five-construction bypass test above).
 	assert.equal(decideHost("default", "echo hello").action, "allow");
 	assert.equal(decideHost("default", "printf x").action, "allow");
 	assert.equal(decideHost("default", "echo '(inert); chars'").action, "allow");
@@ -771,6 +748,89 @@ test("host tier fail-closed screen: screen reasons and boundary compat", () => {
 	assert.equal(decideHost("default", "timeout 120 ls").action, "allow");
 	assert.equal(decideHost("default", "which node").action, "allow", "introspection-only wrappers stay");
 	assert.equal(decideHost("default", "type ls").action, "allow", "introspection-only wrappers stay");
+});
+
+test("read-only tier widening: wrapper chains and env/nice now prove the inner command read-only", () => {
+	// Each of these returned PROMPT on the pre-adapter tier (the wrapper token
+	// itself was not a read-only command) and now returns ALLOW because the
+	// tier judges the adapter's unwrapped argv. Every one is a widening of the
+	// implicit allow surface and is listed here for review, not absorbed.
+	const widens = [
+		"command ls", // old: prompt (`command` token)
+		"command cat package.json", // old: prompt; path inside cwd
+		"xargs cat", // old: prompt (`xargs` token)
+		"nice ls", // old: prompt (`nice` token; registry unwraps it)
+		"env ls", // old: prompt (env veto on the whole command)
+		"env FOO=1 ls", // old: prompt (env veto; the assignment is dropped)
+		"[[ a && b ]]", // old: prompt (the active-construct screen declined the && inside [[ ]])
+		"echo {a,b}", // old: prompt (the active-construct screen declined unquoted braces)
+	];
+	for (const command of widens) {
+		const decision = decideHost("default", command);
+		assert.equal(decision.action, "allow", `${command}: expected the argv tier to allow; got ${decision.action} (${decision.reason})`);
+	}
+	// The wrapper does not launder a veto or a non-read-only inner command.
+	assert.equal(decideHost("default", "command cat .env").action, "prompt");
+	assert.equal(decideHost("default", "command touch probe").action, "prompt");
+	assert.equal(decideHost("default", "command cat /etc/passwd").action, "prompt", "out-of-root path still declines");
+});
+
+test("read-only tier vetoes and AST screens still fire: no new false allows", () => {
+	assert.equal(decideHost("default", "env").action, "prompt");
+	assert.equal(decideHost("default", "printenv").action, "prompt");
+	assert.equal(decideHost("default", "command env ls").action, "prompt", "the env command word still vetoes when it is the unwrapped head");
+	assert.equal(decideHost("default", "cat .env").action, "prompt");
+	// The $ veto now comes from the analysis's hasParameterExpansion, which the
+	// adapter reports for arithmetic expansion and for params nested in braces.
+	assert.equal(decideHost("default", "echo $((1+2))").action, "prompt", "arithmetic expansion is a $ expansion");
+	assert.equal(decideHost("default", "echo {$HOME,a}").action, "prompt", "a parameter expansion nested in braces still vetoes");
+	// The adapter's walk treats ArithmExp/BraceExp as leaves; the hardening must
+	// still surface a construct nested inside either.
+	assert.equal(decideHost("default", "echo {a,$(touch probe)}").action, "prompt", "a construct nested in braces is still incomplete");
+	assert.equal(decideHost("default", "echo $(( $(touch probe) ))").action, "prompt", "a construct nested in arithmetic expansion is still caught");
+});
+
+test("top-level redirect scanner: quotes and backticks toggle both ways (quote-state symmetry)", () => {
+	// Regression for the pwsh text scanner (`stripExemptRedirects`): the
+	// double-quote branch used to require `!inDouble`, so a closing `"` could
+	// never reset the flag and a later `>` was invisible. pwsh still uses this
+	// text path (`hasTopLevelFileRedirect`); bash uses structured redirects.
+	const writes = [
+		'echo "p" > /home/z', // closed double quotes must not hide the write
+		"echo p > /home/z", // unquoted write stays detected
+		"echo 'p' > /home/z", // closed single quotes must not hide the write
+		"echo `p` > /home/z", // closed backticks must not hide the write
+		'echo "p" `p` > /home/z',
+		'echo "p" \'p\' > /home/z',
+	];
+	for (const cmd of writes) {
+		assert.equal(hasTopLevelFileRedirect(cmd, [], { cwd: "/home/user/proj" }), true, `${cmd}: the write must be detected`);
+	}
+	// A `>` inside quotes, backticks, or a descriptor dup stays undetected.
+	const inert = [
+		'echo "a > b"',
+		"echo 'a > b'",
+		"echo `a > b`",
+		'echo "a" ">" "b"',
+		"echo hi 2>&1",
+	];
+	for (const cmd of inert) {
+		assert.equal(hasTopLevelFileRedirect(cmd, [], { cwd: "/home/user/proj" }), false, `${cmd}: not a top-level write`);
+	}
+	// Exempt targets stay exempt regardless of the surrounding quotes.
+	assert.equal(hasTopLevelFileRedirect('echo "p" > /dev/null', [], { cwd: "/home/user/proj" }), false);
+});
+
+test("read-only tier never authorizes a write redirect; only a redirect-aware allow rule can", () => {
+	assert.equal(decideHost("default", "echo hi > out.txt").action, "prompt", "a read-only command with a file write still prompts");
+	const plain = makePolicy({ config: makeConfig({ hostBash: { allow: ["HostBash(echo *)"] } }) });
+	assert.equal(decide(plain, { kind: "host-shell", shell: "host-bash", command: "echo hi > out.txt" }).action, "prompt", "a plain allow rule cannot authorize the write");
+	const aware = makePolicy({ config: makeConfig({ hostBash: { allow: ["HostBash(echo * > *)"] } }) });
+	assert.equal(decide(aware, { kind: "host-shell", shell: "host-bash", command: "echo hi > out.txt" }).action, "allow", "a redirect-aware allow rule authorizes the write");
+	// An exempt write (/dev/null) plus a read-only command still tier-allows.
+	assert.equal(decideHost("default", "echo hi >/dev/null").action, "allow");
+	// An input redirect blocks the path-taking tier (its target is not in argv).
+	assert.equal(decideHost("default", "cat x < in").action, "prompt");
 });
 
 test("pi's built-in powershell tool maps to the pwsh shell tier", () => {
@@ -788,6 +848,23 @@ test("pi's built-in powershell tool maps to the pwsh shell tier", () => {
 	// host_bash keeps its own discriminator.
 	const bashMapped = mapToolCallToGuardCall("host_bash", { command: "ls" }, makeConfig());
 	assert.equal(bashMapped.call.kind === "host-shell" && bashMapped.call.shell, "host-bash");
+});
+
+test("pwsh quoted-argument writes prompt: the text scanner is quote-symmetric (fail closed)", () => {
+	// pwsh has no structured redirects, so `hasTopLevelFileRedirect` is the
+	// gate. Before the scanner fix a closed double quote hid every later `>`,
+	// letting a trusted pwsh cell allow a real write. Each quoted form below
+	// must now require a redirect-aware allow rule (there is none) and prompt.
+	const trusted = makePolicy({ profile: "trusted" });
+	for (const command of ['echo "p" > /home/z', "echo 'p' > /home/z", "echo `p` > /home/z", "echo p > /home/z"]) {
+		const decision = decide(trusted, { kind: "host-shell", shell: "pwsh", command });
+		assert.equal(decision.action, "prompt", `${command}: ${decision.reason}`);
+	}
+	// A quoted `>` is still not a write and stays on the trusted cell.
+	assert.equal(decide(trusted, { kind: "host-shell", shell: "pwsh", command: 'echo "a > b"' }).action, "allow");
+	// A redirect-aware allow rule still authorizes the quoted-argument write.
+	const aware = makePolicy({ profile: "trusted", config: makeConfig({ hostBash: { allow: ["Pwsh(echo * > *)"] } }) });
+	assert.equal(decide(aware, { kind: "host-shell", shell: "pwsh", command: 'echo "p" > /home/z' }).action, "allow");
 });
 
 test("session_excerpt maps to local-read with its path retained", () => {

@@ -35,14 +35,15 @@ import {
 	type WorkspaceMode,
 } from "../sandbox/spec.ts";
 import {
+	hasBlockingInputRedirect,
+	hasTopLevelFileRedirect,
+	hasWritableRedirect,
 	isNoopCd,
-	isPureVariableAssignment,
-	isReadOnlyBashSubcommand,
+	isReadOnlyBashArgv,
 	pathInsideAllowedRoots,
 	stripLineContinuations,
-	tokenizeSimple,
-	validatorApprovedBashReason,
-	hasTopLevelFileRedirect,
+	validatorApprovedBashArgv,
+	type StructuredRedirect,
 } from "./bashtier.ts";
 import { parseRule, ruleMatches, rulePatternAllowsRedirect, compilePattern } from "./rules.ts";
 import { homedir } from "node:os";
@@ -91,6 +92,8 @@ export interface Decision {
 	reason: string;
 	/** Explicit ask rules never offer saving an allow rule. */
 	provenance?: "explicit-ask" | "fallback";
+	/** Raw rule identifier when an explicit shell rule decided this result. */
+	matchedRule?: string;
 }
 
 export interface PolicyState {
@@ -108,116 +111,14 @@ export interface PolicyState {
 export type ClassifyStrategy = (call: GuardCall, policy: PolicyState) => Promise<{ verdict: "allow" | "soft_deny" | "hard_deny" | "no_match"; reason: string; modelId?: string }>;
 
 /**
- * True when `s` contains a `$` outside single quotes: any shell expansion
- * vetoes the host tier's auto-allow (`echo $GITHUB_TOKEN` must prompt).
- * Double quotes do NOT protect: `"$HOME"` still expands. A single quote
- * inside double quotes is a literal character, not a toggle: `echo "'$HOME'"`
- * still expands and must be flagged.
- */
-export function hasDollarExpansionOutsideSingleQuotes(s: string): boolean {
-	let inSingle = false;
-	let inDouble = false;
-	let i = 0;
-	while (i < s.length) {
-		const ch = s[i];
-		if (ch === "\\" && !inSingle) { i += 2; continue; }
-		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
-		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
-		if (!inSingle && ch === "$") return true;
-		i++;
-	}
-	return false;
-}
-
-/**
- * The active-construct screen for the read-only tier: returns a reason string
- * when `cmd` contains shell syntax the tier's per-command checks cannot prove
- * harmless, or null when the command is syntactically simple enough for the
- * tier. Fail closed: a flagged command never auto-allows, it falls through to
- * the normal rule/cell pipeline (a prompt in the default profile).
- *
- * Flagged constructs:
- *   - Dollar expansion and backtick command substitution outside literal
- *     single quotes (both are ACTIVE inside double quotes).
- *   - Process substitution `<(...)` / `>(...)`, subshells and grouping
- *     `(...)`, brace grouping `{`.
- *   - Background execution `&`, pipelines `|`, `&&` / `||`, and command
- *     separators `;` / newlines the top-level splitter did not handle.
- *   - Heredocs and here-strings `<<` / `<<<`.
- *   - Unterminated quotes (uncertain syntax).
- *
- * Deliberately NOT flagged: file-output redirects `>` / `>>` / `&>` (judged
- * by the redirect-aware allow-rule machinery, not here), plain input
- * redirects `<`, and descriptor dups `N>&M` / `>&-` / `&>target` (not file
- * writes in the dup case; the `&>` write case is judged by the redirect
- * machinery). Trailing separators are inert in bash (`echo ok;`) and are
- * trimmed before scanning; a trailing `&` is NOT trimmed, backgrounding is
- * an active semantic.
- */
-export function activeConstructReason(cmd: string): string | null {
-	const s = cmd.replace(/(?:\|\||&&|\||;|\s)+$/, "");
-	let inSingle = false;
-	let inDouble = false;
-	let i = 0;
-	while (i < s.length) {
-		const ch = s[i];
-		// Backslash escape outside single quotes: the next character cannot be
-		// an active construct (bash itself treats it as literal, including
-		// inside double quotes for the escapable set).
-		if (ch === "\\" && !inSingle) { i += 2; continue; }
-		// Quote toggles: a single quote inside double quotes (and vice versa)
-		// is a literal character, not a toggle.
-		if (ch === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
-		if (ch === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
-		// Expansion and backtick substitution are active outside AND inside
-		// double quotes; only literal single quotes neutralize them.
-		if (ch === "$" && !inSingle) return "dollar expansion";
-		if (ch === "`" && !inSingle) return "backtick command substitution";
-		if (inSingle || inDouble) { i++; continue; }
-		// Everything below is unquoted and therefore active shell syntax.
-		if (ch === "&") {
-			const next = s[i + 1] ?? "";
-			const prev = s[i - 1] ?? "";
-			if (next === "&") return "&& control operator";
-			if (next === ">") { i += 2; continue; } // &> file: judged by the redirect machinery
-			if (prev === ">" && (next === "-" || /[0-9]/.test(next))) {
-				// Descriptor dup `N>&M` / `>&-`: skip past `&` and the fd digits.
-				i++;
-				while (i < s.length && /[0-9]/.test(s[i] ?? "")) i++;
-				continue;
-			}
-			return "background execution";
-		}
-		if (ch === "|") return s[i + 1] === "|" ? "|| control operator" : "pipeline";
-		if (ch === ";" || ch === "\n" || ch === "\r") return "command separator";
-		if (ch === "(") {
-			const prev = s[i - 1] ?? "";
-			if (prev === "<" || prev === ">") return "process substitution";
-			return "subshell or grouping";
-		}
-		if (ch === ")") return "subshell or grouping";
-		if (ch === "{") return "brace grouping";
-		if (ch === "<") {
-			if (s[i + 1] === "<") return "heredoc or here-string";
-			i++; // plain input redirect: read-only
-			continue;
-		}
-		i++;
-	}
-	if (inSingle || inDouble) return "unterminated quotes";
-	return null;
-}
-
-/**
  * Basenames of a host command's non-flag tokens that match a secret-mask
  * pattern: a file argument like `.env` or `server.pem` vetoes the host tier's
  * auto-allow (the file's contents must not be readable on the host).
  * Patterns: built-ins plus guard.json additions. Exceptions: the built-in
  * exceptions (e.g. .env.example) plus guard.json additions.
  */
-export function maskArgumentVeto(cmd: string, config: ResolvedGuardConfig): string | null {
-	const tokens = tokenizeSimple(stripTrailingHarmlessRedirects(cmd));
-	for (const tok of tokens.slice(1)) {
+export function maskArgumentVeto(argv: readonly string[], config: ResolvedGuardConfig): string | null {
+	for (const tok of argv.slice(1)) {
 		if (!tok || tok.startsWith("-")) continue;
 		if (/[`$(){}|&;<>*?]/.test(tok)) continue; // unresolvable: other vetoes handle it
 		const base = tok.split("/").pop() ?? tok;
@@ -254,15 +155,18 @@ export function maskedReadPathReason(path: string, config: ResolvedGuardConfig):
  * Host-tier vetoes applied BEFORE the read-only tier for host_bash and pwsh
  * (the tightened host tier). Returns a veto reason or null.
  */
-export function hostTierVetoReason(cmd: string, config: ResolvedGuardConfig): string | null {
-	const stripped = stripLineContinuations(cmd);
+export function hostTierVetoReason(
+	argv: readonly string[],
+	hasParameterExpansion: boolean,
+	config: ResolvedGuardConfig,
+): string | null {
 	// env/printenv removed from the host tier: the host environment holds tokens.
-	const first = (tokenizeSimple(stripped)[0] ?? "").toLowerCase();
+	const first = (argv[0] ?? "").toLowerCase();
 	if (first === "env" || first === "printenv") return "env/printenv removed from the host tier (host environment holds tokens)";
-	// Any $ expansion vetoes auto-allow.
-	if (hasDollarExpansionOutsideSingleQuotes(stripped)) return "$ expansion vetoes host-tier auto-allow";
+	// Any $ expansion vetoes auto-allow (the analysis's per-call flag).
+	if (hasParameterExpansion) return "$ expansion vetoes host-tier auto-allow";
 	// Secret-mask file arguments veto auto-allow.
-	const mask = maskArgumentVeto(stripped, config);
+	const mask = maskArgumentVeto(argv, config);
 	if (mask) return mask;
 	return null;
 }
@@ -283,27 +187,45 @@ function matchedHostShellRule(list: readonly string[], shell: "host-bash" | "pws
 }
 
 /**
- * The tightened read-only tier for host_bash (pwsh has no read-only tier).
- * Returns an allow reason, or null when the tier cannot prove the command
- * read-only.
+ * One call's inputs to the tightened read-only tier: the unwrapped argv, the
+ * structured redirects, the per-call `$` flag, the pure-assignment flag, and
+ * the writeRoots-aware redirect gate. No subject text is judged here (the
+ * syntax screen is the AST analysis's completeness, checked by the caller).
  */
-function hostTierAllowReason(cmd: string, config: ResolvedGuardConfig): string | null {
-	if (hostTierVetoReason(cmd, config) !== null) return null;
-	// Active-construct screen (fail closed): command/process substitution,
-	// background execution, grouping, heredocs, and separators the splitter
-	// did not handle all make the per-command checks below unsound. A flagged
-	// command does not deny: it falls through to the normal pipeline (rules,
-	// then the profile cell, typically a prompt).
-	if (activeConstructReason(cmd) !== null) return null;
-	if (isReadOnlyBashSubcommand(cmd, config.cwd, {}, config.writeRoots, config.readRoots)) {
+interface HostTierInput {
+	/** The call's canonical matching subject (used only for the string-based no-op cd helper). */
+	subject: string;
+	argv: readonly string[];
+	redirects: readonly StructuredRedirect[];
+	hasParameterExpansion: boolean;
+	pureAssignment: boolean;
+	requiresRedirectAwareAllow: boolean;
+}
+
+/**
+ * The tightened read-only tier for host_bash (pwsh has no read-only tier).
+ * Judged on the call's UNWRAPPED argv, its redirects, and its assignment flag,
+ * never on the subject text. Returns an allow reason, or null when the tier
+ * cannot prove the command read-only.
+ */
+function hostTierAllowReason(step: HostTierInput, config: ResolvedGuardConfig): string | null {
+	if (hostTierVetoReason(step.argv, step.hasParameterExpansion, config) !== null) return null;
+	// A top-level file write is authorized ONLY by a redirect-aware allow rule:
+	// the tier never proves a write read-only.
+	if (step.requiresRedirectAwareAllow) return null;
+	// The read-only name-set judgment is on argv. An input redirect blocks the
+	// path-taking / validator / assignment checks below, because its target is
+	// not in argv and the pre-AST tier rejected those forms for exactly that
+	// reason; the safe-always set (and a pure assignment) is unaffected.
+	const hasInput = hasBlockingInputRedirect(step.redirects);
+	if (isReadOnlyBashArgv(step.argv, config.cwd, config.readRoots, hasInput)) {
 		return "read-only host command (tightened tier)";
 	}
-	const validatorReason = validatorApprovedBashReason(cmd, config.cwd, config.bashValidators, config.writeRoots, config.readRoots);
+	if (hasInput) return null;
+	const validatorReason = validatorApprovedBashArgv(step.argv, config.cwd, config.bashValidators, config.readRoots);
 	if (validatorReason !== null) return validatorReason;
-	if (isNoopCd(cmd, config.cwd)) return "no-op cd";
-	if (isPureVariableAssignment(cmd, config.writeRoots, { cwd: config.cwd })) {
-		return "pure shell variable assignment";
-	}
+	if (isNoopCd(step.subject, config.cwd)) return "no-op cd";
+	if (step.pureAssignment) return "pure shell variable assignment";
 	return null;
 }
 
@@ -311,11 +233,22 @@ function hostTierAllowReason(cmd: string, config: ResolvedGuardConfig): string |
  * The tier for host_bash in degraded mode (research): the tightened host tier
  * applies (host vetoes included: degraded execution is host execution, so
  * env/printenv, $ expansion, and secret-mask file arguments are not proven
- * read-only). Allow rules never widen this set. Returns an allow reason or
- * null.
+ * read-only). Allow rules never widen this set. A compound is not provable as
+ * one whole-command tier check (its per-call argv cannot be collapsed), so
+ * only a complete single call is judged. Returns an allow reason or null.
  */
-function degradedResearchTierReason(cmd: string, config: ResolvedGuardConfig): string | null {
-	const tier = hostTierAllowReason(cmd, config);
+function degradedResearchTierReason(analysis: ShellCommandAnalysis | null, config: ResolvedGuardConfig): string | null {
+	if (analysis === null || analysis.cause !== null || analysis.calls.length !== 1) return null;
+	const call = analysis.calls[0];
+	if (!call.complete) return null;
+	const tier = hostTierAllowReason({
+		subject: call.subject,
+		argv: call.argv,
+		redirects: call.redirects,
+		hasParameterExpansion: call.hasParameterExpansion,
+		pureAssignment: call.pureAssignment,
+		requiresRedirectAwareAllow: hasWritableRedirect(call.redirects, config.writeRoots, { cwd: config.cwd }),
+	}, config);
 	return tier === null ? null : `${tier} (degraded research)`;
 }
 
@@ -372,18 +305,21 @@ export interface HostShellExplanation {
 
 /**
  * One evaluable step handed to evaluateHostShellSub. `subject` is the exact
- * string deny/ask rules match against; `argv`/`hasParameterExpansion`/
- * `pureAssignment` drive the tightened read-only tier (Stage 3 moves the tier
- * onto argv; Stage 2 still judges the subject string). `incompleteReason` is
- * non-null when the step cannot be evaluated (its own subtree was flagged, or
- * a pwsh command is malformed): it prompts before the tier and every allow
- * rule, so no rule can authorize an incomplete step.
+ * string deny/ask rules match against; the tightened read-only tier is judged
+ * on `argv`/`redirects`/`hasParameterExpansion`/`pureAssignment` (never the
+ * subject text), with `requiresRedirectAwareAllow` computed by the caller
+ * from the structured redirects (bash) or the text scanner (pwsh).
+ * `incompleteReason` is non-null when the step cannot be evaluated (its own
+ * subtree was flagged, or a pwsh command is malformed): it prompts before the
+ * tier and every allow rule, so no rule can authorize an incomplete step.
  */
 interface EvaluableStep {
 	subject: string;
 	argv: readonly string[];
+	redirects: readonly StructuredRedirect[];
 	hasParameterExpansion: boolean;
 	pureAssignment: boolean;
+	requiresRedirectAwareAllow: boolean;
 	incompleteReason: string | null;
 }
 
@@ -405,21 +341,22 @@ function evaluateHostShellSub(step: EvaluableStep, policy: PolicyState, shell: "
 	const { config, profile } = policy;
 	const cmd = stripTimeoutPrefix(stripLineContinuations(step.subject).trim());
 	const subject = cmd;
-	const requiresRedirectAwareAllow = hasTopLevelFileRedirect(cmd, config.writeRoots, { cwd: config.cwd });
+	const requiresRedirectAwareAllow = step.requiresRedirectAwareAllow;
 	// Plain allow rules match the redirect-stripped subject; a step that needs
 	// a redirect-aware rule is matched verbatim (its text contains '>').
 	const allowSubject = requiresRedirectAwareAllow ? cmd : stripTrailingHarmlessRedirects(cmd);
 	// Explicit rules: deny > ask (redirect-agnostic; safety rules win first).
 	const denyRule = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
-	if (denyRule !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'` }, subject, allowSubject, requiresRedirectAwareAllow };
+	if (denyRule !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'`, matchedRule: denyRule }, subject, allowSubject, requiresRedirectAwareAllow };
 	const askRule = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
-	if (askRule !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'`, provenance: "explicit-ask" }, subject, allowSubject, requiresRedirectAwareAllow };
+	if (askRule !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'`, matchedRule: askRule, provenance: "explicit-ask" }, subject, allowSubject, requiresRedirectAwareAllow };
 	if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, subject, allowSubject, requiresRedirectAwareAllow };
 	// An unfaithful step prompts here: no tier or allow rule may authorize it.
 	if (step.incompleteReason !== null) return { decision: { action: "prompt", reason: step.incompleteReason }, subject, allowSubject, requiresRedirectAwareAllow };
-	// Tightened read-only tier (host_bash only; host vetoes first).
+	// Tightened read-only tier (host_bash only; host vetoes first). Judged on
+	// the unwrapped argv and the structured redirects, never the subject text.
 	if (shell === "host-bash") {
-		const tier = hostTierAllowReason(cmd, config);
+		const tier = hostTierAllowReason(step, config);
 		if (tier !== null) return { decision: { action: "allow", reason: tier }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
 	// Redirect handling: a top-level file redirect (outside the writeRoots
@@ -430,7 +367,7 @@ function evaluateHostShellSub(step: EvaluableStep, policy: PolicyState, shell: "
 		for (const raw of config.hostBash.allow) {
 			const rule = parseRule(raw);
 			if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, ruleToolFor(shell), { command: cmd }, config.cwd)) {
-				return { decision: { action: "allow", reason: `matched redirect-aware allow rule '${raw}'` }, subject, allowSubject, requiresRedirectAwareAllow };
+				return { decision: { action: "allow", reason: `matched redirect-aware allow rule '${raw}'`, matchedRule: raw }, subject, allowSubject, requiresRedirectAwareAllow };
 			}
 		}
 		return { decision: { action: "prompt", reason: "file redirect requires a redirect-aware allow rule (a pattern containing '>')" }, subject, allowSubject, requiresRedirectAwareAllow };
@@ -438,7 +375,7 @@ function evaluateHostShellSub(step: EvaluableStep, policy: PolicyState, shell: "
 	// Plain allow rules.
 	const allowRule = matchedHostShellRule(config.hostBash.allow, shell, stripTrailingHarmlessRedirects(cmd), config.cwd);
 	if (allowRule !== undefined) {
-		return { decision: { action: "allow", reason: `matched ${ruleToolFor(shell)} allow rule '${allowRule}'` }, subject, allowSubject, requiresRedirectAwareAllow };
+		return { decision: { action: "allow", reason: `matched ${ruleToolFor(shell)} allow rule '${allowRule}'`, matchedRule: allowRule }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
 	// Profile cell.
 	return { decision: cellAction(hostShellCell(profile), "host shell"), subject, allowSubject, requiresRedirectAwareAllow };
@@ -470,7 +407,7 @@ function evaluateHostShell(
 			const degradedResearchBreakdown: BreakdownReliability = { available: false, reason: "degraded research runs a whole-command read-only-tier check" };
 			const cmd = call.command ?? "";
 			if (cmd.trim() === "") return { decision: { action: "deny", reason: "degraded research: no command to prove read-only" }, steps: [], breakdown: degradedResearchBreakdown };
-			const tier = degradedResearchTierReason(stripTimeoutPrefix(stripLineContinuations(cmd).trim()), config);
+			const tier = degradedResearchTierReason(analysis, config);
 			if (tier !== null) return { decision: { action: "allow", reason: tier }, steps: [], breakdown: degradedResearchBreakdown };
 			return { decision: { action: "deny", reason: "degraded research: only read-only-tier commands run on the host" }, steps: [], breakdown: degradedResearchBreakdown };
 		}
@@ -479,7 +416,7 @@ function evaluateHostShell(
 
 	const cmd = stripLineContinuations(call.command);
 	const rawDeny = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
-	if (rawDeny !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${rawDeny}'` }, steps: [], rawDenyRule: rawDeny, breakdown: { available: false, reason: "a whole-command deny rule matched" } };
+	if (rawDeny !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${rawDeny}'`, matchedRule: rawDeny }, steps: [], rawDenyRule: rawDeny, breakdown: { available: false, reason: "a whole-command deny rule matched" } };
 	const rawAsk = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
 
 	if (shell === "pwsh") return evaluatePwshCommand(cmd, policy);
@@ -493,12 +430,12 @@ function evaluateHostShell(
 		const reason = analysis?.reason ?? shellAstStatus().diagnostic ?? "the bash parser is unavailable";
 		const offending = analysis?.calls.find((c) => !c.complete)?.subject;
 		const breakdown: BreakdownReliability = offending === undefined ? { available: false, reason } : { available: false, reason, offending };
-		if (rawAsk !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" }, steps: [], rawAskRule: rawAsk, splitCause: reason, breakdown };
+		if (rawAsk !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, matchedRule: rawAsk, provenance: "explicit-ask" }, steps: [], rawAskRule: rawAsk, splitCause: reason, breakdown };
 		if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, steps: [], splitCause: reason, breakdown };
 		return { decision: { action: "prompt", reason }, steps: [], splitCause: reason, breakdown };
 	}
 
-	const evaluations = analysis.calls.map((c) => ({ sub: c.subject, ev: evaluateHostShellSub({ subject: c.subject, argv: c.argv, hasParameterExpansion: c.hasParameterExpansion, pureAssignment: c.pureAssignment, incompleteReason: c.complete ? null : shellAnalysisCauseReason(c.cause ?? "unrecognized-node") }, policy, shell) }));
+	const evaluations = analysis.calls.map((c) => ({ sub: c.subject, ev: evaluateHostShellSub({ subject: c.subject, argv: c.argv, redirects: c.redirects, hasParameterExpansion: c.hasParameterExpansion, pureAssignment: c.pureAssignment, requiresRedirectAwareAllow: hasWritableRedirect(c.redirects, config.writeRoots, { cwd: config.cwd }), incompleteReason: c.complete ? null : shellAnalysisCauseReason(c.cause ?? "unrecognized-node") }, policy, shell) }));
 	const incompleteCall = analysis.calls.find((c) => !c.complete);
 	const reliability: BreakdownReliability = incompleteCall === undefined
 		? { available: analysis.calls.length > 0 }
@@ -506,18 +443,18 @@ function evaluateHostShell(
 	const toStep = (i: number, e: { sub: string; ev: ReturnType<typeof evaluateHostShellSub> }): HostShellStep => ({ occurrenceId: i, display: e.sub, subject: e.ev.subject, allowSubject: e.ev.allowSubject, requiresRedirectAwareAllow: e.ev.requiresRedirectAwareAllow, decision: e.ev.decision });
 	if (evaluations.length === 1) {
 		const e = evaluations[0];
-		const decision = e.ev.decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt" as const, reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" as const } : e.ev.decision;
+		const decision = e.ev.decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt" as const, reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, matchedRule: rawAsk, provenance: "explicit-ask" as const } : e.ev.decision;
 		return { decision, steps: [toStep(0, e)], rawAskRule: rawAsk, breakdown: reliability };
 	}
 	if (!evaluations.some((e) => e.ev.decision.action === "deny") && rawAsk !== undefined) {
-		return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, provenance: "explicit-ask" }, steps: evaluations.map((e, i) => toStep(i, e)), rawAskRule: rawAsk, breakdown: reliability };
+		return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, matchedRule: rawAsk, provenance: "explicit-ask" }, steps: evaluations.map((e, i) => toStep(i, e)), rawAskRule: rawAsk, breakdown: reliability };
 	}
 	const worst =
 		evaluations.find((e) => e.ev.decision.action === "deny") ??
 		evaluations.find((e) => e.ev.decision.action === "prompt") ??
 		evaluations.find((e) => e.ev.decision.action === "classify") ??
 		evaluations[0];
-	const decision: Decision = { action: worst.ev.decision.action, reason: `subcommand '${worst.sub}': ${worst.ev.decision.reason}`, provenance: evaluations.some((e) => e.ev.decision.provenance === "explicit-ask") ? "explicit-ask" : worst.ev.decision.provenance };
+	const decision: Decision = { action: worst.ev.decision.action, matchedRule: worst.ev.decision.matchedRule, reason: `subcommand '${worst.sub}': ${worst.ev.decision.reason}`, provenance: evaluations.some((e) => e.ev.decision.provenance === "explicit-ask") ? "explicit-ask" : worst.ev.decision.provenance };
 	return { decision, steps: evaluations.map((e, i) => toStep(i, e)), rawAskRule: rawAsk, failingSub: worst.sub, breakdown: reliability };
 }
 
@@ -534,7 +471,7 @@ function evaluateHostShell(
 function evaluatePwshCommand(cmd: string, policy: PolicyState): HostShellExplanation {
 	const breakdown: BreakdownReliability = { available: false, reason: "PowerShell commands are evaluated as one whole command (no per-step breakdown)" };
 	const malformed = pwshMalformedReason(cmd);
-	const ev = evaluateHostShellSub({ subject: cmd, argv: [], hasParameterExpansion: false, pureAssignment: false, incompleteReason: malformed }, policy, "pwsh");
+	const ev = evaluateHostShellSub({ subject: cmd, argv: [], redirects: [], hasParameterExpansion: false, pureAssignment: false, requiresRedirectAwareAllow: hasTopLevelFileRedirect(cmd, policy.config.writeRoots, { cwd: policy.config.cwd }), incompleteReason: malformed }, policy, "pwsh");
 	if (malformed !== null) return { decision: ev.decision, steps: [], splitCause: malformed, breakdown };
 	const step: HostShellStep = { occurrenceId: 0, display: cmd, subject: ev.subject, allowSubject: ev.allowSubject, requiresRedirectAwareAllow: ev.requiresRedirectAwareAllow, decision: ev.decision };
 	return { decision: ev.decision, steps: [step], breakdown };
