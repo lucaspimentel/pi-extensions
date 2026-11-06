@@ -72,11 +72,18 @@ pi-extensions/
 │   ├── *.ts              # single-file extensions
 │   ├── */                # multi-file extensions (web, guard, idle-summary, ...)
 │   └── shared/           # modules imported by several extensions (model pin, model selection, bounded spawn)
-└── tests/                # node-runnable test harnesses (*.test.mts)
+├── tests/                # node-runnable test harnesses (*.test.mts)
+└── tools/                # development-only tooling, never loaded by pi
+    └── shell-ast-spike/  #   bash-parser replacement spike (own package.json)
 ```
 
 Runtime npm deps live in the root `package.json` so a single `npm install`
 (run by pi after `git clone`) covers all extensions.
+
+The `tools/shell-ast-spike/` spike measures whether `@questi0nm4rk/shell-ast`
+can replace guard's hand-written bash parsing. Its README documents the
+methodology and `results.md` carries the numbers; neither is an extension and
+nothing under `tools/` is registered in the `pi` manifest.
 
 ## Update
 

@@ -1,0 +1,17 @@
+{
+	"name": "shell-ast-spike",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"description": "Throwaway measurement spike: is @questi0nm4rk/shell-ast viable as guard's bash parser?",
+	"dependencies": {
+		"@questi0nm4rk/shell-ast": "0.8.0"
+	},
+	"scripts": {
+		"harvest": "node harvest.ts --out corpus/commands.jsonl --manifest counts.json",
+		"bench": "node bench.ts --corpus corpus/commands.jsonl --out out/warm.json",
+		"cold": "node cold.ts --out out/cold.json",
+		"battery": "node battery.ts --out out/battery.json",
+		"report": "node report.ts --dir out --out results"
+	}
+}
