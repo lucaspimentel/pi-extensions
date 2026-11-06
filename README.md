@@ -72,18 +72,18 @@ pi-extensions/
 │   ├── *.ts              # single-file extensions
 │   ├── */                # multi-file extensions (web, guard, idle-summary, ...)
 │   └── shared/           # modules imported by several extensions (model pin, model selection, bounded spawn)
-├── tests/                # node-runnable test harnesses (*.test.mts)
-└── tools/                # development-only tooling, never loaded by pi
-    └── shell-ast-spike/  #   bash-parser replacement spike (own package.json)
+└── tests/                # node-runnable test harnesses (*.test.mts)
+    └── fixtures/guard-shell/ # curated synthetic-policy shell regressions
 ```
 
 Runtime npm deps live in the root `package.json` so a single `npm install`
 (run by pi after `git clone`) covers all extensions.
 
-The `tools/shell-ast-spike/` spike measures whether `@questi0nm4rk/shell-ast`
-can replace guard's hand-written bash parsing. Its README documents the
-methodology and `results.md` carries the numbers; neither is an extension and
-nothing under `tools/` is registered in the `pi` manifest.
+Guard uses the pinned `@questi0nm4rk/shell-ast` Bash adapter. The temporary
+measurement harness is retired; final measurements and accepted behavior
+changes are preserved in [docs/guard-design.md](docs/guard-design.md#shell-ast-adoption-final-measurement-and-retirement-record).
+[The shell fixtures](tests/fixtures/guard-shell/README.md) pin mechanisms under
+a synthetic policy, not the user-config-specific measurement results.
 
 ## Update
 
