@@ -246,29 +246,31 @@ Holes, verified 2026-10-02:
   is the guarantee, so no string-based tier runs. Provably read-only host
   commands auto-allow. The tier has no network commands, and path-taking
   commands are already restricted to cwd and read roots.
-- **Tightened host tier** (host_bash only; these cases prompt instead):
-  - `env` and `printenv` are removed from the tier (the host environment
-    holds tokens; the sandbox environment is scrubbed);
-  - any `$` expansion vetoes auto-allow (`echo $GITHUB_TOKEN`); the scanner
-    is quote-correct: a single quote inside double quotes is a literal, so
-    `echo "'$HOME'"` is still flagged;
-  - the active-construct screen (2026-10-21) declines the tier for commands
-    whose syntax the per-command checks cannot prove harmless: command and
-    process substitution (backticks are active inside double quotes too),
-    background execution `&`, grouping `(...)` / `{`, heredocs and
-    here-strings, separators the splitter did not handle, and unterminated
-    quotes. `command` was removed from the safe-always list (it executes its
-    arguments; `command touch probe` prompts, including `command -v git`,
-    until a narrowly validated introspection path lands). File-output
-    redirects stay with the redirect-aware rule machinery, and descriptor
-    dups (`2>&1`) stay tier-eligible;
-  - a discarded structural head (loop/select/case head or bare block
-    keyword removed by step projection) makes the whole projection
-    unfaithful: no step of such a command derives allow authorization at
-    all (tier, plain allow rules, and redirect-aware allow rules are all
-    skipped; deny/ask rules still apply), and a purely structural command
-    prompts instead of allowing (`for x in $(touch probe); do done` still
-    expands its word list);
+- **Tightened host tier** (host_bash only; these cases prompt instead).
+  Since the shell-ast adoption (2026-11-06) the tier judges the call's
+  **unwrapped argv** plus its structured redirects, never the subject text:
+  - `env` and `printenv` as the unwrapped command word are removed from the
+    tier (the host environment holds tokens; the sandbox environment is
+    scrubbed). `env FOO=1 <cmd>` unwraps to `<cmd>` and no longer trips this
+    veto (a reviewed widening);
+  - any `$` expansion the analysis reports (`hasParameterExpansion`, which
+    includes arithmetic `$((...))` and parameters nested in brace expansion)
+    vetoes auto-allow (`echo $GITHUB_TOKEN`); `echo "'$HOME'"` is still
+    flagged;
+  - the AST analysis is the fail-closed screen: a call whose own span holds a
+    construct guard cannot evaluate (command/process substitution,
+    backgrounding, grouping, heredocs), or one nested inside `$((...))` /
+    `{...}`, prompts before the tier and every allow rule. `command` is not
+    read-only (`command touch probe` prompts), and `command -v X` / `-V X`
+    are plain queries, not wrappers, so they are never unwrapped to `X`.
+    File-output redirects stay with the redirect-aware rule machinery, and
+    descriptor dups (`2>&1`) stay tier-eligible; the redirect gate is derived
+    from the analysis's redirect structures with the same writeRoots
+    exemptions;
+  - the read-only name sets and the duckdb/mlr/find/awk validators are fed
+    the unwrapped argv, so a wrapper chain (`command ls`, `xargs cat`) is
+    judged by its inner command; an input redirect blocks the path-taking
+    branches (its target is not in argv);
   - file arguments matching the secret-mask patterns veto auto-allow
     (`cat .env`).
 - **python/node in yolo and unrestricted** are fully raw: the persistent worker and protocol
@@ -1263,8 +1265,8 @@ remain useful.
 | Inline editor-slot delivery (2026-10-20) | All guard prompt stages (selector, rule editor, checkbox picker) mount INLINE in Pi's editor slot by default via `ui.custom(factory, { overlay: false })` (`guard/ask-overlay.ts` `runDialogStage`/`runInlineStage`), so the transcript stays visible while a prompt is open (the user's original complaint: the overlay covered the last messages and forced ctrl+] to read them). Stage components are shared by both presentations; the layout row count comes from the stage context's `rowsFor()`: the full terminal for overlays, `max(12, floor(rows * 0.7))` capped at the terminal (the same budget idiom rpiv-ask-user-question uses, since the host clips the editor slot from the bottom) for inline. ctrl+] collapses an inline prompt to a one-line hint inside the component (which keeps focus, so the same key re-expands and Esc still cancels); the owned overlay keeps the raw-listener hide/show. When an overlay is already on screen at mount, the inline factory yields and the stage remounts through the owned overlay path (stacking); a host with `ui.custom` but no setWidget/onTerminalInput still mounts inline and only fails closed if it also has an overlay open. Abort semantics are presentation-identical: the host mount settles first (the editor is restored, the component disposed), then the stage rejects with the same cancellation error the overlay path uses. Editor/picker stage availability (`ownedStagesFor`) relaxed from the setWidget/onTerminalInput probe to TUI + `ui.custom`. Known limitation, shared with rpiv: pi has one editor slot and no public API to detect a foreign inline occupant, so a native selector opened mid-prompt (e.g. /model) displaces an inline prompt without settling it; the FIFO gate still serializes guard's own dialogs. Suite: `tests/guard-ask-inline.test.mts` |
 | Herdr blocked signaling (2026-10-09) | Every guard dialog reports pane status to herdr: `gatedSelect` in `guard/index.ts` emits `herdr:blocked { active: true, label: "guard: awaiting user input" }` before the mode check and `{ active: false }` in its `finally`, so all four dialogs (approvals, read grants, profile picker, migrate confirmation) are covered by one choke point on every settle path (answer, abort, cancellation, expiry, error). Deliberate deviations from the legacy port, settled with the user: uniform label instead of per-tool labels, coverage of the two command dialogs (legacy only covered approval and read-root prompts), unconditional emission with no `HERDR_ENV` check (gating stays herdr's consumer-side responsibility, matching `pi-tool-permissions` and `herdr-ask-user-bridge.ts`), and per-dialog release with no gate-level latching, so back-to-back queued approvals may briefly flash "working" between dialogs (user-accepted). Emission covers RPC as well as TUI. Companion cleanup: the `finally` guards `setWorkingVisible(true)` to TUI mode, since the non-TUI path returns before hiding the spinner and the RPC setter is a no-op. Cosmetic only: the gate, enforcement, and overlay are untouched. Documented in `guard/README.md` (Events) |
 | Save/deny/compound prompt design (2026-10-09) | User-confirmed design only, not implemented: flat actions, persistent rule/root editors, validated preview, independent allow-rule bundles for needed steps, multi-select deny suggestions, manual deny entry on unreliable parsing, and optional steering collected before commit. No session deny or deny-and-stop; all TUI stages retain owned hide/show and the existing gate/commit barriers. See Save, deny, and compound prompts. Implementation and step 6 remain unauthorized. |
-| Offending-fragment line (2026-10-22) | Unavailable breakdowns that are attributable to a single fragment carry it in an additive optional `offending` field on `BreakdownReliability` (`policy/shellsplit.ts`: populated at the length-mismatch, per-step structural mismatch, and unreliable-construct returns; left unset for Pwsh, empty-step, and early-return profiles), and `executionPromptTitle` (`prompt-flow.ts`) renders it as an indented "Offending step:" line directly below the "Breakdown unavailable:" reason, truncated with the same 200-character cap as the full command. Presentation-only: policy routing, decisions, and suggestions are unchanged. Suites: `tests/guard-explain.test.mts`, `tests/guard-prompt-flow.test.mts` |
-| Save/deny/compound prompt implementation (2026-10-13) | The confirmed contract is implemented across `policy/decision.ts` (`explainHostShellCommand`: the per-step projection of exactly the aggregate evaluation, never re-decided fragments), `policy/shellsplit.ts` (`assessBreakdownReliability`: conservative presentation-only reliability; Pwsh, ambiguous splits, structural constructs, substitutions, background execution, grouping, and inline comments are unavailable), `policy/save.ts` (pure parsing/validation: existing-grammar rule lines with namespace rejection, complete-call hypothetical merges via `decide(originalCall)`, whole-call vs per-step allow plans, selected-occurrence deny plans, one-plain-path root parsing), `ask-overlay.ts` (`runOwnedStage`: the extracted canary/bridge/toggle/cleanup lifecycle shared by every stage), `ask-components.ts` (public Editor and SelectList checkbox picker), `prompt-flow.ts` (authority-free stage orchestration with typed outcomes; no persistence, steering delivery, or transitions), and `index.ts` wiring (final-commit revalidation of the ACTUAL reviewed patch/root against re-read config plus session roots inside `beforeCommit` with no await before the additive one-scope write; owning-commit epoch recorded synchronously for the steering ownership check). Settled implementation decisions: RPC persistent saves are DEFERRED (once actions, session read grants, and signal-aware native steering input remain; no native `ui.editor` call is ever made); the steering handoff uses the existing `pi.sendUserMessage(..., { deliverAs: "steer" })` semantics the user explicitly accepted (guard checks captured owner/runtime/cwd/epoch synchronously immediately before dispatch and suppresses on invalidity, but claims no post-dispatch cancellation or SDK-bound ownership); capability-limited TUI hosts detect missing capabilities BEFORE the dialog and keep once/session-grant actions with native `ui.input({ signal })` steering, never falling back to authority from a failed stage; the spinner and `herdr:blocked` now span the entire admitted interaction (one interval per dialog body, not per selector); and the deny picker opens for any reliable breakdown (single-step included) with nothing preselected. Remaining limits: breakdown reliability gates presentation/suggestions only (policy routing unchanged); ordinary cancellation effects are exactly the documented once/deny/no-grant fallbacks while abort/staleness/setup failures never grant authority; bundles grant each matching step independently outside the sequence. Quoted punctuation inside strings (e.g. commit messages) does not make the breakdown unavailable (since 2026-10-15): the inert-construct checks (process substitution, heredoc, background execution, subshell or brace grouping, inline comments) run on text with quoted segments blanked, mirroring the splitter's quote semantics, while command and parameter substitution still flag on the raw text because double-quoted forms remain active in bash. Suites: `tests/guard-explain.test.mts`, `tests/guard-save.test.mts`, `tests/guard-ask-components.test.mts`, `tests/guard-prompt-flow.test.mts`, plus updated `guard-dialogs`/`guard-harness` wiring coverage; all wired into `test:guard` |
+| Offending-fragment line (2026-10-22) | Unavailable breakdowns that are attributable to a single fragment carry it in an additive optional `offending` field on `BreakdownReliability` (the now-retired shell-splitter module: populated at the length-mismatch, per-step structural mismatch, and unreliable-construct returns; left unset for Pwsh, empty-step, and early-return profiles), and `executionPromptTitle` (`prompt-flow.ts`) renders it as an indented "Offending step:" line directly below the "Breakdown unavailable:" reason, truncated with the same 200-character cap as the full command. Presentation-only: policy routing, decisions, and suggestions are unchanged. Suites: `tests/guard-explain.test.mts`, `tests/guard-prompt-flow.test.mts` |
+| Save/deny/compound prompt implementation (2026-10-13) | The confirmed contract is implemented across `policy/decision.ts` (`explainHostShellCommand`: the per-step projection of exactly the aggregate evaluation, never re-decided fragments), the now-retired shell-splitter module (`assessBreakdownReliability`: conservative presentation-only reliability; Pwsh, ambiguous splits, structural constructs, substitutions, background execution, grouping, and inline comments are unavailable), `policy/save.ts` (pure parsing/validation: existing-grammar rule lines with namespace rejection, complete-call hypothetical merges via `decide(originalCall)`, whole-call vs per-step allow plans, selected-occurrence deny plans, one-plain-path root parsing), `ask-overlay.ts` (`runOwnedStage`: the extracted canary/bridge/toggle/cleanup lifecycle shared by every stage), `ask-components.ts` (public Editor and SelectList checkbox picker), `prompt-flow.ts` (authority-free stage orchestration with typed outcomes; no persistence, steering delivery, or transitions), and `index.ts` wiring (final-commit revalidation of the ACTUAL reviewed patch/root against re-read config plus session roots inside `beforeCommit` with no await before the additive one-scope write; owning-commit epoch recorded synchronously for the steering ownership check). Settled implementation decisions: RPC persistent saves are DEFERRED (once actions, session read grants, and signal-aware native steering input remain; no native `ui.editor` call is ever made); the steering handoff uses the existing `pi.sendUserMessage(..., { deliverAs: "steer" })` semantics the user explicitly accepted (guard checks captured owner/runtime/cwd/epoch synchronously immediately before dispatch and suppresses on invalidity, but claims no post-dispatch cancellation or SDK-bound ownership); capability-limited TUI hosts detect missing capabilities BEFORE the dialog and keep once/session-grant actions with native `ui.input({ signal })` steering, never falling back to authority from a failed stage; the spinner and `herdr:blocked` now span the entire admitted interaction (one interval per dialog body, not per selector); and the deny picker opens for any reliable breakdown (single-step included) with nothing preselected. Remaining limits: breakdown reliability gates presentation/suggestions only (policy routing unchanged); ordinary cancellation effects are exactly the documented once/deny/no-grant fallbacks while abort/staleness/setup failures never grant authority; bundles grant each matching step independently outside the sequence. Quoted punctuation inside strings (e.g. commit messages) does not make the breakdown unavailable (since 2026-10-15): the inert-construct checks (process substitution, heredoc, background execution, subshell or brace grouping, inline comments) run on text with quoted segments blanked, mirroring the splitter's quote semantics, while command and parameter substitution still flag on the raw text because double-quoted forms remain active in bash. Suites: `tests/guard-explain.test.mts`, `tests/guard-save.test.mts`, `tests/guard-ask-components.test.mts`, `tests/guard-prompt-flow.test.mts`, plus updated `guard-dialogs`/`guard-harness` wiring coverage; all wired into `test:guard` |
 | Planning eligibility (2026-10-07) | `/plan` filters the ACTIVE set through `isPlanningToolAllowed`: built-in host-shell/local-write removed regardless of hints; built-in read/sandboxed/meta classes stay; everything else needs `readOnlyHint === true && destructiveHint !== true` from a fresh getAllTools lookup; toolClasses overrides create no planning exceptions; input-dependent wrappers qualify only via explicit annotations. (Historical; superseded by retirement of the manifest-registered plan.ts extension on 2026-10-26 in favor of the agent-skills plan skill.) |
 | Worker capability metadata (2026-10-07) | Conservative static annotations on this repo's tools: web/web_search/Slack reads read-only open-world, session_search read-only closed-domain, guard python/node write-capable open-world (raw profiles expose the host); read-only hints describe intended operations, not the absence of internal caches or index files |
 | Plan narrowing limits (2026-10-07) | Entry-time declaration filtering only, not execution containment: codemode/deferred tools can remain callable, tool_search or another extension can change activation afterwards, nested non-owned calls stay observe-only until step 6, trusted extensions have host privileges, annotations are unverified author hints. (Historical; superseded by retirement of the manifest-registered plan.ts extension on 2026-10-26 in favor of the agent-skills plan skill.) |
@@ -1275,9 +1277,11 @@ remain useful.
 | Per-step allow saves (2026-10-19) | User-confirmed design only, NOT implemented: revises the 2026-10-13 allow-save contract (motivated by comparing against pi-tool-permissions' per-subcommand save loop). Scope: per-step allow saves, per-step validation, the post-commit re-prompt loop, and save notifications. Explicitly out of scope, settled during the interview: an "allow remaining steps once" action (redundant, Allow once already approves every prompting step exactly once in guard's single-gate model), glob-variant editor prefill (exact rules only), session-scoped step allows, /guard rules management, and deny-picker changes. Reliable breakdown: "Save allow for project/user" opens the checkbox picker (the deny picker component) over all breakdown steps whenever more than one prompting step exists; prompting and unresolved-classify steps are selectable and start PRESELECTED (deselect to narrow; confirming unchanged reproduces the old bundle); allowed steps are unselectable context; esc or confirming zero selections returns to the action menu with nothing granted or executed; a single prompting step skips the picker. Confirming prefills the editor with anchored exact rules for the selected steps only (each step's evaluator matching subject; a redirect-requiring step's prefill is its verbatim subject, whose pattern necessarily contains ">"), and the whole-call exact rule is no longer offered when the breakdown is reliable (full selection strictly covers it); unreliable breakdowns keep the existing whole-call path with no picker. Per-step validation contract (replaces whole-call validateShellSave at all three index.ts checkpoints): after the hypothetical merge, every selected step must resolve allow, the aggregate must not be deny, and no existing ask/deny rule is bypassed; deliberate broadening that allows unselected steps or the entire call is accepted, and when the merge allows the complete call the save commits and the call executes without a further prompt. Explicit-ask provenance still prohibits allow-saving entirely. Commit machinery unchanged (staleness barrier, one-scope additive write, epoch checks). After a partial save commits, guard re-decides the original call: still prompting opens a fresh approval dialog with the breakdown recomputed against the saved rules and the full action menu again, saves included; the loop has no cap (each iteration requires an explicit commit; escaping any approval selector denies without saving; initial-selector cancellation unchanged). The cancellation table gains the picker row; editor/preview cancellation keeps its documented allow-once fallback. After any rule-save commit (allow and the previously silent deny saves), one info notification: scope, destination path, rule count, and for partial saves the number of steps still prompting. The 2026-10-13 whole-call/bundle contract remains the implemented behavior until this lands. SUPERSEDED: implemented 2026-10-20 (commit `bd7acbf`); the 2026-10-13 whole-call exact suggestion survives only for unreliable breakdowns. REVERSED IN PART (2026-10-26): the "glob-variant editor prefill (exact rules only)" exclusion is reversed; allow prefills are glob-form and the not-exact advisory is shown (see the "Glob-form allow prefills and the not-exact advisory (2026-10-26)" row). SUPERSEDED IN PART (2026-10-26): the "session-scoped step allows" exclusion is reversed; session-scoped host-shell grants are implemented (see the "Session-scoped host-shell grants (2026-10-26)" row) while the remaining exclusions stand |
 | Standalone python/node retirement (2026-10-21, user-authorized) | `./extensions/python` and `./extensions/node` were dropped from `pi.extensions` (commit `1c298b4`); guard's ported copies (`guard/tools/python`, `guard/tools/node`) are the only registered python/node tools. Supersedes the step-3 coexistence contract's first-extension-wins dormancy mechanism above: the old extensions no longer load at all, and the writable-mount hole they carried is closed by absence rather than by registration order. The standalone directories and their unit/integration suites were deleted on 2026-10-28 after porting frame-protocol coverage to `tests/guard-worker-protocol.test.mts` against guard's live modules; `test:python`/`test:node` were removed. Remaining at switchover: guard on by default and pi-tool-permissions off |
 | Host-tier active-construct screen (2026-10-21) | Surgical fail-closed fix (dependency-free; the shell-ast parser adapter remains a later item) closing five verified false allows on the tightened host tier: `` echo `touch probe` ``, `echo <(touch probe)`, `printf x & touch probe`, `command touch probe`, and `for x in $(touch probe); do echo ok; done` all returned allow, "read-only host command (tightened tier)". Causes: `READONLY_BASH_SAFE_ALWAYS` trusted `command`/`echo`/`printf` regardless of arguments; the tokenizer ignores operators so a backgrounded second command vanished; process substitution and backticks were never screened (the `$` veto has quote-semantics bugs: a single quote inside double quotes toggled the wrong state, so `echo "'$HOME'"` slipped through); structural stripping discarded loop heads whose word lists execute (`for x in $(touch probe); do done` ran the substitution under "no commands after structural stripping"). Fix: `activeConstructReason` in `policy/decision.ts` screens for substitution (quote-correct), process substitution, background execution, grouping, heredocs/here-strings, unhandled separators, and unterminated quotes, and gates `hostTierAllowReason` (which also covers the degraded research tier); a discarded structural head marks the whole projection unfaithful so no step derives allow authorization (tier, plain allow rules, redirect-aware allow rules all skipped; deny/ask rules still apply) and a purely structural command prompts instead of allowing. `command` removed from `READONLY_BASH_SAFE_ALWAYS` (`command -v git` prompts too; conservative, no flag parsing). Accepted compatibility changes (all fail-safe, prompt-not-deny): compound commands with a discarded structural head prompt; `echo {a,b}` braces, `cat <<EOF` heredocs, and `[[ a && b ]]` conditionals prompt; in degraded research a compound like `ls -la && pwd` is denied instead of tier-allowed (the old pass came from `&&` being containment-checked as a literal path token). Trusted simple commands keep their behavior (`echo hello`, `printf x`, `ls 2>&1`, `timeout 120 ls`, `which`/`type`, quoted punctuation, escaped separators). Suites: `tests/guard-{policy,explain,save,prompt-flow}.test.mts` via `npm run test:guard` |
-| shell-ast re-spike (2026-11-06) | Measurement only, no production change: a committed `tools/shell-ast-spike/` (its own `package.json`, exact pin `@questi0nm4rk/shell-ast@0.8.0`, never registered in `pi.extensions`, never loaded by pi) re-measured the candidate parser over the corpus of every `bash`/`host_bash` command in the local session transcripts (36,201 calls -> 34,969 unique from 1,388 files). Warm (3 warmup + 30 timed iterations per command, all tiers, same corpus on every arm): shell-ast `parse` 0.2956 ms median of per-command medians vs 0.4994 ms for today's end-to-end `explainHostShellCommand` path (0.59x) and 0.0022 ms for `splitTopLevelShell` alone (136x); the ratio against today's path is p50 0.52, p95 6.18, max 92.5, so the average favours shell-ast while a minority of long commands cost far more. Cold (10 boots per arm, fresh headless `pi -p` probe extension, offsets from each process's own time origin so pi's startup cancels): module import 1.37 ms, wasm compile + first parse 34.91 ms, headline 36.28 ms on the first guarded command, steady RSS +17.91 MiB at that first parse (peak RSS delta is noise; the middle arm proves the wasm compiles at first parse, not at import). Coverage: 11/34,969 commands raise `ParseSyntaxError` and `bash -n` also rejects 9 of those, so only 2 are pure parser gaps; 274/34,969 invoke a wrapper the package does NOT unwrap (`command` 191, `xargs` 83) because the wrapper registry is unreachable through the package's `exports` map (only `.` and `./semantic` are importable), so the adapter must walk those itself while `findAll(ast, "CallExpr")` covers the other four recorded false-allow constructions directly. Battery rebuilt from the 2026-10-20 claims, which were never written down: typed-node matrix 13/13 against the real type names (`IfClause`/`WhileClause`/`ForClause`/`CaseClause`), 6/6 malformed inputs raise `ParseSyntaxError`, an over-cap input raises `ParseSizeError` (four `kind`s total), and all five host-tier false-allow constructions are surfaced by the AST while guard already prompts on all five today, confirming the 2026-10-21 screen closed them. Package facts re-verified: `dependencies: {}`, tarball unpacked 4,389,634 B with a 4,228,590 B wasm, `engines: node>=18`, `parse()` genuinely async, and the license question is a version split rather than a conflict: `0.8.0` (published 2026-06-09) is MIT in registry metadata, the tarball `package.json`, and an MIT `LICENSE` file the tarball ships, while the repo was relicensed to MPL-2.0 on 2026-10-12 (commit `f46a0044`) and `0.8.1-beta.0` (2026-10-14) is MPL-2.0 in those same three places, so pinning `0.8.0` keeps MIT terms and any bump moves to file-level copyleft. Boundary: no guard source, root manifest, lockfile, or `test:ci` change, and the committed artifacts are text-free (command hashes plus shape counts only, the corpus itself gitignored and regenerated locally). VERDICT (2026-11-06): ADOPT `@questi0nm4rk/shell-ast@0.8.0`, decided by the reviewer from `tools/shell-ast-spike/results.md` with no pre-committed thresholds, accepting the numbers above; the scope is the pinned version only, and the adapter (TODO adoption steps 3-7) plus any bump past `0.8.0` (which moves to MPL-2.0) stay downstream and are not authorized by the decision. |
-| Shell-ast adapter, Stages 1-2 (2026-11-06) | Working-tree implementation of TODO adoption steps 3-4: `policy/shellast.ts` (new) is the only parser boundary. Lazy single-flight load with a pinned SHA-256 integrity check (`SHELL_AST_WASM_SHA256`), every `ShellAstError` kind mapped to the existing fail-closed prompt path, and `analyzeHostCommand` projecting a `ShellCommandAnalysis` (ordered `ShellExecCall`s with a raw-source-slice `subject`, unwrapped `argv`, assignments, `hasParameterExpansion`, per-call `complete`/`cause`, plus a whole-command `complete`). Node positions are UTF-8 BYTE offsets, so subjects and assignments are sliced from a `Buffer` of the parsed string, never `src.slice`; a leading BOM is stripped before parsing so offsets stay aligned. `policy/shell-text.ts` (new) holds the moved text helpers (`stripTrailingHarmlessRedirects`, `stripTimeoutPrefix`), re-exported by `shellsplit.ts` until it is retired. Wired through `policy/decision.ts` (`evaluateHostShell(Sub)`, with `decide`/`resolveDecision`/`explainHostShellCommand`/`qualifyingSwitchRungs` taking the analysis as a REQUIRED `ShellCommandAnalysis | null`), `policy/save.ts`, `policy/suggest.ts`, and `index.ts` (parse once at the `tool_call` boundary and thread it; `executeShell` analyses the command itself for the sandbox failure hint, because `analysisFor` is null for a sandboxed call). Subject contract (the decision-5 wording corrected here): a subject is the RAW SOURCE SLICE of the call's whole chain, not a canonical argv rendering, so `VAR=`-prefixed and redirect-aware rule text keeps matching; `argv` is the separate unwrapped-executing-vector field. Two fail-closed guards are re-wired rather than dropped: `evaluateHostShellSub`'s `tierEligible` parameter still gates the tier and every allow rule on an unfaithful projection. Bash always passes true because `analysis.complete` is the fail-closed gate checked by the caller (any flagged construct makes the whole analysis incomplete before per-step evaluation), while pwsh computes it from `stripStructuralKeywords` on each split part, so a discarded structural head still blocks allow rules; that branch is reachable and covered by tests. Only the genuinely unreachable `evaluations.length === 0` branch (a complete analysis always has at least one call) was DELETED, with pwsh's empty-part case handled in `evaluatePwshCommand`. Consequence the Stage-5-7 decision-diff fixture must enumerate: an incomplete command is never checked against allow rules, so a previously-matching explicit allow rule (e.g. `HostBash(echo $(compute))`) no longer authorizes it (allow -> prompt). That tightening is intended (an unfaithful projection must not auto-allow) but is broader than "commands the parser cannot parse" and is currently pinned only by the incomplete-analysis tests, not by a per-change fixture. Per-call completeness now also marks a call whose own subtree contains a flagged construct and populates the prompt's `offending` step. Pwsh is unchanged: no AST, no bash tier; `evaluatePwshCommand` keeps the pre-adapter `splitTopLevelShell` split so per-step `Pwsh(...)` deny/ask rules still match a compound and an ambiguous split still prompts (whole-command matching would have let a previously denied compound fall through to the allow cell). Stage 5-7 deletions/fixtures are DEFERRED, not silently skipped: `shellsplit.ts` still exports `splitTopLevelShell` and `stripStructuralKeywords` (both used by pwsh) plus the dead `assessBreakdownReliability`; the `bashtier.ts` tokenizer paths are untouched; and no decision-diff corpus/fixture file exists. Remaining steps: move the per-command read-only judgment onto AST argv, retire `shellsplit.ts`/`bashtier.ts` tokenizer paths, and port the spike battery plus a fixture file enumerating each decision change with action + cause. Suites: new `tests/guard-shellast.test.mts` (load/integrity, every cause, wrapper walk, byte-offset subjects, per-call completeness, redirect param expansion) and `tests/shellast-sync{,-worker}.mts` (synchronous test façade); adapted `tests/guard-{policy,classes,explain,save,prompt-flow,shell-hints,mode-line}.test.mts`; `tests/guard-harness.test.mts` drives the real `executeShell` sandbox-hint wiring; `tests/guard-shellast.test.mts` is registered in both `test:ci` and `test:guard`. |
-| Shell-ast adapter corrections: per-call completeness and whole-command pwsh (2026-11-06) | Follow-up to "Shell-ast adapter, Stages 1-2" that corrects three working-tree semantics. (1) Per-call completeness: `policy/shellast.ts` separates the analysis-level cause from per-call causes. The analysis-level `cause`/`complete` is set ONLY when no reliable call list exists: `parser-unavailable`, `parse-error`, `size-cap`, `no-command`, `function-definition`, `state-change`, the whole-command constructs that wrap or sit between calls (`background`, `grouped`, `subshell`, `heredoc`; new `WHOLE_COMMAND_CAUSES`), and any flagged construct that falls outside every call's span. A construct inside one call's own span (`command-substitution`, `process-substitution`, an unrecognized wrapper node, a redirect expansion) sets only `ShellExecCall.complete = false` with its own `cause` and leaves `analysis.complete = true`. `policy/decision.ts` `evaluateHostShell` takes the whole-command branch only when `analysis == null || analysis.cause !== null`; otherwise it evaluates every call, passing that call's completeness (its cause rendered by the new `shellAnalysisCauseReason`) into `evaluateHostShellSub`. The step order is deny rule > ask rule > yolo allow > incomplete prompt > read-only tier > redirect-aware allow rule > plain allow rule > profile cell, so an incomplete call prompts without reaching the tier or any allow rule while its complete siblings keep exactly today's decision; aggregation is unchanged (deny > prompt > classify > allow), so a deny rule matched on an incomplete call still DENIES. `analysis.calls.find((c) => !c.complete)?.subject` still names the offending step for the prompt and breakdown. (2) Rules never authorize incompleteness, at either level: this is the intent of (1), not a separate code path, and it must NOT be "fixed" by matching rules earlier. An explicit `HostBash(echo *)` allow rule (or a whole-command-shaped allow rule) does not authorize `echo $(date)`, which prompts; pinned in `tests/guard-policy.test.mts`. This is an accepted tightening over the pre-adapter splitter; its exact size is DEFERRED to the stage-4 corpus/decision-diff, which must enumerate every allow -> prompt it introduces. (3) Pwsh reverts to the settled whole-command design: `evaluatePwshCommand` no longer calls `splitTopLevelShell`/`stripStructuralKeywords`. Pwsh is ONE step, so whole-command-text `Pwsh(...)` deny/ask/allow rules match the whole text, yolo allows, and the pwsh profile cell governs an unruled command (default/allow-edits/auto prompt, trusted allows); the one fail-closed exception is a malformed command (an unterminated quote), which prompts instead of reaching an allow cell. The per-step split, the ambiguity branch, the per-step `tierEligible` gate, and the bash read-only tier are gone; the `evaluateHostShellSub` `tierEligible` parameter is removed entirely (the incomplete prompt replaces it). The pwsh breakdown reason is now "PowerShell commands are evaluated as one whole command (no per-step breakdown)". Retired as dead: `assessBreakdownReliability`, `unreliableConstructReason`, `stripQuotedSegments`, and `stripStructuralKeywords`. `splitTopLevelShell` is KEPT because `tools/shell-ast-spike/bench.ts` still imports it as the parser-only baseline (the module header now marks it legacy); `consumeHeredoc` stays with it. Suites: `tests/guard-shellast.test.mts` (per-call causes split from analysis causes; a complete sibling stays decidable), and `tests/guard-{policy,explain,save}.test.mts` updated for the pwsh and per-call changes. |
+| shell-ast re-spike (2026-11-06) | Measurement only, no production change: a committed the now-retired measurement harness (its own `package.json`, exact pin `@questi0nm4rk/shell-ast@0.8.0`, never registered in `pi.extensions`, never loaded by pi) re-measured the candidate parser over the corpus of every `bash`/`host_bash` command in the local session transcripts (36,201 calls -> 34,969 unique from 1,388 files). Warm (3 warmup + 30 timed iterations per command, all tiers, same corpus on every arm): shell-ast `parse` 0.2956 ms median of per-command medians vs 0.4994 ms for today's end-to-end `explainHostShellCommand` path (0.59x) and 0.0022 ms for `splitTopLevelShell` alone (136x); the ratio against today's path is p50 0.52, p95 6.18, max 92.5, so the average favours shell-ast while a minority of long commands cost far more. Cold (10 boots per arm, fresh headless `pi -p` probe extension, offsets from each process's own time origin so pi's startup cancels): module import 1.37 ms, wasm compile + first parse 34.91 ms, headline 36.28 ms on the first guarded command, steady RSS +17.91 MiB at that first parse (peak RSS delta is noise; the middle arm proves the wasm compiles at first parse, not at import). Coverage: 11/34,969 commands raise `ParseSyntaxError` and `bash -n` also rejects 9 of those, so only 2 are pure parser gaps; 274/34,969 invoke a wrapper the package does NOT unwrap (`command` 191, `xargs` 83) because the wrapper registry is unreachable through the package's `exports` map (only `.` and `./semantic` are importable), so the adapter must walk those itself while `findAll(ast, "CallExpr")` covers the other four recorded false-allow constructions directly. Battery rebuilt from the 2026-10-20 claims, which were never written down: typed-node matrix 13/13 against the real type names (`IfClause`/`WhileClause`/`ForClause`/`CaseClause`), 6/6 malformed inputs raise `ParseSyntaxError`, an over-cap input raises `ParseSizeError` (four `kind`s total), and all five host-tier false-allow constructions are surfaced by the AST while guard already prompts on all five today, confirming the 2026-10-21 screen closed them. Package facts re-verified: `dependencies: {}`, tarball unpacked 4,389,634 B with a 4,228,590 B wasm, `engines: node>=18`, `parse()` genuinely async, and the license question is a version split rather than a conflict: `0.8.0` (published 2026-06-09) is MIT in registry metadata, the tarball `package.json`, and an MIT `LICENSE` file the tarball ships, while the repo was relicensed to MPL-2.0 on 2026-10-12 (commit `f46a0044`) and `0.8.1-beta.0` (2026-10-14) is MPL-2.0 in those same three places, so pinning `0.8.0` keeps MIT terms and any bump moves to file-level copyleft. Boundary: no guard source, root manifest, lockfile, or `test:ci` change, and the committed artifacts are text-free (command hashes plus shape counts only, the corpus itself gitignored and regenerated locally). VERDICT (2026-11-06): ADOPT `@questi0nm4rk/shell-ast@0.8.0`, decided by the reviewer from the reviewed re-spike results preserved in this document with no pre-committed thresholds, accepting the numbers above; the scope is the pinned version only, and the adapter (TODO adoption steps 3-7) plus any bump past `0.8.0` (which moves to MPL-2.0) stay downstream and are not authorized by the decision. |
+| Shell-ast adapter, Stages 1-2 (2026-11-06) | Historical intermediate state, superseded by the corrections and final retirement record below. Working-tree implementation of TODO adoption steps 3-4: `policy/shellast.ts` (new) is the only parser boundary. Lazy single-flight load with a pinned SHA-256 integrity check (`SHELL_AST_WASM_SHA256`), every `ShellAstError` kind mapped to the existing fail-closed prompt path, and `analyzeHostCommand` projecting a `ShellCommandAnalysis` (ordered `ShellExecCall`s with a raw-source-slice `subject`, unwrapped `argv`, assignments, `hasParameterExpansion`, per-call `complete`/`cause`, plus a whole-command `complete`). Node positions are UTF-8 BYTE offsets, so subjects and assignments are sliced from a `Buffer` of the parsed string, never `src.slice`; a leading BOM is stripped before parsing so offsets stay aligned. `policy/shell-text.ts` (new) holds the moved text helpers (`stripTrailingHarmlessRedirects`, `stripTimeoutPrefix`), re-exported by the legacy splitter at this stage until that splitter was retired later. Wired through `policy/decision.ts` (`evaluateHostShell(Sub)`, with `decide`/`resolveDecision`/`explainHostShellCommand`/`qualifyingSwitchRungs` taking the analysis as a REQUIRED `ShellCommandAnalysis | null`), `policy/save.ts`, `policy/suggest.ts`, and `index.ts` (parse once at the `tool_call` boundary and thread it; `executeShell` analyses the command itself for the sandbox failure hint, because `analysisFor` is null for a sandboxed call). Subject contract (the decision-5 wording corrected here): a subject is the RAW SOURCE SLICE of the call's whole chain, not a canonical argv rendering, so `VAR=`-prefixed and redirect-aware rule text keeps matching; `argv` is the separate unwrapped-executing-vector field. Two fail-closed guards are re-wired rather than dropped: `evaluateHostShellSub`'s `tierEligible` parameter still gates the tier and every allow rule on an unfaithful projection. Bash always passes true because `analysis.complete` is the fail-closed gate checked by the caller (any flagged construct makes the whole analysis incomplete before per-step evaluation), while pwsh computes it from `stripStructuralKeywords` on each split part, so a discarded structural head still blocks allow rules; that branch is reachable and covered by tests. Only the genuinely unreachable `evaluations.length === 0` branch (a complete analysis always has at least one call) was DELETED, with pwsh's empty-part case handled in `evaluatePwshCommand`. Consequence the Stage-5-7 decision-diff fixture must enumerate: an incomplete command is never checked against allow rules, so a previously-matching explicit allow rule (e.g. `HostBash(echo $(compute))`) no longer authorizes it (allow -> prompt). That tightening is intended (an unfaithful projection must not auto-allow) but is broader than "commands the parser cannot parse" and is currently pinned only by the incomplete-analysis tests, not by a per-change fixture. Per-call completeness now also marks a call whose own subtree contains a flagged construct and populates the prompt's `offending` step. Pwsh at this stage was unchanged: no AST, no bash tier; `evaluatePwshCommand` kept the pre-adapter `splitTopLevelShell` split so per-step `Pwsh(...)` deny/ask rules still matched a compound and an ambiguous split still prompted (whole-command matching would have let a previously denied compound fall through to the allow cell). Later reverted to whole-command evaluation; see the corrections row below. Stage 5-7 deletions/fixtures are DEFERRED, not silently skipped: at this stage the legacy splitter still exported `splitTopLevelShell` and `stripStructuralKeywords` (then used by pwsh) plus the dead `assessBreakdownReliability`; the `bashtier.ts` tokenizer paths are untouched; and no decision-diff corpus/fixture file exists. Remaining steps: move the per-command read-only judgment onto AST argv, retire the legacy splitter and the `bashtier.ts` tokenizer paths, and port the spike battery plus a fixture file enumerating each decision change with action + cause. Suites: new `tests/guard-shellast.test.mts` (load/integrity, every cause, wrapper walk, byte-offset subjects, per-call completeness, redirect param expansion) and `tests/shellast-sync{,-worker}.mts` (synchronous test façade); adapted `tests/guard-{policy,classes,explain,save,prompt-flow,shell-hints,mode-line}.test.mts`; `tests/guard-harness.test.mts` drives the real `executeShell` sandbox-hint wiring; `tests/guard-shellast.test.mts` is registered in both `test:ci` and `test:guard`. |
+| Shell-ast adapter corrections: per-call completeness and whole-command pwsh (2026-11-06) | Historical intermediate state; the final retirement record below supersedes its deferred-measurement and kept-splitter notes. Follow-up to "Shell-ast adapter, Stages 1-2" that corrects three working-tree semantics. (1) Per-call completeness: `policy/shellast.ts` separates the analysis-level cause from per-call causes. The analysis-level `cause`/`complete` is set ONLY when no reliable call list exists: `parser-unavailable`, `parse-error`, `size-cap`, `no-command`, `function-definition`, `state-change`, the whole-command constructs that wrap or sit between calls (`background`, `grouped`, `subshell`, `heredoc`; new `WHOLE_COMMAND_CAUSES`), and any flagged construct that falls outside every call's span. A construct inside one call's own span (`command-substitution`, `process-substitution`, an unrecognized wrapper node, a redirect expansion) sets only `ShellExecCall.complete = false` with its own `cause` and leaves `analysis.complete = true`. `policy/decision.ts` `evaluateHostShell` takes the whole-command branch only when `analysis == null || analysis.cause !== null`; otherwise it evaluates every call, passing that call's completeness (its cause rendered by the new `shellAnalysisCauseReason`) into `evaluateHostShellSub`. The step order is deny rule > ask rule > yolo allow > incomplete prompt > read-only tier > redirect-aware allow rule > plain allow rule > profile cell, so an incomplete call prompts without reaching the tier or any allow rule while its complete siblings keep exactly today's decision; aggregation is unchanged (deny > prompt > classify > allow), so a deny rule matched on an incomplete call still DENIES. `analysis.calls.find((c) => !c.complete)?.subject` still names the offending step for the prompt and breakdown. (2) Rules never authorize incompleteness, at either level: this is the intent of (1), not a separate code path, and it must NOT be "fixed" by matching rules earlier. An explicit `HostBash(echo *)` allow rule (or a whole-command-shaped allow rule) does not authorize `echo $(date)`, which prompts; pinned in `tests/guard-policy.test.mts`. This is an accepted tightening over the pre-adapter splitter; its exact size is DEFERRED to the stage-4 corpus/decision-diff, which must enumerate every allow -> prompt it introduces. (3) Pwsh reverts to the settled whole-command design: `evaluatePwshCommand` no longer calls `splitTopLevelShell`/`stripStructuralKeywords`. Pwsh is ONE step, so whole-command-text `Pwsh(...)` deny/ask/allow rules match the whole text, yolo allows, and the pwsh profile cell governs an unruled command (default/allow-edits/auto prompt, trusted allows); the one fail-closed exception is a malformed command (an unterminated quote), which prompts instead of reaching an allow cell. The per-step split, the ambiguity branch, the per-step `tierEligible` gate, and the bash read-only tier are gone; the `evaluateHostShellSub` `tierEligible` parameter is removed entirely (the incomplete prompt replaces it). The pwsh breakdown reason is now "PowerShell commands are evaluated as one whole command (no per-step breakdown)". Retired as dead: `assessBreakdownReliability`, `unreliableConstructReason`, `stripQuotedSegments`, and `stripStructuralKeywords`. `splitTopLevelShell` is KEPT because the now-retired parser-only benchmark still imports it as the parser-only baseline (the module header now marks it legacy); `consumeHeredoc` stays with it. Suites: `tests/guard-shellast.test.mts` (per-call causes split from analysis causes; a complete sibling stays decidable), and `tests/guard-{policy,explain,save}.test.mts` updated for the pwsh and per-call changes. |
+| Shell-ast adapter, Stage 3: the read-only tier judges argv (2026-11-06) | TODO adoption step 5. `policy/decision.ts`'s `hostTierAllowReason` no longer tokenizes the subject text: it takes an argv-based input (`argv`, `redirects`, `hasParameterExpansion`, `pureAssignment`, `requiresRedirectAwareAllow`) and the `isReadOnlyBashSubcommand` / `validatorApprovedBashReason` / `isPureVariableAssignment` string path is retired. `policy/bashtier.ts` gains `isReadOnlyBashArgv` (the same name sets judged on argv) and `validatorApprovedBashArgv` (the four validators fed argv), and the retired `isReadOnlyBashSubcommand`/`validatorApprovedBashReason`/`isPureVariableAssignment`/`ASSIGN_PREFIX_BUILTINS`/`hasUnquotedSeparator` plus `tokenizeSimple` are deleted (the read-only name sets are KEPT: the new function reads them). `requiresRedirectAwareAllow` is now derived from the analysis's structured redirects (`ShellExecCall.redirects`, op + resolved target) through the new `hasWritableRedirect`, with unchanged writeRoots/readRoots semantics (a `/dev/null` target, an allowed-root target, and a descriptor dup/close stay exempt; a dynamic target is never exempt); the text scanner remains only for pwsh. The semantic layer stays and is also fed argv: the env/printenv command-word veto on `argv[0]`, the secret-mask veto on `argv`, and the `$` veto on the analysis's `hasParameterExpansion` (the fresh text scan is no longer on the path); the duckdb/mlr/find/awk validators take argv directly (no redirect tokens leak into their argument checks). Adapter fixes required by the move: `manualWrapWalk` no longer unwraps `command -v X`/`command -V X` (plain queries, not wrappers; they prompt), while `command ls`/`xargs cat` keep unwrapping; and the package's `walk` treats `ArithmExp` and `BraceExp` as leaves, so `detectConstructs` recurses into `$((...))`/`{a,$(cmd)}` and `hasParameterExpansion` reports arithmetic and brace-nested expansions (closing substitutions the old `activeConstructReason` text screen caught). Subject/rule matching is unchanged (the raw-source-slice `subject` still matches deny/ask/allow rules; only the tier's inputs moved). The degraded-research whole-command tier is now the same argv judgment over a complete, single-call analysis (a compound is not collapsible into one whole-command check, so it still denies, preserving the 2026-10-21 behavior). Widenings introduced by the argv move (ACCEPTED as reviewed recoveries on 2026-11-06; the run-2 decision diff measures 132 changed cells over 43 commands, `prompt -> allow` 88 plus `classify -> allow` 44, with no allow -> deny and no deny -> allow): wrapper chains (`command ls`, `command cat <inside>`, `xargs cat`), registry-unwrapped wrappers (`nice ls`, `env ls`, `env FOO=1 ls`) where the env veto no longer sees the whole command, `[[ a && b ]]`, and `echo {a,b}` are now tier-ALLOWs where the pre-adapter tier prompted; `env`/`printenv` with no inner command still veto, and `command touch probe`, `command cat .env`, `command cat /etc/passwd` still prompt. No allow -> deny or deny -> allow is introduced. `activeConstructReason` and `hasDollarExpansionOutsideSingleQuotes` are DELETED (they had no production callers) together with their standalone tests in `tests/guard-policy.test.mts`; see the "pwsh redirect scanner and traversal-coverage guarantee" row below for the replacement. Suites: `tests/guard-{policy,shellast,explain,save,prompt-flow}.test.mts` via `npm run test:guard`, with new tier tests (wrapper-chain widenings, the argv-fed vetoes, the arithmetic/brace traversal fixes, and the redirect gate). |
+| pwsh redirect scanner and traversal-coverage guarantee (2026-11-06) | Two follow-ups to Stage 3. (1) The pwsh text redirect scanner `stripExemptRedirects`/`hasTopLevelFileRedirect` in `policy/bashtier.ts` had an enter/exit asymmetry: the double-quote branch tested `!inSingle && !inDouble`, so a closing `"` could never reset `inDouble` and every later `>` was invisible. Bash moved to structured redirects in Stage 3, but pwsh still uses this text path, so `echo "p" > /home/z` was authorized by a permissive pwsh cell (trusted) instead of requiring a redirect-aware allow rule. Fixed by testing each toggle against the OTHER states only (single/double/backtick all toggle both ways; a backslash escape still works inside double quotes and outside, never inside single quotes). This is pwsh-only (pwsh is not in the decision-diff corpus) and cannot appear in the host-bash decision diff; regression tests at the scanner level plus a pwsh decision test pin it. The other scanner in the same file, `stripLineContinuations` (the single-quote handling at `policy/bashtier.ts:58`), is symmetric (`if (ch === "'") inSingle = !inSingle` is unconditional, so it always exits); it is context-blind rather than asymmetric (it does not track double quotes, so a `'` inside a double-quoted word wrongly toggles `inSingle`), a pre-existing correctness nit with no authorization effect, left unchanged. (2) The 2026-10-21 `activeConstructReason` text screen is replaced by a traversal-coverage guarantee in `policy/shellast.ts`: `NODE_DISPOSITIONS: Record<ShellNode["type"], NodeDisposition>` classifies every node type the package can emit as `descend`, `leaf` (semantics represented elsewhere, e.g. `ParamExp` -> `hasParameterExpansion`), or `cause`; `buildConstructVisitor` derives the construct walk from that table, and a `Proxy` raises `unrecognized-node` for any node type absent from the table instead of letting the package walk silently treat it as a leaf. The package's walk treats `ArithmExp`/`BraceExp` as leaves, so those two carry `manualRecurse` and a construct nested in `$((...))`/`{a,$(cmd)}` stays flagged; `ParamExp` and `CStyleLoop` are the other walker leaves and are classified `leaf` (the `$` veto / their enclosing `ForClause` cause cover them). `tests/guard-shellast.test.mts` resolves the declared `ShellNode` union from the shipped `types.d.ts` at runtime, fails if the disposition table or the per-type case table misses a type, and induces one command per type (`Comment` and `TestDecl` are marked not-inducible with the reason: the walk never visits a `Comment`, and the 0.8.0 parser rejects Bats `@test` syntax). The five 2026-10-21 false-allow constructions stay pinned as prompting by the AST tests. No bash decision changes: the dead functions had no callers, the visitor refactor is behavior-identical, and the Proxy path needs a node type the parser cannot emit. |
 | Discovery knobs (2026-10-23) | The workspace-discovery scan is tunable per config while the fail-closed defaults and prune semantics are unchanged. Prune matching stays basename-based at any depth for files and directories, a matching directory subtree is never descended, and the workspace root is now exempt: `findScanArgs` adds `! -path <glob-escaped workspace>` (fd already exempts the search root; verified empirically). `SCAN_MATCH_CAP_DEFAULT` (500) and `SCAN_TIMEOUT_MS_DEFAULT` (5000) move to `sandbox/spec.ts`, and three optional config keys are added: `discoveryPruneNames` (extras unioned with the built-ins, deduped, built-in duplicates dropped, sorted so reordering or duplication cannot change `launchPolicyKey`), `discoveryMatchCap` (1..200000), and `discoveryTimeoutMs` ms (1..600000); the two scalars fall back project-valid, then user-valid, then the default. `scan.ts` unions the built-ins itself (extras only in `ScanOptions.pruneNames`), and the cap and timeout diagnostics name the effective value and the config key. Weakening values fire one notice per session (reset on `session_start`) and stay inspectable through an added `/guard list` line (cap, timeout, effective pruned basenames, collision warnings). Pruned entries remain mounted: pruning is discovery-only, so a secret under a pruned basename is not masked. A `$HOME` session uses a project-scope `~/.pi/guard.local.json`, read only when the cwd is `$HOME`, to add the large generated trees. Suites: `tests/guard-{sandbox-unit,policy,harness,runtime,classes,migrate,sandbox-integration}.test.mts` |
 | Launch mask and scanner-kind fixes (2026-10-23) | Two verified pre-existing defects are fixed. (1) `tools/shell.ts` and the worker controller passed the config mask extras as `LaunchSpec.maskPatterns`, and `spawnSandboxed` forwarded them as the complete `scanWorkspace` pattern set, so the default empty extras list replaced `DEFAULT_MASK_PATTERNS` and left secrets unmasked on launch paths (audits merged the defaults); `spawnSandboxed` now unions the built-ins with the extras, and `LaunchSpec.maskPatterns`/`maskExceptions` are documented as extras. (2) When fd was absent, `detect.ts` returned `fdPath: "/usr/bin/find"` with `scanner: "find"`, but `run.ts` and `runtime.auditOptions` passed only `fdPath`, and `scan.ts` inferred the kind from `fdPath`, so the fallback ran find with fd argv; both call sites now thread `detection.scanner`. Regression tests: `tests/guard-sandbox-integration.test.mts` (an empty extras list still masks; the find-fallback detection scans and masks through the real launch path). |
 | Glob-form allow prefills and the not-exact advisory (2026-10-26) | Implemented. Allow prefills switch from the anchored-regex form `HostBash(/^<escaped>$/)` to glob form `HostBash(<subject>)` / `Pwsh(<subject>)`, at BOTH allow sites: `globAllowRule` (renamed from `exactAllowRule`) in `policy/save.ts` used by `planAllowSave`, and the host-shell branch of `suggestRule` in `policy/suggest.ts` used by `effectiveAllowSuggestion` for unreliable breakdowns. Deny prefills stay anchored exact (`exactDenyRule` unchanged), so allow and deny are deliberately asymmetric. No migration and no config toggle: existing `/^...$/` rules remain valid and equivalent, and a metacharacter-free glob compiles to the same anchored, case-insensitive match. Broadening is accepted and documented: `compilePattern` cannot express a literal `*` or `?` and turns a `" *"` pair into optional space, and a subject whose text both starts and ends with `/` is compiled as an UNANCHORED regex (`/tmp/` becomes `/tmp/i`, matching `cd /tmp/` and `rm -rf /var/tmp`); validation still accepts those rules because they match the original subject, while an uncompilable body like `/(/` is rejected on the save path (`parseShellRuleLine` reports the parse error and re-prompts). Non-blocking advisory: `notExactShellRules(text, references)` in `policy/save.ts` is a pure, total, display-only predicate (never called by a validator, plan builder, or commit path) returning rule lines that are not the exact rendering of any reference; `notExactNoteFor` in `prompt-flow.ts` turns the count into neutral singular/plural wording (never asserting proven widening). References are the selected steps' `allowSubject` (allow) or `subject` (deny), or the whole command on the whole-call and manual-deny paths. The note is threaded to the editor as an optional fourth `PromptFlowIO.editor` parameter (`noteFor`) rendered by `ask-components.ts` as dim rows between the editor text and the hint; it is recomputed from `editor.getText()` on every render, dropped when the row budget cannot hold it, and deliberately excluded from BOTH fit checks so it can never disable submission (the stage degrades by dropping the note, never by blocking). It also always appears as a line in the confirm/preview text, so capability-limited hosts that lack the owned editor stage still see it, and it never appears for `webFetchAllow`, `readRoots`, or `writeRoots` saves. Suites: `tests/guard-save.test.mts` (glob builder, `notExactShellRules` silent/flagged/order-independence, the `/tmp/` broadening, the redirect allow-subject versus deny-subject distinction, a broadened glob still validating), `tests/guard-classes.test.mts` (whole-call host-shell suggestions in both namespaces, anchoring), `tests/guard-prompt-flow.test.mts` (Pwsh whole-call prefill, advisory in editor and preview, preview reflects the final edited rules, deny prefill silence versus a hand-edited broad deny, read-root editors receive no note), `tests/guard-ask-components.test.mts` (the live advisory appears and clears; a tight row budget drops it without blocking submission), `tests/guard-ask-inline.test.mts` (the advisory never breaks the inline row budget), plus updated `guard-harness`/`guard-dialogs` saved-rule expectations; all wired into `test:guard` |
@@ -1346,3 +1350,457 @@ Current verification: `npx tsc --noEmit`, `npm run test:guard`, and
 `npm run test:ci`. The standalone `test:python` and `test:node` targets were
 removed on 2026-10-28; guard's live worker suites include frame-protocol
 coverage for both runtimes.
+
+## Shell-ast adoption: final measurement and retirement record
+
+This final record supersedes the intermediate stage notes above, including
+their deferred-fixture/measurement and kept-splitter statements.
+The adapter and argv tier are complete. The temporary measurement harness,
+including raw gitignored corpora/outputs, is retired. The legacy shell-splitter
+module and its last benchmark-only caller are deleted. The retained text
+helpers are `stripTrailingHarmlessRedirects` and `stripTimeoutPrefix` in
+`extensions/guard/policy/shell-text.ts`.
+
+### Scope, provenance, and final totals
+
+Measured 2026-11-06 against the pre-adapter HEAD baseline, with one command
+mapped to host-shell/host-bash (including commands harvested as sandboxed
+bash, whose actual sandbox policy does not parse them). Both runs evaluate
+the same 34,969 real commands (28,301 bash, 6,668 host_bash) plus 11 synthetic
+inputs across seven profiles and two configs: the measured user's real
+guard config (338 allow rules) and an empty config. Cwd was this repository;
+sandbox mode full, interactive true, workspace unlocked. Classify outcomes
+were left unresolved. These are user-config-specific measurements, NOT
+claims about the synthetic regression policy.
+
+| Metric | Run 1 (09:13 UTC) | Run 2 (09:50 UTC, final argv tier) |
+| --- | ---: | ---: |
+| Paired cells | 489,720 | 489,720 |
+| Real / synthetic cells | 489,566 / 154 | 489,566 / 154 |
+| Changed cells | 38,133 | 38,772 |
+| Action-changing | 17,345 | 17,779 |
+| Reason-class-only | 20,788 | 20,993 |
+| Duplicate keys / consistency errors | 0 / 0 | 0 / 0 |
+| Previously allowed, now denied | 0 | 0 |
+| Deny to prompt or allow | 0 | 0 |
+| Rule-matched, now incomplete prompt (cells / commands) | 1,802 / 1,148 | 1,802 / 1,148 |
+| Yolo ask lost (cells / commands) | 184 / 184 | 184 / 184 |
+| Recoveries, all groups (cells / commands) | 218 / 195 | 368 / 244 |
+| Read-only-tier widening commands | 3 | 43 |
+
+Full numeric summaries (including group totals, transitions, distinct-command
+counts, and audit counters) are retained here rather than linking deleted
+outputs:
+
+<details>
+<summary>Run 1 numeric summary</summary>
+
+```json
+{
+  "generatedAt": "2026-11-06T09:13:24.828Z",
+  "corpus": {
+    "real": 34969,
+    "evaluatedReal": 34969,
+    "bash": 28301,
+    "hostBash": 6668,
+    "synthetic": 11
+  },
+  "expectedPairedLines": 489720,
+  "pairedLines": 489720,
+  "realCells": 489566,
+  "syntheticCells": 154,
+  "changedCells": 38133,
+  "actionChangingCells": 17345,
+  "reasonOnlyChanges": 20788,
+  "duplicateKeys": 0,
+  "consistencyErrors": [],
+  "groupTotals": {
+    "incompleteness": 37904,
+    "rule-matching": 214,
+    "read-only-tier": 15
+  },
+  "groupActionChanging": {
+    "incompleteness": 17140,
+    "rule-matching": 196,
+    "read-only-tier": 9
+  },
+  "groupDistinctCommands": {
+    "incompleteness": 4931,
+    "rule-matching": 192,
+    "read-only-tier": 5
+  },
+  "groupTransitionTypes": {
+    "incompleteness": {
+      "classify->prompt": 7936,
+      "allow->prompt": 9180,
+      "same-action-reason-change": 20764,
+      "prompt->allow": 16,
+      "prompt->classify": 8
+    },
+    "rule-matching": {
+      "prompt->allow": 190,
+      "classify->allow": 3,
+      "same-action-reason-change": 18,
+      "classify->prompt": 1,
+      "allow->prompt": 2
+    },
+    "read-only-tier": {
+      "prompt->allow": 6,
+      "classify->allow": 3,
+      "same-action-reason-change": 6
+    }
+  },
+  "allowPromptNotIncomplete": 2,
+  "allowPromptNotIncompleteByGroup": {
+    "rule-matching": 2
+  },
+  "allowPromptRuleAnyCfg": 2,
+  "allowPromptRuleUser": 2,
+  "allowedNowDenied": 0,
+  "denyToPromptOrAllow": 0,
+  "denyToPrompt": 0,
+  "denyToAllow": 0,
+  "ruleMatchedNowPrompts": {
+    "cells": 1802,
+    "commands": 1148
+  },
+  "yoloAskLost": {
+    "cells": 184,
+    "commands": 184,
+    "byCause": {
+      "grouped": 46,
+      "heredoc": 111,
+      "subshell": 16,
+      "function-definition": 6,
+      "background": 4,
+      "unrecognized-node": 1
+    }
+  },
+  "askGained": {
+    "cells": 3,
+    "commands": 1
+  },
+  "recoveries": {
+    "cells": 218,
+    "commands": 195
+  },
+  "candidates": 4980
+}
+```
+
+</details>
+
+<details>
+<summary>Run 2 numeric summary</summary>
+
+```json
+{
+  "generatedAt": "2026-11-06T09:50:21.057Z",
+  "corpus": {
+    "real": 34969,
+    "evaluatedReal": 34969,
+    "bash": 28301,
+    "hostBash": 6668,
+    "synthetic": 11
+  },
+  "expectedPairedLines": 489720,
+  "pairedLines": 489720,
+  "realCells": 489566,
+  "syntheticCells": 154,
+  "changedCells": 38772,
+  "actionChangingCells": 17779,
+  "reasonOnlyChanges": 20993,
+  "duplicateKeys": 0,
+  "consistencyErrors": [],
+  "groupTotals": {
+    "incompleteness": 37912,
+    "rule-matching": 346,
+    "read-only-tier": 204,
+    "profile-cell": 310
+  },
+  "groupActionChanging": {
+    "incompleteness": 17136,
+    "rule-matching": 250,
+    "profile-cell": 220,
+    "read-only-tier": 173
+  },
+  "groupDistinctCommands": {
+    "incompleteness": 4931,
+    "rule-matching": 233,
+    "read-only-tier": 88,
+    "profile-cell": 125
+  },
+  "groupTransitionTypes": {
+    "incompleteness": {
+      "classify->prompt": 7930,
+      "allow->prompt": 9182,
+      "same-action-reason-change": 20776,
+      "prompt->allow": 16,
+      "prompt->classify": 8
+    },
+    "rule-matching": {
+      "same-action-reason-change": 96,
+      "prompt->allow": 208,
+      "allow->prompt": 27,
+      "classify->allow": 12,
+      "classify->prompt": 1,
+      "allow->classify": 2
+    },
+    "read-only-tier": {
+      "same-action-reason-change": 31,
+      "allow->prompt": 41,
+      "prompt->allow": 88,
+      "classify->allow": 44
+    },
+    "profile-cell": {
+      "classify->prompt": 131,
+      "allow->prompt": 89,
+      "same-action-reason-change": 90
+    }
+  },
+  "allowPromptNotIncomplete": 157,
+  "allowPromptNotIncompleteByGroup": {
+    "rule-matching": 27,
+    "profile-cell": 89,
+    "read-only-tier": 41
+  },
+  "allowPromptRuleAnyCfg": 27,
+  "allowPromptRuleUser": 27,
+  "allowedNowDenied": 0,
+  "denyToPromptOrAllow": 0,
+  "denyToPrompt": 0,
+  "denyToAllow": 0,
+  "ruleMatchedNowPrompts": {
+    "cells": 1802,
+    "commands": 1148
+  },
+  "yoloAskLost": {
+    "cells": 184,
+    "commands": 184,
+    "byCause": {
+      "grouped": 46,
+      "heredoc": 111,
+      "subshell": 16,
+      "function-definition": 6,
+      "background": 4,
+      "unrecognized-node": 1
+    }
+  },
+  "askGained": {
+    "cells": 3,
+    "commands": 1
+  },
+  "recoveries": {
+    "cells": 368,
+    "commands": 244
+  },
+  "candidates": 5159
+}
+```
+
+</details>
+
+### Confirmed decisions
+
+- **Accepted incompleteness tightening:** 1,802 cells / 1,148 commands that
+  matched an allow rule now prompt because the projection is incomplete.
+  Never move allow rules before completeness to recover them. Complete
+  siblings remain decidable; deny/ask rules still precede per-call
+  completeness. Whole-command constructs take the fail-closed branch.
+- **Accepted yolo ask-rule loosening:** 184 cells / 184 commands. Whole-command
+  incompleteness prevents rediscovering inner per-step ask rules. Raw
+  whole-command deny/ask rules still win. Breakdown: grouped 46, heredoc
+  111, subshell 16, function-definition 6, background 4, unrecognized-node 1.
+  This is deliberate, not an unexplained fixture allow.
+- **Redirect false-allow correction:** 151 changed cells fix writes that
+  escaped the old redirect scan, notably after a quoted argument. Bash now
+  uses structured redirects: only a redirect-aware allow rule may authorize
+  a non-exempt write. Root-contained writes, /dev/null and descriptor
+  dup/close remain exempt; dynamic targets are not exempt.
+- **Pwsh scanner fix:** its quote scanner could enter but not leave double
+  quotes, hiding a subsequent `>`. Symmetric toggling now catches
+  `echo "p" > <outside>` before a trusted cell can allow it. Pwsh was NOT
+  in the measured Bash corpus; its scanner and policy regressions are
+  covered separately. Whole-command Pwsh rules and lack of a Bash tier stay
+  unchanged; broader pwsh enforcement is still deferred.
+- **Accepted tier recovery list:** exactly 43 commands, 132 changed cells:
+  88 prompt-to-allow and 44 classify-to-allow. Three commands already widened
+  in run 1; 40 are new in run 2. This includes manual/registry wrapper
+  handling, assignment-prefixed commands, no-op cd, quote-correct regex
+  arguments, brace expansion, and test clauses. Focused synthetic cases
+  separately pin `command`, `xargs`, `nice`, `env`, `[[ a && b ]]`
+  and `echo {a,b}`; `command -v`/`-V` are plain queries, not wrappers,
+  and still prompt. Env/printenv without an inner command, secret-file
+  arguments and out-of-root reads still veto the tier. No batch loosening
+  or effects-based projection is authorized.
+- **Traversal-coverage guarantee:** the exhaustive
+  `NODE_DISPOSITIONS: Record<ShellNode["type"], NodeDisposition>` table
+  classifies every emitted node as descend/leaf/cause. A Proxy fails closed
+  with `unrecognized-node` for unknown node types. Explicit manual recursion
+  into arithmetic/brace walker leaves catches nested substitutions.
+  Per-type tests compare the table against the shipped declared node union
+  and induce every inducible type. Comment/TestDecl exceptions and the
+  ParamExp/CStyleLoop coverage rationale remain documented above.
+- **Curated fixtures, not a replay of user config:** the permanent
+  [fixture README](../tests/fixtures/guard-shell/README.md) documents provenance,
+  placeholders and the reviewed allow inventory. The small synthetic policy
+  derives cwd/readRoots/writeRoots from one fresh temp root. All 11 parser
+  rejects and the entire accepted 43-command list are retained in full,
+  except home-path and sensitive-identifier substitution; incompleteness is
+  sampled by cause, never one row per changed command. Each row asserts
+  action, machine adapter cause and evaluator-reported matched rule ID,
+  plus per-step action/cause/rule/redirect gate. No prose is asserted.
+  The fixtures and existing adapter battery run in both test scripts.
+  `Decision.matchedRule` is additive observation metadata, not a routing
+  change. No unexplained fixture allow was found.
+
+### Accepted recovery commands, full path-independent list
+
+The following commands retain run-2 source hashes as fixture IDs. Paths use
+the synthetic placeholder vocabulary, not the measured user's roots.
+This list identifies the accepted measurement set; it does not assert that
+all commands allow under arbitrary config. In the synthetic fixture policy,
+38 allow and five prompt because original git/gh/dynamic-path rules are absent.
+Historical file names in search arguments are literal command data, not
+references to files that must still exist.
+
+```text
+widen-16569879817e
+sudo -n true 2>&1 && echo "sudo ok" || echo "sudo needs password"
+
+widen-3364b8f21390
+find {{READ}}/user/source/datadog/libdatadog -name "*.rs" -path "*trace*" | xargs grep -ln "ErrorsSampler" 2>/dev/null
+
+widen-90316e02c998
+grep -n "^<<<<<<<\|^=======$\|^>>>>>>>" bottlecap/src/traces/stats_concentrator_service.rs
+
+widen-e9c006ad3bbb
+grep -n "^<<<<<<<\|^|||||||\|^=======$\|^>>>>>>>" bottlecap/src/traces/stats_concentrator_service.rs
+
+widen-e3ab4519f039
+find {{READ}}/user/.cargo/registry/src -maxdepth 2 -name "libdd-trace-utils-*" -type d | head -1 | xargs -I{} grep -rn "fn send_with_retry\|is_retriable\|RETRIABLE\|backoff\|retry" {} -l | head -3
+
+widen-06a705915425
+rg -n 'Deserialize|runner.Run|Assert.Empty\(tracerGitMetadata\)' profiler/test/Datadog.Profiler.IntegrationTests/DebugInfo/GitMetadataTest.cs; rg -n ThrowIfHandlerFailed profiler/test/Datadog.Profiler.IntegrationTests/Helpers/{MockDatadogAgent,TestApplicationRunner}.cs
+
+widen-a2c233e66db3
+rg -n "appendRules|defaultRules|'\\$" packages/dd-trace/src/config/index.js | head; rg -n "cloudPayloadTagging" packages/dd-trace/src/config/defaults.js -A 30 | head -60
+
+widen-8c9008ad5b0e
+rg -n "defaultRules|\\$\\." packages/dd-trace/src/payload-tagging/config/*.js | head -30
+
+widen-95f42cebe07d
+ls packages/dd-trace/src/payload-tagging/config/ && rg -n "appendRules|\\$" packages/dd-trace/src/payload-tagging/config/index.js | head -30
+
+widen-2d1f718cda42
+rg -n 'from_tags|TracePropagationStyle|TracePropagationBehaviorExtract' datadog-opentelemetry/src/core/configuration/configuration.rs | head -25; rg -n 'pub\(crate\) fn (extract_baggage|ot_extract_rv|ot_sanitize|ot_set_rv_th|get_extractors|get_injectors)|pub\(crate\) fn from_header' datadog-trace-propagation/src || true; rg -n '#\[doc\(hidden\)\]' datadog-trace-propagation/src/{baggage.rs,config.rs,tracecontext.rs}
+
+widen-e90dd3fcb745
+printf '%s\n' '--- direct libdd references in new crate ---'; rg -n "libdd[-_]" datadog-trace-propagation || true; printf '%s\n' '--- public exports ---'; rg -n '^pub (mod|use|trait|struct|enum|const|fn)|^pub\(crate\) mod' datadog-trace-propagation/src/{lib.rs,configuration.rs,sampling.rs,context.rs,carrier.rs,datadog.rs,tracecontext.rs,b3.rs,b3multi.rs,baggage.rs} | head -240
+
+widen-4fdb01ff20c4
+date; TZ=America/Toronto date; echo "---"; git -C {{READ}}/user/source/datadog/lucas-pimentel rev-parse --show-toplevel
+
+widen-7ac794d83b0a
+date; TZ=America/New_York date; echo "---"; ls {{READ}}/user/source/datadog/lucas-pimentel/daily-summaries/ 2>/dev/null | tail -20
+
+widen-e7afcf3cb5c3
+ls -la graphify-out/ | grep -vE "^\s*$"; echo "==="; ls graphify-out/semantic* 2>/dev/null | head
+
+widen-badfe9716311
+WORKSPACE="{{READ}}/user/source/datadog/lucas-pimentel"; SOURCE_ROOT="{{READ}}/user/source/datadog"; date; TZ=America/New_York date; ls "$WORKSPACE/daily-summaries/" 2>/dev/null | tail -20; gh auth status 2>&1 | head -20; gh api user --jq .login
+
+widen-8c79484816a4
+grep -n "80f1649\|residual gap\|no linked PR visible\|no PR yet\|further touch 2026-09-23\|assigned Lucas.$" projects.md | head; echo ---; grep -n "### Problems" projects.md
+
+widen-ce0557dd3dc9
+date; echo "---"; TZ=America/New_York date; echo "---"; git rev-parse --show-toplevel 2>/dev/null; echo "---"; pwd
+
+widen-5e00b368f1c0
+TZ=America/New_York date '+%F %T %Z'
+
+widen-9ba40f33ba50
+ls {{READ}}/user/source/datadog/lucas-pimentel/.agent/skills/yesterday-summary/scripts/ 2>/dev/null; ls {{READ}}/user/source/datadog/lucas-pimentel/.agent/skills/yesterday-summary/references/ 2>/dev/null; date; TZ=America/New_York date; ls {{READ}}/user/source/datadog/lucas-pimentel/daily-summaries/ 2>/dev/null | tail -5
+
+widen-54fddca0344a
+WORKSPACE="{{READ}}/user/source/datadog/lucas-pimentel"
+echo "TZ check:"; TZ=America/New_York date
+echo "--- gh auth ---"
+gh auth status 2>&1 | grep -E "github.com|account" | head -20
+echo "--- pr-threads probe ---"
+gh pr-threads list DataDog dd-trace-dotnet 1 --all 2>&1 | head -3
+echo "--- existing output ---"
+ls -la "$WORKSPACE/daily-summaries/" 2>/dev/null | tail -5
+echo "--- scripts ---"
+ls "$WORKSPACE/.agent/skills/yesterday-summary/scripts/" "$WORKSPACE/.agent/skills/yesterday-summary/references/" 2>&1
+
+widen-eb096e88ca18
+ls {{READ}}/user/source/datadog/lucas-pimentel/.pi/skills/yesterday-summary/ {{READ}}/user/source/datadog/lucas-pimentel/.pi/skills/yesterday-summary/scripts/ {{READ}}/user/source/datadog/lucas-pimentel/.pi/skills/yesterday-summary/references/ 2>&1; echo ---; ls {{READ}}/user/source/datadog/lucas-pimentel/daily-summaries/ 2>&1 | tail -5; echo ---; date; TZ=America/New_York date
+
+widen-c317dabba32f
+TZ=America/New_York date && echo "---" && gh auth status 2>&1 | head -30
+
+widen-0aea39d156c9
+date; date -u; cat {{READ}}/timezone 2>/dev/null; TZ=America/New_York date "+%Y-%m-%d %H:%M %Z"
+
+widen-5029d0496694
+date; TZ=America/New_York date '+%Y-%m-%d %A %H:%M %Z'
+
+widen-a44dc0e65fe3
+grep -nE 'awk .*NR == 1|all GitLab scripts show|Unify `--help`' skills/gitlab-status/scripts/{bridges,find-pipeline,job-status,pipeline-status}.sh skills/gitlab-failure-survey/scripts/{classify-test-failures,fetch-pipelines,survey-job-traces,survey-pipeline-variables}.sh tests/gitlab-mocked.sh TODO.md
+
+widen-bb59be0de147
+rg -n 'baseURL|baseUrl|BASE_URL|ENDPOINT' node_modules/@earendil-works/pi-ai/dist/{providers/anthropic.js,providers/google.js,providers/openai.js,providers/baseten.js,providers/typesafe.js,api/anthropic.js,api/google.js,api/openai-responses.js} | head -55; rg -n 'version' node_modules/@earendil-works/{pi-ai,pi-coding-agent}/package.json | head
+
+widen-7546ec79e66f
+rg -n 'Memory|memory|ModelsStore' node_modules/@earendil-works/pi-ai/dist/index.d.ts node_modules/@earendil-works/pi-ai/dist/models-store.d.ts; rg -n 'client\?|baseUrl\?|endpoint|baseURL|url\?' node_modules/@earendil-works/pi-ai/dist/api/{anthropic-messages,google-generative-ai,openai-responses,openai-completions,typesafe-system-one}.d.ts; rg -n 'questions|must|empty' node_modules/@earendil-works/pi-ai/dist/api/typesafe-system-one*.js
+
+widen-422576376929
+grep -n -E 'sha256_of\(\)|verified_sha256\(\)|^lock_hash|case "\$guard_rc"' scripts/cargo-audit-release-gate.sh; grep -n -E 'usage_error\(\)|rc" -eq 0' scripts/cargo-audit-report-guard.sh; grep -n -E 'for fake_env, rc, message|if text is None' scripts/tests/audit-release-gate/test_release_gate.py
+
+widen-2642e31ec5c4
+grep -n "fn apply_error_rescue\b\|fn apply_error_rescue_at\|fn rescue_with_sampler\|fn lock_sampler\|fn new_error_sampler\|fn resolve_payload_env\|fn span_view\|fn sample_and_stamp\|let Some(root) = chunk.spans.get(root_index)\|fn default_error_sampler\|fn sampler_for\|fn parse_error_sampler_config\|^///$" crates/datadog-trace-agent/src/trace_processor.rs | head -20; grep -n "fn new_error_sampler\|default_error_sampler" crates/datadog-trace-agent/src/trace_processor.rs | head
+
+widen-36167f85b071
+rg -n "fn valid_stats_body|fn stats_body|fn wait_for|stats_payload\(\s*$|fn stats_payload\b|fn client_payload" crates/datadog-mock-intake/src/lib.rs | head
+
+widen-a60d404f958d
+grep -rln "orchestrator\|OrchestratorURL\|OrchestratorFunction" --include=*.ts --include=*.py --include=*.js . | grep -iv node_modules | grep -iv cdk.out | head; echo "=== CDK stack files ==="; find . -path ./node_modules -prune -o -name "*.ts" -print 2>/dev/null | xargs grep -ln "Orchestrator\|orchestrator" 2>/dev/null | grep -iv cdk.out | head
+
+widen-a4c1f4d8568e
+rg -n '500 chars|truncat|first child|assumes|grep -oE|deterministic|usually inflated' .claude/skills/ci-triage/references/{known-failures,pipeline-structure}.md .claude/skills/ci-triage/SKILL.md
+
+widen-543cc23b8454
+rg -n "key.json|A\"|\"B\"|\"C\"|LETTERS" src/shuffle.ts | head -8; rg -n "command|case " src/cli.ts | head -10; rg -n "localStorage|scores" src/review.ts | head -5
+
+widen-e68ec43ab749
+find {{CWD}} -name "package.json" | grep -v node_modules | xargs grep -l "mariozechner" 2>/dev/null
+
+widen-1a77ba1e1f48
+rg -n "permissions allow|\"allow\"|'allow'|case \"allow\"" {{CWD}}/extensions/pi-tool-permissions/index.ts | head; rg -n "permissions allow" {{CWD}} -r 2>/dev/null | head
+
+widen-25424c62a4c8
+printf '\nPi documentation sizes:\n'; wc -l node_modules/@earendil-works/pi-coding-agent/docs/{extensions,tui,sdk,keybindings,themes,rpc-commands,json}.md; printf '\nTest entry points:\n'; rg -n '^test\(|^function test|All .*tests passed|^const tests|^async function main|^after\(' tests/guard-policy.test.mts tests/guard-classes.test.mts tests/guard-harness.test.mts tests/guard-dialogs.test.mts tests/guard-test-temp.mts | head -80; printf '\nNested instruction files:\n'; rg --files --hidden -g AGENTS.md -g CLAUDE.md extensions/guard tests docs 2>/dev/null || true
+
+widen-91e2f60197a2
+cd {{CWD}} && rg -rn "Theme" node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts | head -5 && rg -n "class Theme|selectList|editor" node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme*.d.ts 2>/dev/null | head; find node_modules/@earendil-works/pi-coding-agent/dist -name "*.d.ts" | xargs rg -ln "class Theme" 2>/dev/null | head -3
+
+widen-39bfb21dec39
+file extensions/guard/tools/shell-render.ts extensions/guard/index.ts extensions/timestamps/index.ts; echo ---; grep -c $'\r' extensions/guard/tools/shell-render.ts extensions/guard/index.ts extensions/timestamps/index.ts; echo ---; wc -l extensions/guard/tools/shell-render.ts
+
+widen-9208e1f14f27
+grep -l "formatDelta" {{READ}}/user/.pi/agent/sessions/--home-lucas-source-lucaspimentel-pi-extensions--/*.jsonl | xargs ls -t | head -3
+
+widen-98cf302d071e
+cd {{CWD}} && rg -n "formatDelta|deltaFor|anchors|delta" extensions/timestamps/ | head -40; echo ---; rg -n $'\r' extensions/timestamps/ | head; echo ---; file extensions/timestamps/*.ts
+
+widen-9a7412c766be
+rg -n 'READONLY_BASH_SAFE_ALWAYS|export function splitTopLevelShell|export function assessBreakdownReliability|Iteration / case|for\|select|export function stripStructural|export function tokenizeSimple|function evaluateHostShell|const reliability|function hostTierAllowReason|export function hostTierVetoReason|if \(READONLY_BASH_SAFE_ALWAYS' extensions/guard/policy/{shellsplit,bashtier,decision}.ts
+
+widen-75f1aed44dee
+cd {{CWD}} && ls -la tests/fixtures/ | head && echo "=== precedent: test files importing other test modules ===" && grep -rn "^import .*from \"\./" tests/*.mts | grep -v "\.\./extensions" | head -20 && echo "=== guard-harness head ===" && head -20 tests/guard-harness.test.mts && echo "=== does test:ci include a non-test helper? ===" && grep -o "tests/[a-z0-9-]*\.mts" package.json | sort -u | wc -l
+
+widen-2f4c7d74ba91
+cd {{CWD}} && grep -rn "nine\|ten \|ten$\|nine-\|ten-" README.md docs/gh-read-design.md extensions/gh-read/index.ts extensions/gh-read/validate.ts extensions/gh-read/api.ts TODO.md tests/gh-read-tool.test.mts tests/gh-read-validate.test.mts 2>/dev/null | grep -vi "nine-item\|ten-item" | head -40
+```
+

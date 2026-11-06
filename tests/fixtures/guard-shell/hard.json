@@ -1,0 +1,1622 @@
+[
+	{
+		"id": "parse-reject-0c15440e8184",
+		"command": "python3 - <<'PY'\nfrom pathlib import Path\npath = Path('{{READ}}/user/source/datadog/datadog-lambda-extension--lpimentel-filter-sampled-traces-by-stats-owner/bottlecap/src/traces/trace_processor.rs')\ntext = path.read_text()\nstart = text.index('    /// Verifies that `process_traces` filters sampled-out chunks from the backend\\n')\nend = text.index(\"    /// An error on a child span (root not errored) still makes the chunk a rescue\\n\", start)\nreplacement = '''    /// Verifies that `process_traces` filters sampled-out chunks from the backend\n    /// payload whenever stats are computed before the backend, by either the tracer\n    /// or the extension, while preserving them in the stats collection. When the\n    /// backend owns stats, all chunks are kept so the backend can compute stats.\n    #[test]\n    #[allow(clippy::unwrap_used)]\n    fn test_process_traces_filters_sampled_out_chunks() {\n        // (lambda_extension_compute_stats, client_computed_stats) -> filtering expected\n        let cases = [\n            (false, false, false), // backend owns stats: keep all chunks\n            (true, false, true),   // extension owns stats: filter\n            (false, true, true),   // tracer owns stats: filter\n            (true, true, true),    // tracer owns stats even when extension configured: filter\n        ];\n\n        for (compute_on_extension, client_computed_stats, expect_filtering) in cases {\n            let config = Arc::new(Config {\n                apm_dd_url: \"https://trace.agent.datadoghq.com\".to_string(),\n                ext: crate::config::LambdaConfig {\n                    lambda_extension_compute_stats: compute_on_extension,\n                    ..Default::default()\n                },\n                ..Config::default()\n            });\n            let (tags_provider, processor) =\n                create_test_processor(&config, enabled_error_sampler());\n            let mut header_tags = create_test_header_tags();\n            header_tags.generic.client_computed_stats = client_computed_stats;\n\n            let make_span = |trace_id: u64, priority: Option<f64>| -> pb::Span {\n                let mut metrics = HashMap::new();\n                if let Some(p) = priority {\n                    metrics.insert(\"_sampling_priority_v1\".to_string(), p);\n                }\n                pb::Span {\n                    trace_id,\n                    span_id: trace_id,\n                    parent_id: 0,\n                    metrics,\n                    service: \"svc\".to_string(),\n                    name: \"op\".to_string(),\n                    resource: \"res\".to_string(),\n                    ..Default::default()\n                }\n            };\n\n            // Three traces: kept (priority 1), dropped (priority 0), dropped (priority -1)\n            let traces = vec![\n                vec![make_span(1, Some(1.0))],\n                vec![make_span(2, Some(0.0))],\n                vec![make_span(3, Some(-1.0))],\n            ];\n\n            let (payload_info, stats_collection) =\n                processor.process_traces(config, tags_provider, header_tags, traces, 0, None);\n            let payload_info = payload_info.expect(\"expected Some payload\");\n\n            let TracerPayloadCollection::V07(ref stats_payloads) = stats_collection else {\n                panic!(\"expected V07\");\n            };\n            let stats_span_count: usize = stats_payloads\n                .iter()\n                .flat_map(|tp| tp.chunks.iter())\n                .map(|c| c.spans.len())\n                .sum();\n            assert_eq!(\n                stats_span_count, 3,\n                \"stats must include all traces (compute_on_extension={compute_on_extension}, \\\\\n                 client_computed_stats={client_computed_stats})\"\n            );\n\n            let backend_send_data = payload_info.builder.build();\n            let TracerPayloadCollection::V07(backend_payloads) = backend_send_data.get_payloads()\n            else {\n                panic!(\"expected V07\");\n            };\n            let backend_span_count: usize = backend_payloads\n                .iter()\n                .flat_map(|tp| tp.chunks.iter())\n                .map(|c| c.spans.len())\n                .sum();\n            let expected_backend_span_count = if expect_filtering { 1 } else { 3 };\n            assert_eq!(\n                backend_span_count, expected_backend_span_count,\n                \"compute_on_extension={compute_on_extension}, \\\\\n                 client_computed_stats={client_computed_stats}\"\n            );\n        }\n    }\n\n    /// On any stats path where stats are computed before the backend (extension or\n    /// tracer), the error sampler rescues errored chunks that would otherwise be\n    /// dropped (`AutoDrop`), stamping `_dd.errors_sr`, while non-errored P0 chunks\n    /// and explicit user drops are still dropped. Priorities are never rewritten.\n    #[test]\n    #[allow(clippy::too_many_lines)]\n    fn test_error_sampler_rescues_errored_p0_chunks() {\n        // (owner label, lambda_extension_compute_stats, client_computed_stats)\n        let cases = [(\"extension\", true, false), (\"tracer\", false, true)];\n\n        for (owner, compute_on_extension, client_computed_stats) in cases {\n            let config = Arc::new(Config {\n                apm_dd_url: \"https://trace.agent.datadoghq.com\".to_string(),\n                ext: crate::config::LambdaConfig {\n                    lambda_extension_compute_stats: compute_on_extension,\n                    ..Default::default()\n                },\n                ..Config::default()\n            });\n            let (tags_provider, processor) =\n                create_test_processor(&config, enabled_error_sampler());\n            let mut header_tags = create_test_header_tags();\n            header_tags.generic.client_computed_stats = client_computed_stats;\n\n            let make_span = |trace_id: u64, priority: f64, error: i32| -> pb::Span {\n                let mut metrics = HashMap::new();\n                metrics.insert(\"_sampling_priority_v1\".to_string(), priority);\n                pb::Span {\n                    trace_id,\n                    span_id: trace_id,\n                    parent_id: 0,\n                    error,\n                    metrics,\n                    service: \"svc\".to_string(),\n                    name: \"op\".to_string(),\n                    resource: \"res\".to_string(),\n                    ..Default::default()\n                }\n            };\n\n            // trace 1: kept normally (priority 1). trace 2: errored P0 (rescued).\n            // trace 3: non-errored P0 (dropped). trace 4: errored user drop (dropped).\n            let traces = vec![\n                vec![make_span(1, 1.0, 0)],\n                vec![make_span(2, 0.0, 1)],\n                vec![make_span(3, 0.0, 0)],\n                vec![make_span(4, -1.0, 1)],\n            ];\n\n            let (payload_info, _stats) =\n                processor.process_traces(config, tags_provider, header_tags, traces, 0, None);\n            let payload_info = payload_info.expect(\"expected Some payload\");\n            let backend_send_data = payload_info.builder.build();\n            let TracerPayloadCollection::V07(backend_payloads) = backend_send_data.get_payloads()\n            else {\n                panic!(\"expected V07\");\n            };\n\n            let kept: Vec<(u64, f64)> = backend_payloads\n                .iter()\n                .flat_map(|tp| tp.chunks.iter())\n                .flat_map(|c| c.spans.iter())\n                .map(|s| (s.trace_id, s.metrics[\"_sampling_priority_v1\"]))\n                .collect();\n            assert_eq!(\n                kept.len(),\n                2,\n                \"kept normal trace + rescued errored trace (owner={owner})\"\n            );\n            assert!(\n                kept.contains(&(1, 1.0)),\n                \"priority-1 trace kept (owner={owner})\"\n            );\n            assert!(\n                kept.contains(&(2, 0.0)),\n                \"errored P0 trace rescued with its original priority (owner={owner})\"\n            );\n            assert!(\n                !kept.iter().any(|(id, _)| *id == 3),\n                \"non-errored P0 trace dropped (owner={owner})\"\n            );\n            assert!(\n                !",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "0c15440e8184",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "parse-reject-9c7557719098",
+		"command": "rg -n \"resource.*cardinality|RESOURCE_NAME|distinct `resource|resource_limit\" {{READ}}/user/.cargo/git/checkouts/libdatadog-fb268e227e330049/72fa868/libdd-trace-stats/src/span_concentrator/tests.rs | head -30",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "9c7557719098",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "parse-reject-5d7de180b054",
+		"command": "cd {{READ}}/user/source/datadog/datadog-lambda-extension--lpimentel-fake-intake-bin/bottlecap && cargo check --workspace --features fake-intake 2>&1 | grep -E \"^(error|warning: unused|warning: variable|warning: `bottlecap)\" | head -20; echo \"exit: $?\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "5d7de180b054",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "parse-reject-a96f16ecdfc6",
+		"command": "cd {{READ}}/user/source/datadog/datadog-lambda-extension--lpimentel-isolate-bottlecap-build-cache && for i in $(seq 1 10); sleep=60; do :; done 2>/dev/null; for i in $(seq 1 10); do rows=$(gh pr checks 1369 2>/dev/null | grep -Ei 'dd-gitlab|DDCI'); pending=$(echo \"$rows\" | grep -c $'\\tpending\\t' || true); if [ \"$pending\" = \"0\" ]; then echo \"=== dd-gitlab pipeline complete ===\"; echo \"$rows\"; break; fi; echo \"[$i] $pending dd-gitlab checks still pending\"; sleep 60; done; echo \"=== overall ===\"; gh pr checks 1369 2>&1",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a96f16ecdfc6",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "parse-reject-e42b4a42b538",
+		"command": "SKILL={{READ}}/user/.pi/agent/git/github.com/ddoghq-sandbox/lucas-pimentel-coding-agent-tools/skills/gitlab-status; cd $SKILL && for p in 133754620 132441414 131540007 128945686 127186311; do echo \"=== pipeline $p ($(date -u -d @$(($(date -d \"$(date -u -d @$p)\" +%s) 2>/dev/null) 2>/dev/null) 2>/dev/null)) ===\"; done; for p in 133754620 132441414 131540007 128945686 127186311; do echo \"=== pipeline $p ===\"; ./scripts/pipeline-status.sh DataDog/datadog-lambda-extension $p --recurse 2>&1 | grep -E \"child=|failed\" | grep -v '\"status\"'; done",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e42b4a42b538",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "parse-reject-3389852f11f2",
+		"command": "grep -rn \"CreateAsyncEndMethodDelegate\\|CreateEndMethodDelegate\" tracer/src/Datadog.Trace/ClrProfiler/CallTarget/Handlers/Continuations/TaskContinuationGenerator.cs | head; sed -n '1,60p' tracer/src/Datadog.Trace/ClrProfiler/CallTarget/Handlers/Continuations/TaskContinuationGenerator`1.cs",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "3389852f11f2",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "parse-reject-0c0689aab011",
+		"command": "grep -rhoE \"'\\\\$[^']*'\" packages/dd-trace/src/payload-tagging/config | grep -E '[?()@^~:`]' | head; grep -rn \"payload-tagging\\|payloadTagging\\|tagsFromRe\" packages --include=*.js -l | grep -v test | head",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "0c0689aab011",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "parse-reject-ebda7e60f73c",
+		"command": "while read -r o n num; do\n  gh api graphql -f query='query($o:String!,$n:String!,$num:Int!){repository(owner:$o,name:$n){pullRequest(number:$num){isDraft reviewRequests(first:50){nodes{requestedReviewer{__typename ... on User{login} ... on Team{name}}}}}}}' -f o=\"$o\" -f n=\"$n\" -F num=\"$num\" --jq '\"'\"'\"$o/$n#\"'\"'\"'\" + ($num|tostring) + \" draft=\" + (.data.repository.pullRequest.isDraft|tostring) + \" reviewers=\" + ([.data.repository.pullRequest.reviewRequests.nodes[].requestedReviewer | select(.__typename==\"User\") | .login] | join(\",\"))' 2>/dev/null\ndone <<'EOF'\nDataDog datadog-lambda-js 846\nDataDog dd-trace-dotnet 9367\nDataDog dd-trace-dotnet 7767\nDataDog datadog-lambda-extension 1353\nDataDog datadog-lambda-extension 1358\nDataDog datadog-lambda-extension 1216\nDataDog serverless-components 174\nDataDog datadog-lambda-extension 1367\nDataDog datadog-lambda-extension 1369\nDataDog serverless-components 169\nDataDog datadog-lambda-extension 1392\nDataDog serverless-e2e-tests 348\nDataDog serverless-e2e-tests 349\nDataDog libdatadog 2554\nDataDog serverless-components 173\nDataDog serverless-e2e-tests 340\nDataDog serverless-e2e-tests 325\ndocker docs 26073\nDataDog dd-trace-dotnet 9186\nDataDog homebrew-tap 1270\nDataDog datadog-serverless-compat-dotnet 21\nDataDog dd-trace-dotnet 6923\nEOF",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "ebda7e60f73c",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "parse-reject-a21f0c493ed3",
+		"command": "export DD_API_KEY=$(op item get {{ITEM_ID}} --account vault.example.invalid --fields label=DD_API_KEY --reveal)\nexport DD_APP_KEY=$(op item get {{ITEM_ID}} --account vault.example.invalid --fields label=DD_APPLICATION_KEY --reveal)\nNOW=$(date +%s%3N)\nQ='SELECT count(*) AS n FROM dd.llm_observability(columns => ARRAY['\"@metrics.total_tokens\"'], event_type => '\"span\"', filter => '\"service:ai_gateway ml_app:pi\"', from_timestamp => NOW() - INTERVAL '\"'1 hour\"'', to_timestamp => NOW()) AS (\"@metrics.total_tokens\" BIGINT)'\npython3 - <<'EOF' > {{OUTSIDE}}/tmp/ddsql_body.json\nimport json, time\nnow = int(time.time()*1000)\nq = \"SELECT count(*) AS n FROM dd.llm_observability(columns => ARRAY['@metrics.total_tokens'], event_type => 'span', filter => 'service:ai_gateway ml_app:pi', from_timestamp => NOW() - INTERVAL '1 hour', to_timestamp => NOW()) AS (\\\"@metrics.total_tokens\\\" BIGINT)\"\njson.dump({\"data\":{\"type\":\"ddsql_query_request\",\"attributes\":{\"query\":q,\"time\":{\"from_timestamp\":now-3600000,\"to_timestamp\":now}}},\"meta\":{\"client_id\":\"session-cost-research\"}}, open('/dev/stdout','w'))\nEOF\ncurl -s -X POST \"https://api.datadoghq.com/api/v2/ddsql/query/tabular\" -H \"DD-API-KEY: $DD_API_KEY\" -H \"DD-APPLICATION-KEY: $DD_APP_KEY\" -H \"Content-Type: application/json\" -H \"Accept: application/json\" -H \"User-Agent: session-cost-research\" --data @{{OUTSIDE}}/tmp/ddsql_body.json | head -c 1200",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a21f0c493ed3",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "parse-reject-c23d7e55f6a1",
+		"command": "cd {{CWD}} && git status --short && echo \"=== stat ===\" && git diff --stat && echo \"=== round-2 markers present? ===\" && grep -n \"Agent roles\\|subagent_list. contract\\|ignoredPanels\\|Code and test layout\\|role: internal\\|role` frontmatter\\|Preparatory commit\" docs/subagent-panel-design.md TODO.md | head -30",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "c23d7e55f6a1",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "parse-reject-82eb14f3f6e4",
+		"command": "git ls-files '*.",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "82eb14f3f6e4",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "manual-wrapper-abc58d4a7736",
+		"command": "command -v gh >/dev/null && gh auth status 2>&1 | head; echo \"===\"; command -v gh >/dev/null && gh api repos/DataDog/homebrew-tap --jq '{full_name, permissions, private}' 2>&1 | head -20 || echo \"gh not installed\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "abc58d4a7736",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "manual-wrapper-c503d71c5b30",
+		"command": "wsl.exe -e {{READ}}/users/linuxbrew/.linuxbrew/bin/zsh -il -c 'echo $PATH | tr \":\" \"\\n\"' 2>&1 | head -15; echo \"---chezmoi managed?---\"; command -v chezmoi >/dev/null && chezmoi managed 2>/dev/null | grep -E \"profile\\.sh|\\.zshrc\" | head -5; ls {{READ}}/user/.local/share/chezmoi 2>/dev/null | head -3",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "c503d71c5b30",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "manual-wrapper-000178c21299",
+		"command": "cd {{READ}}/user/source/lucaspimentel/pi-extensions/skills/zsa-layouts/scripts && chmod +x *.sh && for f in *.sh; do bash -n \"$f\" && echo \"OK $f\"; done && command -v shellcheck >/dev/null && shellcheck *.sh || echo \"shellcheck not installed, skipped\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "000178c21299",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "manual-wrapper-039abcd1687b",
+		"command": "brew leaves; echo ---NPM---; npm ls -g --depth=0 --parseable 2>/dev/null | tail -n +2 | xargs -I{} basename {}",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "039abcd1687b",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "manual-wrapper-17bcc1ed6320",
+		"command": "echo \"$PATH\" | tr ':' '\\n' | grep -n linuxbrew; echo ---; command -v git jq starship",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "17bcc1ed6320",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": "HostBash(echo *)",
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "manual-wrapper-41723d0fb73c",
+		"command": "command -v chezmoi && chezmoi source-path {{READ}}/user/.pi/agent/AGENTS.md 2>&1; chezmoi managed 2>/dev/null | grep -F '.pi/agent/AGENTS.md'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "41723d0fb73c",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "ambiguous-compound-0c15440e8184",
+		"command": "python3 - <<'PY'\nfrom pathlib import Path\npath = Path('{{READ}}/user/source/datadog/datadog-lambda-extension--lpimentel-filter-sampled-traces-by-stats-owner/bottlecap/src/traces/trace_processor.rs')\ntext = path.read_text()\nstart = text.index('    /// Verifies that `process_traces` filters sampled-out chunks from the backend\\n')\nend = text.index(\"    /// An error on a child span (root not errored) still makes the chunk a rescue\\n\", start)\nreplacement = '''    /// Verifies that `process_traces` filters sampled-out chunks from the backend\n    /// payload whenever stats are computed before the backend, by either the tracer\n    /// or the extension, while preserving them in the stats collection. When the\n    /// backend owns stats, all chunks are kept so the backend can compute stats.\n    #[test]\n    #[allow(clippy::unwrap_used)]\n    fn test_process_traces_filters_sampled_out_chunks() {\n        // (lambda_extension_compute_stats, client_computed_stats) -> filtering expected\n        let cases = [\n            (false, false, false), // backend owns stats: keep all chunks\n            (true, false, true),   // extension owns stats: filter\n            (false, true, true),   // tracer owns stats: filter\n            (true, true, true),    // tracer owns stats even when extension configured: filter\n        ];\n\n        for (compute_on_extension, client_computed_stats, expect_filtering) in cases {\n            let config = Arc::new(Config {\n                apm_dd_url: \"https://trace.agent.datadoghq.com\".to_string(),\n                ext: crate::config::LambdaConfig {\n                    lambda_extension_compute_stats: compute_on_extension,\n                    ..Default::default()\n                },\n                ..Config::default()\n            });\n            let (tags_provider, processor) =\n                create_test_processor(&config, enabled_error_sampler());\n            let mut header_tags = create_test_header_tags();\n            header_tags.generic.client_computed_stats = client_computed_stats;\n\n            let make_span = |trace_id: u64, priority: Option<f64>| -> pb::Span {\n                let mut metrics = HashMap::new();\n                if let Some(p) = priority {\n                    metrics.insert(\"_sampling_priority_v1\".to_string(), p);\n                }\n                pb::Span {\n                    trace_id,\n                    span_id: trace_id,\n                    parent_id: 0,\n                    metrics,\n                    service: \"svc\".to_string(),\n                    name: \"op\".to_string(),\n                    resource: \"res\".to_string(),\n                    ..Default::default()\n                }\n            };\n\n            // Three traces: kept (priority 1), dropped (priority 0), dropped (priority -1)\n            let traces = vec![\n                vec![make_span(1, Some(1.0))],\n                vec![make_span(2, Some(0.0))],\n                vec![make_span(3, Some(-1.0))],\n            ];\n\n            let (payload_info, stats_collection) =\n                processor.process_traces(config, tags_provider, header_tags, traces, 0, None);\n            let payload_info = payload_info.expect(\"expected Some payload\");\n\n            let TracerPayloadCollection::V07(ref stats_payloads) = stats_collection else {\n                panic!(\"expected V07\");\n            };\n            let stats_span_count: usize = stats_payloads\n                .iter()\n                .flat_map(|tp| tp.chunks.iter())\n                .map(|c| c.spans.len())\n                .sum();\n            assert_eq!(\n                stats_span_count, 3,\n                \"stats must include all traces (compute_on_extension={compute_on_extension}, \\\\\n                 client_computed_stats={client_computed_stats})\"\n            );\n\n            let backend_send_data = payload_info.builder.build();\n            let TracerPayloadCollection::V07(backend_payloads) = backend_send_data.get_payloads()\n            else {\n                panic!(\"expected V07\");\n            };\n            let backend_span_count: usize = backend_payloads\n                .iter()\n                .flat_map(|tp| tp.chunks.iter())\n                .map(|c| c.spans.len())\n                .sum();\n            let expected_backend_span_count = if expect_filtering { 1 } else { 3 };\n            assert_eq!(\n                backend_span_count, expected_backend_span_count,\n                \"compute_on_extension={compute_on_extension}, \\\\\n                 client_computed_stats={client_computed_stats}\"\n            );\n        }\n    }\n\n    /// On any stats path where stats are computed before the backend (extension or\n    /// tracer), the error sampler rescues errored chunks that would otherwise be\n    /// dropped (`AutoDrop`), stamping `_dd.errors_sr`, while non-errored P0 chunks\n    /// and explicit user drops are still dropped. Priorities are never rewritten.\n    #[test]\n    #[allow(clippy::too_many_lines)]\n    fn test_error_sampler_rescues_errored_p0_chunks() {\n        // (owner label, lambda_extension_compute_stats, client_computed_stats)\n        let cases = [(\"extension\", true, false), (\"tracer\", false, true)];\n\n        for (owner, compute_on_extension, client_computed_stats) in cases {\n            let config = Arc::new(Config {\n                apm_dd_url: \"https://trace.agent.datadoghq.com\".to_string(),\n                ext: crate::config::LambdaConfig {\n                    lambda_extension_compute_stats: compute_on_extension,\n                    ..Default::default()\n                },\n                ..Config::default()\n            });\n            let (tags_provider, processor) =\n                create_test_processor(&config, enabled_error_sampler());\n            let mut header_tags = create_test_header_tags();\n            header_tags.generic.client_computed_stats = client_computed_stats;\n\n            let make_span = |trace_id: u64, priority: f64, error: i32| -> pb::Span {\n                let mut metrics = HashMap::new();\n                metrics.insert(\"_sampling_priority_v1\".to_string(), priority);\n                pb::Span {\n                    trace_id,\n                    span_id: trace_id,\n                    parent_id: 0,\n                    error,\n                    metrics,\n                    service: \"svc\".to_string(),\n                    name: \"op\".to_string(),\n                    resource: \"res\".to_string(),\n                    ..Default::default()\n                }\n            };\n\n            // trace 1: kept normally (priority 1). trace 2: errored P0 (rescued).\n            // trace 3: non-errored P0 (dropped). trace 4: errored user drop (dropped).\n            let traces = vec![\n                vec![make_span(1, 1.0, 0)],\n                vec![make_span(2, 0.0, 1)],\n                vec![make_span(3, 0.0, 0)],\n                vec![make_span(4, -1.0, 1)],\n            ];\n\n            let (payload_info, _stats) =\n                processor.process_traces(config, tags_provider, header_tags, traces, 0, None);\n            let payload_info = payload_info.expect(\"expected Some payload\");\n            let backend_send_data = payload_info.builder.build();\n            let TracerPayloadCollection::V07(backend_payloads) = backend_send_data.get_payloads()\n            else {\n                panic!(\"expected V07\");\n            };\n\n            let kept: Vec<(u64, f64)> = backend_payloads\n                .iter()\n                .flat_map(|tp| tp.chunks.iter())\n                .flat_map(|c| c.spans.iter())\n                .map(|s| (s.trace_id, s.metrics[\"_sampling_priority_v1\"]))\n                .collect();\n            assert_eq!(\n                kept.len(),\n                2,\n                \"kept normal trace + rescued errored trace (owner={owner})\"\n            );\n            assert!(\n                kept.contains(&(1, 1.0)),\n                \"priority-1 trace kept (owner={owner})\"\n            );\n            assert!(\n                kept.contains(&(2, 0.0)),\n                \"errored P0 trace rescued with its original priority (owner={owner})\"\n            );\n            assert!(\n                !kept.iter().any(|(id, _)| *id == 3),\n                \"non-errored P0 trace dropped (owner={owner})\"\n            );\n            assert!(\n                !",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "0c15440e8184",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "ambiguous-compound-407b0eb0e7c1",
+		"command": "# Check where the 145 inferred edges' non-test endpoints live: how many go to #[cfg(test)] code vs prod code\ngrep -rn \"read_json_file\" bottlecap/src --include=\"*.rs\" | grep -v \"_test\\|tests\\|mod.rs:3\" | awk -F: '{print $1}' | sort | uniq -c | sort -rn | head\necho ---\n# Are all read_json_file usages inside cfg(test) modules?\n$(cat graphify-out/.graphify_python) -c \"\nimport re\nfrom pathlib import Path\nimport subprocess\nfiles = subprocess.run(['grep', '-rl', 'read_json_file', 'bottlecap/src', '--include=*.rs'], capture_output=True, text=True).stdout.split()\nprod = []\nfor f in files:\n    src = Path(f).read_text(encoding='utf-8')\n    for i, line in enumerate(src.splitlines(), 1):\n        if 'read_json_file(' in line and 'pub fn read_json_file' not in line:\n            # find enclosing cfg(test): look backwards for '#[cfg(test)]'\n            before = src[:src.find(line)]\n            # crude: is the last cfg(test) marker after the last non-test fn start? Just count: distance from nearest preceding cfg(test)\n            idx = before.rfind('#[cfg(test)]')\n            if idx == -1:\n                prod.append((f, i, line.strip()[:60]))\nprint('usages NOT preceded by a cfg(test) marker in file:', len(prod))\nfor f, i, l in prod[:10]: print(f, i, l)\n\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "407b0eb0e7c1",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "ambiguous-compound-3389852f11f2",
+		"command": "grep -rn \"CreateAsyncEndMethodDelegate\\|CreateEndMethodDelegate\" tracer/src/Datadog.Trace/ClrProfiler/CallTarget/Handlers/Continuations/TaskContinuationGenerator.cs | head; sed -n '1,60p' tracer/src/Datadog.Trace/ClrProfiler/CallTarget/Handlers/Continuations/TaskContinuationGenerator`1.cs",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "3389852f11f2",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "ambiguous-compound-8eff207b2aaf",
+		"command": "TOKEN=$(ddtool auth gitlab token 2>/dev/null | tail -1)\n# amd64 prod jobs may be on page 2 of job list\nfor page in 1 2; do\n  curl -s --header \"Authorization: Bearer $TOKEN\" \"https://gitlab.ddbuild.io/api/v4/projects/5562/pipelines/143167034/jobs?per_page=100&page=$page\" \\\n  | jq -r '.[] | select(.name | test(\"publish layer prod (amd64)\")) | \"\\(.id) \\(.name)\"' \\\n  | while read id name; do case \"$name\" in *us-east-1*|*us-west-2*) echo \"== $name ==\"; curl -s --header \"Authorization: Bearer $TOKEN\" \"https://gitlab.ddbuild.io/api/v4/projects/5562/jobs/$id/trace\" | grep -E \"Published version\";; esac; done\ndone",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "8eff207b2aaf",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "ambiguous-compound-56bf0c145015",
+		"command": "# Intentional scope shrink: back up old graph.json so the #479 guard doesn't block the write\nmv graphify-out/graph.json graphify-out/graph.json.prev-scope 2>/dev/null\n$(cat graphify-out/.graphify_python) -c \"\nimport sys, json\nfrom graphify.build import build_from_json\nfrom graphify.cluster import cluster, score_all\nfrom graphify.analyze import god_nodes, surprising_connections, suggest_questions\nfrom graphify.report import generate\nfrom graphify.export import to_json\nfrom pathlib import Path\n\nextraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text(encoding='utf-8'))\ndetection  = json.loads(Path('graphify-out/.graphify_detect.json').read_text(encoding='utf-8'))\n\nG = build_from_json(extraction, root='.', directed=False)\nif G.number_of_nodes() == 0:\n    print('ERROR: Graph is empty')\n    raise SystemExit(1)\ncommunities = cluster(G)\ncohesion = score_all(G, communities)\ntokens = {'input': 0, 'output': 0}\ngods = god_nodes(G)\nsurprises = surprising_connections(G, communities)\nlabels = {cid: 'Community ' + str(cid) for cid in communities}\nquestions = suggest_questions(G, communities, labels)\n\nwrote = to_json(G, communities, 'graphify-out/graph.json')\nif not wrote:\n    print('ERROR: refused to write graph.json (#479).')\n    raise SystemExit(1)\nreport = generate(G, communities, cohesion, labels, gods, surprises, detection, tokens, '.', suggested_questions=questions)\nPath('graphify-out/GRAPH_REPORT.md').write_text(report, encoding='utf-8')\nanalysis = {\n    'communities': {str(k): v for k, v in communities.items()},\n    'cohesion': {str(k): v for k, v in cohesion.items()},\n    'gods': gods,\n    'surprises': surprises,\n    'questions': questions,\n}\nPath('graphify-out/.graphify_analysis.json').write_text(json.dumps(analysis, indent=2, ensure_ascii=False), encoding='utf-8')\nprint(f'Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, {len(communities)} communities')\n\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "56bf0c145015",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "ambiguous-compound-b445e46514b5",
+		"command": "cd {{READ}}/user/source/datadog/datadog-lambda-extension\n# what did #1332's libdatadog bump touch in the stats/additional-tags surface?\ngit show 657cd548 --stat | head -30\necho ==== Cargo.lock libdd-trace-versions at #1332:\ngit show 657cd548:Cargo.lock 2>/dev/null | grep -A2 'name = \"libdd-trace-stats\"' | head -5\necho ==== current main Cargo.lock:\ngrep -A2 'name = \"libdd-trace-stats\"' Cargo.lock | head -5",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "b445e46514b5",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "redirect-aware-b483e9aec2da",
+		"command": "F=\"$(brew --repository)/Library/Taps/datadog/homebrew-tap/Formula/agenda.rb\"\ncat > \"$F\" <<'EOF'\nclass Agenda < Formula\n    desc \"Agenda is a templating tool used by DataScience to manage Delancie Schedules\"\n    homepage \"https://github.com/DataDog/agenda\"\n    url \"https://binaries.ddbuild.io/agenda/v0.12.0/agenda-v0.12.0-x86_64-macos.tar.xz\"\n    version \"v0.12.0\"\n    sha256 \"e2ec1fcdc7d45d64bea686376a3577405b14e1d8560a7871743680641e435d08\"\n\n    if OS.mac?\n        url \"https://binaries.ddbuild.io/agenda/v0.12.0/agenda-v0.12.0-x86_64-macos.tar.xz\"\n        version \"v0.12.0\"\n        sha256 \"e2ec1fcdc7d45d64bea686376a3577405b14e1d8560a7871743680641e435d08\"\n    end\n\n    def install\n        bin.install \"agenda\"\n    end\n end\nEOF\necho \"=== brew info test ===\"; brew info datadog/tap/agenda 2>&1 | head -6\necho \"=== enumeration test (brew desc, triggers Formula.all) ===\"; brew desc --search agenda 2>&1 | grep -iE 'error|invalid|agenda' | head",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "b483e9aec2da",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "redirect-aware-d8dc21fc6b0a",
+		"command": "cat > {{OUTSIDE}}/windows-temp/pi-unc-test.ps1 << 'EOF'\nSet-Location '{{READ}}/unc-home'\nWrite-Host \"PS cwd: $(Get-Location)\"\nWrite-Host \"=== zsh ===\"\nwsl.exe -e zsh -i -c 'echo \"zsh PWD: $PWD\"; node -e \"console.log(`\"node cwd: `\" + process.cwd())\"'\nWrite-Host \"=== bash ===\"\nwsl.exe -e bash -i -c 'echo \"bash PWD: $PWD\"; node -e \"console.log(`\"node cwd: `\" + process.cwd())\"'\nEOF\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File '{{OUTSIDE}}/windows-temp\\pi-unc-test.ps1'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "d8dc21fc6b0a",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "redirect-aware-853445717d2f",
+		"command": "cat > {{READ}}/user/unc-probe.sh << 'EOF'\necho \"shell: $0, PWD: $PWD\"\nnode -e \"console.log('node cwd: ' + process.cwd())\"\nEOF\ncat > {{OUTSIDE}}/windows-temp/pi-unc-test.ps1 << 'EOF'\nSet-Location '{{READ}}/unc-home'\nWrite-Host \"PS cwd: $(Get-Location)\"\nWrite-Host \"=== zsh ===\"\nwsl.exe -e {{READ}}/users/linuxbrew/.linuxbrew/bin/zsh -i {{READ}}/user/unc-probe.sh\nWrite-Host \"=== bash ===\"\nwsl.exe -e bash -i {{READ}}/user/unc-probe.sh\nEOF\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File '{{OUTSIDE}}/windows-temp\\pi-unc-test.ps1'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "853445717d2f",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "redirect-aware-a383a1b7831e",
+		"command": "cat > {{OUTSIDE}}/tmp/gql.json <<'EOF'\n{\"query\":\"query { layout(hashId: \\\"yG5qz\\\", revisionId: \\\"latest\\\") { title privacy geometry hashId revision { hashId createdAt model qmkVersion config md5 layers { position title color keys } combos { keyIndices layerIdx name trigger } } } }\"}\nEOF\ncurl -s -X POST \"https://oryx.zsa.io/graphql\" -H \"Content-Type: application/json\" -d @{{OUTSIDE}}/tmp/gql.json -o {{OUTSIDE}}/tmp/layout.json -w \"%{http_code}\\n\"\nhead -c 600 {{OUTSIDE}}/tmp/layout.json",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a383a1b7831e",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "redirect-aware-6948960f9427",
+		"command": "cp {{OUTSIDE}}/tmp/gql.json /dev/null 2>/dev/null; cat > {{OUTSIDE}}/tmp/gql2.json <<'EOF'\n{\"query\":\"query { layout(hashId: \\\"yG5qz\\\", revisionId: \\\"latest\\\") { title privacy geometry hashId revision { hashId createdAt model qmkVersion config md5 layers { position title color keys } combos { keyIndices layerIdx name trigger } } } }\"}\nEOF\ncurl -s -X POST \"https://oryx.zsa.io/graphql\" -H \"Content-Type: application/json\" -d @{{OUTSIDE}}/tmp/gql2.json -o {{OUTSIDE}}/tmp/layout2.json -w \"%{http_code}\\n\"\npython3 -c \"import json; d=json.load(open('{{OUTSIDE}}/tmp/layout2.json'))['data']['layout']; r=d['revision']; print(r['hashId'], r['createdAt']); print('combos:', json.dumps(r['combos'])[:300]); print('layers:', len(r['layers']))\"\ncp {{OUTSIDE}}/tmp/layout2.json {{OUTSIDE}}/tmp/pi-python-tool/4703d1cd5c4f3526/scratch/",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "6948960f9427",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "redirect-aware-28f93a16c8bd",
+		"command": "cat > {{OUTSIDE}}/tmp/gql3.json <<'EOF'\n{\"query\":\"query { layout(hashId: \\\"yG5qz\\\", revisionId: \\\"aNjg5J\\\") { title geometry hashId revision { hashId createdAt model layers { position title keys } combos { keyIndices layerIdx name trigger } config } } }\"}\nEOF\ncurl -s -X POST \"https://oryx.zsa.io/graphql\" -H \"Content-Type: application/json\" -d @{{OUTSIDE}}/tmp/gql3.json -o {{OUTSIDE}}/tmp/layout3.json -w \"%{http_code}\\n\"\npython3 -c \"import json; d=json.load(open('{{OUTSIDE}}/tmp/layout3.json')); r=d['data']['layout']['revision']; print(r['hashId'], r['createdAt']); print('layers:', len(r['layers']))\"\ncp {{OUTSIDE}}/tmp/layout3.json {{OUTSIDE}}/tmp/pi-python-tool/4703d1cd5c4f3526/scratch/",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "28f93a16c8bd",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "known-hard-shape-97668642e602",
+		"command": "echo `touch probe`",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "97668642e602",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "known-hard-shape-e2cda2106ecb",
+		"command": "echo <(touch probe)",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e2cda2106ecb",
+		"expected": {
+			"action": "prompt",
+			"cause": "process-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "process-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "known-hard-shape-5e28a48dd368",
+		"command": "printf x & touch probe",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "5e28a48dd368",
+		"expected": {
+			"action": "prompt",
+			"cause": "background",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "known-hard-shape-6d5f8c57de05",
+		"command": "command touch probe",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "6d5f8c57de05",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "known-hard-shape-4c85937764c5",
+		"command": "for x in $(touch probe); do echo ok; done",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "4c85937764c5",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "known-hard-shape-732e4c210ffe",
+		"command": "echo 'unterminated",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "732e4c210ffe",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "known-hard-shape-c96303d07ed5",
+		"command": "echo $(unclosed",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "c96303d07ed5",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "known-hard-shape-0e7ad319fe0a",
+		"command": "( echo",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "0e7ad319fe0a",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "known-hard-shape-a5619b20da6a",
+		"command": "cat <<EOF",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a5619b20da6a",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "known-hard-shape-d8c6ad179eae",
+		"command": "echo a &&",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "d8c6ad179eae",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "known-hard-shape-6668d58c8630",
+		"command": "echo `x",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "6668d58c8630",
+		"expected": {
+			"action": "prompt",
+			"cause": "parse-error",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "command-query-v",
+		"command": "command -v git",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "command-query-V",
+		"command": "command -V git",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "command-ls",
+		"command": "command ls",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "xargs-cat",
+		"command": "xargs -0 cat",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "nice-ls",
+		"command": "nice -n 5 ls",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "env-ls",
+		"command": "env FOO=1 ls",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "test-clause",
+		"command": "[[ a && b ]]",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "brace-expansion",
+		"command": "echo {a,b}",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "arithmetic-substitution",
+		"command": "echo $((1 + $(touch probe)))",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "heredoc",
+		"command": "cat <<EOF\nhi\nEOF",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "background",
+		"command": "echo hi &",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "background",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "subshell",
+		"command": "(echo hi)",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "subshell",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "function",
+		"command": "f() { echo hi; }",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "function-definition",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "assignment",
+		"command": "FOO=bar",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "noop-cd",
+		"command": "cd {{CWD}}",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "plain-allow",
+		"command": "fixture-tool read",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": "HostBash(fixture-tool *)",
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": "HostBash(fixture-tool *)",
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-allow",
+		"command": "echo $(date)",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "redirect-allow",
+		"command": "fixture-write ok > {{OUTSIDE}}/approved",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": "HostBash(fixture-write * > {{OUTSIDE}}/approved)",
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": "HostBash(fixture-write * > {{OUTSIDE}}/approved)",
+					"redirectAware": true
+				}
+			]
+		}
+	},
+	{
+		"id": "redirect-denied-broad-allow",
+		"command": "fixture-tool write > {{OUTSIDE}}/other",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": true
+				}
+			]
+		}
+	},
+	{
+		"id": "redirect-quoted-argument",
+		"command": "echo \"p\" > {{OUTSIDE}}/z",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": true
+				}
+			]
+		}
+	},
+	{
+		"id": "redirect-inside-write-root",
+		"command": "echo \"p\" > {{WRITE}}/z",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "redirect-null",
+		"command": "echo \"p\" > /dev/null",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "redirect-descriptor",
+		"command": "echo \"p\" 2>&1",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "ask",
+		"command": "fixture-ask run",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": "HostBash(fixture-ask *)",
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": "HostBash(fixture-ask *)",
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "deny",
+		"command": "fixture-deny run",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "deny",
+			"cause": "complete",
+			"matchedRule": "HostBash(fixture-deny *)",
+			"steps": []
+		}
+	},
+	{
+		"id": "ask-compound",
+		"command": "echo hi && fixture-ask run",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": "HostBash(fixture-ask *)",
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": "HostBash(fixture-ask *)",
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "deny-incomplete-sibling",
+		"command": "echo $(date) && fixture-deny run",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "deny",
+			"cause": "command-substitution",
+			"matchedRule": "HostBash(fixture-deny *)",
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "deny",
+					"cause": "complete",
+					"matchedRule": "HostBash(fixture-deny *)",
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "deny-incomplete-step",
+		"command": "fixture-deny $(date)",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "deny",
+			"cause": "command-substitution",
+			"matchedRule": "HostBash(fixture-deny *)",
+			"steps": []
+		}
+	},
+	{
+		"id": "ask-before-yolo",
+		"command": "fixture-ask run",
+		"profile": "yolo",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": "HostBash(fixture-ask *)",
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": "HostBash(fixture-ask *)",
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "deny-before-yolo",
+		"command": "fixture-deny run",
+		"profile": "yolo",
+		"shell": "host-bash",
+		"expected": {
+			"action": "deny",
+			"cause": "complete",
+			"matchedRule": "HostBash(fixture-deny *)",
+			"steps": []
+		}
+	},
+	{
+		"id": "yolo-incomplete",
+		"command": "for x in a; do fixture-ask run; done",
+		"profile": "yolo",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "trusted-cell",
+		"command": "fixture-unknown run",
+		"profile": "trusted",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "unrestricted-cell",
+		"command": "fixture-deny run",
+		"profile": "unrestricted",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "pwsh-rule",
+		"command": "Get-Fixture sample",
+		"profile": "default",
+		"shell": "pwsh",
+		"expected": {
+			"action": "allow",
+			"cause": "not-bash",
+			"matchedRule": "Pwsh(Get-Fixture *)",
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "not-bash",
+					"matchedRule": "Pwsh(Get-Fixture *)",
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "pwsh-quoted-redirect",
+		"command": "echo \"p\" > {{OUTSIDE}}/z",
+		"profile": "trusted",
+		"shell": "pwsh",
+		"expected": {
+			"action": "prompt",
+			"cause": "not-bash",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "not-bash",
+					"matchedRule": null,
+					"redirectAware": true
+				}
+			]
+		}
+	},
+	{
+		"id": "pwsh-trusted-cell",
+		"command": "Get-Unknown sample",
+		"profile": "trusted",
+		"shell": "pwsh",
+		"expected": {
+			"action": "allow",
+			"cause": "not-bash",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "not-bash",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "auto-cell",
+		"command": "fixture-unknown run",
+		"profile": "auto",
+		"shell": "host-bash",
+		"expected": {
+			"action": "classify",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "classify",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "research-deny",
+		"command": "ls",
+		"profile": "research",
+		"shell": "host-bash",
+		"expected": {
+			"action": "deny",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "secret-veto",
+		"command": "command cat .env",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "outside-veto",
+		"command": "command cat {{OUTSIDE}}/passwd",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "env-veto",
+		"command": "env",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "printenv-veto",
+		"command": "printenv",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "read-root",
+		"command": "command cat {{READ}}/file",
+		"profile": "default",
+		"shell": "host-bash",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	}
+]

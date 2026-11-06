@@ -383,15 +383,23 @@ filter stays observe-only:
   `host_bash` runs only commands the read-only tier proves read-only, and
   allow rules never widen that set (`bash` is denied by name there).
 - **default / auto / trusted:** deny rules > ask rules > the tightened
-  read-only tier (host vetoes first: `env`/`printenv` as the command, any `$`
-  outside single quotes, the active-construct screen (command/process
-  substitution, backgrounding, grouping, heredocs, unhandled separators,
-  unterminated quotes; `command` removed from the safe list), file arguments
-  matching the secret-mask patterns minus exceptions) > redirect-aware allow
-  rules > the profile cell. A bash call whose own projection is incomplete
-  (its span holds a construct guard cannot evaluate, e.g. command
-  substitution) prompts and is never authorized by the tier or an allow rule;
-  its complete sibling calls are still evaluated normally.
+  read-only tier (host vetoes first: `env`/`printenv` as the command word,
+  any `$` expansion the analysis reports, file arguments matching the
+  secret-mask patterns minus exceptions) > redirect-aware allow rules > the
+  profile cell. The tier judges the call's **unwrapped argv** plus its
+  structured redirects, never the subject text: the read-only name sets and
+  the duckdb/mlr/find/awk validators are fed argv, and a pure assignment is
+  taken from the analysis. A wrapper chain the adapter unwraps (`command ls`,
+  `xargs cat`) is therefore judged by its inner command, which is the recovery
+  this adoption exists for; `command -v`/`-V` are plain introspection queries,
+  not wrappers, and are left un-unwrapped (so they prompt). A call whose own
+  projection is incomplete (its span holds a construct guard cannot evaluate,
+  e.g. command substitution, or a construct nested in `$((...))`/`{...}`)
+  prompts and is never authorized by the tier or an allow rule; its complete
+  sibling calls are still evaluated normally. The analysis itself accounts for
+  every node type the parser can emit (a table-driven traversal-coverage
+  guarantee in `policy/shellast.ts`): a node type the table cannot classify is
+  raised as `unrecognized-node` and prompts rather than being skipped.
 - A top-level file redirect (outside the writeRoots exemptions) is allowed
   only by a redirect-aware allow rule, one whose pattern contains `>` (e.g.
   `HostBash(rg * > *)`). Broad rules and the profile cell never authorize a
@@ -404,7 +412,10 @@ filter stays observe-only:
   deny/ask/allow rules match, yolo allows, and the pwsh profile cell governs
   an unruled command. There is no split, no per-subcommand rule, and no
   read-only tier; a malformed command (an unterminated quote) prompts instead
-  of reaching an allow cell.
+  of reaching an allow cell. A top-level file redirect in a pwsh command
+  (`echo "p" > /home/z`) is allowed only by a redirect-aware `Pwsh(... > ...)`
+  rule: the text scanner is quote-symmetric, so a quoted argument can no
+  longer hide the write (fail closed).
 - **yolo:** deny rules block, ask rules prompt, everything else allows.
 - **unrestricted:** allow, rules ignored.
 - Non-interactive sessions (`!ctx.hasUI`): prompts collapse to deny.
@@ -745,7 +756,7 @@ process tree down, and `kill(-pid)` on the returned child's pid works too.
 - `npm run test:guard`: unit (`tests/guard-sandbox-unit.test.mts`) and
   integration (`tests/guard-sandbox-integration.test.mts`) suites for the
   sandbox library, plus the policy suites: `tests/guard-policy.test.mts`
-  (decision table, host shell and the active-construct screen, protected
+  (decision table, host shell and the argv-judged read-only tier, protected
   paths, local reads, config, state), `tests/guard-classes.test.mts`
   (classification, suggestions, save helper), `tests/guard-migrate.test.mts`
   (migrate fixtures and idempotence), `tests/guard-filter.test.mts`

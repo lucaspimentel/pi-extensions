@@ -1,0 +1,1780 @@
+[
+	{
+		"id": "widen-16569879817e",
+		"command": "sudo -n true 2>&1 && echo \"sudo ok\" || echo \"sudo needs password\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "16569879817e",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-3364b8f21390",
+		"command": "find {{READ}}/user/source/datadog/libdatadog -name \"*.rs\" -path \"*trace*\" | xargs grep -ln \"ErrorsSampler\" 2>/dev/null",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "3364b8f21390",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-90316e02c998",
+		"command": "grep -n \"^<<<<<<<\\|^=======$\\|^>>>>>>>\" bottlecap/src/traces/stats_concentrator_service.rs",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "90316e02c998",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-e9c006ad3bbb",
+		"command": "grep -n \"^<<<<<<<\\|^|||||||\\|^=======$\\|^>>>>>>>\" bottlecap/src/traces/stats_concentrator_service.rs",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e9c006ad3bbb",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-e3ab4519f039",
+		"command": "find {{READ}}/user/.cargo/registry/src -maxdepth 2 -name \"libdd-trace-utils-*\" -type d | head -1 | xargs -I{} grep -rn \"fn send_with_retry\\|is_retriable\\|RETRIABLE\\|backoff\\|retry\" {} -l | head -3",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e3ab4519f039",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-06a705915425",
+		"command": "rg -n 'Deserialize|runner.Run|Assert.Empty\\(tracerGitMetadata\\)' profiler/test/Datadog.Profiler.IntegrationTests/DebugInfo/GitMetadataTest.cs; rg -n ThrowIfHandlerFailed profiler/test/Datadog.Profiler.IntegrationTests/Helpers/{MockDatadogAgent,TestApplicationRunner}.cs",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "06a705915425",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-a2c233e66db3",
+		"command": "rg -n \"appendRules|defaultRules|'\\\\$\" packages/dd-trace/src/config/index.js | head; rg -n \"cloudPayloadTagging\" packages/dd-trace/src/config/defaults.js -A 30 | head -60",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a2c233e66db3",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-8c9008ad5b0e",
+		"command": "rg -n \"defaultRules|\\\\$\\\\.\" packages/dd-trace/src/payload-tagging/config/*.js | head -30",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "8c9008ad5b0e",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-95f42cebe07d",
+		"command": "ls packages/dd-trace/src/payload-tagging/config/ && rg -n \"appendRules|\\\\$\" packages/dd-trace/src/payload-tagging/config/index.js | head -30",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "95f42cebe07d",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-2d1f718cda42",
+		"command": "rg -n 'from_tags|TracePropagationStyle|TracePropagationBehaviorExtract' datadog-opentelemetry/src/core/configuration/configuration.rs | head -25; rg -n 'pub\\(crate\\) fn (extract_baggage|ot_extract_rv|ot_sanitize|ot_set_rv_th|get_extractors|get_injectors)|pub\\(crate\\) fn from_header' datadog-trace-propagation/src || true; rg -n '#\\[doc\\(hidden\\)\\]' datadog-trace-propagation/src/{baggage.rs,config.rs,tracecontext.rs}",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "2d1f718cda42",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-e90dd3fcb745",
+		"command": "printf '%s\\n' '--- direct libdd references in new crate ---'; rg -n \"libdd[-_]\" datadog-trace-propagation || true; printf '%s\\n' '--- public exports ---'; rg -n '^pub (mod|use|trait|struct|enum|const|fn)|^pub\\(crate\\) mod' datadog-trace-propagation/src/{lib.rs,configuration.rs,sampling.rs,context.rs,carrier.rs,datadog.rs,tracecontext.rs,b3.rs,b3multi.rs,baggage.rs} | head -240",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e90dd3fcb745",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-4fdb01ff20c4",
+		"command": "date; TZ=America/Toronto date; echo \"---\"; git -C {{READ}}/user/source/datadog/lucas-pimentel rev-parse --show-toplevel",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "4fdb01ff20c4",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-7ac794d83b0a",
+		"command": "date; TZ=America/New_York date; echo \"---\"; ls {{READ}}/user/source/datadog/lucas-pimentel/daily-summaries/ 2>/dev/null | tail -20",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "7ac794d83b0a",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-e7afcf3cb5c3",
+		"command": "ls -la graphify-out/ | grep -vE \"^\\s*$\"; echo \"===\"; ls graphify-out/semantic* 2>/dev/null | head",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e7afcf3cb5c3",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-badfe9716311",
+		"command": "WORKSPACE=\"{{READ}}/user/source/datadog/lucas-pimentel\"; SOURCE_ROOT=\"{{READ}}/user/source/datadog\"; date; TZ=America/New_York date; ls \"$WORKSPACE/daily-summaries/\" 2>/dev/null | tail -20; gh auth status 2>&1 | head -20; gh api user --jq .login",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "badfe9716311",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-8c79484816a4",
+		"command": "grep -n \"80f1649\\|residual gap\\|no linked PR visible\\|no PR yet\\|further touch 2026-09-23\\|assigned Lucas.$\" projects.md | head; echo ---; grep -n \"### Problems\" projects.md",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "8c79484816a4",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-ce0557dd3dc9",
+		"command": "date; echo \"---\"; TZ=America/New_York date; echo \"---\"; git rev-parse --show-toplevel 2>/dev/null; echo \"---\"; pwd",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "ce0557dd3dc9",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-5e00b368f1c0",
+		"command": "TZ=America/New_York date '+%F %T %Z'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "5e00b368f1c0",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-9ba40f33ba50",
+		"command": "ls {{READ}}/user/source/datadog/lucas-pimentel/.agent/skills/yesterday-summary/scripts/ 2>/dev/null; ls {{READ}}/user/source/datadog/lucas-pimentel/.agent/skills/yesterday-summary/references/ 2>/dev/null; date; TZ=America/New_York date; ls {{READ}}/user/source/datadog/lucas-pimentel/daily-summaries/ 2>/dev/null | tail -5",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "9ba40f33ba50",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-54fddca0344a",
+		"command": "WORKSPACE=\"{{READ}}/user/source/datadog/lucas-pimentel\"\necho \"TZ check:\"; TZ=America/New_York date\necho \"--- gh auth ---\"\ngh auth status 2>&1 | grep -E \"github.com|account\" | head -20\necho \"--- pr-threads probe ---\"\ngh pr-threads list DataDog dd-trace-dotnet 1 --all 2>&1 | head -3\necho \"--- existing output ---\"\nls -la \"$WORKSPACE/daily-summaries/\" 2>/dev/null | tail -5\necho \"--- scripts ---\"\nls \"$WORKSPACE/.agent/skills/yesterday-summary/scripts/\" \"$WORKSPACE/.agent/skills/yesterday-summary/references/\" 2>&1",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "54fddca0344a",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-eb096e88ca18",
+		"command": "ls {{READ}}/user/source/datadog/lucas-pimentel/.pi/skills/yesterday-summary/ {{READ}}/user/source/datadog/lucas-pimentel/.pi/skills/yesterday-summary/scripts/ {{READ}}/user/source/datadog/lucas-pimentel/.pi/skills/yesterday-summary/references/ 2>&1; echo ---; ls {{READ}}/user/source/datadog/lucas-pimentel/daily-summaries/ 2>&1 | tail -5; echo ---; date; TZ=America/New_York date",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "eb096e88ca18",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-c317dabba32f",
+		"command": "TZ=America/New_York date && echo \"---\" && gh auth status 2>&1 | head -30",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "c317dabba32f",
+		"expected": {
+			"action": "prompt",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-0aea39d156c9",
+		"command": "date; date -u; cat {{READ}}/timezone 2>/dev/null; TZ=America/New_York date \"+%Y-%m-%d %H:%M %Z\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "0aea39d156c9",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-5029d0496694",
+		"command": "date; TZ=America/New_York date '+%Y-%m-%d %A %H:%M %Z'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "5029d0496694",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-a44dc0e65fe3",
+		"command": "grep -nE 'awk .*NR == 1|all GitLab scripts show|Unify `--help`' skills/gitlab-status/scripts/{bridges,find-pipeline,job-status,pipeline-status}.sh skills/gitlab-failure-survey/scripts/{classify-test-failures,fetch-pipelines,survey-job-traces,survey-pipeline-variables}.sh tests/gitlab-mocked.sh TODO.md",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a44dc0e65fe3",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-bb59be0de147",
+		"command": "rg -n 'baseURL|baseUrl|BASE_URL|ENDPOINT' node_modules/@earendil-works/pi-ai/dist/{providers/anthropic.js,providers/google.js,providers/openai.js,providers/baseten.js,providers/typesafe.js,api/anthropic.js,api/google.js,api/openai-responses.js} | head -55; rg -n 'version' node_modules/@earendil-works/{pi-ai,pi-coding-agent}/package.json | head",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "bb59be0de147",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-7546ec79e66f",
+		"command": "rg -n 'Memory|memory|ModelsStore' node_modules/@earendil-works/pi-ai/dist/index.d.ts node_modules/@earendil-works/pi-ai/dist/models-store.d.ts; rg -n 'client\\?|baseUrl\\?|endpoint|baseURL|url\\?' node_modules/@earendil-works/pi-ai/dist/api/{anthropic-messages,google-generative-ai,openai-responses,openai-completions,typesafe-system-one}.d.ts; rg -n 'questions|must|empty' node_modules/@earendil-works/pi-ai/dist/api/typesafe-system-one*.js",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "7546ec79e66f",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-422576376929",
+		"command": "grep -n -E 'sha256_of\\(\\)|verified_sha256\\(\\)|^lock_hash|case \"\\$guard_rc\"' scripts/cargo-audit-release-gate.sh; grep -n -E 'usage_error\\(\\)|rc\" -eq 0' scripts/cargo-audit-report-guard.sh; grep -n -E 'for fake_env, rc, message|if text is None' scripts/tests/audit-release-gate/test_release_gate.py",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "422576376929",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-2642e31ec5c4",
+		"command": "grep -n \"fn apply_error_rescue\\b\\|fn apply_error_rescue_at\\|fn rescue_with_sampler\\|fn lock_sampler\\|fn new_error_sampler\\|fn resolve_payload_env\\|fn span_view\\|fn sample_and_stamp\\|let Some(root) = chunk.spans.get(root_index)\\|fn default_error_sampler\\|fn sampler_for\\|fn parse_error_sampler_config\\|^///$\" crates/datadog-trace-agent/src/trace_processor.rs | head -20; grep -n \"fn new_error_sampler\\|default_error_sampler\" crates/datadog-trace-agent/src/trace_processor.rs | head",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "2642e31ec5c4",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-36167f85b071",
+		"command": "rg -n \"fn valid_stats_body|fn stats_body|fn wait_for|stats_payload\\(\\s*$|fn stats_payload\\b|fn client_payload\" crates/datadog-mock-intake/src/lib.rs | head",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "36167f85b071",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-a60d404f958d",
+		"command": "grep -rln \"orchestrator\\|OrchestratorURL\\|OrchestratorFunction\" --include=*.ts --include=*.py --include=*.js . | grep -iv node_modules | grep -iv cdk.out | head; echo \"=== CDK stack files ===\"; find . -path ./node_modules -prune -o -name \"*.ts\" -print 2>/dev/null | xargs grep -ln \"Orchestrator\\|orchestrator\" 2>/dev/null | grep -iv cdk.out | head",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a60d404f958d",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-a4c1f4d8568e",
+		"command": "rg -n '500 chars|truncat|first child|assumes|grep -oE|deterministic|usually inflated' .claude/skills/ci-triage/references/{known-failures,pipeline-structure}.md .claude/skills/ci-triage/SKILL.md",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a4c1f4d8568e",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-543cc23b8454",
+		"command": "rg -n \"key.json|A\\\"|\\\"B\\\"|\\\"C\\\"|LETTERS\" src/shuffle.ts | head -8; rg -n \"command|case \" src/cli.ts | head -10; rg -n \"localStorage|scores\" src/review.ts | head -5",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "543cc23b8454",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-e68ec43ab749",
+		"command": "find {{CWD}} -name \"package.json\" | grep -v node_modules | xargs grep -l \"mariozechner\" 2>/dev/null",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e68ec43ab749",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-1a77ba1e1f48",
+		"command": "rg -n \"permissions allow|\\\"allow\\\"|'allow'|case \\\"allow\\\"\" {{CWD}}/extensions/pi-tool-permissions/index.ts | head; rg -n \"permissions allow\" {{CWD}} -r 2>/dev/null | head",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "1a77ba1e1f48",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-25424c62a4c8",
+		"command": "printf '\\nPi documentation sizes:\\n'; wc -l node_modules/@earendil-works/pi-coding-agent/docs/{extensions,tui,sdk,keybindings,themes,rpc-commands,json}.md; printf '\\nTest entry points:\\n'; rg -n '^test\\(|^function test|All .*tests passed|^const tests|^async function main|^after\\(' tests/guard-policy.test.mts tests/guard-classes.test.mts tests/guard-harness.test.mts tests/guard-dialogs.test.mts tests/guard-test-temp.mts | head -80; printf '\\nNested instruction files:\\n'; rg --files --hidden -g AGENTS.md -g CLAUDE.md extensions/guard tests docs 2>/dev/null || true",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "25424c62a4c8",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-91e2f60197a2",
+		"command": "cd {{CWD}} && rg -rn \"Theme\" node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts | head -5 && rg -n \"class Theme|selectList|editor\" node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme*.d.ts 2>/dev/null | head; find node_modules/@earendil-works/pi-coding-agent/dist -name \"*.d.ts\" | xargs rg -ln \"class Theme\" 2>/dev/null | head -3",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "91e2f60197a2",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-39bfb21dec39",
+		"command": "file extensions/guard/tools/shell-render.ts extensions/guard/index.ts extensions/timestamps/index.ts; echo ---; grep -c $'\\r' extensions/guard/tools/shell-render.ts extensions/guard/index.ts extensions/timestamps/index.ts; echo ---; wc -l extensions/guard/tools/shell-render.ts",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "39bfb21dec39",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-9208e1f14f27",
+		"command": "grep -l \"formatDelta\" {{READ}}/user/.pi/agent/sessions/--home-lucas-source-lucaspimentel-pi-extensions--/*.jsonl | xargs ls -t | head -3",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "9208e1f14f27",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-98cf302d071e",
+		"command": "cd {{CWD}} && rg -n \"formatDelta|deltaFor|anchors|delta\" extensions/timestamps/ | head -40; echo ---; rg -n $'\\r' extensions/timestamps/ | head; echo ---; file extensions/timestamps/*.ts",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "98cf302d071e",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-9a7412c766be",
+		"command": "rg -n 'READONLY_BASH_SAFE_ALWAYS|export function splitTopLevelShell|export function assessBreakdownReliability|Iteration / case|for\\|select|export function stripStructural|export function tokenizeSimple|function evaluateHostShell|const reliability|function hostTierAllowReason|export function hostTierVetoReason|if \\(READONLY_BASH_SAFE_ALWAYS' extensions/guard/policy/{shellsplit,bashtier,decision}.ts",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "9a7412c766be",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-75f1aed44dee",
+		"command": "cd {{CWD}} && ls -la tests/fixtures/ | head && echo \"=== precedent: test files importing other test modules ===\" && grep -rn \"^import .*from \\\"\\./\" tests/*.mts | grep -v \"\\.\\./extensions\" | head -20 && echo \"=== guard-harness head ===\" && head -20 tests/guard-harness.test.mts && echo \"=== does test:ci include a non-test helper? ===\" && grep -o \"tests/[a-z0-9-]*\\.mts\" package.json | sort -u | wc -l",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "75f1aed44dee",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "widen-2f4c7d74ba91",
+		"command": "cd {{CWD}} && grep -rn \"nine\\|ten \\|ten$\\|nine-\\|ten-\" README.md docs/gh-read-design.md extensions/gh-read/index.ts extensions/gh-read/validate.ts extensions/gh-read/api.ts TODO.md tests/gh-read-tool.test.mts tests/gh-read-validate.test.mts 2>/dev/null | grep -vi \"nine-item\\|ten-item\" | head -40",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "2f4c7d74ba91",
+		"expected": {
+			"action": "allow",
+			"cause": "complete",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	}
+]

@@ -1,0 +1,1300 @@
+[
+	{
+		"id": "incomplete-background-28c198aa79b7",
+		"command": "xdg-open https://github.com/DataDog/dd-trace-dotnet/pull/9310 2>/dev/null & echo opened",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "28c198aa79b7",
+		"sampleCause": "background",
+		"expected": {
+			"action": "prompt",
+			"cause": "background",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-background-10fe8fd4db19",
+		"command": "nohup cargo test -p datadog-mock-intake > {{OUTSIDE}}/tmp/mock-intake-test.log 2>&1 &\necho started",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "10fe8fd4db19",
+		"sampleCause": "background",
+		"expected": {
+			"action": "prompt",
+			"cause": "background",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-background-f1edae48862c",
+		"command": "nohup xdg-open \"https://datadoghq.atlassian.net/browse/SLES-3026\" >/dev/null 2>&1 & sleep 1; echo opened",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "f1edae48862c",
+		"sampleCause": "background",
+		"expected": {
+			"action": "prompt",
+			"cause": "background",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-background-910fa05abd1d",
+		"command": "cd bottlecap && cargo test --locked -j 2 --features test-mode --test double_count_integration_test > {{OUTSIDE}}/tmp/statsv2-rig-focused.log 2>&1 &",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "910fa05abd1d",
+		"sampleCause": "background",
+		"expected": {
+			"action": "prompt",
+			"cause": "background",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-background-3ed794ceca3e",
+		"command": "setsid nohup npm run run -- --config configs/first-run.yaml --skill git-commit > {{OUTSIDE}}/tmp/first-run-v4.log 2>&1 < /dev/null & echo \"pid=$!\"; sleep 10; ls runs/ | tail -1",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "3ed794ceca3e",
+		"sampleCause": "background",
+		"expected": {
+			"action": "prompt",
+			"cause": "background",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-background-85e1ae1fdefb",
+		"command": "cd {{READ}}/user/source/datadog/dd-trace-js--lpimentel-sles-3026-safe-payload-snapshot && nohup npm run test:trace:core > {{OUTSIDE}}/tmp/trace-core-node26.log 2>&1 & echo started; sleep 2; tail -1 {{OUTSIDE}}/tmp/trace-core-node26.log",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "85e1ae1fdefb",
+		"sampleCause": "background",
+		"expected": {
+			"action": "prompt",
+			"cause": "background",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-background-83b2863839c4",
+		"command": "cd {{READ}}/user/source/datadog/datadog-lambda-js--lpimentel-sync-esm-loader-hooks && (npx jest --coverage=false > {{OUTSIDE}}/tmp/review-jest-26.log 2>&1; echo \"exit=$?\" >> {{OUTSIDE}}/tmp/review-jest-26.log) & \nsleep 240; tail -3 {{OUTSIDE}}/tmp/review-jest-26.log",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "83b2863839c4",
+		"sampleCause": "background",
+		"expected": {
+			"action": "prompt",
+			"cause": "background",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-background-4b27c135b745",
+		"command": "setsid nohup npm run run -- --config configs/first-run.yaml --skill git-commit > {{OUTSIDE}}/tmp/first-run-v5.log 2>&1 < /dev/null & echo \"pid=$!\"; sleep 10; NEW=$(ls runs/ | tail -1); echo \"dir: $NEW\"; ls $NEW/cases 2>/dev/null | wc -l",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "4b27c135b745",
+		"sampleCause": "background",
+		"expected": {
+			"action": "prompt",
+			"cause": "background",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-command-substitution-2f2f9ca24114",
+		"command": "pwd; basename \"$(pwd)\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "2f2f9ca24114",
+		"sampleCause": "command-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-command-substitution-435c83607504",
+		"command": "which git-worktree-cd.sh && cat \"$(which git-worktree-cd.sh)\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "435c83607504",
+		"sampleCause": "command-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-command-substitution-583093b57be3",
+		"command": "chezmoi source-path && cd $(chezmoi source-path) && ls | head -30",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "583093b57be3",
+		"sampleCause": "command-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-command-substitution-9fc12293bdde",
+		"command": "which pup; pup --version 2>&1 | head -3; file $(which pup) 2>/dev/null",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "9fc12293bdde",
+		"sampleCause": "command-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-command-substitution-73b638760d6f",
+		"command": "cd \"$(brew --repository)\" && sed -n '441,470p' Library/Homebrew/formula.rb",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "73b638760d6f",
+		"sampleCause": "command-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-command-substitution-d4dd50e42b9f",
+		"command": "chezmoi source-path 2>/dev/null; cd \"$(chezmoi source-path)\" && git status",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "d4dd50e42b9f",
+		"sampleCause": "command-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-command-substitution-0f98afbd9b8e",
+		"command": "ls daily-summaries/ | head -5; head -20 \"$(ls daily-summaries/* | head -1)\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "0f98afbd9b8e",
+		"sampleCause": "command-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-command-substitution-7a66af9f0172",
+		"command": "printf 'python3 -c pass %s\\n' \"$(seq -f 'segment-%03g' 1 60 | tr '\\n' ' ')\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "7a66af9f0172",
+		"sampleCause": "command-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "command-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "command-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-function-definition-d721f3208e52",
+		"command": "ffgrep(){ :;}; grep -rn \"not properly owned\" .github .azure-pipelines .gitlab* tools 2>/dev/null | head -20",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "d721f3208e52",
+		"sampleCause": "function-definition",
+		"expected": {
+			"action": "prompt",
+			"cause": "function-definition",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-function-definition-5caab21d33df",
+		"command": "cd {{CWD}}\ngit branch -a | head; git symbolic-ref --short HEAD\nt() { echo \"--- git diff --stat $*\"; git --no-pager diff --stat \"$@\" >/dev/null 2>&1; echo \"exit=$?\"; }\nt HEAD... HEAD\nt HEAD...\nt HEAD.. HEAD\nt HEAD..HEAD\nt HEAD...HEAD\nt ..HEAD",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "5caab21d33df",
+		"sampleCause": "function-definition",
+		"expected": {
+			"action": "prompt",
+			"cause": "function-definition",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-function-definition-8af13bcfe5d2",
+		"command": "TOKEN=$(ddtool auth gitlab token); set +x\ngl_curl() { curl -sf --config <(printf 'header = \"Authorization: Bearer %s\"\\n' \"$TOKEN\") \"$@\"; }\ngl_curl \"https://gitlab.ddbuild.io/api/v4/projects/DataDog%2Fdatadog-lambda-extension/pipelines/136725777/bridges?per_page=5\" | jq '.[0].downstream_pipeline'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "8af13bcfe5d2",
+		"sampleCause": "function-definition",
+		"expected": {
+			"action": "prompt",
+			"cause": "function-definition",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-function-definition-9ae97f2e8a24",
+		"command": "TOKEN=$(ddtool auth gitlab token 2>/dev/null) && gl_curl() { curl -sf --config <(printf 'header = \"Authorization: Bearer %s\"\\n' \"$TOKEN\") \"$@\"; }; gl_curl \"https://gitlab.ddbuild.io/api/v4/projects/DataDog%2Fserverless-e2e-tests/jobs/2069867139/artifacts\" | jq -r '.[] | \"\\(.file_size)\\t\\(.file_path)\"' | head -20",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "9ae97f2e8a24",
+		"sampleCause": "function-definition",
+		"expected": {
+			"action": "prompt",
+			"cause": "function-definition",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-function-definition-e0f99b5e6bed",
+		"command": "export GH_TOKEN=\"$(gh auth token --user lucas-pimentel_ddog)\"\nraw() { gh api -H 'Accept: application/vnd.github.raw' \"repos/ddoghq/logs-backend/contents/$1?ref=prod\" 2>&1; }\nraw domains/intake/libs/intake-backend/common/src/main/resources/track-types.conf > {{OUTSIDE}}/tmp/tt.conf\nwc -l {{OUTSIDE}}/tmp/tt.conf\ngrep -n -B6 -A16 'v0.2/stats' {{OUTSIDE}}/tmp/tt.conf | head -80",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e0f99b5e6bed",
+		"sampleCause": "function-definition",
+		"expected": {
+			"action": "prompt",
+			"cause": "function-definition",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-function-definition-162f76e86fb2",
+		"command": "set +x\nTOKEN=$(ddtool auth gitlab token)\ngl_curl() { curl -sf --config <(printf 'header = \"Authorization: Bearer %s\"\\n' \"$TOKEN\") \"$@\"; }\nENC='DataDog%2Fserverless-e2e-tests'\nfor pid in 132139655 133517205 133517235 133630445 133341978 133049342; do\n  echo \"=== $pid keys ===\"\n  gl_curl \"https://gitlab.ddbuild.io/api/v4/projects/$ENC/pipelines/$pid/variables\" | jq -r '.[].key' | sort\n done\nunset TOKEN",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "162f76e86fb2",
+		"sampleCause": "function-definition",
+		"expected": {
+			"action": "prompt",
+			"cause": "function-definition",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-function-definition-b01d1f651f53",
+		"command": "cd {{CWD}}\nt() { echo \"--- git $*\"; git --no-pager diff --stat \"$@\" >/dev/null 2>&1; echo \"exit=$?\"; }\nt master... HEAD\nt master...\nt master.. HEAD\nt master..\nt ..HEAD\nt master...HEAD\nt master..HEAD\necho \"=== log ===\"\nl() { echo \"--- git log $*\"; git --no-pager log --oneline -1 \"$@\" >/dev/null 2>&1; echo \"exit=$?\"; }\nl master... HEAD\nl master...\nl ..master\nl master..",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "b01d1f651f53",
+		"sampleCause": "function-definition",
+		"expected": {
+			"action": "prompt",
+			"cause": "function-definition",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-function-definition-77184ac24bb6",
+		"command": "TOKEN=$(ddtool auth gitlab token 2>/dev/null); gl_curl() { curl -s --config <(printf 'header = \"Authorization: Bearer %s\"\\n' \"$TOKEN\") \"$@\"; }; gl_curl \"https://gitlab.ddbuild.io/api/v4/projects/DataDog%2Fserverless-e2e-tests/jobs/2069867139/artifacts\" | head -c 300; echo; gl_curl \"https://gitlab.ddbuild.io/api/v4/projects/DataDog%2Fserverless-e2e-tests/jobs/2069867139\" | jq '{artifacts_file: .artifacts_file}'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "77184ac24bb6",
+		"sampleCause": "function-definition",
+		"expected": {
+			"action": "prompt",
+			"cause": "function-definition",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-grouped-09efb8f9e5e9",
+		"command": "for p in python3 python \"py -3\"; do echo \"== $p\"; $p --version 2>&1 | head -1; done",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "09efb8f9e5e9",
+		"sampleCause": "grouped",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-grouped-3c7b6c395098",
+		"command": "for d in {{CWD}}/skills/*/; do echo \"== $d\"; ls \"$d\"; done",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "3c7b6c395098",
+		"sampleCause": "grouped",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-grouped-a5c7c30b9c49",
+		"command": "for d in {{READ}}/user/source/*/*/; do r=$(git -C \"$d\" remote get-url origin 2>/dev/null) && echo \"$d $r\"; done",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a5c7c30b9c49",
+		"sampleCause": "grouped",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-grouped-681264bde613",
+		"command": "for i in 1 2 3; do curl -s -m 8 -o /dev/null -w \"attempt$i:%{http_code}\\n\" http://127.0.0.1:4566/; done",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "681264bde613",
+		"sampleCause": "grouped",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-grouped-173fae76f082",
+		"command": "for f in .claude/skills/ci-triage/scripts/*.sh; do bash -n \"$f\" || exit; done; echo 'bash -n: all passed'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "173fae76f082",
+		"sampleCause": "grouped",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-grouped-358f7087b0a1",
+		"command": "if test -f graphify-out/graph.json; then printf 'Graph available\\n'; else printf 'No existing graph\\n'; fi",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "358f7087b0a1",
+		"sampleCause": "grouped",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-grouped-97705f64a6ab",
+		"command": "if rg -n 'HANDOFF|handoff' . --glob '!target/**'; then exit 1; else echo 'No remaining handoff references'; fi",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "97705f64a6ab",
+		"sampleCause": "grouped",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-grouped-360ab1732e81",
+		"command": "for d in {{READ}}/user/source/lucaspimentel/agent-skills/skills/*/; do echo \"$d: $(ls \"$d\" | tr '\\n' ' ')\"; done",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "360ab1732e81",
+		"sampleCause": "grouped",
+		"expected": {
+			"action": "prompt",
+			"cause": "grouped",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-heredoc-089c5bcf6c5c",
+		"command": "cat > {{OUTSIDE}}/tmp/gtest.txt << 'EOF'\nhello heredoc\nEOF\ncat {{OUTSIDE}}/tmp/gtest.txt",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "089c5bcf6c5c",
+		"sampleCause": "heredoc",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-heredoc-a86e2e9b0608",
+		"command": "python3 - << 'EOF'\nopen('{{OUTSIDE}}/tmp/py_probe','w').write('x')\nprint('ok')\nEOF",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a86e2e9b0608",
+		"sampleCause": "heredoc",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-heredoc-b018d833955e",
+		"command": "base64 -d -o {{OUTSIDE}}/tmp/wtest4.txt /dev/stdin <<B64EOF\naGVsbG8gd29ybGQK\nB64EOF",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "b018d833955e",
+		"sampleCause": "heredoc",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-heredoc-471b57dd676e",
+		"command": "bash -x {{OUTSIDE}}/tmp/map_e2e_pipeline_vars.sh <<< $'133517205\\tfailed\\t774be62\\t2026-08-26\\turl'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "471b57dd676e",
+		"sampleCause": "heredoc",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-heredoc-976217fc6e9f",
+		"command": "tee {{READ}}/user/source/datadog/serverless-components/graphify-out/probe.txt << 'EOF'\ntest\nEOF\necho done",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "976217fc6e9f",
+		"sampleCause": "heredoc",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-heredoc-e2071627120e",
+		"command": "cat >> {{OUTSIDE}}/tmp/dbg-api.mjs << 'EOF'\nconsole.log(\"requests:\", requests);\nEOF\nnode {{OUTSIDE}}/tmp/dbg-api.mjs 2>&1 | tail -3",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e2071627120e",
+		"sampleCause": "heredoc",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-heredoc-53b299c1774a",
+		"command": "bash -s {{READ}}/user/.local/share/chezmoi/linux/dot_local/bin/executable_git-rebase-parent.sh <<'EOF'\nprintf 'arg=%s\\n' \"$1\"\nEOF",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "53b299c1774a",
+		"sampleCause": "heredoc",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-heredoc-a073340b3ba9",
+		"command": "{{OUTSIDE}}/tmp/tmp.PbWV4U2ebr/venv/bin/python - <<'PY'\nimport boto3, requests\nprint('boto3', boto3.__version__)\nprint('requests', requests.__version__)\nPY",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a073340b3ba9",
+		"sampleCause": "heredoc",
+		"expected": {
+			"action": "prompt",
+			"cause": "heredoc",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-process-substitution-169a682fe002",
+		"command": "diff <(chezmoi cat {{READ}}/user/.profile) {{READ}}/user/.profile",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "169a682fe002",
+		"sampleCause": "process-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "process-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "process-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-process-substitution-0dcd9de18fba",
+		"command": "diff <(env | sort) <(zsh -i -c 'env | sort' 2>/dev/null) | grep -v \"^[0-9]\" | head -40",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "0dcd9de18fba",
+		"sampleCause": "process-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "process-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "process-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-process-substitution-c7a0e194eb34",
+		"command": "diff <(git diff e852fe44^ e852fe44) <(git diff 64395fed 9cd5f961) && echo IDENTICAL || echo DIFFERENT",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "c7a0e194eb34",
+		"sampleCause": "process-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "process-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "process-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-process-substitution-a28804bba101",
+		"command": "diff <(grep -E \"error TS\" {{OUTSIDE}}/tmp/typecheck-baseline.log) <(grep -E \"error TS\" {{OUTSIDE}}/tmp/typecheck-after.log) | head -20",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a28804bba101",
+		"sampleCause": "process-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "process-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "process-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-process-substitution-7551db2d4b52",
+		"command": "diff <(cat CLAUDE.md) <(cat AGENTS.md) && echo IDENTICAL; grep -n '🐚\\|📜\\|Chrome\\|emoji\\|icons\\|Icon' src/wade-rs/KNOWN_DEVIATIONS.md | head -20",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "7551db2d4b52",
+		"sampleCause": "process-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "process-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "process-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-process-substitution-eb5fba96f7d9",
+		"command": "cd {{READ}}/user/source/datadog/dd-trace-js--lpimentel-sles-3026-safe-payload-snapshot && diff <(gh pr view 10710 --json body --jq .body) {{OUTSIDE}}/tmp/tmp.5OndA54ygR",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "eb5fba96f7d9",
+		"sampleCause": "process-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "process-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "process-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-process-substitution-b46ff2b5d435",
+		"command": "cd {{READ}}/user/.pi/agent && mv {{OUTSIDE}}/tmp/ptp.json pi-tool-permissions.json && diff <(jq -S . {{OUTSIDE}}/tmp/pi-tool-permissions.json.bak) <(jq -S . pi-tool-permissions.json); echo \"exit=$?\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "b46ff2b5d435",
+		"sampleCause": "process-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "process-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "process-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": "HostBash(echo *)",
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-process-substitution-dc7746fd173d",
+		"command": "diff <(sed -n '2,19p' {{READ}}/user/.local/bin/git-rebase-parent.sh | sed 's/^# \\{0,1\\}//') <({{READ}}/user/.local/bin/git-rebase-parent.sh -h) && echo \"HELP-MATCHES-HEADER\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "dc7746fd173d",
+		"sampleCause": "process-substitution",
+		"expected": {
+			"action": "prompt",
+			"cause": "process-substitution",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "process-substitution",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-state-change-e8ee39a86199",
+		"command": "source {{READ}}/user/.pi/agent/git/github.com/ddoghq-sandbox/lucas-pimentel-coding-agent-tools/skills/lib/gitlab-api.sh; echo \"EXIT=$?\"; declare -F gitlab_init gitlab_find_latest_job gitlab_job_trace 2>&1",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e8ee39a86199",
+		"sampleCause": "state-change",
+		"expected": {
+			"action": "prompt",
+			"cause": "state-change",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-state-change-50567867d07c",
+		"command": "SKILL={{READ}}/user/.pi/agent/git/github.com/ddoghq-sandbox/lucas-pimentel-coding-agent-tools/skills/gitlab-status\ndeclare -A MAP=( [1994370381]=1994370258 [1995677896]=1995376438 [1995566926]=1995566883 [1996251176]=1996251166 )\nfor TESTJOB in 1994370381 1995677896 1995566926 1996251176; do\n  DEPLOY=${MAP[$TESTJOB]}\n  GITLAB_MAX_TIME=300 $SKILL/scripts/job-status.sh DataDog/serverless-e2e-tests $TESTJOB --trace > {{OUTSIDE}}/tmp/trace-$TESTJOB.txt 2>/dev/null\n  GITLAB_MAX_TIME=300 $SKILL/scripts/job-status.sh DataDog/serverless-e2e-tests $DEPLOY --trace > {{OUTSIDE}}/tmp/dtrace-$DEPLOY.txt 2>/dev/null\n  ARN=$(grep -m1 'DD_EXTENSION_ARN' {{OUTSIDE}}/tmp/dtrace-$DEPLOY.txt | sed 's/\\x1b\\[[0-9;]*m//g' | grep -o 'Datadog-Extension[A-Za-z-]*:[0-9]*')\n  RESULTS=$(grep 'hits_has_span_derived_primary_tag' {{OUTSIDE}}/tmp/trace-$TESTJOB.txt | sed 's/\\x1b\\[[0-9;]*m//g' | grep -o '\\[[a-z0-9]*-statsv2\\] [A-Z]*' | awk '{print $NF}' | sort | uniq -c | tr '\\n' ' ')\n  echo \"job $TESTJOB  layer=$ARN  statsv2-region: $RESULTS\"\ndone",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "50567867d07c",
+		"sampleCause": "state-change",
+		"expected": {
+			"action": "prompt",
+			"cause": "state-change",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-state-change-b4be05e29267",
+		"command": "cd {{READ}}/user/source/datadog\n# capture branch names before removal\ndeclare -A branches\nfor wt in \\\n  datadog-lambda-extension--lpimentel-fix-flaky-durable-tag-test \\\n  datadog-lambda-extension--lpimentel-span-derived-primary-tags \\\n  datadog-lambda-extension.lpimentel-add-trace-error-sampler \\\n  dd-trace-dotnet--lpimentel-downgrade-rejit-logs-debug \\\n  serverless-e2e-tests--lpimentel-disable-tracer-compute-stats \\\n  serverless-e2e-tests--lpimentel-fix-statsv2-env-var \\\n  serverless-e2e-tests--lpimentel-test-stage-trace-readiness-retry \\\n  serverless-e2e-tests--lpimentel-xflake-statsv2-trace-stats-metrics; do\n  b=$(git -C \"$wt\" rev-parse --abbrev-ref HEAD)\n  parent=$(git -C \"$wt\" rev-parse --git-common-dir | xargs dirname)\n  echo \"REMOVING $wt (branch $b)\"\n  git -C \"$parent\" worktree remove \"$wt\" || echo \"  FAILED to remove $wt\"\n  branches[\"$parent|$b\"]=1\ndone\necho; echo \"=== deleting local branches ===\"\nfor key in \"${!branches[@]}\"; do\n  parent=\"${key%%|*}\"; b=\"${key#*|}\"\n  git -C \"$parent\" branch -d \"$b\" 2>&1 | sed \"s|^|[$(basename $parent)] |\"\ndone",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "b4be05e29267",
+		"sampleCause": "state-change",
+		"expected": {
+			"action": "prompt",
+			"cause": "state-change",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-state-change-c99bdd0fe10a",
+		"command": "set -uo pipefail\nWORK=\"$(mktemp -d -t dbg4.XXXXXX)\"; BIN=\"$WORK/bin\"; mkdir -p \"$BIN\"\nCURL_ARGV_LOG=\"$WORK/curl_argv.log\"; CURL_TOKEN_LOG=\"$WORK/curl_token.log\"; CURL_URL_LOG=\"$WORK/curl_url.log\"; DDTOOL_LOG=\"$WORK/ddtool.log\"\n: > \"$CURL_ARGV_LOG\"; : > \"$CURL_TOKEN_LOG\"; : > \"$CURL_URL_LOG\"; : > \"$DDTOOL_LOG\"\nexport CURL_ARGV_LOG CURL_TOKEN_LOG CURL_URL_LOG DDTOOL_LOG\nTOKEN=\"FAKE-TOKEN\"\n# ddtool mock\ncat > \"$BIN/ddtool\" <<'EOF'\n#!/usr/bin/env bash\necho \"$MOCK_DDTOOL_CALL\" >> \"$DDTOOL_LOG\"\nif [[ \"${MOCK_DDTOOL_EMPTY:-0}\" == \"1\" ]]; then exit 0; fi\nprintf '%s\\n' \"$MOCK_TOKEN\"\nEOF\n# curl mock (extracted from test file, verbatim)\nsed -n '/^cat > \"\\$BIN\\/curl\" <<.EOF.$/,/^EOF$/p' {{READ}}/user/source/datadog/lucas-pimentel-coding-agent-tools/tests/gitlab-mocked.sh | sed '1d;$d' > \"$BIN/curl\"\nchmod +x \"$BIN/ddtool\" \"$BIN/curl\"\nexport MOCK_TOKEN=\"$TOKEN\" MOCK_DDTOOL_CALL=\"ddtool auth gitlab token\" MOCK_PIPE_PAGED=1\nSTATUS_DIR={{READ}}/user/source/datadog/lucas-pimentel-coding-agent-tools/skills/gitlab-status/scripts\n: > \"$CURL_URL_LOG\"\nPATH=\"$BIN:$PATH\" \"$STATUS_DIR/find-pipeline.sh\" DataDog/datadog-lambda-js --ref main --limit 150 > \"$WORK/out.txt\" 2>\"$WORK/err.txt\"; echo \"rc=$?\"\necho \"row count: $(grep -cE '^[0-9]+\tsuccess\t' \"$WORK/out.txt\")\"\necho \"stderr: $(cat \"$WORK/err.txt\")\"\necho \"URLs requested:\"; cat \"$CURL_URL_LOG\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "c99bdd0fe10a",
+		"sampleCause": "state-change",
+		"expected": {
+			"action": "prompt",
+			"cause": "state-change",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-state-change-9db5e0411cff",
+		"command": "WORK=\"$(mktemp -d -t dbg2.XXXXXX)\"\nBIN=\"$WORK/bin\"; mkdir -p \"$BIN\"\nCURL_ARGV_LOG=\"$WORK/curl_argv.log\"; CURL_TOKEN_LOG=\"$WORK/curl_token.log\"; CURL_URL_LOG=\"$WORK/curl_url.log\"; DDTOOL_LOG=\"$WORK/ddtool.log\"\n: > \"$CURL_ARGV_LOG\"; : > \"$CURL_TOKEN_LOG\"; : > \"$CURL_URL_LOG\"; : > \"$DDTOOL_LOG\"\nexport CURL_ARGV_LOG CURL_TOKEN_LOG CURL_URL_LOG DDTOOL_LOG\nTOKEN=\"FAKE\"\n# Extract the mock curl from the test file (lines between the two cat heredocs).\nsed -n '/^cat > \"\\$BIN\\/curl\" <<.EOF.$/,/^EOF$/p' tests/gitlab-mocked.sh > \"$WORK/curl_mock.sh\"\nsed -n '/^cat > \"\\$BIN\\/ddtool\" <<.EOF.$/,/^EOF$/p' tests/gitlab-mocked.sh > \"$WORK/ddtool_mock.sh\"\n# Rebuild the mock files the way the test does (strip the cat/EOF wrapper).\nsed -i '1d;$d' \"$WORK/curl_mock.sh\"; sed -i '1d;$d' \"$WORK/ddtool_mock.sh\"\ncp \"$WORK/ddtool_mock.sh\" \"$BIN/ddtool\"; cp \"$WORK/curl_mock.sh\" \"$BIN/curl\"\nchmod +x \"$BIN/ddtool\" \"$BIN/curl\"\nexport MOCK_TOKEN=\"$TOKEN\" MOCK_DDTOOL_CALL=\"ddtool auth gitlab token\" MOCK_PIPE_PAGED=1\n# Call the mock curl directly with a find-pipeline-style URL.\n\"$BIN/curl\" -sf --config <(printf 'header = \"Authorization: Bearer %s\"\\n' \"$TOKEN\") \\\n  \"https://gitlab.ddbuild.io/api/v4/projects/DataDog%2Fdatadog-lambda-js/pipelines?per_page=100&page=1&order_by=id&sort=desc&ref=main\" | jq 'length'\necho \"--- page 2 ---\"\n\"$BIN/curl\" -sf --config <(printf 'header = \"Authorization: Bearer %s\"\\n' \"$TOKEN\") \\\n  \"https://gitlab.ddbuild.io/api/v4/projects/DataDog%2Fdatadog-lambda-js/pipelines?per_page=50&page=2&order_by=id&sort=desc&ref=main\" | jq 'length'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "9db5e0411cff",
+		"sampleCause": "state-change",
+		"expected": {
+			"action": "prompt",
+			"cause": "state-change",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-subshell-66d77b974242",
+		"command": "git status --porcelain && git branch --show-current && (command -v git-rebase-parent || echo \"not on PATH\")",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "66d77b974242",
+		"sampleCause": "subshell",
+		"expected": {
+			"action": "prompt",
+			"cause": "subshell",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-subshell-1b1921e850ec",
+		"command": "cd bottlecap && (cargo audit --version 2>/dev/null || (echo \"installing cargo-audit\" && cargo install cargo-audit --locked 2>&1 | tail -3))",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "1b1921e850ec",
+		"sampleCause": "subshell",
+		"expected": {
+			"action": "prompt",
+			"cause": "subshell",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-subshell-ad84275881d7",
+		"command": "git remote get-url origin && git rev-parse --abbrev-ref HEAD && (git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true) && git log -5 --oneline",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "ad84275881d7",
+		"sampleCause": "subshell",
+		"expected": {
+			"action": "prompt",
+			"cause": "subshell",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-subshell-174f0e3db20b",
+		"command": "cd /tmp && (pi --mode rpc > {{OUTSIDE}}/tmp/pi-rpc.log 2>&1 & echo $! > {{OUTSIDE}}/tmp/pi-rpc.pid); sleep 5; P=$(cat {{OUTSIDE}}/tmp/pi-rpc.pid); kill -0 $P 2>/dev/null && echo alive",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "174f0e3db20b",
+		"sampleCause": "subshell",
+		"expected": {
+			"action": "prompt",
+			"cause": "subshell",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-subshell-78b6e8ec590e",
+		"command": "curl -s --max-time 5 -o /dev/null -w \"via-machine-ip:%{http_code}\\n\" http://192.168.129.200:4566/ && (command -v socat && echo have-socat) || echo no-socat",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "78b6e8ec590e",
+		"sampleCause": "subshell",
+		"expected": {
+			"action": "prompt",
+			"cause": "subshell",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-subshell-f60d53c8ef62",
+		"command": "cd {{READ}}/user/source/datadog/datadog-lambda-extension--lpimentel-error-sampler-rate-limited && git diff && echo \"=== em dash check ===\" && (git diff | rg -c \"—\" || echo \"none\")",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "f60d53c8ef62",
+		"sampleCause": "subshell",
+		"expected": {
+			"action": "prompt",
+			"cause": "subshell",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-subshell-a8da98a36e6d",
+		"command": "cd {{READ}}/user/source/datadog/serverless-components.lpimentel-add-error-sampler && (cargo test -p datadog-agent-trace-sampler 2>&1 | tail -8; cargo test -p datadog-trace-agent 2>&1 | tail -8) ",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "a8da98a36e6d",
+		"sampleCause": "subshell",
+		"expected": {
+			"action": "prompt",
+			"cause": "subshell",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-subshell-c43fc0ba7cf1",
+		"command": "cd /tmp && (echo '{\"type\":\"exec\",\"protocol\":1,\"id\":1,\"code\":\"1+1\"}'; sleep 1) | node {{CWD}}/prototypes/node-worker/worker-proto.mjs 3>{{OUTSIDE}}/tmp/w3.out; echo \"exit=$?\"; cat {{OUTSIDE}}/tmp/w3.out",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "c43fc0ba7cf1",
+		"sampleCause": "subshell",
+		"expected": {
+			"action": "prompt",
+			"cause": "subshell",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-unrecognized-node-3ccc53603875",
+		"command": "zsh -c 'echo $ZSH_VERSION'",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "3ccc53603875",
+		"sampleCause": "unrecognized-node",
+		"expected": {
+			"action": "prompt",
+			"cause": "unrecognized-node",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "unrecognized-node",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-unrecognized-node-e66dccef18ae",
+		"command": "cd {{READ}}/user/source/datadog/lucas-pimentel && time search-md reindex --json",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e66dccef18ae",
+		"sampleCause": "unrecognized-node",
+		"expected": {
+			"action": "prompt",
+			"cause": "unrecognized-node",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-unrecognized-node-74096df58fb9",
+		"command": "bash \"$HOME/.local/bin/git-rebase-parent.sh\" --keep-on-conflict --no-push 2>&1",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "74096df58fb9",
+		"sampleCause": "unrecognized-node",
+		"expected": {
+			"action": "prompt",
+			"cause": "unrecognized-node",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "unrecognized-node",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-unrecognized-node-92b29d985f9f",
+		"command": "time (TOKEN=$(ddtool auth gitlab token) && [ -n \"$TOKEN\" ] && echo \"token ok, length ${#TOKEN}\")",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "92b29d985f9f",
+		"sampleCause": "unrecognized-node",
+		"expected": {
+			"action": "prompt",
+			"cause": "unrecognized-node",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-unrecognized-node-afa6b544d171",
+		"command": "cd {{OUTSIDE}}/tmp/tier2 && head -1 Dockerfile && time docker buildx build --load -t t2:main . 2>&1 | tail -5",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "afa6b544d171",
+		"sampleCause": "unrecognized-node",
+		"expected": {
+			"action": "prompt",
+			"cause": "unrecognized-node",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-unrecognized-node-e6f15087fd86",
+		"command": "time (COMPLETE=powershell WORKTRUNK_COMPLETE_NAME=wt wt > {{OUTSIDE}}/tmp/wt-complete.ps1 2>/dev/null); wc -l {{OUTSIDE}}/tmp/wt-complete.ps1",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "e6f15087fd86",
+		"sampleCause": "unrecognized-node",
+		"expected": {
+			"action": "prompt",
+			"cause": "unrecognized-node",
+			"matchedRule": null,
+			"steps": []
+		}
+	},
+	{
+		"id": "incomplete-unrecognized-node-4f0a175add43",
+		"command": "bash -c 'set -euo pipefail; count=100; page_size=100; (( count < page_size )) && break; echo \"survived\"' ; echo \"exit=$?\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "4f0a175add43",
+		"sampleCause": "unrecognized-node",
+		"expected": {
+			"action": "prompt",
+			"cause": "unrecognized-node",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "unrecognized-node",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": "HostBash(echo *)",
+					"redirectAware": false
+				}
+			]
+		}
+	},
+	{
+		"id": "incomplete-unrecognized-node-2ef376c738cf",
+		"command": "zsh -lic 'echo $PATH' 2>/dev/null | tr ':' '\\n' | grep -cn linuxbrew; echo ---; zsh -lic -x -c 'true' 2>&1 | grep -c \"env.sh\"",
+		"profile": "default",
+		"shell": "host-bash",
+		"source": "2ef376c738cf",
+		"sampleCause": "unrecognized-node",
+		"expected": {
+			"action": "prompt",
+			"cause": "unrecognized-node",
+			"matchedRule": null,
+			"steps": [
+				{
+					"action": "prompt",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "prompt",
+					"cause": "unrecognized-node",
+					"matchedRule": null,
+					"redirectAware": false
+				},
+				{
+					"action": "allow",
+					"cause": "complete",
+					"matchedRule": null,
+					"redirectAware": false
+				}
+			]
+		}
+	}
+]
