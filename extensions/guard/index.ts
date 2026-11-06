@@ -31,6 +31,7 @@ import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapTo
 import { constraintFromParse, INHERIT_ENV, INHERITANCE_VERSION, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
 import { resolveWorkspaceScope, scopeContains, SessionShellRuleStore, type SessionShellScope } from "./session-shell-rules.ts";
 import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
+import { GUARD_STATE_FALLBACK, GUARD_STATE_SECTION, renderGuardStateSection } from "./policy/mode-line.ts";
 import { modelLabel, pickableModels } from "../shared/model-selection.ts";
 import { createIgnoredPinNotifier, describeIgnoredPin, ignoredPinReasonText, resolveModel, type ResolvedModel } from "../shared/model-pin.ts";
 
@@ -454,6 +455,40 @@ export default function guard(pi: ExtensionAPI) {
 	}
 	pi.on("session_start", async (_event, ctx) => { await startSession(ctx, true); });
 	pi.on("session_tree", async (_event, ctx) => { await startSession(ctx, false); });
+	// Model-visible guard state: one advisory `guard_state` section per run,
+	// rebuilt from the live session state because pi normalizes fresh prompt
+	// options for every run (a mutation never carries over). A change lands as a
+	// patch for that section alone. Advisory only: the policy path never reads
+	// it, so the prompt line can never widen or narrow a decision.
+	pi.on("before_agent_start", (event, ctx) => {
+		const inherited = state?.inherited ?? null;
+		let line: string | null;
+		try {
+			line = renderGuardStateSection({
+				initialized: state !== null,
+				inheritanceError: inherited !== null && "error" in inherited ? inherited.error : null,
+				teardownFailure: runtime?.teardownFailure ?? null,
+				profile: state?.profile ?? "default",
+				sandboxMode: state?.sandbox?.mode ?? null,
+				workspaceLocked: state?.workspaceLocked ?? false,
+				inheritedProfile: inherited !== null && "profile" in inherited ? inherited.profile : null,
+			});
+		} catch {
+			// The renderer is total; this is belt and braces so a prompt-surface
+			// failure can never take the run down with it.
+			line = GUARD_STATE_FALLBACK;
+		}
+		if (line === null) return;
+		try {
+			event.systemPromptOptions.sections[GUARD_STATE_SECTION] = line;
+		} catch {
+			notify(ctx, "guard: could not attach the guard state to this run's prompt", "warning");
+			return;
+		}
+		// Report a degraded line: presence of the section is meant to mean guard
+		// is up and stating its effective state.
+		if (line === GUARD_STATE_FALLBACK) notify(ctx, "guard: could not render the effective guard state for this run", "warning");
+	});
 	// An unpinned (or ignored-pin) classifier follows the session model, so a
 	// model switch must refresh the footer's classifier label. Footer only:
 	// the profile event payload carries no classifier field.

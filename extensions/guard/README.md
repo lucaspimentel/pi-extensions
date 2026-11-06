@@ -552,6 +552,22 @@ removed.
   wrapper, unconditionally (no `HERDR_ENV` check), matching
   pi-tool-permissions and the herdr ask-user bridge.
 
+### Model-visible state line (`before_agent_start`)
+
+Guard adds one advisory prompt section, `guard_state`, on every run, so the
+model can adapt before acting instead of learning constraints from denials:
+`guard: profile auto; sandbox full; host shell rules, then read-only tier,
+then classifier; writes in-root classified, out-of-root prompt`. It is
+rendered by the pure `policy/mode-line.ts` from the same per-profile cells
+the decision core uses (degraded/reduced mode and the workspace lock
+included), names every profile verbatim, is rebuilt per run (pi normalizes
+fresh prompt options each run, so a change patches only that section), and is
+never read by the policy path. Blocked sessions render a blocked line
+instead, an unrenderable state renders `guard: initialized; effective state
+unavailable` plus a user notice, and nothing is emitted before session start.
+Full contract and the per-profile expected text: `docs/guard-design.md`
+(Model-visible guard state).
+
 ## Shared sandbox library (`sandbox/`)
 
 | Module | Purpose |

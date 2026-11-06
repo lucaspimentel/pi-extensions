@@ -863,6 +863,78 @@ Exfiltration needs a sink the attacker can read:
 - **Not attacker-readable:** web_search queries (they go to the search
   provider), and pup or Jira reads (your own tenant).
 
+## Model-visible guard state (before_agent_start)
+
+The model sees guard's effective mode as one advisory prompt section,
+`guard_state`, written by a `before_agent_start` handler in `index.ts` and
+rebuilt on every run (pi normalizes fresh prompt options per run, so a
+mutation never carries over; a change lands as a patch for that section
+alone). It is rendered by the pure `policy/mode-line.ts` from the same
+per-profile cells the decision core uses, so the text cannot contradict
+enforcement. Nothing in the policy path reads it: the kernel still enforces,
+the line only routes.
+
+One line, fixed clause order, semicolon separated:
+
+`guard: profile <name>[ (inherited, cannot be loosened)]; sandbox <mode>; host shell <consequence>; writes <consequence>[; /guard ack clears the lock]`
+
+- `profile` names the ladder value verbatim for every profile, `yolo` and
+  `unrestricted` included; only the classifier identity is left out (the
+  footer's classifier label exists for the user).
+- `sandbox` is `full`, `reduced (workspace overlay degrades to read-only)`,
+  `degraded (no sandbox; bash and interpreters unavailable)`, or
+  `none (tools run raw)` for an unlocked raw profile, and switches to
+  `<mode> (workspace locked: read-only)` under the workspace lock. A locked
+  raw profile therefore loses the raw clause, mirroring `bashRunsOnHost`.
+- `host shell` and `writes` state the cell-level consequence: `denied`
+  (research), `rules, then read-only tier, then prompt` (default,
+  allow-edits), `rules, then read-only tier, then classifier` (auto),
+  `rules, then read-only tier, then allow` (trusted),
+  `deny/ask rules, else allow` (yolo), `allow` (unrestricted),
+  `prompted (in-root or not)` (default writes),
+  `in-root allowed, out-of-root prompt` (allow-edits),
+  `in-root classified, out-of-root prompt` (auto), `allowed`
+  (trusted/yolo/unrestricted). Degraded research renders
+  `read-only tier only (degraded)`, and the lock rewrites them to
+  `denied (workspace locked)` and `writes stopped (workspace locked)` with the
+  `/guard ack clears the lock` tail. Per-command rules, session grants, and
+  the remote/secret-mask cells are deliberately absent: they are too granular
+  for one line or already covered by the tool descriptions and the deny
+  reasons the model reads when it hits them.
+- Expected text at full sandbox, unlocked, not inherited:
+  - research: `guard: profile research; sandbox full; host shell denied; writes denied`
+  - default: `guard: profile default; sandbox full; host shell rules, then read-only tier, then prompt; writes prompted (in-root or not)`
+  - allow-edits: `guard: profile allow-edits; sandbox full; host shell rules, then read-only tier, then prompt; writes in-root allowed, out-of-root prompt`
+  - auto: `guard: profile auto; sandbox full; host shell rules, then read-only tier, then classifier; writes in-root classified, out-of-root prompt`
+  - trusted: `guard: profile trusted; sandbox full; host shell rules, then read-only tier, then allow; writes allowed`
+  - yolo: `guard: profile yolo; sandbox none (tools run raw); host shell deny/ask rules, else allow; writes allowed`
+  - unrestricted: `guard: profile unrestricted; sandbox none (tools run raw); host shell allow; writes allowed`
+- Blocked states replace the line: `guard: session blocked (inherited
+  contract invalid); tool execution denied` (invalid ambient inheritance
+  contract, so no executable runtime exists) and `guard: execution blocked
+  (unresolved teardown); tool execution denied`. Before `session_start`
+  installs the session state nothing is emitted at all. When a clause cannot
+  be resolved the section reads `guard: initialized; effective state
+  unavailable` and the user is notified, so presence of the section stays a
+  reliable signal that guard is up.
+- Freshness is the run boundary: a profile switch (including the computed
+  switch accepted inside an approval dialog) or a lock that lands mid-run
+  appears on the next user turn. Every lag is informational, because the
+  policy still blocks the call.
+- Every session gets it, subagent children included: a child renders its
+  inherited profile with the `(inherited, cannot be loosened)` suffix, which
+  stays visible even after the child itself moves to research.
+- Out of scope, recorded: a model-callable status tool, `context_with_system`
+  per-LLM-call freshness, changes to existing decision-reason wording, and
+  any new enforcement.
+
+Suites: `tests/guard-mode-line.test.mts` (the exact line for every profile,
+the sandbox/lock/inherited variants, the blocked and fallback states, and
+drift guards against `bashRunsOnHost`, `effectiveWorkspaceMode`, `decide`,
+and `decideLocalWrite`) and `tests/guard-harness.test.mts` (the real handler:
+no section before initialization, a rebuilt section per run, a profile change
+reflected on the next run, and the blocked and locked lines).
+
 ## Sandbox contents
 
 For every profile except yolo and unrestricted:
@@ -1212,6 +1284,8 @@ remain useful.
 | Fullscreen page-key reach (2026-10-28) | Bug found in a real session (`tuiMode: "fullscreen"`): guard's inline prompt advertised "PgUp/PgDn to scroll" while those keys scrolled the transcript instead. Root cause is host-side, not guard-side: `TuiAltScreen` registers its transcript-scroll shortcuts (`tui.altScreen.pageUp`/`pageDown`, which deliberately shadow the editor's same bindings in fullscreen) on raw terminal input in its constructor, before any extension or component listener, and defers only to a focused overlay (`tui-alt-screen.js` `shouldDeferViewportInputToOverlay`, dispatch at the page keys). Guard's inline editor-slot mount is a focused component, not an overlay, so the `matchesKey(data, "pageup")` branch in `guard/ask-overlay.ts` was unreachable there and the overflow detail lines could not be reached at all; `ui.onTerminalInput` cannot intercept them either (extension listeners are registered after the viewport listener). Verified with a throwaway probe against the real `TuiAltScreen`/`TuiMainScreen` (fullscreen+inline: pageUp/pageDown swallowed, and invisible even to a later-added raw listener; fullscreen+overlay and regular mode: delivered) plus candidate-key delivery (ctrl+u/ctrl+d, shift+pageUp/pageDown, alt+pageUp/pageDown, ctrl+f/b all arrive; only plain pageUp/pageDown are shadowed). Fix is guard-local: `guardPageKeys(presentation, tui.mode)` in `guard/ask-overlay.ts` resolves the receivable keys and the advertised label together, `GuardStageContext` carries `presentation` (`"inline" | "overlay"`), and both the selector and the picker detail windows page with `ctrl+u`/`ctrl+d` when mounted inline on a fullscreen host, keeping PgUp/PgDn on the overlay path and on regular-mode or mode-less hosts. The editor stage is untouched (pi's Editor owns those keys there and nothing pages a details window). Suites: `tests/guard-ask-inline.test.mts` (key mapping, fullscreen inline paging, regular-mode and omitted-mode regression) and `tests/guard-ask-overlay.test.mts` (a fullscreen host keeps PgUp/PgDn on the overlay path). Upstream gap, not filed: a pi-tui opt-out that `shouldDeferViewportInputToOverlay` honors for a focused component would let PgUp/PgDn work for inline prompts on fullscreen hosts everywhere, including pi's own inline dialogs, whose `tui.select.pageUp` bindings are starved the same way. |
 | Planning integration retirement (2026-10-28) | Deleted the unregistered `extensions/plan.ts`, `isPlanningToolAllowed` and its doc block, research-hold state/helpers and all four event channels, and hold/planning-only tests. Research remains a profile with its existing ladder/cycle position, `/guard profile research`, and child inheritance escape rule. Historical planning rows are retained as history, not live contracts. Suites: `tests/guard-{policy,classes,harness,subagent}.test.mts` via `npm run test:guard` (profile ladder and cycle order, `/guard profile` and ack, classification own-key lookup, subagent inheritance) |
 | Computed host-shell profile switch (2026-11-05) | User-confirmed and implemented. The host-shell approval dialog offers one `Switch to <rung> (this session only)` action per qualifying rung, computed per call as `qualifyingSwitchRungs(call, policy)` (`policy/decision.ts`): the pinned candidate set `SWITCH_CANDIDATES = [allow-edits, auto, trusted]` filtered to rungs whose pure `explainHostShellCommand` re-decision would allow this exact call, excluding the current profile, then filtered by `profileChangeAllowed` so a child with an inherited restriction cannot escalate. The ladder is not a permission ordering, so the candidate set is an eligibility allow-list, not a promise that every rung appears; under today's cells only `trusted` can qualify for a prompting call (`default` and `allow-edits` share the `prompt` cell and rules are profile-independent; `auto`'s `classify` cell is never resolved here), and that collapse is asserted in `tests/guard-policy.test.mts`. The flow surface (`prompt-flow.ts`) gains `switchProfileLabel`, an `ExecutionFlowOutcome` member, and a `switchProfileRungs` dep; an unoffered label falls through to the existing unexpected-answer throw (hiding an action is not an authorization check), and the action is appended last after the save/deny entries. `authorize` applies it AFTER the dialog lease releases through the same `transition` as the write/edit switch (no persistence or command options), emits the exact `Profile: <rung> (this session only)` notice, re-decides the original call against the post-transition policy, and returns the POST-transition epoch (a stale epoch would reject execution). No owned editor/picker stages are required (it is a plain selector choice, mirroring `runWriteEditPrompt`'s `offerSwitch`), so a capability-limited host still sees it; the previously pinned `deepEqual(offered, ["Allow once", "Deny once"])` capability-limited menu assertion was updated accordingly. This supersedes the "no mid-dialog profile switching" clause of the 2026-10-06 Step-3 dialogs row for host-shell prompts only: write/edit prompts keep their separate switch, and no other dialog gains a switch. Suites: `tests/guard-policy.test.mts` (the computed set, the collapse, suppression of explicit asks, ambiguous splits, and the current profile), `tests/guard-prompt-flow.test.mts` (label, last placement, one action per rung, forged-label rejection), `tests/guard-harness.test.mts` (end to end: lands the rung, executes with the post-transition epoch, session-only with no config written, child suppression, capability-limited menu shape), and `tests/guard-dialogs.test.mts` (the switch applies after the lease and invalidates a queued command dialog); all wired into `test:ci` and `test:guard`. |
+
+| Model-visible guard state (2026-11-05) | User-confirmed and implemented. One advisory `guard_state` prompt section per run, written by a `before_agent_start` handler in `index.ts` and rendered by the new pure `policy/mode-line.ts` from the same per-profile cells the decision core uses (`hostShellCell`, `writeEditCell`) plus the runtime-mode and lock adjustments (`bashRunsOnHost`, `effectiveWorkspaceMode`), so the text cannot contradict enforcement; no policy code reads it. Fixed one-line contract `guard: profile <name>[ (inherited, cannot be loosened)]; sandbox <mode>; host shell <consequence>; writes <consequence>[; /guard ack clears the lock]`, naming every profile verbatim (classifier identity excluded), with the degraded/reduced clauses and the lock-aware rewrites plus the remedy tail. Blocked sessions render `guard: session blocked (inherited contract invalid); tool execution denied` or `guard: execution blocked (unresolved teardown); tool execution denied`; an unrenderable clause renders `guard: initialized; effective state unavailable` plus a user notice (as does a failed sections write); nothing is emitted before initialization. Freshness is the run boundary (a mid-run switch or lock appears next turn; every lag is informational), and children render their inherited profile. Chosen over a `<rules>` bullet (a change would re-send the whole rules section, and a custom system prompt suppresses `<rules>` entirely) and over `context_with_system` per-LLM-call freshness (an extra request-rewriting hook that must preserve the index-0 system message and its tool declarations). Suites: `tests/guard-mode-line.test.mts` and `tests/guard-harness.test.mts`, wired into `test:ci` and `test:guard`. |
 
 ## Implementation outline (build alongside, switch over)
 

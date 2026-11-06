@@ -241,6 +241,80 @@ test("harness: session_start initializes state, footer, and the profile event", 
 	});
 });
 
+/** A before_agent_start-shaped event carrying a mutable, empty sections record. */
+function stateEvent(): { systemPromptOptions: { sections: Record<string, string> } } {
+	return { systemPromptOptions: { sections: {} } };
+}
+
+test("harness: before_agent_start publishes the guard state section on every run", async () => {
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-state-");
+		const ctx = harnessCtx(h, cwd);
+		assert.equal((h.handlers["before_agent_start"] ?? []).length, 1, "exactly one before_agent_start handler");
+		const handler = h.handlers.before_agent_start[0];
+		// Before session_start there is no session state, so nothing is claimed.
+		const pre = stateEvent();
+		await handler(pre, ctx);
+		assert.equal(pre.systemPromptOptions.sections.guard_state, undefined, "no section before initialization");
+		for (const start of h.handlers["session_start"] ?? []) await start({}, ctx);
+		const first = stateEvent();
+		await handler(first, ctx);
+		assert.match(first.systemPromptOptions.sections.guard_state, /^guard: profile default; sandbox /);
+		assert.match(first.systemPromptOptions.sections.guard_state, /host shell .*; writes /);
+		// pi normalizes fresh options for every run, so a profile change is
+		// reflected on the next run and a stale value is never left in place.
+		await h.commandHandlers.get("guard")!("profile research", ctx);
+		const second = stateEvent();
+		await handler(second, ctx);
+		assert.match(second.systemPromptOptions.sections.guard_state, /^guard: profile research;/);
+		const stale = stateEvent();
+		stale.systemPromptOptions.sections.guard_state = "stale";
+		await handler(stale, ctx);
+		assert.notEqual(stale.systemPromptOptions.sections.guard_state, "stale", "the run's value is always rebuilt");
+		await h.handlers.session_shutdown[0]({}, ctx);
+	});
+});
+
+test("harness: the guard state section reports blocked and locked sessions", async () => {
+	// An invalid ambient inheritance contract blocks the session: the line says
+	// so instead of claiming an effective profile.
+	await withTempHome(async () => {
+		await withInheritanceEnv("not-a-valid-payload", async () => {
+			const h = makeHarness();
+			const cwd = makeTempDir("guard-state-blocked-");
+			const ctx = harnessCtx(h, cwd);
+			await h.handlers.session_start[0]({}, ctx);
+			const event = stateEvent();
+			await h.handlers.before_agent_start[0](event, ctx);
+			assert.equal(
+				event.systemPromptOptions.sections.guard_state,
+				"guard: session blocked (inherited contract invalid); tool execution denied",
+			);
+		});
+	});
+	if (sandboxMode === "degraded") return;
+	// A workspace lock rewrites the affected clauses and adds the remedy tail.
+	await withTempHome(async () => {
+		const h = makeHarness();
+		const cwd = makeTempDir("guard-state-locked-");
+		fs.mkdirSync(path.join(cwd, ".pi"));
+		fs.writeFileSync(projectConfigPath(cwd), JSON.stringify({ protectedPaths: ["../invalid-protection"] }));
+		const ctx = harnessCtx(h, cwd);
+		await h.handlers.session_start[0]({}, ctx);
+		await assert.rejects(h.registeredTools.get("bash")!.execute("id", { command: "echo safe" }, undefined, undefined, ctx), /protectedPaths/);
+		await h.commandHandlers.get("guard")!("profile yolo", ctx);
+		const locked = (h.emitted.filter(([name]) => name === "guard:profile").at(-1)![1] as { workspaceLocked: boolean }).workspaceLocked;
+		assert.equal(locked, true, "the audit failure locked the workspace");
+		const event = stateEvent();
+		await h.handlers.before_agent_start[0](event, ctx);
+		assert.equal(
+			event.systemPromptOptions.sections.guard_state,
+			`guard: profile yolo; sandbox ${sandboxMode} (workspace locked: read-only); host shell denied (workspace locked); writes stopped (workspace locked); /guard ack clears the lock`,
+		);
+	});
+});
+
 test("harness: tool_call observer records decisions and never blocks", async () => {
 	await withTempHome(async () => {
 		const h = makeHarness();
