@@ -34,6 +34,20 @@ function readJson(path: string): any | null {
 
 const dir = resolve(argValue("--dir", "out")!);
 const outBase = resolve(argValue("--out", "results")!);
+
+/**
+ * The reviewer's decision. Kept here rather than hand-edited into results.md so
+ * that regenerating the report cannot silently lose the verdict.
+ */
+const VERDICT = {
+	decision: "adopt",
+	library: "@questi0nm4rk/shell-ast",
+	version: "0.8.0",
+	date: "2026-11-06",
+	basis: "reviewer decision from the numbers in this file; thresholds were deliberately never pre-committed",
+	scope:
+		"the pinned 0.8.0 only, which is MIT; the adapter (TODO adoption steps 3-7) is not implemented by this decision, and any bump past 0.8.0 moves to MPL-2.0",
+};
 const warm = readJson(resolve(dir, "warm.json"));
 const cold = readJson(resolve(dir, "cold.json"));
 const battery = readJson(resolve(dir, "battery.json"));
@@ -220,18 +234,22 @@ push("");
 push(
 	"## Verdict",
 	"",
-	"**Pending.** Thresholds were deliberately not fixed before the measurement (settled: see README).",
-	"The reviewer sets the adopt / do-not-adopt bar from the numbers above; this file records the",
-	"measurement only. What the call turns on, listed so nothing is decided implicitly:",
+	`**ADOPT** \`${VERDICT.library}@${VERDICT.version}\`, decided ${VERDICT.date}. Basis: ${VERDICT.basis}.`,
+	`Scope: ${VERDICT.scope}.`,
 	"",
-	"- the cold first-command cost and the steady-RSS delta at that first parse;",
-	"- the warm tail, not just the median: long commands are where shell-ast loses to today's path;",
-	"- the commands needing a manual wrapper walk, which the adapter must implement itself;",
-	"- the pure parser gaps versus inputs `bash -n` also rejects;",
-	"- separately, the license split (not a discrepancy): `0.8.0` is MIT in the registry metadata, the",
-	"  tarball `package.json`, and the MIT `LICENSE` file the tarball ships, while the repo was",
-	"  relicensed to MPL-2.0 on 2026-10-12 and `0.8.1-beta.0` is MPL-2.0 in those same three places, so",
-	"  pinning `0.8.0` keeps MIT terms and any bump moves to file-level copyleft.",
+	"What this decision accepts, listed so nothing is accepted implicitly:",
+	"",
+	"- the cold cost: the first guarded command pays ~36 ms (module import ~1.4 ms, wasm compile plus",
+	"  first parse ~35 ms) and steady RSS grows ~18 MiB at that first parse;",
+	"- the warm tail, not just the median: shell-ast is at or below today's end-to-end path for the",
+	"  typical command but loses badly on a minority of long ones;",
+	"- the ~274-in-34,969 commands needing a manual wrapper walk, which the adapter must implement itself;",
+	"- the rejected commands, only ~2 of which are pure parser gaps rather than malformed input, all",
+	"  mapping to the existing fail-closed prompt path;",
+	"- the license split (not a discrepancy): `0.8.0` is MIT in the registry metadata, the tarball",
+	"  `package.json`, and the MIT `LICENSE` file the tarball ships, while the repo was relicensed to",
+	"  MPL-2.0 on 2026-10-12 and `0.8.1-beta.0` is MPL-2.0 in those same three places, so pinning",
+	"  `0.8.0` keeps MIT terms and any bump moves to file-level copyleft.",
 	"",
 );
 
@@ -265,7 +283,7 @@ const warmForJson =
 				rowsNote: `top ${JSON_ROW_CAP} rows by shell-ast / baseline-B median ratio; the full set is regenerated locally by run-all.sh`,
 				rows: [...warm.rows].sort((a: any, b: any) => (b.ratioB ?? 0) - (a.ratioB ?? 0)).slice(0, JSON_ROW_CAP).map(compactRow),
 			};
-const payload = { meta: { generatedAt: new Date().toISOString() }, counts, cold, warm: warmForJson, battery, fidelity };
+const payload = { meta: { generatedAt: new Date().toISOString() }, verdict: VERDICT, counts, cold, warm: warmForJson, battery, fidelity };
 writeFileSync(
 	`${outBase}.json`,
 	JSON.stringify(payload, (_key, value) => (typeof value === "string" ? scrubText(value) : value), "\t") + "\n",

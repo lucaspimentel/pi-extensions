@@ -80,9 +80,9 @@ node report.ts                               # writes results.md / results.json
 
 ## Findings (2026-11-06)
 
-The numbers live in `results.md`; the verdict is deliberately not written yet
-(thresholds were not pre-committed, so the bar is set by the reviewer from those
-numbers). Headline facts, all from the committed artifacts:
+The numbers live in `results.md`, which also records the verdict: **ADOPT
+`@questi0nm4rk/shell-ast@0.8.0`** (2026-11-06), scoped to the pinned version
+only. Headline facts, all from the committed artifacts:
 
 - Warm, over 34,969 real commands: shell-ast `parse` 0.2956 ms median of
   per-command medians, vs 0.4994 ms for today's end-to-end
@@ -108,8 +108,9 @@ numbers). Headline facts, all from the committed artifacts:
   discrepancy is real on both sides: npm metadata and the tarball say MIT, while
   upstream `LICENSE` at `main` (sha `8cfa1f1`) is the 374-line MPL-2.0 text.
 
-Not measured here: the adapter's own cost, the retirement of `shellsplit.ts` /
-`bashtier.ts`, and (deliberately) any adopt/do-not-adopt call.
+Not measured here: the adapter's own cost and the retirement of `shellsplit.ts`
+/ `bashtier.ts`. The adopt decision covers the pinned 0.8.0 only; it does not
+authorize the adapter or a version bump.
 
 ## Out of scope
 

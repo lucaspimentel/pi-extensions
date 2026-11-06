@@ -1,6 +1,6 @@
 # shell-ast spike results
 
-Generated: 2026-11-06T06:12:28.465Z
+Generated: 2026-11-06T06:15:56.500Z
 
 Spike: `@questi0nm4rk/shell-ast` vs guard's hand-written bash parsing.
 See `README.md` for the settled methodology and hard boundary. Thresholds are deliberately
@@ -1635,15 +1635,19 @@ retirement of `shellsplit.ts`/`bashtier.ts`, and the license question are all ou
 
 ## Verdict
 
-**Pending.** Thresholds were deliberately not fixed before the measurement (settled: see README).
-The reviewer sets the adopt / do-not-adopt bar from the numbers above; this file records the
-measurement only. What the call turns on, listed so nothing is decided implicitly:
+**ADOPT** `@questi0nm4rk/shell-ast@0.8.0`, decided 2026-11-06. Basis: reviewer decision from the numbers in this file; thresholds were deliberately never pre-committed.
+Scope: the pinned 0.8.0 only, which is MIT; the adapter (TODO adoption steps 3-7) is not implemented by this decision, and any bump past 0.8.0 moves to MPL-2.0.
 
-- the cold first-command cost and the steady-RSS delta at that first parse;
-- the warm tail, not just the median: long commands are where shell-ast loses to today's path;
-- the commands needing a manual wrapper walk, which the adapter must implement itself;
-- the pure parser gaps versus inputs `bash -n` also rejects;
-- separately, the license split (not a discrepancy): `0.8.0` is MIT in the registry metadata, the
-  tarball `package.json`, and the MIT `LICENSE` file the tarball ships, while the repo was
-  relicensed to MPL-2.0 on 2026-10-12 and `0.8.1-beta.0` is MPL-2.0 in those same three places, so
-  pinning `0.8.0` keeps MIT terms and any bump moves to file-level copyleft.
+What this decision accepts, listed so nothing is accepted implicitly:
+
+- the cold cost: the first guarded command pays ~36 ms (module import ~1.4 ms, wasm compile plus
+  first parse ~35 ms) and steady RSS grows ~18 MiB at that first parse;
+- the warm tail, not just the median: shell-ast is at or below today's end-to-end path for the
+  typical command but loses badly on a minority of long ones;
+- the ~274-in-34,969 commands needing a manual wrapper walk, which the adapter must implement itself;
+- the rejected commands, only ~2 of which are pure parser gaps rather than malformed input, all
+  mapping to the existing fail-closed prompt path;
+- the license split (not a discrepancy): `0.8.0` is MIT in the registry metadata, the tarball
+  `package.json`, and the MIT `LICENSE` file the tarball ships, while the repo was relicensed to
+  MPL-2.0 on 2026-10-12 and `0.8.1-beta.0` is MPL-2.0 in those same three places, so pinning
+  `0.8.0` keeps MIT terms and any bump moves to file-level copyleft.

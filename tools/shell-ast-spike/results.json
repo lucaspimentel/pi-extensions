@@ -1,6 +1,14 @@
 {
 	"meta": {
-		"generatedAt": "2026-11-06T06:12:28.590Z"
+		"generatedAt": "2026-11-06T06:15:56.622Z"
+	},
+	"verdict": {
+		"decision": "adopt",
+		"library": "@questi0nm4rk/shell-ast",
+		"version": "0.8.0",
+		"date": "2026-11-06",
+		"basis": "reviewer decision from the numbers in this file; thresholds were deliberately never pre-committed",
+		"scope": "the pinned 0.8.0 only, which is MIT; the adapter (TODO adoption steps 3-7) is not implemented by this decision, and any bump past 0.8.0 moves to MPL-2.0"
 	},
 	"counts": {
 		"generatedAt": "2026-11-06T05:15:42.930Z",
