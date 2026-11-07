@@ -164,7 +164,8 @@ export default function ghReadExtension(pi: ExtensionAPI): void {
 				: await runGh(checked.argv, ctx.cwd);
 			return {
 				content: [{ type: "text", text: result.text }],
-				details: { subcommand: checked.subcommand },
+				details: { subcommand: checked.subcommand, exitCode: result.exitCode, timedOut: result.timedOut },
+				...(result.ok ? {} : { isError: true }),
 			};
 		},
 	});

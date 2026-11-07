@@ -46,24 +46,25 @@ const extraLines = (content: unknown): string[] => {
 };
 
 /**
- * Failures always surface, ignoring gist/hide: `timed out` for a killed exec,
- * `exit N` when an exit code is available, else the first error line.
+ * Failures always surface, ignoring gist/hide: `timed out` for a killed or
+ * timed-out exec, `exit N` when an exit code is available, else the first error
+ * line.
  *
  * pi's `ToolExecutionComponent` forwards only `{ content, details }` to a result
  * renderer (`dist/modes/interactive/components/tool-execution.js`), so
  * `structuredContent` (and with it `exit_code`) is normally absent and the error
  * flag arrives on `ToolRenderContext.isError`; the resolver seeds `isError` from
  * the context before calling here. Forwarded `details` is the reliable
- * structured source: `details.killed` wins first because a killed process can
- * still report `exitCode: 0` (`pup_*` is the first consumer), and a non-zero
- * `details.exitCode` is next. `structuredContent.exit_code` is still honored
- * when a caller forwards it, and the native shell tools append
+ * structured source: `details.killed` (`pup_*`) and `details.timedOut`
+ * (`gh_read`) win first because such a process can still report `exitCode: 0`,
+ * and a non-zero `details.exitCode` is next. `structuredContent.exit_code` is
+ * still honored when a caller forwards it, and the native shell tools append
  * `Command exited with code N` to `content`, which covers the real exec case.
  */
 const failureGist = (result: GistResult): string | undefined => {
 	if (!result.isError) return undefined;
 	const details = asObject(result.details);
-	if (details?.killed === true) return "timed out";
+	if (details?.killed === true || details?.timedOut === true) return "timed out";
 	const detailsExitCode = details?.exitCode;
 	if (typeof detailsExitCode === "number" && detailsExitCode !== 0) return `exit ${detailsExitCode}`;
 	const exitCode = asObject(result.structuredContent)?.exit_code;
@@ -89,6 +90,7 @@ const PUP_COUNTS: Record<string, { path: string[]; noun: string }> = {
 	pup_apm_services: { path: ["data", "attributes", "services"], noun: "services" },
 	pup_logs_aggregate: { path: ["data", "buckets"], noun: "buckets" },
 	pup_metrics_query: { path: ["data", "series"], noun: "series" },
+	pup_run: { path: ["data"], noun: "items" },
 };
 
 /** The length of the array at `path` inside `value`, or undefined when it is not one. */
@@ -241,7 +243,7 @@ const detailGist = (toolName: string, result: GistResult, args: unknown): string
 			// pup_*: the payload is the parsed JSON of `pup ... --output json`, and
 			// pup's envelope, not the command, decides where the items sit. Any
 			// other shape (an unexpected payload, a non-JSON stdout, a pup tool
-			// without an entry here such as pup_run or pup_auth_status) falls
+			// without an entry here such as pup_auth_status) falls
 			// through to the generic line count.
 			const spec = PUP_COUNTS[toolName];
 			if (spec === undefined) return undefined;

@@ -60,6 +60,10 @@ export const INJECTED_ENV = {
 export interface GhRunResult {
 	ok: boolean;
 	text: string;
+	/** The child's exit code, or null when it never exited (gate, spawn error, cancellation). */
+	exitCode: number | null;
+	/** True when the run was killed at its timeout; wins over `exitCode` in the gist. */
+	timedOut: boolean;
 }
 
 /**
@@ -111,7 +115,7 @@ export async function runGh(argv: readonly string[], cwd: string): Promise<GhRun
 	if (!isAuthStatusArgv(argv)) {
 		const gatePassed = await worktreeCheckPassed(cwd);
 		if (!gatePassed) {
-			return { ok: false, text: "gh_read: not inside a git worktree" };
+			return { ok: false, text: "gh_read: not inside a git worktree", exitCode: null, timedOut: false };
 		}
 	}
 
@@ -132,5 +136,10 @@ export async function runGh(argv: readonly string[], cwd: string): Promise<GhRun
 		text += `\n[gh_read: output truncated, showing ${outcome.retainedBytes} of ${outcome.totalBytes} bytes]`;
 	}
 
-	return { ok: outcome.code === 0 && outcome.spawnError === undefined && !outcome.timedOut, text };
+	return {
+		ok: outcome.code === 0 && outcome.spawnError === undefined && !outcome.timedOut,
+		text,
+		exitCode: outcome.code,
+		timedOut: outcome.timedOut,
+	};
 }

@@ -151,8 +151,43 @@ test("execute native: worktree gate then gh argv verbatim, details carry the sub
 	const result = await tool.execute("id", { subcommand: "pr list", args: ["--state", "open"] }, undefined, null, { cwd: "/repo" });
 	assert.equal(result.isError, undefined);
 	assert.equal(result.content[0].text, "#1 open\n");
-	assert.deepEqual(result.details, { subcommand: "pr list" });
+	assert.deepEqual(result.details, { subcommand: "pr list", exitCode: 0, timedOut: false });
 	assert.deepEqual(argsList[1], ["pr", "list", "--state", "open"]);
+	setSpawnOverride(null);
+});
+
+test("execute native: a failed worktree gate is a tool error with no gh spawn", async () => {
+	const tool = register();
+	const { argsList } = harness((spawn) => {
+		// git rev-parse on a non-repo cwd: stderr plus exit 128.
+		spawn.child.stderr.emit("data", Buffer.from("fatal: not a git repository\n"));
+		spawn.child.emit("close", 128);
+	});
+	const result = await tool.execute("id", { subcommand: "pr list" }, undefined, null, { cwd: "/not-a-worktree" });
+	assert.equal(result.isError, true);
+	assert.equal(result.content[0].text, "gh_read: not inside a git worktree");
+	assert.deepEqual(result.details, { subcommand: "pr list", exitCode: null, timedOut: false });
+	assert.equal(argsList.length, 1, "only the git gate ran");
+	setSpawnOverride(null);
+});
+
+test("execute native: a non-zero gh exit is a tool error carrying the exit code", async () => {
+	const tool = register();
+	const { argsList } = harness((spawn, index) => {
+		if (index === 0) {
+			spawn.child.stdout.emit("data", Buffer.from("/repo\n"));
+			spawn.child.emit("close", 0);
+			return;
+		}
+		spawn.child.stderr.emit("data", Buffer.from("gh: nope\n"));
+		spawn.child.emit("close", 1);
+	});
+	const result = await tool.execute("id", { subcommand: "pr list" }, undefined, null, { cwd: "/repo" });
+	assert.equal(result.isError, true);
+	assert.ok(result.content[0].text.startsWith("gh_read: gh exited with code 1\n"), result.content[0].text);
+	assert.ok(result.content[0].text.includes("gh: nope"), result.content[0].text);
+	assert.deepEqual(result.details, { subcommand: "pr list", exitCode: 1, timedOut: false });
+	assert.equal(argsList.length, 2, "gate then the gh argv");
 	setSpawnOverride(null);
 });
 
@@ -292,6 +327,8 @@ test("execute native run view --log is routed to the dual-window log runner via 
 	const result = await tool.execute("id", { subcommand: "run view", args: ["123", "--log"] }, undefined, null, { cwd: "/repo" });
 	assert.equal(result.isError, undefined, result.content[0].text);
 	assert.equal(result.details["subcommand"], "run view");
+	assert.equal(result.details["exitCode"], 0, "a successful log read reports its exit code");
+	assert.equal(result.details["timedOut"], false);
 	assert.equal(sharedArgs.length, 1, "the shared seam captured only the rev-parse gate");
 	assert.deepEqual(sharedArgs[0], ["rev-parse", "--show-toplevel"]);
 	assert.deepEqual(logArgs[0], ["run", "view", "123", "--log"]);

@@ -27,8 +27,8 @@ A key with a `*` anywhere else is invalid and warns.
 
 Presence of a name in the effective table is the opt-in. Unknown names are
 valid and enable the mode for that name. Failures always surface, ignoring the
-mode: `exit N` for exec tools (or `timed out` for a killed one), else
-`error: <first line>`.
+mode: `exit N` for exec tools (or `timed out` for a killed or timed-out exec),
+else `error: <first line>`.
 
 Nothing hides by default. `subagent` is deliberately absent from the defaults
 because it renders itself. The `pi-memory` tools (`memory_write`, `scratchpad`,

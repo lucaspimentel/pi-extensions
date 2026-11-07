@@ -957,8 +957,18 @@ preserving useful results. The ENTIRE displayed API result is capped at
 space reserved); on overflow the data becomes an explicitly incomplete
 UTF-8-safe prefix preview labeled "NOT complete JSON" plus narrowing
 guidance. Source completeness and display clipping are distinct facts. No
-hidden full payload is retained in details or on disk. Native command
-result conventions are unchanged.
+hidden full payload is retained in details or on disk.
+
+Native command results (the `gh` argv runner and the log runner) carry
+`exitCode: number | null` and `timedOut: boolean` in tool details and set
+`isError: true` on every failure: the worktree gate, a spawn error, a timeout,
+a cancellation, and a non-zero exit. Success leaves `isError` unset. This
+AMENDS the earlier settled "reports failures as text with no `isError`" stance:
+a collapsed tool row needs a structured failure signal, and the display-only
+compact-tool-view extension reads `details.{timedOut,exitCode}` to render
+`timed out` or `exit N`. The model-facing `content` is unchanged, byte for byte,
+on every path, and the tool still does no error-shape matching and appends no
+hints.
 
 The text-mode exception is `job logs`: its result is raw log text rendered
 through the window described under "job logs" rather than the JSON pipeline,
@@ -1070,13 +1080,18 @@ Non-log invocations keep the 15 s / 50 KiB contract unchanged.
 
 `job logs` deliberately does NOT use this runner: it is an API operation
 using the API runner's windowed mode, gate-exempt, and `isError: true` on a
-failed read, while `run view --log` stays native, gated, and reports failures
-as text with no `isError`. The window size and the omission notice string are
+failed read, while `run view --log` stays native and gated and now matches it on
+the failure side: a failed log read sets `isError: true` and reports
+`timedOut`/`exitCode` in details (see "API result shape and display cap" for the
+amendment). The window size and the omission notice string are
 shared; the two paths are otherwise separate.
 
 Failure contract mirrors `git_read` exactly, with `gh_read:`/`gh` prefixes:
 never throws; `ok` true only for exit 0 without timeout or spawn error;
-truncation noted inline; exit-code and timeout messages name what happened.
+truncation noted inline; exit-code and timeout messages name what happened; a
+failure is also flagged as a tool error (`isError: true`) and its structured
+outcome (`exitCode`, `timedOut`) is exposed in details for display, with the
+content text unchanged.
 GitHub API and auth errors (including 403 from the wrong active gh account)
 pass through verbatim; the tool does no error-shape matching and appends no
 hints (settled: passthrough only).
@@ -1166,7 +1181,10 @@ Settled in the grill-me review:
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout
-  escalation, exit-code contract including `auth status` passthrough.
+  escalation, exit-code contract including `auth status` passthrough, and the
+  `exitCode`/`timedOut` pair on every result (exit 0, non-zero exit, gate,
+  spawn error, cancellation, and the timeout paths, where a killed child
+  reports `exitCode: null`).
   Reuse the git-read spawn test harness patterns. Log runner coverage
   through its own spawn seam (gate still arriving via the shared seam as
   spawn 0): byte-identical under-cap output, exact 100 KiB boundary and
@@ -1269,7 +1287,9 @@ Settled in the grill-me review:
 - `tests/gh-read-tool.test.mts`: registered-tool coverage through a capture
   stub and the spawn seams: schema shape without outputSchema, fail-closed
   validation errors with zero spawns, native path (gate + argv verbatim,
-  details.subcommand), `pr checks` tool-authored JSON fields reaching the
+  details.subcommand plus `exitCode`/`timedOut`), the failed-gate and
+  non-zero-exit tool errors (`isError: true` with the structured fields),
+  `pr checks` tool-authored JSON fields reaching the
   child, and the API path end to end (no worktree gate, pinned SHA,
   partial-source isError with preserved data and continuation). Run
   coverage: `run list` end to end with argv verbatim, `run view --log`
