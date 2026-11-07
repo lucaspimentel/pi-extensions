@@ -7,8 +7,8 @@ tests. The git-read extraction regression guard held: tests/git-read-*.test.mts
 passed unmodified after the refactor.
 
 Addition: `pr threads` (see "pr threads"): the GraphQL review-thread read
-with resolved/outdated state, implemented as the tenth API operation and the
-first (and only) tool-authored GraphQL POST transport.
+with resolved/outdated state, the first (and only) tool-authored GraphQL POST
+transport.
 
 Addition: `job logs` (see "job logs"). Design settled in a grill-me review on
 2026-10-26; NOT yet implemented. It is the first API operation whose response
@@ -790,7 +790,7 @@ BOM-prefixed on the first line, with no job/step prefixes, unlike
 Settled in the grill-me review (2026-10-26):
 
 - Input surface is `{repo, job_id}` only, as above.
-- Worktree-gate EXEMPT, like the other ten API operations and unlike
+- Worktree-gate EXEMPT, like the other API operations and unlike
   `run view --log`, because the target repository is explicit and the common
   case is debugging CI from a directory that is not a checkout.
 - Retention is the first 50 KiB plus the last 50 KiB of the response BODY
@@ -874,13 +874,13 @@ instead of silently substituting replacement characters. Spawn function
 and clock are injectable seams; tests run network-free.
 
 One per-operation retention mode was added for `job logs`: the default
-"full" mode above is unchanged for the other ten operations, while
+"full" mode above is unchanged for the other operations, while
 "window" mode keeps the first 50 KiB and last 50 KiB of the response BODY,
 still counts every byte for the omission metadata, never poisons on growth
 past the 8 MiB budget, and carries the retained window on the error path so a
 deadline or interrupt can return it. The header/body split, the 64 KiB
 header block, the 16 KiB stderr cap, the strict UTF-8 decode, and the shared
-30 s deadline apply to both modes. The ten existing operations must remain
+30 s deadline apply to both modes. The existing operations must remain
 byte-identical; their budget and poison tests are re-pinned against the
 unchanged "full" mode.
 
@@ -957,8 +957,18 @@ preserving useful results. The ENTIRE displayed API result is capped at
 space reserved); on overflow the data becomes an explicitly incomplete
 UTF-8-safe prefix preview labeled "NOT complete JSON" plus narrowing
 guidance. Source completeness and display clipping are distinct facts. No
-hidden full payload is retained in details or on disk. Native command
-result conventions are unchanged.
+hidden full payload is retained in details or on disk.
+
+Native command results (the `gh` argv runner and the log runner) carry
+`exitCode: number | null` and `timedOut: boolean` in tool details and set
+`isError: true` on every failure: the worktree gate, a spawn error, a timeout,
+a cancellation, and a non-zero exit. Success leaves `isError` unset. This
+AMENDS the earlier settled "reports failures as text with no `isError`" stance:
+a collapsed tool row needs a structured failure signal, and the display-only
+compact-tool-view extension reads `details.{timedOut,exitCode}` to render
+`timed out` or `exit N`. The model-facing `content` is unchanged, byte for byte,
+on every path, and the tool still does no error-shape matching and appends no
+hints.
 
 The text-mode exception is `job logs`: its result is raw log text rendered
 through the window described under "job logs" rather than the JSON pipeline,
@@ -988,7 +998,7 @@ repository context, so it is useful precisely where the other eight are not:
 outside any worktree. The other eight keep the gate unchanged, including
 `run view --log`: the dual-window log runner reuses the identical
 worktreeCheckPassed gate even though `run view` accepts `-R` (settled
-one-simple-contract rule). Separately, the ten implemented API operations
+one-simple-contract rule). Separately, the implemented API operations
 are exempt as a class, as documented under "GitHub API operations";
 `job logs` inherits that exemption even though it returns log text, so a CI
 log can be read from a directory that is not a checkout while `run view
@@ -1070,13 +1080,18 @@ Non-log invocations keep the 15 s / 50 KiB contract unchanged.
 
 `job logs` deliberately does NOT use this runner: it is an API operation
 using the API runner's windowed mode, gate-exempt, and `isError: true` on a
-failed read, while `run view --log` stays native, gated, and reports failures
-as text with no `isError`. The window size and the omission notice string are
+failed read, while `run view --log` stays native and gated and now matches it on
+the failure side: a failed log read sets `isError: true` and reports
+`timedOut`/`exitCode` in details (see "API result shape and display cap" for the
+amendment). The window size and the omission notice string are
 shared; the two paths are otherwise separate.
 
 Failure contract mirrors `git_read` exactly, with `gh_read:`/`gh` prefixes:
 never throws; `ok` true only for exit 0 without timeout or spawn error;
-truncation noted inline; exit-code and timeout messages name what happened.
+truncation noted inline; exit-code and timeout messages name what happened; a
+failure is also flagged as a tool error (`isError: true`) and its structured
+outcome (`exitCode`, `timedOut`) is exposed in details for display, with the
+content text unchanged.
 GitHub API and auth errors (including 403 from the wrong active gh account)
 pass through verbatim; the tool does no error-shape matching and appends no
 hints (settled: passthrough only).
@@ -1166,7 +1181,10 @@ Settled in the grill-me review:
 - `tests/gh-read-spawn.test.mts`: worktree gate (and the `auth status`
   exemption: no git spawn at all, while `pr list` still gates), environment
   assertions (stripped and injected vars), caps and truncation, timeout
-  escalation, exit-code contract including `auth status` passthrough.
+  escalation, exit-code contract including `auth status` passthrough, and the
+  `exitCode`/`timedOut` pair on every result (exit 0, non-zero exit, gate,
+  spawn error, cancellation, and the timeout paths, where a killed child
+  reports `exitCode: null`).
   Reuse the git-read spawn test harness patterns. Log runner coverage
   through its own spawn seam (gate still arriving via the shared seam as
   spawn 0): byte-identical under-cap output, exact 100 KiB boundary and
@@ -1269,7 +1287,9 @@ Settled in the grill-me review:
 - `tests/gh-read-tool.test.mts`: registered-tool coverage through a capture
   stub and the spawn seams: schema shape without outputSchema, fail-closed
   validation errors with zero spawns, native path (gate + argv verbatim,
-  details.subcommand), `pr checks` tool-authored JSON fields reaching the
+  details.subcommand plus `exitCode`/`timedOut`), the failed-gate and
+  non-zero-exit tool errors (`isError: true` with the structured fields),
+  `pr checks` tool-authored JSON fields reaching the
   child, and the API path end to end (no worktree gate, pinned SHA,
   partial-source isError with preserved data and continuation). Run
   coverage: `run list` end to end with argv verbatim, `run view --log`

@@ -80,10 +80,10 @@ function trimLeadingContinuation(buf: Buffer): Buffer {
  */
 export async function runGhLog(argv: readonly string[], cwd: string, signal: AbortSignal | undefined, clock: ApiClock = defaultClock): Promise<GhRunResult> {
 	if (signal?.aborted) {
-		return { ok: false, text: "gh_read: gh run log fetch cancelled before spawn" };
+		return { ok: false, text: "gh_read: gh run log fetch cancelled before spawn", exitCode: null, timedOut: false };
 	}
 	if (!(await worktreeCheckPassed(cwd))) {
-		return { ok: false, text: "gh_read: not inside a git worktree" };
+		return { ok: false, text: "gh_read: not inside a git worktree", exitCode: null, timedOut: false };
 	}
 
 	const spawnFn = spawnOverride ?? spawn;
@@ -97,7 +97,7 @@ export async function runGhLog(argv: readonly string[], cwd: string, signal: Abo
 			windowsHide: true,
 		});
 	} catch (err) {
-		return { ok: false, text: `gh_read: failed to run gh: ${err instanceof Error ? err.message : String(err)}` };
+		return { ok: false, text: `gh_read: failed to run gh: ${err instanceof Error ? err.message : String(err)}`, exitCode: null, timedOut: false };
 	}
 
 	return await new Promise<GhRunResult>((resolvePromise) => {
@@ -179,7 +179,7 @@ export async function runGhLog(argv: readonly string[], cwd: string, signal: Abo
 			signal?.removeEventListener("abort", onAbort);
 
 			if (spawnError !== undefined) {
-				resolvePromise({ ok: false, text: `gh_read: failed to run gh: ${spawnError}` });
+				resolvePromise({ ok: false, text: `gh_read: failed to run gh: ${spawnError}`, exitCode: null, timedOut: false });
 				return;
 			}
 
@@ -211,18 +211,19 @@ export async function runGhLog(argv: readonly string[], cwd: string, signal: Abo
 
 			const stderr = Buffer.concat(stderrChunks).toString("utf8");
 			if (cancelled) {
-				resolvePromise({ ok: false, text: `gh_read: gh run log fetch cancelled\n${stderr}\n${stdoutText}` });
+				// Cancellation reports no exit code even when a close code arrived.
+				resolvePromise({ ok: false, text: `gh_read: gh run log fetch cancelled\n${stderr}\n${stdoutText}`, exitCode: null, timedOut: false });
 				return;
 			}
 			if (timedOut) {
-				resolvePromise({ ok: false, text: `gh_read: gh timed out after ${LOG_TIMEOUT_MS} ms\n${stderr}\n${stdoutText}` });
+				resolvePromise({ ok: false, text: `gh_read: gh timed out after ${LOG_TIMEOUT_MS} ms\n${stderr}\n${stdoutText}`, exitCode: code, timedOut: true });
 				return;
 			}
 			if (code !== 0) {
-				resolvePromise({ ok: false, text: `gh_read: gh exited with code ${code}\n${stderr}\n${stdoutText}` });
+				resolvePromise({ ok: false, text: `gh_read: gh exited with code ${code}\n${stderr}\n${stdoutText}`, exitCode: code, timedOut: false });
 				return;
 			}
-			resolvePromise({ ok: true, text: stdoutText });
+			resolvePromise({ ok: true, text: stdoutText, exitCode: code, timedOut: false });
 		};
 
 		child.on("error", (err: Error) => {

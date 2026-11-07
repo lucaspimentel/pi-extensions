@@ -209,6 +209,8 @@ test("rev-parse gate runs first, then the validated argv verbatim; both spawns s
 	const spawns = harness(scriptOk("/repo", "open PRs\n"));
 	const result = await runGh(prListArgv("--state", "open"), "/repo");
 	assert.equal(result.ok, true);
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.timedOut, false);
 	assert.equal(spawns.length, 2);
 	assert.deepEqual(spawns[0]!.args, ["rev-parse", "--show-toplevel"]);
 	assert.deepEqual(spawns[1]!.args, ["pr", "list", "--state", "open"]);
@@ -238,18 +240,24 @@ test("gate failure, empty toplevel, and outside-cwd all fail closed with one mes
 	const failed = await runGh(prListArgv(), "/repo");
 	assert.equal(failed.ok, false);
 	assert.equal(failed.text, "gh_read: not inside a git worktree");
+	assert.equal(failed.exitCode, null);
+	assert.equal(failed.timedOut, false);
 
 	// Gate prints an empty toplevel.
 	harness(scriptGateFailure(0));
 	const empty = await runGh(prListArgv(), "/repo");
 	assert.equal(empty.ok, false);
 	assert.equal(empty.text, "gh_read: not inside a git worktree");
+	assert.equal(empty.exitCode, null);
+	assert.equal(empty.timedOut, false);
 
 	// Gate passes but cwd is outside the toplevel.
 	harness(scriptOk("/other/repo"));
 	const outside = await runGh(prListArgv(), "/repo");
 	assert.equal(outside.ok, false);
 	assert.equal(outside.text, "gh_read: not inside a git worktree");
+	assert.equal(outside.exitCode, null);
+	assert.equal(outside.timedOut, false);
 });
 
 test("auth status skips the worktree gate entirely: no git spawn, gh runs anywhere", async () => {
@@ -272,6 +280,8 @@ test("other subcommands still gate: pr list fails closed outside a worktree", as
 	const result = await runGh(prListArgv(), "/repo");
 	assert.equal(result.ok, false);
 	assert.equal(result.text, "gh_read: not inside a git worktree");
+	assert.equal(result.exitCode, null);
+	assert.equal(result.timedOut, false);
 });
 
 // ── Unit: exit codes, API errors passthrough, and text assembly ─────────────
@@ -281,6 +291,8 @@ test("exit 0: ok true with decoded stdout", async () => {
 	const result = await runGh(prListArgv(), "/repo");
 	assert.equal(result.ok, true);
 	assert.equal(result.text, "#123 fixing things\n");
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.timedOut, false);
 });
 
 test("API/auth errors pass through verbatim with the exit-code prefix and no hints", async () => {
@@ -292,6 +304,8 @@ test("API/auth errors pass through verbatim with the exit-code prefix and no hin
 	assert.ok(result.text.startsWith("gh_read: gh exited with code 1\n"), result.text);
 	assert.ok(result.text.includes("Could not resolve to a PullRequest"));
 	assert.ok(result.text.includes("hint: see docs"));
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.timedOut, false);
 });
 
 // ── Unit: truncation ─────────────────────────────────────────────────────────
@@ -360,6 +374,8 @@ test("timeout: SIGTERM then SIGKILL escalation, reaped on close, error result", 
 		const result = await promise;
 		assert.equal(result.ok, false);
 		assert.ok(result.text.startsWith(`gh_read: gh timed out after ${TIMEOUT_MS} ms`), result.text);
+		assert.equal(result.exitCode, null, "a killed child reports no exit code");
+		assert.equal(result.timedOut, true);
 	} finally {
 		mock.timers.reset();
 	}
@@ -380,6 +396,8 @@ test("spawn failure: error event resolves with a failed-to-run message", async (
 	assert.equal(result.ok, false);
 	assert.ok(result.text.startsWith("gh_read: failed to run gh: "), result.text);
 	assert.ok(result.text.includes("ENOENT"));
+	assert.equal(result.exitCode, null);
+	assert.equal(result.timedOut, false);
 });
 
 // ── Unit: auth status env and failure contract ────────────────────────────────
@@ -405,6 +423,8 @@ test("auth status: nonzero gh exit (not logged in) keeps the gh_read failure con
 	assert.equal(result.ok, false);
 	assert.ok(result.text.startsWith("gh_read: gh exited with code 1\n"), result.text);
 	assert.ok(result.text.includes("not logged in"));
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.timedOut, false);
 });
 
 test("auth status: exit 0 passes the --json hosts payload through verbatim", async () => {
@@ -415,6 +435,8 @@ test("auth status: exit 0 passes the --json hosts payload through verbatim", asy
 	const result = await runGh(authStatusArgv(), "/repo");
 	assert.equal(result.ok, true);
 	assert.equal(result.text, '{"hosts":{}}');
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.timedOut, false);
 });
 
 // ── Dual-window log runner (runGhLog) ─────────────────────────────────────────
@@ -515,6 +537,8 @@ test("log runner: under-cap stdout is byte-identical with no notice", async () =
 	const result = await runGhLog(runViewLogArgv("--log"), "/repo", undefined);
 	assert.equal(result.ok, true);
 	assert.equal(result.text, Buffer.alloc(60 * 1024, 0x61).toString("utf8"));
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.timedOut, false);
 	assert.ok(!result.text.includes("[gh_read:"));
 });
 
@@ -636,6 +660,8 @@ test("log runner: concurrent large stdout and stderr on a nonzero exit keep stde
 	});
 	const result = await runGhLog(runViewLogArgv("--log"), "/repo", undefined);
 	assert.equal(result.ok, false);
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.timedOut, false);
 	const expected = `gh_read: gh exited with code 1\n${
 		stderr.subarray(0, LOG_STDERR_CAP).toString("utf8")
 	}\n${stdout.subarray(0, 50 * 1024).toString("utf8")}\n${OMIT_NOTICE(20 * 1024)}\n${
@@ -664,6 +690,8 @@ test("log runner: timeout SIGTERM at 30 s, SIGKILL after 5 s, resolves only afte
 		const result = await promise;
 		assert.equal(result.ok, false);
 		assert.ok(result.text.startsWith(`gh_read: gh timed out after ${LOG_TIMEOUT_MS} ms\n`), result.text);
+		assert.equal(result.exitCode, null, "a killed log child reports no exit code");
+		assert.equal(result.timedOut, true);
 	} finally {
 		void gateSpawns;
 	}
@@ -677,6 +705,8 @@ test("log runner: spawn error resolves with the failed-to-run message", async ()
 	assert.equal(result.ok, false);
 	assert.ok(result.text.startsWith("gh_read: failed to run gh: "), result.text);
 	assert.ok(result.text.includes("ENOENT"));
+	assert.equal(result.exitCode, null);
+	assert.equal(result.timedOut, false);
 });
 
 test("log runner: cancellation mid-stream kills the child and reports cancellation with windows", async () => {
@@ -693,6 +723,8 @@ test("log runner: cancellation mid-stream kills the child and reports cancellati
 	assert.equal(result.ok, false);
 	assert.ok(result.text.startsWith("gh_read: gh run log fetch cancelled\n"), result.text);
 	assert.ok(result.text.includes(OMIT_NOTICE(20 * 1024)));
+	assert.equal(result.exitCode, null, "cancellation reports no exit code even after a close code");
+	assert.equal(result.timedOut, false);
 });
 
 test("log runner: abort before spawn performs zero spawns", async () => {
@@ -704,6 +736,8 @@ test("log runner: abort before spawn performs zero spawns", async () => {
 	const result = await runGhLog(runViewLogArgv("--log"), "/repo", controller.signal);
 	assert.equal(result.ok, false);
 	assert.equal(result.text, "gh_read: gh run log fetch cancelled before spawn");
+	assert.equal(result.exitCode, null);
+	assert.equal(result.timedOut, false);
 	assert.equal(gateSpawns.length, 0);
 	assert.equal(ghSpawns.length, 0);
 });
@@ -716,6 +750,8 @@ test("log runner: validated argv verbatim plus env and option parity on the gh c
 	const argv = runViewLogArgv("--log-failed", "-j", "97354534680000000000");
 	const result = await runGhLog(argv, "/repo", undefined);
 	assert.equal(result.ok, true);
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.timedOut, false);
 	assert.equal(ghSpawns.length, 1);
 	assert.equal(ghSpawns[0]!.command, "gh");
 	assert.deepEqual(ghSpawns[0]!.args, ["run", "view", "123", "--log-failed", "-j", "97354534680000000000"]);
@@ -738,6 +774,8 @@ test("log runner: the worktree gate still applies to run view --log, even though
 	const result = await runGhLog(runViewLogArgv("--log"), "/repo", undefined);
 	assert.equal(result.ok, false);
 	assert.equal(result.text, "gh_read: not inside a git worktree");
+	assert.equal(result.exitCode, null);
+	assert.equal(result.timedOut, false);
 	assert.equal(gateSpawns.length, 1);
 	assert.deepEqual(gateSpawns[0]!.args, ["rev-parse", "--show-toplevel"]);
 	assert.equal(ghSpawns.length, 0);

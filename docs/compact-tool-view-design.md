@@ -76,9 +76,9 @@ The shipped defaults deliberately exclude `subagent`, which renders itself.
 `gistFor(toolName, result, args)` returns element 0 (the primary line) plus any
 extra lines, in this order:
 
-1. Failure: `timed out` when `details.killed`, else `exit N` when an exit code is
-   available (see below), else `error: <first line of the error text>` from the
-   first text block.
+1. Failure: `timed out` when `details.killed` or `details.timedOut`, else
+   `exit N` when an exit code is available (see below), else
+   `error: <first line of the error text>` from the first text block.
 2. Typed `details`/`structuredContent` per the default table below. Each typed
    branch is gated on the tool name, so a `bash`-shaped details object on an
    unknown tool falls through to the fallback.
@@ -102,13 +102,13 @@ not forwarded, and the error flag lives on `ToolRenderContext.isError` (set from
 on both counts against the installed runtime.
 
 The resolver therefore seeds the error flag from `context.isError` before calling
-`gistFor`, and the failure gist tries, in order: `details.killed` (a killed
-process can still report `exitCode: 0`, so it wins; `pup_*` is the first
-consumer), then a non-zero `details.exitCode` (forwarded `details` is the
-reliable structured source), then `structuredContent.exit_code` when a caller
-forwards it anyway, then `/Command exited with code (\d+)/` in the first text
-block (which the native shell tools always append on a non-zero exit), then
-`error: <first line>`. The same forwarding gap means the `bash` line count comes
+`gistFor`, and the failure gist tries, in order: `details.killed` (`pup_*`) or
+`details.timedOut` (`gh_read`), either of which wins because such a process can
+still report `exitCode: 0`, then a non-zero `details.exitCode` (forwarded
+`details` is the reliable structured source), then `structuredContent.exit_code`
+when a caller forwards it anyway, then `/Command exited with code (\d+)/` in the
+first text block (which the native shell tools always append on a non-zero
+exit), then `error: <first line>`. The same forwarding gap means the `bash` line count comes
 from the model-facing first text block rather than the full
 `structuredContent.output`; the count is the model-facing output's line count.
 
@@ -127,7 +127,8 @@ Every entry below is `gist`.
 | `ffgrep` | `N matches in M files` from `details.{totalMatched,totalFiles}` |
 | `fffind` | `N files` from `details.totalMatched` |
 | `python`, `node` | the worker status from `details.status` (`ok`, `runtime_error`, ...) |
-| `gh_read`, `git_read`, `web_fetch`, `web_search`, `session_search`, `session_excerpt`, `jira_read`, `jira_update`, `subagent_list`, `request_read_access` | generic `N lines` |
+| `git_read`, `web_fetch`, `web_search`, `session_search`, `session_excerpt`, `jira_read`, `jira_update`, `subagent_list`, `request_read_access` | generic `N lines` |
+| `gh_read` | `timed out` from `details.timedOut`; `exit N` from a non-zero `details.exitCode`; otherwise generic `N lines` on success. Its `gh` argv and log runners set `isError: true` on every failure and report both fields in `details` (its API path keeps its own `isError` handling, whose failures render through the shared `error: <first line>` path), and a successful read has no count noun because its payloads are heterogeneous |
 | `write` | `N lines written` from `context.args.content` (see the assumption below) |
 | `subagent` | not in the defaults (it renders itself) |
 
@@ -173,7 +174,8 @@ family is meant to be covered by a single prefix pattern. Their typed lines
 | `pup_apm_services` | `N services` from `details.parsed.data.attributes.services` |
 | `pup_logs_aggregate` | `N buckets` from `details.parsed.data.buckets` |
 | `pup_metrics_query` | `N series` from `details.parsed.data.series` |
-| `pup_run`, `pup_auth_status` | generic `N lines`: `pup_auth_status` returns a flat `{ authenticated, site, org, expires_at, ... }` object with nothing to count, and `pup_run` is the escape hatch |
+| `pup_run` | `N items` from the length of `details.parsed.data`, the escape hatch's only verified envelope entry point; any other payload keeps the generic line count |
+| `pup_auth_status` | `authenticated (SITE)` / `not authenticated (SITE)` from `details.parsed.{authenticated,site}`, dropping the parenthetical when `site` is missing or empty; no expiry, countdown, or `status_message` text, and any other `parsed` shape (no boolean `authenticated`) keeps the generic line count |
 | any `pup_*` failure | `exit N` from `details.exitCode`, or `timed out` when `details.killed` |
 
 Every `pup` command wraps its payload in pup's own `{ data, metadata, status }`
@@ -182,7 +184,9 @@ that does not match its path (including a non-JSON stdout, which leaves
 `details.parsed` unset) falls through to the generic line count, and every pup
 noun is deliberately fixed plural (`1 monitors`, `1 buckets`). A count line gains
 `, auth refreshed` when `details.refreshed` is set, the only place that state
-surfaces.
+surfaces. `pup_auth_status` is the deliberate exception: its line already
+describes auth state, and `refresh` is only a pre-step that makes the status read
+newer, so no suffix is added.
 
 Deliberate renderer overrides: `host_bash` overrides guard's own shell result
 renderer (`extensions/guard/index.ts`, `extensions/guard/tools/shell-render.ts`),

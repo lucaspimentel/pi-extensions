@@ -250,21 +250,50 @@ test("pup_* gists the item count from pup's JSON envelope", () => {
 	]);
 	assert.deepEqual(gistFor("pup_logs_aggregate", pupResult({ data: { buckets: [{}] } }), {}), ["1 buckets"]);
 	assert.deepEqual(gistFor("pup_metrics_query", pupResult({ data: { series: [{}] } }), {}), ["1 series"]);
+	// pup_run is the escape hatch, so its noun is the generic one.
+	assert.deepEqual(gistFor("pup_run", pupResult({ data: [{}, {}] }, false), {}), ["2 items"]);
 	assert.deepEqual(gistFor("pup_monitors_list", pupResult({ data: [] }), {}), ["0 monitors"]);
 	assert.deepEqual(gistFor("pup_monitors_list", pupResult({ data: [{}] }, true), {}), ["1 monitors, auth refreshed"]);
 });
 
 test("pup_* falls back to the line count on an unexpected payload", () => {
 	const withParsed = (parsed: unknown, text: string) => ({ content: [{ type: "text", text }], details: { parsed } });
-	// pup_run and pup_auth_status have no count path; a wrapper the path does not
-	// match and a non-JSON stdout (no `parsed`) all fall through.
-	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: true }, "a\nb"), {}), ["2 lines"]);
-	assert.deepEqual(gistFor("pup_run", withParsed({ data: [{}] }, "a"), {}), ["1 lines"]);
+	// A wrapper the count path does not match, a non-JSON stdout (no `parsed`),
+	// and a pup tool without a typed line all fall through.
+	assert.deepEqual(gistFor("pup_run", withParsed({ data: { items: [] } }, "a"), {}), ["1 lines"]);
+	assert.deepEqual(gistFor("pup_run", withParsed({ items: [{}] }, "a"), {}), ["1 lines"]);
 	assert.deepEqual(gistFor("pup_monitors_list", withParsed({ data: { items: [] } }, "a\nb\nc"), {}), ["3 lines"]);
 	assert.deepEqual(
 		gistFor("pup_monitors_list", { content: [{ type: "text", text: "a\nb" }], details: { argv: [], exitCode: 0, killed: false, refreshed: false } }, {}),
 		["2 lines"],
 	);
+});
+
+test("pup_auth_status gists the auth state and site", () => {
+	const withParsed = (parsed: unknown, text: string) => ({ content: [{ type: "text", text }], details: { parsed } });
+	// Authenticated and not authenticated mirror each other, with the site read
+	// from `parsed.site` (never hardcoded).
+	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: true, site: "datadoghq.com" }, "a\nb"), {}), [
+		"authenticated (datadoghq.com)",
+	]);
+	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: false, site: "datadoghq.com" }, "a\nb"), {}), [
+		"not authenticated (datadoghq.com)",
+	]);
+	// A missing or empty site drops the parenthetical.
+	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: true }, "a\nb"), {}), ["authenticated"]);
+	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: false, site: "" }, "a\nb"), {}), ["not authenticated"]);
+	// `refresh: true` is a pre-step, not a state on this line: no `, auth refreshed`.
+	assert.deepEqual(
+		gistFor(
+			"pup_auth_status",
+			{ content: [{ type: "text", text: "a\nb" }], details: { parsed: { authenticated: true, site: "datadoghq.com" }, refreshed: true } },
+			{},
+		),
+		["authenticated (datadoghq.com)"],
+	);
+	// Any other shape (no boolean `authenticated`, no `parsed`) keeps the generic line count.
+	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: "yes", site: "datadoghq.com" }, "a\nb"), {}), ["2 lines"]);
+	assert.deepEqual(gistFor("pup_auth_status", withParsed(undefined, "a\nb"), {}), ["2 lines"]);
 });
 
 test("pup failures gist the exit code or a timeout from details", () => {
@@ -278,6 +307,26 @@ test("pup failures gist the exit code or a timeout from details", () => {
 	// The numeric details exit code is the shared failure path, not pup-specific.
 	assert.deepEqual(gistFor("unknown_tool", failure({ exitCode: 3 }), {}), ["exit 3"]);
 	assert.deepEqual(gistFor("gitlab_read", failure({ exitCode: 3 }), {}), ["exit 3"]);
+});
+
+test("gh_read gists its structured failure and keeps a success on the line count", () => {
+	const ghFailure = (details: Record<string, unknown>, text: string) => ({ content: [{ type: "text", text }], details, isError: true });
+	// gh-read now sets isError and carries both fields, so the failure path (not
+	// a typed branch) produces these lines.
+	assert.deepEqual(gistFor("gh_read", ghFailure({ subcommand: "run view", exitCode: null, timedOut: true }, ""), {}), ["timed out"]);
+	assert.deepEqual(
+		gistFor("gh_read", ghFailure({ subcommand: "pr list", exitCode: 128, timedOut: false }, "gh_read: gh exited with code 128\nboom"), {}),
+		["exit 128"],
+	);
+	assert.deepEqual(
+		gistFor("gh_read", ghFailure({ subcommand: "pr list", exitCode: null, timedOut: false }, "gh_read: not inside a git worktree"), {}),
+		["error: gh_read: not inside a git worktree"],
+	);
+	// A successful read has no count noun: heterogeneous payloads keep the count.
+	assert.deepEqual(
+		gistFor("gh_read", { content: [{ type: "text", text: "a\nb" }], details: { subcommand: "pr list", exitCode: 0, timedOut: false } }, {}),
+		["2 lines"],
+	);
 });
 
 test("tools without a typed gist fall back to the line count or image", () => {
