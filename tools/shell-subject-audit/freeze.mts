@@ -14,7 +14,9 @@ if (!rel.startsWith(`build${sep}`)) throw new Error("private audit inputs must l
 execFileSync("git", ["check-ignore", "--quiet", `${rel}/inputs/user-config.json`]);
 if (existsSync(out)) throw new Error("refusing to overwrite a frozen audit directory");
 const hash = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
-const baselineSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const baselineIndex = args.indexOf("--baseline");
+const baselineRef = baselineIndex < 0 ? "HEAD" : arg("--baseline");
+const baselineSha = execFileSync("git", ["rev-parse", "--verify", "--end-of-options", `${baselineRef}^{commit}`], { encoding: "utf8" }).trim();
 const paths = [...new Set(execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean))].sort();
 const tracked = execFileSync("git", ["ls-tree", "-r", "--name-only", "-z", baselineSha], { encoding: "utf8" }).split("\0").filter(Boolean);
 const before = resolve(out, "baseline");
@@ -36,7 +38,7 @@ JSON.parse(configBytes.toString("utf8"));
 mkdirSync(resolve(out, "inputs"), { recursive: true });
 writeFileSync(resolve(out, "inputs/user-config.json"), configBytes);
 const manifest = {
-	generatedAt: new Date().toISOString(), baselineSha,
+	generatedAt: new Date().toISOString(), baselineRef, baselineSha,
 	candidateFiles, baselineFiles,
 	configSource: config, configSha256: hash(configBytes), archiveSha256: hash(archive),
 	provenance: { harvester: "e4377ed:tools/shell-ast-spike/{harvest,redact}.ts", harness: "adapted from edbff4a:tools/shell-ast-spike/diff/" },

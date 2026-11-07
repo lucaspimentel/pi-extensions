@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import * as rules from "../extensions/guard/policy/rules.ts";
 import * as tier from "../extensions/guard/policy/bashtier.ts";
 import * as text from "../extensions/guard/policy/shell-text.ts";
@@ -9,6 +14,40 @@ import { explainHostShellCommand } from "../extensions/guard/policy/decision.ts"
 import { compileRules, coverageDelta, ruleCoverage, ruleProbes } from "../tools/shell-subject-audit/coverage.mts";
 
 const api = { rules, tier, text };
+
+test("freeze pins an explicit baseline commit independently of the candidate", () => {
+	const dir = mkdtempSync(join(tmpdir(), "guard-audit-freeze-"));
+	const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+	const freeze = fileURLToPath(new URL("../tools/shell-subject-audit/freeze.mts", import.meta.url));
+	const run = (...args: string[]) => spawnSync(process.execPath, [freeze, "--config", "config.json", ...args], { cwd: dir, encoding: "utf8" });
+	try {
+		git("init");
+		git("config", "user.name", "Test");
+		git("config", "user.email", "test@example.invalid");
+		writeFileSync(join(dir, ".gitignore"), "build/\nconfig.json\n");
+		writeFileSync(join(dir, "config.json"), "{}");
+		writeFileSync(join(dir, "example.txt"), "baseline");
+		git("add", ".gitignore", "example.txt");
+		git("commit", "-m", "baseline");
+		const baseline = git("rev-parse", "HEAD");
+		writeFileSync(join(dir, "example.txt"), "committed candidate");
+		git("commit", "-am", "candidate");
+		writeFileSync(join(dir, "example.txt"), "working candidate");
+		const result = run("--out", "build/explicit", "--baseline", baseline.slice(0, 12));
+		assert.equal(result.status, 0, result.stderr);
+		const manifest = JSON.parse(readFileSync(join(dir, "build/explicit/source-manifest.json"), "utf8"));
+		assert.equal(manifest.baselineSha, baseline);
+		assert.equal(manifest.baselineRef, baseline.slice(0, 12));
+		assert.equal(readFileSync(join(dir, "build/explicit/baseline/example.txt"), "utf8"), "baseline");
+		assert.equal(readFileSync(join(dir, "build/explicit/candidate/example.txt"), "utf8"), "working candidate");
+		const defaultResult = run("--out", "build/default");
+		assert.equal(defaultResult.status, 0, defaultResult.stderr);
+		assert.equal(JSON.parse(readFileSync(join(dir, "build/default/source-manifest.json"), "utf8")).baselineSha, git("rev-parse", "HEAD"));
+		assert.notEqual(run("--out", "build/invalid", "--baseline", "missing-ref").status, 0);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
 
 test("rule probes preserve source spelling and label exact frozen rule origins", () => {
 	const probes = ruleProbes({ hostBash: { allow: [

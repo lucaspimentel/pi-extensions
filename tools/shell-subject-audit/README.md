@@ -13,12 +13,16 @@ in a tracked directory.
 
 ```sh
 node tools/shell-subject-audit/freeze.mts \
-  --out build/shell-subject-audit/run-001 --config <guard.json>
+  --out build/shell-subject-audit/run-001 --config <guard.json> \
+  --baseline f47aefe
 ```
 
-This freezes HEAD as the baseline (`git archive`), copies the working tree,
-including untracked source, as the candidate, and copies the explicit config.
-It hashes both trees and the config in `source-manifest.json`. The directory
+This resolves `--baseline` to a commit and freezes it (`git archive`); without
+that option it defaults to HEAD. For the canonical-subject migration use the
+pre-switch commit `f47aefe`, not the current HEAD. The candidate is the working
+tree, including untracked source, and the config is copied explicitly.
+It records the requested ref and resolved SHA and hashes both trees and the
+config in `source-manifest.json`. The directory
 must be inside ignored `build/`. Frozen trees resolve the installed dependencies
 through their repository ancestor; the runtime runner hashes the shared WASM
 and records both lockfiles. No user config is changed.
