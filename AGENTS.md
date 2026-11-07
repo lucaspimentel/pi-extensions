@@ -30,8 +30,8 @@ node --test --test-name-pattern="<substring>" tests/<name>.test.mts   # single t
 
 - `extensions/` holds one extension per file or directory. `extensions/shared/` holds modules imported by several extensions (model pin, model selection, bounded spawn); use it rather than duplicating.
 - `tests/` holds node-runnable harnesses, mostly one per extension area. Tests exercise the real TypeScript modules, usually with fake pi/`ExtensionAPI` objects and spawn-override seams (e.g. `setSpawnOverride` in `subagent/index.ts`) instead of real network or processes.
-- `docs/*-design.md` are the settled designs for the larger extensions (guard, gh-read, git-read, jira, subagent panel). Read the relevant doc before changing behavior; code, tool descriptions, prompt guidelines, README, and tests are expected to stay consistent with it.
-- `TODO.md` tracks planned work with file/line anchors and the verification steps for each item; check it before extending gh-read, subagent, or guard.
+- `docs/*-design.md` are the settled designs for the larger extensions (guard, gh-read, git-read, jira, subagent panel, compact-tool-view). Read the relevant doc before changing behavior; code, tool descriptions, prompt guidelines, README, and tests are expected to stay consistent with it.
+- `TODO.md` tracks planned work with file/line anchors and the verification steps for each item; check it before extending gh-read, subagent, guard, or compact-tool-view.
 - `prompts/` holds package-level prompt templates; extensions can ship their own under `extensions/<name>/prompts/`.
 
 ### Big pieces
