@@ -7,8 +7,8 @@ tests. The git-read extraction regression guard held: tests/git-read-*.test.mts
 passed unmodified after the refactor.
 
 Addition: `pr threads` (see "pr threads"): the GraphQL review-thread read
-with resolved/outdated state, implemented as the tenth API operation and the
-first (and only) tool-authored GraphQL POST transport.
+with resolved/outdated state, the first (and only) tool-authored GraphQL POST
+transport.
 
 Addition: `job logs` (see "job logs"). Design settled in a grill-me review on
 2026-10-26; NOT yet implemented. It is the first API operation whose response
@@ -790,7 +790,7 @@ BOM-prefixed on the first line, with no job/step prefixes, unlike
 Settled in the grill-me review (2026-10-26):
 
 - Input surface is `{repo, job_id}` only, as above.
-- Worktree-gate EXEMPT, like the other ten API operations and unlike
+- Worktree-gate EXEMPT, like the other API operations and unlike
   `run view --log`, because the target repository is explicit and the common
   case is debugging CI from a directory that is not a checkout.
 - Retention is the first 50 KiB plus the last 50 KiB of the response BODY
@@ -874,13 +874,13 @@ instead of silently substituting replacement characters. Spawn function
 and clock are injectable seams; tests run network-free.
 
 One per-operation retention mode was added for `job logs`: the default
-"full" mode above is unchanged for the other ten operations, while
+"full" mode above is unchanged for the other operations, while
 "window" mode keeps the first 50 KiB and last 50 KiB of the response BODY,
 still counts every byte for the omission metadata, never poisons on growth
 past the 8 MiB budget, and carries the retained window on the error path so a
 deadline or interrupt can return it. The header/body split, the 64 KiB
 header block, the 16 KiB stderr cap, the strict UTF-8 decode, and the shared
-30 s deadline apply to both modes. The ten existing operations must remain
+30 s deadline apply to both modes. The existing operations must remain
 byte-identical; their budget and poison tests are re-pinned against the
 unchanged "full" mode.
 
@@ -988,7 +988,7 @@ repository context, so it is useful precisely where the other eight are not:
 outside any worktree. The other eight keep the gate unchanged, including
 `run view --log`: the dual-window log runner reuses the identical
 worktreeCheckPassed gate even though `run view` accepts `-R` (settled
-one-simple-contract rule). Separately, the ten implemented API operations
+one-simple-contract rule). Separately, the implemented API operations
 are exempt as a class, as documented under "GitHub API operations";
 `job logs` inherits that exemption even though it returns log text, so a CI
 log can be read from a directory that is not a checkout while `run view
