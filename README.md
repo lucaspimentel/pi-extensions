@@ -79,7 +79,10 @@ pi-extensions/
 Runtime npm deps live in the root `package.json` so a single `npm install`
 (run by pi after `git clone`) covers all extensions.
 
-Guard uses the pinned `@questi0nm4rk/shell-ast` Bash adapter. The temporary
+Guard uses the pinned `@questi0nm4rk/shell-ast` Bash adapter. Bash allow rules
+use canonical pre-unwrap AST subjects; deny/ask also retain raw-spelling
+matching ([contract](docs/guard-design.md#canonical-bash-rule-subjects), migration
+measurement still pending). The temporary
 measurement harness is retired; final measurements and accepted behavior
 changes are preserved in [docs/guard-design.md](docs/guard-design.md#shell-ast-adoption-final-measurement-and-retirement-record).
 [The shell fixtures](tests/fixtures/guard-shell/README.md) pin mechanisms under

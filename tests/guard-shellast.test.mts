@@ -152,7 +152,7 @@ const COMPLETE_CASES: ReadonlyArray<readonly [string, { argv: string[]; assignme
 	["command ls", { argv: ["ls"], subject: "command ls" }],
 	["xargs -0 rm", { argv: ["rm"] }],
 	["sudo rm -rf /", { argv: ["rm", "-rf", "/"] }],
-	["timeout 5 ls", { argv: ["ls"], subject: "ls" }],
+	["timeout 5 ls", { argv: ["ls"], subject: "timeout 5 ls" }],
 	["TZ=UTC date +%F", { argv: ["date", "+%F"], assignments: ["TZ=UTC"] }],
 	["X=é env", { argv: ["env"], assignments: ["X=é"] }],
 	["result=$?", { argv: [], assignments: ["result=$?"], pureAssignment: true }],
@@ -249,7 +249,8 @@ test("a harmless descriptor dup is appended but stripped from allowSubject", asy
 	const result = await analyzeHostCommand("echo hi 2>&1");
 	assert.equal(result.complete, true);
 	const call = result.calls[0];
-	assert.equal(call.subject, "echo hi 2>&1");
+	assert.equal(call.subject, "echo hi 2>& 1");
+	assert.equal(call.rawSubject, "echo hi 2>&1");
 	assert.equal(call.requiresRedirectAwareAllow, false);
 	assert.equal(call.allowSubject, "echo hi");
 });
@@ -345,12 +346,14 @@ test("a call bearing a construct is incomplete and names itself as the offending
 	assert.equal(subst.cause, null);
 	assert.equal(subst.calls[0].complete, false);
 	assert.equal(subst.calls[0].cause, "command-substitution");
-	assert.equal(subst.calls[0].subject, "echo $(date)");
+	assert.equal(subst.calls[0].subject, null);
+	assert.equal(subst.calls[0].rawSubject, "echo $(date)");
 	const heredoc = await analyzeHostCommand("cat <<EOF\nhi\nEOF");
 	assert.equal(heredoc.complete, false, "a heredoc is a whole-command construct");
 	assert.equal(heredoc.cause, "heredoc");
 	assert.equal(heredoc.calls[0].complete, false);
-	assert.match(heredoc.calls[0].subject, /<<EOF/);
+	assert.equal(heredoc.calls[0].subject, null);
+	assert.match(heredoc.calls[0].rawSubject, /<<EOF/);
 });
 
 // ── Traversal-coverage guarantee ─────────────────────────────────────────────

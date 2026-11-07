@@ -467,7 +467,7 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 				prefill = deps.denyRulesFor(selected).join("\n");
 				denyReferences = deps.explanation.steps
 					.filter((step) => selected.includes(step.occurrenceId))
-					.map((step) => step.subject);
+					.map((step) => step.subject ?? step.rawSubject);
 			}
 			const noteFor = (text: string): string | undefined => notExactNoteFor(text, denyReferences);
 			const baseTitle = `Edit the deny rules to save (${scope})\nFull command:\n  ${truncateCommand(deps.command)}\nWhy: ${deps.decision.reason}`;

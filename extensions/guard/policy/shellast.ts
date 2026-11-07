@@ -16,12 +16,13 @@
  * with every later analysis `complete: false`. Guard therefore fails closed
  * (a prompt) whenever the parser is missing, corrupt, or rejects the input.
  *
- * Subject contract: `subject` is the raw source slice of the call's whole
- * chain (wrappers, assignment words, args, and its redirect clause) with a
- * leading `timeout` wrapper stripped and line continuations removed, so the
- * deny/ask/allow rule text that matched before the adoption keeps matching.
- * Bare `$VAR`/`${VAR}` expansion no longer authorizes the read-only tier: it
- * is reported per call via `hasParameterExpansion`.
+ * Subject contract: complete calls render their pre-unwrap chain from AST
+ * words, assignments, and redirects. Literal words have one quoted spelling;
+ * expansion nodes retain their source spelling. Declarations, arrays and
+ * tests retain source spelling. Incomplete calls have no canonical subject.
+ * `rawSubject` preserves the legacy normalized slice for deny/ask and display,
+ * never allow. `tierNoopCdSubject` preserves the old no-op-cd input separately.
+ * Bare `$VAR`/`${VAR}` expansion still vetoes the read-only tier.
  */
 
 import { createHash } from "node:crypto";
@@ -41,6 +42,7 @@ import type {
 } from "@questi0nm4rk/shell-ast";
 import { stripLineContinuations, hasWritableRedirect, type StructuredRedirect } from "./bashtier.ts";
 import { stripTimeoutPrefix, stripTrailingHarmlessRedirects } from "./shell-text.ts";
+import { renderCanonicalJoin, renderRuleSubject, type ShellSourceSpan, type ShellRuleWord, type ShellAssignmentSubject, type ShellRedirectSubject } from "./shell-subject.ts";
 
 type ShellAstModule = typeof import("@questi0nm4rk/shell-ast");
 type Command = NonNullable<Stmt["cmd"]>;
@@ -102,10 +104,16 @@ export interface ShellRedirect extends StructuredRedirect {}
 /** One executing command inside a parsed host command. */
 export interface ShellExecCall {
 	occurrenceId: number;
-	/** Raw source slice of the call's whole chain (wrappers + assignment words + argv + redirect clause). */
-	subject: string;
-	/** subject minus trailing harmless redirects. */
-	allowSubject: string;
+	/** Canonical pre-unwrap chain, null when the call cannot be projected. */
+	subject: string | null;
+	/** Canonical subject minus trailing harmless redirects. */
+	allowSubject: string | null;
+	/** Legacy normalized raw slice, for deny/ask matching and display only. */
+	rawSubject: string;
+	sourceSpan: ShellSourceSpan;
+	chainArgv: readonly ShellRuleWord[];
+	/** The unchanged input to the tier's string-based no-op-cd exception. */
+	tierNoopCdSubject: string;
 	/** Unwrapped executing argv (registry unwrap + manual command/xargs/builtin/nocache walk). */
 	argv: readonly string[];
 	/** Leading assignment words, verbatim. */
@@ -130,6 +138,8 @@ export interface ShellCommandAnalysis {
 	/** Machine-reason text for `cause`, authored here. */
 	reason: string | null;
 	calls: readonly ShellExecCall[];
+	/** Null for incomplete or unrepresentable structure (including comments and negation). */
+	canonicalJoin: string | null;
 }
 
 export interface ShellAstStatus {
@@ -260,7 +270,7 @@ export async function analyzeHostCommand(command: string): Promise<ShellCommandA
 	} catch (err) {
 		return parseFailureAnalysis(mod, err);
 	}
-	return analyzeParsed(mod, slice, file);
+	return analyzeParsed(mod, slice, file, src);
 }
 
 /** Slice the parsed source by UTF-8 byte offsets into the matching JS substring. */
@@ -277,7 +287,7 @@ function parseFailureAnalysis(mod: ShellAstModule, err: unknown): ShellCommandAn
 }
 
 function incomplete(cause: ShellAnalysisCause, reason: string, calls: ShellExecCall[]): ShellCommandAnalysis {
-	return { complete: false, cause, reason, calls };
+	return { complete: false, cause, reason, calls, canonicalJoin: null };
 }
 
 interface ConstructEvent {
@@ -286,14 +296,18 @@ interface ConstructEvent {
 	node: ShellNode;
 }
 
-function analyzeParsed(mod: ShellAstModule, slice: ByteSlicer, file: ShellFile): ShellCommandAnalysis {
+function analyzeParsed(mod: ShellAstModule, slice: ByteSlicer, file: ShellFile, source: string): ShellCommandAnalysis {
 	const events = detectConstructs(mod, file);
 	const raw = collectCalls(mod, slice, file);
 	markConstructBearingCalls(raw, events);
 	const calls: ShellExecCall[] = raw.map((entry, index) => ({
 		occurrenceId: index,
-		subject: entry.subject,
-		allowSubject: entry.requiresRedirectAwareAllow ? entry.subject : stripTrailingHarmlessRedirects(entry.subject),
+		subject: entry.complete ? entry.subject : null,
+		allowSubject: !entry.complete ? null : entry.requiresRedirectAwareAllow ? entry.subject : stripTrailingHarmlessRedirects(entry.subject, true),
+		rawSubject: entry.rawSubject,
+		sourceSpan: { start: entry.start, end: entry.end },
+		chainArgv: entry.chainArgv,
+		tierNoopCdSubject: entry.rawSubject,
 		argv: entry.argv,
 		assignments: entry.assignments,
 		redirects: entry.redirects,
@@ -314,7 +328,9 @@ function analyzeParsed(mod: ShellAstModule, slice: ByteSlicer, file: ShellFile):
 	if (file.stmts.length === 0 || calls.length === 0) {
 		return incomplete("no-command", CAUSE_REASON["no-command"], calls);
 	}
-	return { complete: true, cause: null, reason: null, calls };
+	let representable = file.last.length === 0;
+	mod.walk(file, { Stmt: (stmt) => { if (stmt.negated || stmt.comments.length > 0) representable = false; } });
+	return { complete: true, cause: null, reason: null, calls, canonicalJoin: renderCanonicalJoin(source, calls, representable) };
 }
 
 /**
@@ -502,6 +518,8 @@ function isPureAssignmentDecl(decl: DeclClause): boolean {
 
 interface RawCall {
 	subject: string;
+	rawSubject: string;
+	chainArgv: ShellRuleWord[];
 	argv: string[];
 	assignments: string[];
 	redirects: ShellRedirect[];
@@ -544,7 +562,13 @@ function spanOf(slice: ByteSlicer, stmt: Stmt, node: { pos: { offset: number }; 
 
 function makeCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, call: CallExprNode): RawCall {
 	const span = spanOf(slice, stmt, call);
-	const subject = stripTimeoutPrefix(span.text);
+	const rawSubject = stripTimeoutPrefix(span.text);
+	// Capture the chain before either registry or manual wrapper unwrapping.
+	const chainArgv = call.args.map((w) => projectRuleWord(mod, slice, w));
+	const assignmentSubjects = call.assigns.map((a) => projectAssignment(mod, slice, a));
+	const subject = assignmentSubjects.some((a) => a === null)
+		? span.text
+		: renderRuleSubject(chainArgv, assignmentSubjects as ShellAssignmentSubject[], stmt.redirs.map((r) => projectRedirect(mod, slice, r)));
 	const assignments = call.assigns.map((a) => slice(a.pos.offset, a.end.offset));
 	const deepest = deepestLayer(mod, call);
 	let argv: string[];
@@ -566,6 +590,8 @@ function makeCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, call: Call
 	const redirects = redirectsOf(mod, stmt);
 	return {
 		subject,
+		rawSubject,
+		chainArgv,
 		argv,
 		assignments,
 		redirects,
@@ -580,11 +606,13 @@ function makeCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, call: Call
 
 function makeDeclCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, decl: DeclClause): RawCall {
 	const span = spanOf(slice, stmt, decl);
-	const subject = stripTimeoutPrefix(span.text);
+	const subject = span.text;
 	const assignments = decl.args.filter((a) => a.name !== null).map((a) => slice(a.pos.offset, a.end.offset));
 	const redirects = redirectsOf(mod, stmt);
 	return {
 		subject,
+		rawSubject: stripTimeoutPrefix(span.text),
+		chainArgv: [],
 		argv: [],
 		assignments,
 		redirects,
@@ -600,10 +628,12 @@ function makeDeclCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, decl: 
 /** `[[ ... ]]` is a read-only conditional expression; preserve the old tier's `[[` allow. */
 function makeTestCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, test: TestClause): RawCall {
 	const span = spanOf(slice, stmt, test);
-	const subject = stripTimeoutPrefix(span.text);
+	const subject = span.text;
 	const redirects = redirectsOf(mod, stmt);
 	return {
 		subject,
+		rawSubject: stripTimeoutPrefix(span.text),
+		chainArgv: [],
 		argv: ["[["],
 		assignments: [],
 		redirects,
@@ -613,6 +643,64 @@ function makeTestCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, test: 
 		cause: null,
 		start: span.start,
 		end: span.end,
+	};
+}
+
+/** Literal decoding is quote-context aware; the package's wordToLit retains escapes. */
+function literalRuleValue(slice: ByteSlicer, parts: readonly WordPart[], doubleQuoted = false): string {
+	return parts.map((part): string => {
+		switch (part.type) {
+			case "Lit": return doubleQuoted
+				? part.value.replace(/\\([$`"\\\n])/g, "$1")
+				: part.value.replace(/\\([\s\S])/g, "$1");
+			case "SglQuoted": return part.value;
+			case "DblQuoted": return literalRuleValue(slice, part.parts, true);
+			// These are literal for this rule contract, not runtime shell expansions.
+			case "ExtGlob": case "BraceExp": return slice(part.pos.offset, part.end.offset);
+			default: return slice(part.pos.offset, part.end.offset);
+		}
+	}).join("");
+}
+
+function projectRuleWord(mod: ShellAstModule, slice: ByteSlicer, word: Word): ShellRuleWord {
+	const source = slice(word.pos.offset, word.end.offset);
+	const span = { start: word.pos.offset, end: word.end.offset };
+	let dynamic = false;
+	let preserveSource = false;
+	const visitor: Visitor = {
+		SglQuoted: (part) => { if (part.dollar) preserveSource = true; },
+		DblQuoted: (part) => { if (part.dollar) preserveSource = true; },
+		ParamExp: () => { dynamic = true; },
+		CmdSubst: () => { dynamic = true; },
+		ArithmExp: () => { dynamic = true; },
+		ProcSubst: () => { dynamic = true; },
+		BraceExp: (node) => { for (const elem of node.elems) mod.walk(elem, visitor); },
+	};
+	mod.walk(word, visitor);
+	return dynamic ? { kind: "dynamic", source, span }
+		: preserveSource ? { kind: "source", source, span }
+		: { kind: "literal", value: literalRuleValue(slice, word.parts), source, span };
+}
+
+function projectAssignment(mod: ShellAstModule, slice: ByteSlicer, assignment: Assign): ShellAssignmentSubject | null {
+	if (assignment.name === null || assignment.array !== null || assignment.index !== null) return null;
+	const span = { start: assignment.pos.offset, end: assignment.end.offset };
+	return {
+		name: assignment.name.value,
+		append: assignment.append,
+		value: assignment.value === null
+			? { kind: "literal", value: "", source: "", span: { start: span.end, end: span.end } }
+			: projectRuleWord(mod, slice, assignment.value),
+		span,
+	};
+}
+
+function projectRedirect(mod: ShellAstModule, slice: ByteSlicer, redirect: Redirect): ShellRedirectSubject {
+	return {
+		descriptor: redirect.n?.value ?? null,
+		op: redirect.op,
+		target: projectRuleWord(mod, slice, redirect.word),
+		span: { start: redirect.pos.offset, end: redirect.end.offset },
 	};
 }
 

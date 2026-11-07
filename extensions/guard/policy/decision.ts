@@ -176,12 +176,12 @@ function ruleToolFor(shell: "host-bash" | "pwsh"): string {
 	return shell === "pwsh" ? "Pwsh" : "HostBash";
 }
 
-/** Match a host-shell rule list against a command; returns the raw rule or undefined. */
-function matchedHostShellRule(list: readonly string[], shell: "host-bash" | "pwsh", command: string, cwd: string): string | undefined {
+/** Match rules first, then supplied spellings, preserving the earliest rule's identity. */
+function matchedHostShellRule(list: readonly string[], shell: "host-bash" | "pwsh", commands: readonly (string | null)[], cwd: string): string | undefined {
 	const tool = ruleToolFor(shell);
 	for (const raw of list) {
 		const rule = parseRule(raw);
-		if (rule && ruleMatches(rule, tool, { command }, cwd)) return raw;
+		if (rule && commands.some((command) => command !== null && ruleMatches(rule, tool, { command }, cwd))) return raw;
 	}
 	return undefined;
 }
@@ -193,8 +193,8 @@ function matchedHostShellRule(list: readonly string[], shell: "host-bash" | "pws
  * syntax screen is the AST analysis's completeness, checked by the caller).
  */
 interface HostTierInput {
-	/** The call's canonical matching subject (used only for the string-based no-op cd helper). */
-	subject: string;
+	/** Legacy raw input used only for the string-based no-op cd helper. */
+	tierNoopCdSubject: string;
 	argv: readonly string[];
 	redirects: readonly StructuredRedirect[];
 	hasParameterExpansion: boolean;
@@ -224,7 +224,7 @@ function hostTierAllowReason(step: HostTierInput, config: ResolvedGuardConfig): 
 	if (hasInput) return null;
 	const validatorReason = validatorApprovedBashArgv(step.argv, config.cwd, config.bashValidators, config.readRoots);
 	if (validatorReason !== null) return validatorReason;
-	if (isNoopCd(step.subject, config.cwd)) return "no-op cd";
+	if (isNoopCd(step.tierNoopCdSubject, config.cwd)) return "no-op cd";
 	if (step.pureAssignment) return "pure shell variable assignment";
 	return null;
 }
@@ -242,7 +242,7 @@ function degradedResearchTierReason(analysis: ShellCommandAnalysis | null, confi
 	const call = analysis.calls[0];
 	if (!call.complete) return null;
 	const tier = hostTierAllowReason({
-		subject: call.subject,
+		tierNoopCdSubject: call.tierNoopCdSubject,
 		argv: call.argv,
 		redirects: call.redirects,
 		hasParameterExpansion: call.hasParameterExpansion,
@@ -262,20 +262,22 @@ function cellAction(cell: "allow" | "prompt" | "deny" | "classify", what: string
 }
 
 /**
- * One evaluated host-shell step. `subject` is the exact string deny/ask rules
- * match against and `allowSubject` the exact string a plain allow rule
- * matches against (redirect-stripped), so suggestions can anchor to the real
- * evaluator matching subjects rather than merely displayed fragments.
+ * One evaluated host-shell step. Deny/ask test both `subject` and
+ * `rawSubject`; Bash allow tests only the canonical `allowSubject` (or full
+ * canonical subject for a redirect-aware rule). Suggestions use these exact
+ * evaluator subjects, never merely displayed fragments.
  */
 export interface HostShellStep {
 	/** Stable identity within one evaluation; duplicate command text keeps distinct IDs. */
 	occurrenceId: number;
 	/** The fragment shown for the step (matches the aggregate reason attribution). */
 	display: string;
-	/** The subject deny/ask rules are matched against (normalized). */
-	subject: string;
-	/** The subject a plain allow rule is matched against (redirect-stripped). */
-	allowSubject: string;
+	/** Canonical deny/ask subject, null when the projection is incomplete. */
+	subject: string | null;
+	/** Raw safety subject and displayed spelling, never a Bash allow subject. */
+	rawSubject: string;
+	/** Canonical plain-allow subject, null when the projection is incomplete. */
+	allowSubject: string | null;
 	/** True when only a redirect-aware allow rule (pattern containing '>') can authorize the step. */
 	requiresRedirectAwareAllow: boolean;
 	decision: Decision;
@@ -304,8 +306,8 @@ export interface HostShellExplanation {
 }
 
 /**
- * One evaluable step handed to evaluateHostShellSub. `subject` is the exact
- * string deny/ask rules match against; the tightened read-only tier is judged
+ * One evaluable step handed to evaluateHostShellSub. Safety rules test the
+ * canonical and raw subjects; the tightened read-only tier is judged
  * on `argv`/`redirects`/`hasParameterExpansion`/`pureAssignment` (never the
  * subject text), with `requiresRedirectAwareAllow` computed by the caller
  * from the structured redirects (bash) or the text scanner (pwsh).
@@ -314,7 +316,10 @@ export interface HostShellExplanation {
  * tier and every allow rule, so no rule can authorize an incomplete step.
  */
 interface EvaluableStep {
-	subject: string;
+	subject: string | null;
+	allowSubject: string | null;
+	rawSubject: string;
+	tierNoopCdSubject: string;
 	argv: readonly string[];
 	redirects: readonly StructuredRedirect[];
 	hasParameterExpansion: boolean;
@@ -337,22 +342,23 @@ interface EvaluableStep {
  * Deny and ask rules still apply first, so a deny rule on an incomplete step
  * still denies.
  */
-function evaluateHostShellSub(step: EvaluableStep, policy: PolicyState, shell: "host-bash" | "pwsh"): { decision: Decision; subject: string; allowSubject: string; requiresRedirectAwareAllow: boolean } {
+function evaluateHostShellSub(step: EvaluableStep, policy: PolicyState, shell: "host-bash" | "pwsh"): { decision: Decision; subject: string | null; allowSubject: string | null; requiresRedirectAwareAllow: boolean } {
 	const { config, profile } = policy;
-	const cmd = stripTimeoutPrefix(stripLineContinuations(step.subject).trim());
+	const cmd = step.subject;
 	const subject = cmd;
 	const requiresRedirectAwareAllow = step.requiresRedirectAwareAllow;
-	// Plain allow rules match the redirect-stripped subject; a step that needs
-	// a redirect-aware rule is matched verbatim (its text contains '>').
-	const allowSubject = requiresRedirectAwareAllow ? cmd : stripTrailingHarmlessRedirects(cmd);
-	// Explicit rules: deny > ask (redirect-agnostic; safety rules win first).
-	const denyRule = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
+	// Root exemptions are known only here, not by the AST adapter. Recompute
+	// the harmless suffix after refining the redirect gate with those roots.
+	const allowSubject = requiresRedirectAwareAllow ? cmd : shell === "host-bash" && cmd !== null
+		? stripTrailingHarmlessRedirects(cmd, true) : step.allowSubject;
+	// Rules first, then spellings: an earlier raw rule beats a later canonical rule.
+	const denyRule = matchedHostShellRule(config.hostBash.deny, shell, [cmd, step.rawSubject], config.cwd);
 	if (denyRule !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'`, matchedRule: denyRule }, subject, allowSubject, requiresRedirectAwareAllow };
-	const askRule = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
+	const askRule = matchedHostShellRule(config.hostBash.ask, shell, [cmd, step.rawSubject], config.cwd);
 	if (askRule !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'`, matchedRule: askRule, provenance: "explicit-ask" }, subject, allowSubject, requiresRedirectAwareAllow };
 	if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, subject, allowSubject, requiresRedirectAwareAllow };
 	// An unfaithful step prompts here: no tier or allow rule may authorize it.
-	if (step.incompleteReason !== null) return { decision: { action: "prompt", reason: step.incompleteReason }, subject, allowSubject, requiresRedirectAwareAllow };
+	if (step.incompleteReason !== null || cmd === null) return { decision: { action: "prompt", reason: step.incompleteReason ?? "the command has no canonical rule subject" }, subject, allowSubject, requiresRedirectAwareAllow };
 	// Tightened read-only tier (host_bash only; host vetoes first). Judged on
 	// the unwrapped argv and the structured redirects, never the subject text.
 	if (shell === "host-bash") {
@@ -373,7 +379,7 @@ function evaluateHostShellSub(step: EvaluableStep, policy: PolicyState, shell: "
 		return { decision: { action: "prompt", reason: "file redirect requires a redirect-aware allow rule (a pattern containing '>')" }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
 	// Plain allow rules.
-	const allowRule = matchedHostShellRule(config.hostBash.allow, shell, stripTrailingHarmlessRedirects(cmd), config.cwd);
+	const allowRule = matchedHostShellRule(config.hostBash.allow, shell, [allowSubject], config.cwd);
 	if (allowRule !== undefined) {
 		return { decision: { action: "allow", reason: `matched ${ruleToolFor(shell)} allow rule '${allowRule}'`, matchedRule: allowRule }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
@@ -415,9 +421,9 @@ function evaluateHostShell(
 	}
 
 	const cmd = stripLineContinuations(call.command);
-	const rawDeny = matchedHostShellRule(config.hostBash.deny, shell, cmd, config.cwd);
+	const rawDeny = matchedHostShellRule(config.hostBash.deny, shell, [cmd, shell === "host-bash" ? analysis?.canonicalJoin ?? null : null], config.cwd);
 	if (rawDeny !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${rawDeny}'`, matchedRule: rawDeny }, steps: [], rawDenyRule: rawDeny, breakdown: { available: false, reason: "a whole-command deny rule matched" } };
-	const rawAsk = matchedHostShellRule(config.hostBash.ask, shell, cmd, config.cwd);
+	const rawAsk = matchedHostShellRule(config.hostBash.ask, shell, [cmd, shell === "host-bash" ? analysis?.canonicalJoin ?? null : null], config.cwd);
 
 	if (shell === "pwsh") return evaluatePwshCommand(cmd, policy);
 
@@ -428,19 +434,19 @@ function evaluateHostShell(
 	// when the cause is whole-command.
 	if (analysis == null || analysis.cause !== null) {
 		const reason = analysis?.reason ?? shellAstStatus().diagnostic ?? "the bash parser is unavailable";
-		const offending = analysis?.calls.find((c) => !c.complete)?.subject;
+		const offending = analysis?.calls.find((c) => !c.complete)?.rawSubject;
 		const breakdown: BreakdownReliability = offending === undefined ? { available: false, reason } : { available: false, reason, offending };
 		if (rawAsk !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, matchedRule: rawAsk, provenance: "explicit-ask" }, steps: [], rawAskRule: rawAsk, splitCause: reason, breakdown };
 		if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, steps: [], splitCause: reason, breakdown };
 		return { decision: { action: "prompt", reason }, steps: [], splitCause: reason, breakdown };
 	}
 
-	const evaluations = analysis.calls.map((c) => ({ sub: c.subject, ev: evaluateHostShellSub({ subject: c.subject, argv: c.argv, redirects: c.redirects, hasParameterExpansion: c.hasParameterExpansion, pureAssignment: c.pureAssignment, requiresRedirectAwareAllow: hasWritableRedirect(c.redirects, config.writeRoots, { cwd: config.cwd }), incompleteReason: c.complete ? null : shellAnalysisCauseReason(c.cause ?? "unrecognized-node") }, policy, shell) }));
+	const evaluations = analysis.calls.map((c) => ({ sub: c.rawSubject, ev: evaluateHostShellSub({ subject: c.subject, allowSubject: c.allowSubject, rawSubject: c.rawSubject, tierNoopCdSubject: c.tierNoopCdSubject, argv: c.argv, redirects: c.redirects, hasParameterExpansion: c.hasParameterExpansion, pureAssignment: c.pureAssignment, requiresRedirectAwareAllow: hasWritableRedirect(c.redirects, config.writeRoots, { cwd: config.cwd }), incompleteReason: c.complete ? null : shellAnalysisCauseReason(c.cause ?? "unrecognized-node") }, policy, shell) }));
 	const incompleteCall = analysis.calls.find((c) => !c.complete);
 	const reliability: BreakdownReliability = incompleteCall === undefined
 		? { available: analysis.calls.length > 0 }
-		: { available: false, reason: shellAnalysisCauseReason(incompleteCall.cause ?? "unrecognized-node"), offending: incompleteCall.subject };
-	const toStep = (i: number, e: { sub: string; ev: ReturnType<typeof evaluateHostShellSub> }): HostShellStep => ({ occurrenceId: i, display: e.sub, subject: e.ev.subject, allowSubject: e.ev.allowSubject, requiresRedirectAwareAllow: e.ev.requiresRedirectAwareAllow, decision: e.ev.decision });
+		: { available: false, reason: shellAnalysisCauseReason(incompleteCall.cause ?? "unrecognized-node"), offending: incompleteCall.rawSubject };
+	const toStep = (i: number, e: { sub: string; ev: ReturnType<typeof evaluateHostShellSub> }): HostShellStep => ({ occurrenceId: i, display: e.sub, rawSubject: e.sub, subject: e.ev.subject, allowSubject: e.ev.allowSubject, requiresRedirectAwareAllow: e.ev.requiresRedirectAwareAllow, decision: e.ev.decision });
 	if (evaluations.length === 1) {
 		const e = evaluations[0];
 		const decision = e.ev.decision.action !== "deny" && rawAsk !== undefined ? { action: "prompt" as const, reason: `matched ${ruleToolFor(shell)} ask rule '${rawAsk}'`, matchedRule: rawAsk, provenance: "explicit-ask" as const } : e.ev.decision;
@@ -471,9 +477,11 @@ function evaluateHostShell(
 function evaluatePwshCommand(cmd: string, policy: PolicyState): HostShellExplanation {
 	const breakdown: BreakdownReliability = { available: false, reason: "PowerShell commands are evaluated as one whole command (no per-step breakdown)" };
 	const malformed = pwshMalformedReason(cmd);
-	const ev = evaluateHostShellSub({ subject: cmd, argv: [], redirects: [], hasParameterExpansion: false, pureAssignment: false, requiresRedirectAwareAllow: hasTopLevelFileRedirect(cmd, policy.config.writeRoots, { cwd: policy.config.cwd }), incompleteReason: malformed }, policy, "pwsh");
+	const subject = stripTimeoutPrefix(stripLineContinuations(cmd).trim());
+	const requiresRedirectAwareAllow = hasTopLevelFileRedirect(cmd, policy.config.writeRoots, { cwd: policy.config.cwd });
+	const ev = evaluateHostShellSub({ subject, allowSubject: requiresRedirectAwareAllow ? subject : stripTrailingHarmlessRedirects(subject), rawSubject: subject, tierNoopCdSubject: subject, argv: [], redirects: [], hasParameterExpansion: false, pureAssignment: false, requiresRedirectAwareAllow, incompleteReason: malformed }, policy, "pwsh");
 	if (malformed !== null) return { decision: ev.decision, steps: [], splitCause: malformed, breakdown };
-	const step: HostShellStep = { occurrenceId: 0, display: cmd, subject: ev.subject, allowSubject: ev.allowSubject, requiresRedirectAwareAllow: ev.requiresRedirectAwareAllow, decision: ev.decision };
+	const step: HostShellStep = { occurrenceId: 0, display: cmd, rawSubject: subject, subject: ev.subject, allowSubject: ev.allowSubject, requiresRedirectAwareAllow: ev.requiresRedirectAwareAllow, decision: ev.decision };
 	return { decision: ev.decision, steps: [step], breakdown };
 }
 

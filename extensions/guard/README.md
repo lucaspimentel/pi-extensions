@@ -420,6 +420,31 @@ filter stays observe-only:
 - **unrestricted:** allow, rules ignored.
 - Non-interactive sessions (`!ctx.hasUI`): prompts collapse to deny.
 
+### Bash rule subjects
+
+Bash rules match a canonical AST rendering of the **pre-unwrap chain**:
+`command "custom" arg` becomes `command custom arg`. Literal words needing
+shell quoting use single quotes; expansion words keep their source spelling,
+so `custom "$x"` and `custom $x` remain distinct. Assignments quote only their
+values, and redirects use consistent spacing with descriptors preserved.
+Declarations, arrays and `[[ ... ]]` retain their source spelling, as do words
+containing locale-translated `$"..."` or ANSI-C `$'...'` strings (no static
+decoding is claimed for those forms).
+
+Allow rules match canonical per-step subjects only. Deny/ask rules also match
+the legacy raw spelling, at both whole-command and per-step levels; the first
+matching rule in the list wins across spellings. Display and reason attribution
+stay raw. Incomplete calls have no canonical subject and cannot be authorized
+by an allow rule; yolo/unrestricted retain their existing precedence.
+
+Backslash continuations are folded; genuine newlines remain. A canonical
+compound join is unavailable for comments, unrepresented negation or incomplete
+calls, so whole-command safety matching falls back to raw. Multiline subjects
+can be matched but cannot be saved as per-step rules. Suggestions are canonical
+per-step rules. Pwsh is unchanged. See the [design contract](../../docs/guard-design.md#canonical-bash-rule-subjects).
+Migration coverage and fixture review are still pending; no user rules have
+been rewritten by stage 1.
+
 ### Tool classification
 
 Every call maps to exactly one class (`policy/classes.ts`), which selects the

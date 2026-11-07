@@ -239,9 +239,9 @@ export function planAllowSave(
 		if (whole?.hostBash?.allow?.length) return { kind: "whole-call", rules: whole.hostBash.allow, patch: whole };
 		return null;
 	}
-	const perStep = explanation.steps
-		.filter((step) => step.decision.action !== "allow")
-		.map((step) => ({ occurrenceId: step.occurrenceId, rule: globAllowRule(call.shell, step.allowSubject) }));
+	const needed = explanation.steps.filter((step) => step.decision.action !== "allow");
+	if (needed.some((step) => step.allowSubject === null || /[\r\n]/.test(step.allowSubject))) return null;
+	const perStep = needed.map((step) => ({ occurrenceId: step.occurrenceId, rule: globAllowRule(call.shell, step.allowSubject!) }));
 	if (perStep.length === 0) return null;
 	const validation = validateShellAllowSave(call, policy, perStep.map((entry) => entry.rule), perStep.map((entry) => entry.occurrenceId), analysis);
 	if (!validation.ok) return null;
@@ -262,8 +262,9 @@ export function planDenyRules(
 	const rules = selectedOccurrenceIds
 		.map((id) => byId.get(id))
 		.filter((step): step is NonNullable<typeof step> => step !== undefined)
-		.map((step) => exactDenyRule(call.shell, step.subject));
-	return dedupe(rules);
+		.map((step) => step.subject ?? step.rawSubject);
+	if (rules.some((subject) => /[\r\n]/.test(subject))) return [];
+	return dedupe(rules.map((subject) => exactDenyRule(call.shell, subject)));
 }
 
 export type ReadRootParseResult = { ok: true; root: string } | { ok: false; error: string };

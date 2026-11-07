@@ -122,12 +122,14 @@ test("compound steps carry evaluation-order occurrence IDs and duplicate command
 	assert.deepEqual(explained.steps.map((s) => s.display), ["echo same", "echo other", "echo same"]);
 });
 
-test("step subjects are the evaluator's matching subjects: timeout prefixes and continuations are normalized", () => {
+test("canonical subjects retain wrappers while raw subjects retain legacy normalization", () => {
 	const policy = makePolicy();
 	const explained = explain(shellCall("timeout 5 \\\n  git status"), policy);
 	assert.equal(explained.steps.length, 1);
-	assert.equal(explained.steps[0].subject, "git status");
-	assert.equal(explained.steps[0].allowSubject, "git status");
+	assert.equal(explained.steps[0].subject, "timeout 5 git status");
+	assert.equal(explained.steps[0].allowSubject, "timeout 5 git status");
+	assert.equal(explained.steps[0].rawSubject, "git status");
+	assert.equal(explained.steps[0].display, "git status");
 });
 
 test("a whole-call ask rule appears as a call-level cause even when every step allows", () => {

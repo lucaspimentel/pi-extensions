@@ -17,7 +17,7 @@ import {
 	pupRunClass,
 	type ToolClass,
 } from "../extensions/guard/policy/classes.ts";
-import { suggestRule, suggestRemoteReadRule, readGrantSuggestion, addToConfigScope, effectiveAllowSuggestion as effectiveAllowSuggestionPolicy, countPatchChanges } from "../extensions/guard/policy/suggest.ts";
+import { suggestRule as suggestRulePolicy, suggestRemoteReadRule, readGrantSuggestion, addToConfigScope, effectiveAllowSuggestion as effectiveAllowSuggestionPolicy, countPatchChanges } from "../extensions/guard/policy/suggest.ts";
 import { decide as decidePolicy, type GuardCall, type PolicyState, type Decision } from "../extensions/guard/policy/decision.ts";
 import { analyzeSync, analysisForSync } from "./shellast-sync.mts";
 import { parseRule, ruleMatches } from "../extensions/guard/policy/rules.ts";
@@ -25,6 +25,9 @@ import { parseRule, ruleMatches } from "../extensions/guard/policy/rules.ts";
 // Synchronous test façade over the async shell-ast analysis (see shellast-sync.mts).
 function decide(policy: PolicyState, call: GuardCall): Decision {
 	return decidePolicy(policy, call, analysisForSync(call));
+}
+function suggestRule(call: GuardCall, policy: PolicyState) {
+	return suggestRulePolicy(call, policy, analysisForSync(call));
 }
 function effectiveAllowSuggestion(call: GuardCall, policy: PolicyState) {
 	return effectiveAllowSuggestionPolicy(call, policy, analysisForSync(call));
@@ -320,7 +323,7 @@ test("suggestRule: host shell suggests glob commands, never prefixes", () => {
 	const pwsh = suggestRule({ kind: "host-shell", shell: "pwsh", command: "Get-Content x.txt" }, policy);
 	assert.deepEqual(pwsh, { hostBash: { allow: ["Pwsh(Get-Content x.txt)"] } });
 	assert.equal(suggestRule({ kind: "host-shell", shell: "host-bash", command: "" }, policy), null);
-	assert.equal(suggestRule({ kind: "host-shell", shell: "host-bash", command: "echo a\necho b" }, policy), null);
+	assert.deepEqual(suggestRule({ kind: "host-shell", shell: "host-bash", command: "echo a\necho b" }, policy), { hostBash: { allow: ["HostBash(echo a)", "HostBash(echo b)"] } });
 });
 
 test("glob host suggestions stay anchored and do not grow prefixes", () => {
@@ -342,7 +345,7 @@ test("glob host suggestions stay anchored and do not grow prefixes", () => {
 
 test("effective suggestions cannot override ask/deny or authorize only part of a compound", () => {
 	const call: GuardCall = { kind: "host-shell", shell: "host-bash", command: "echo $UNSET; echo $SECOND" };
-	assert.equal(effectiveAllowSuggestion(call, makePolicy()), null);
+	assert.deepEqual(effectiveAllowSuggestion(call, makePolicy()), { hostBash: { allow: ["HostBash(echo $UNSET)", "HostBash(echo $SECOND)"] } });
 	const config = mergeConfig({ hostBash: { ask: ["HostBash(echo *)"], allow: ["HostBash(*)"] } }, {}, "/w");
 	assert.equal(effectiveAllowSuggestion({ kind: "host-shell", shell: "host-bash", command: "echo asked" }, makePolicy("/w", { config })), null);
 });

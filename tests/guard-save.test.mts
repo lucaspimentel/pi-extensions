@@ -413,12 +413,12 @@ test("redirect steps keep the allow-subject versus deny-subject distinction", ()
 	assert.ok(plan);
 	assert.equal(plan.kind, "per-step");
 	if (plan.kind !== "per-step") return;
-	const curlStep = explanation.steps.find((step) => step.subject.startsWith("curl "))!;
+	const curlStep = explanation.steps.find((step) => step.subject?.startsWith("curl "))!;
 	// A harmless trailing redirect is stripped from the allow subject but kept
 	// in the deny subject.
 	assert.equal(plan.perStep[0].rule, "HostBash(curl https://example.com)");
 	assert.equal(globAllowRule("host-bash", curlStep.allowSubject), plan.perStep[0].rule);
-	assert.deepEqual(planDenyRules(call, explanation, [curlStep.occurrenceId]), [exactDenyRule("host-bash", "curl https://example.com 2>&1")]);
+	assert.deepEqual(planDenyRules(call, explanation, [curlStep.occurrenceId]), [exactDenyRule("host-bash", "curl https://example.com 2>& 1")]);
 	assert.deepEqual(validateShellAllowSave(call, policy, plan.perStep.map((entry) => entry.rule), plan.perStep.map((entry) => entry.occurrenceId)), { ok: true });
 });
 
@@ -429,7 +429,7 @@ test("a broadened glob prefill still validates per-step", () => {
 	assert.ok(plan);
 	assert.equal(plan.kind, "per-step");
 	if (plan.kind !== "per-step") return;
-	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: "HostBash(curl https://example.com/*)" }]);
+	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: "HostBash(curl 'https://example.com/*')" }]);
 	assert.deepEqual(validateShellAllowSave(call, policy, plan.perStep.map((entry) => entry.rule), plan.perStep.map((entry) => entry.occurrenceId)), { ok: true });
 });
 

@@ -501,7 +501,7 @@ test("save allow: a whole-call pwsh suggestion keeps the Pwsh namespace", async 
 });
 
 test("save allow: a broadened glob shows the advisory in the editor and the preview", async () => {
-	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: ["HostBash(curl https://example.com/*)"] });
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: ["HostBash(curl 'https://example.com/*')"] });
 	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: "curl https://example.com/*" }));
 	assert.equal(outcome.kind, "save-allow");
 	assert.match(calls.editor[0], /@@noteFor:present/);

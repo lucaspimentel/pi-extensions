@@ -17,6 +17,8 @@ import { classificationName } from "./classes.ts";
 import { normalizeMatchPath } from "./paths.ts";
 import { decide } from "./decision.ts";
 import type { ShellCommandAnalysis } from "./shellast.ts";
+import { hasWritableRedirect } from "./bashtier.ts";
+import { stripTrailingHarmlessRedirects } from "./shell-text.ts";
 
 /** A partial guard.json patch an "always allow" choice would save. */
 export type SuggestedPatch = Partial<GuardConfig>;
@@ -53,21 +55,30 @@ function writeRootSuggestion(path: string, cwd: string): string {
  * there is nothing worth saving (e.g. a prompt on a remote write has no
  * allow-shaped home). Pure: returns data, never writes.
  *
- * - host shell: the glob-form rule for the complete command, in the call's
- *   shell namespace (a command carrying `*` or `?`, or one that both starts
- *   and ends with `/`, matches more than the command);
+ * - host shell: canonical per-step Bash rules, or a whole raw Pwsh rule,
+ *   in the call's shell namespace (a subject carrying `*` or `?`, or one
+ *   that both starts and ends with `/`, matches more than that subject);
  * - web_fetch: `https://<host>/*`, for webFetchAllow;
  * - local read outside the roots: the grant directory, for readRoots;
  * - write outside the roots: the directory, for writeRoots;
  * - remote tools: `{ toolClasses: { <name>: "remote-read" } }` only when the
  *   decision was a prompt on a read-like call; otherwise null.
  */
-export function suggestRule(call: GuardCall, policy: PolicyState): SuggestedPatch | null {
+export function suggestRule(call: GuardCall, policy: PolicyState, analysis: ShellCommandAnalysis | null): SuggestedPatch | null {
 	switch (call.kind) {
 		case "host-shell": {
-			if (!call.command.trim() || /[\r\n]/.test(call.command)) return null;
-			const shell = call.shell === "pwsh" ? "Pwsh" : "HostBash";
-			return { hostBash: { allow: [`${shell}(${call.command})`] } };
+			if (call.shell === "pwsh") {
+				if (!call.command.trim() || /[\r\n]/.test(call.command)) return null;
+				return { hostBash: { allow: [`Pwsh(${call.command})`] } };
+			}
+			if (analysis === null || analysis.cause !== null || analysis.calls.length === 0) return null;
+			const subjects = analysis.calls.map((step) => {
+				if (!step.complete || step.subject === null) return null;
+				return hasWritableRedirect(step.redirects, policy.config.writeRoots, { cwd: policy.config.cwd })
+					? step.subject : stripTrailingHarmlessRedirects(step.subject, true);
+			});
+			if (subjects.some((subject) => subject === null || !subject.trim() || /[\r\n]/.test(subject))) return null;
+			return { hostBash: { allow: dedupe(subjects.map((subject) => `HostBash(${subject})`)) } };
 		}
 		case "web-fetch": {
 			const host = urlHost(call.url);
@@ -139,7 +150,7 @@ export type ConfigScope = "user" | "project";
 /** Save only patches whose effective merge authorizes the complete call. */
 export function effectiveAllowSuggestion(call: GuardCall, policy: PolicyState, analysis: ShellCommandAnalysis | null): SuggestedPatch | null {
 	if (decide(policy, call, analysis).provenance === "explicit-ask") return null;
-	const patch = suggestRule(call, policy);
+	const patch = suggestRule(call, policy, analysis);
 	if (!patch?.hostBash?.allow) return null;
 	const config: ResolvedGuardConfig = {
 		...policy.config,

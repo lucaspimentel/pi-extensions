@@ -28,13 +28,14 @@ export interface BreakdownReliability {
  * redirects to `/dev/null` (any fd, append variants, target optionally
  * quoted) and descriptor-to-descriptor dups (`2>&1`, `>&2`, `1>&-`).
  * File-target redirects (`>file`, `>>file`) are left intact so
- * write-detection still fires.
+ * write-detection still fires. `canonicalDescriptors` also accepts the AST
+ * renderer's spaced descriptor targets (`2>& 1`), leaving raw Pwsh unchanged.
  */
-export function stripTrailingHarmlessRedirects(s: string): string {
+export function stripTrailingHarmlessRedirects(s: string, canonicalDescriptors = false): string {
 	let r = s.replace(/\s+$/, "");
 	for (;;) {
 		// Descriptor dup: [N]>&M or [N]>&-  (e.g. 2>&1, >&2, 1>&-)
-		let m = r.match(/(\s+\d*>&(?:\d+|-))$/);
+		let m = r.match(canonicalDescriptors ? /(\s+\d*>& *(?:\d+|-))$/ : /(\s+\d*>&(?:\d+|-))$/);
 		if (m) { r = r.slice(0, r.length - m[1].length).replace(/\s+$/, ""); continue; }
 		// Redirect to /dev/null: [N|&]>>? /dev/null (target optionally quoted)
 		m = r.match(/(\s+(?:\d+|&)?>>?\s*(?:"\/dev\/null"|'\/dev\/null'|\/dev\/null))$/);
