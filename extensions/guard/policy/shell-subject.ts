@@ -8,6 +8,8 @@ export interface ShellSourceSpan {
 export type ShellRuleWord =
 	| { kind: "literal"; value: string; source: string; span: ShellSourceSpan }
 	| { kind: "dynamic"; source: string; span: ShellSourceSpan }
+	/** A word containing unquoted shell expansion syntax, encoded from its source. */
+	| { kind: "expanding"; source: string; span: ShellSourceSpan }
 	/** Locale/ANSI-C quoting: source-preserving, not a claimed static value. */
 	| { kind: "source"; source: string; span: ShellSourceSpan };
 
@@ -25,19 +27,20 @@ export interface ShellRedirectSubject {
 	span: ShellSourceSpan;
 }
 
-export function renderRuleRedirect(redirect: ShellRedirectSubject): string {
-	return `${redirect.descriptor ?? ""}${redirect.op} ${renderRuleWord(redirect.target)}`;
+export function renderRuleRedirect(redirect: ShellRedirectSubject, previous = false): string {
+	return `${redirect.descriptor ?? ""}${redirect.op} ${renderWord(redirect.target, previous)}`;
 }
 
 export function renderRuleSubject(
 	words: readonly ShellRuleWord[],
 	assignments: readonly ShellAssignmentSubject[],
 	redirects: readonly ShellRedirectSubject[],
+	previous = false,
 ): string {
 	return [
-		...assignments.map((a) => `${a.name}${a.append ? "+" : ""}=${renderRuleWord(a.value)}`),
-		...words.map(renderRuleWord),
-		...redirects.map(renderRuleRedirect),
+		...assignments.map((a) => `${a.name}${a.append ? "+" : ""}=${renderWord(a.value, previous)}`),
+		...words.map((word) => renderWord(word, previous)),
+		...redirects.map((redirect) => renderRuleRedirect(redirect, previous)),
 	].join(" ");
 }
 
@@ -60,8 +63,19 @@ export function renderCanonicalJoin(
 }
 
 export function renderRuleWord(word: ShellRuleWord): string {
-	if (word.kind !== "literal") return word.source;
+	return renderWord(word, false);
+}
+
+function renderWord(word: ShellRuleWord, previous: boolean): string {
+	if (word.kind === "expanding") return `@guard:exp:${Buffer.from(word.source, "utf8").toString("hex")}`;
+	if (word.kind !== "literal") {
+		// Source-preserving dynamic/locale words must not occupy the reserved
+		// namespace either. Subjects are projections, not executable shell text.
+		return !previous && /^@guard:exp:/i.test(word.source) ? `''${word.source}` : word.source;
+	}
 	const value = word.value;
 	if (value === "") return "''";
-	return /[\s'"\\;|&<>(){}\[\]*?!#~$`]/.test(value) ? `'${value.replace(/'/g, "'\\''")}'` : value;
+	// Reserve the marker namespace: a literal argument must never render as an
+	// encoded expanding word, even when the caller supplied the marker itself.
+	return (!previous && value.toLowerCase().startsWith("@guard:exp:")) || /[\s'"\\;|&<>(){}\[\]*?!#~$`]/.test(value) ? `'${value.replace(/'/g, "'\\''")}'` : value;
 }

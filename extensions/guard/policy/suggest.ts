@@ -19,6 +19,7 @@ import { decide } from "./decision.ts";
 import type { ShellCommandAnalysis } from "./shellast.ts";
 import { hasWritableRedirect } from "./bashtier.ts";
 import { stripTrailingHarmlessRedirects } from "./shell-text.ts";
+import { globAllowRule } from "./shell-rule-prefill.ts";
 
 /** A partial guard.json patch an "always allow" choice would save. */
 export type SuggestedPatch = Partial<GuardConfig>;
@@ -56,8 +57,8 @@ function writeRootSuggestion(path: string, cwd: string): string {
  * allow-shaped home). Pure: returns data, never writes.
  *
  * - host shell: canonical per-step Bash rules, or a whole raw Pwsh rule,
- *   in the call's shell namespace (a subject carrying `*` or `?`, or one
- *   that both starts and ends with `/`, matches more than that subject);
+ *   in the call's shell namespace. Bash prefills use anchored exact patterns
+ *   for wildcard, regex-shaped, and expansion-marker subjects;
  * - web_fetch: `https://<host>/*`, for webFetchAllow;
  * - local read outside the roots: the grant directory, for readRoots;
  * - write outside the roots: the directory, for writeRoots;
@@ -67,8 +68,9 @@ function writeRootSuggestion(path: string, cwd: string): string {
 export function suggestRule(call: GuardCall, policy: PolicyState, analysis: ShellCommandAnalysis | null): SuggestedPatch | null {
 	switch (call.kind) {
 		case "host-shell": {
+			if (/[\r\n]/.test(call.command)) return null;
 			if (call.shell === "pwsh") {
-				if (!call.command.trim() || /[\r\n]/.test(call.command)) return null;
+				if (!call.command.trim()) return null;
 				return { hostBash: { allow: [`Pwsh(${call.command})`] } };
 			}
 			if (analysis === null || analysis.cause !== null || analysis.calls.length === 0) return null;
@@ -78,7 +80,7 @@ export function suggestRule(call: GuardCall, policy: PolicyState, analysis: Shel
 					? step.subject : stripTrailingHarmlessRedirects(step.subject, true);
 			});
 			if (subjects.some((subject) => subject === null || !subject.trim() || /[\r\n]/.test(subject))) return null;
-			return { hostBash: { allow: dedupe(subjects.map((subject) => `HostBash(${subject})`)) } };
+			return { hostBash: { allow: dedupe(subjects.map((subject) => globAllowRule("host-bash", subject!))) } };
 		}
 		case "web-fetch": {
 			const host = urlHost(call.url);

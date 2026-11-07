@@ -262,8 +262,8 @@ function cellAction(cell: "allow" | "prompt" | "deny" | "classify", what: string
 }
 
 /**
- * One evaluated host-shell step. Deny/ask test both `subject` and
- * `rawSubject`; Bash allow tests only the canonical `allowSubject` (or full
+ * One evaluated host-shell step. Deny/ask test the current, previous, and
+ * raw subjects; Bash allow tests only the canonical `allowSubject` (or full
  * canonical subject for a redirect-aware rule). Suggestions use these exact
  * evaluator subjects, never merely displayed fragments.
  */
@@ -317,6 +317,7 @@ export interface HostShellExplanation {
  */
 interface EvaluableStep {
 	subject: string | null;
+	previousSubject: string | null;
 	allowSubject: string | null;
 	rawSubject: string;
 	tierNoopCdSubject: string;
@@ -352,9 +353,9 @@ function evaluateHostShellSub(step: EvaluableStep, policy: PolicyState, shell: "
 	const allowSubject = requiresRedirectAwareAllow ? cmd : shell === "host-bash" && cmd !== null
 		? stripTrailingHarmlessRedirects(cmd, true) : step.allowSubject;
 	// Rules first, then spellings: an earlier raw rule beats a later canonical rule.
-	const denyRule = matchedHostShellRule(config.hostBash.deny, shell, [cmd, step.rawSubject], config.cwd);
+	const denyRule = matchedHostShellRule(config.hostBash.deny, shell, [cmd, step.previousSubject, step.rawSubject], config.cwd);
 	if (denyRule !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${denyRule}'`, matchedRule: denyRule }, subject, allowSubject, requiresRedirectAwareAllow };
-	const askRule = matchedHostShellRule(config.hostBash.ask, shell, [cmd, step.rawSubject], config.cwd);
+	const askRule = matchedHostShellRule(config.hostBash.ask, shell, [cmd, step.previousSubject, step.rawSubject], config.cwd);
 	if (askRule !== undefined) return { decision: { action: "prompt", reason: `matched ${ruleToolFor(shell)} ask rule '${askRule}'`, matchedRule: askRule, provenance: "explicit-ask" }, subject, allowSubject, requiresRedirectAwareAllow };
 	if (profile === "yolo") return { decision: { action: "allow", reason: "host shell: yolo allows everything else" }, subject, allowSubject, requiresRedirectAwareAllow };
 	// An unfaithful step prompts here: no tier or allow rule may authorize it.
@@ -421,9 +422,10 @@ function evaluateHostShell(
 	}
 
 	const cmd = stripLineContinuations(call.command);
-	const rawDeny = matchedHostShellRule(config.hostBash.deny, shell, [cmd, shell === "host-bash" ? analysis?.canonicalJoin ?? null : null], config.cwd);
+	const safetySubjects = [cmd, shell === "host-bash" ? analysis?.canonicalJoin ?? null : null, shell === "host-bash" ? analysis?.previousCanonicalJoin ?? null : null];
+	const rawDeny = matchedHostShellRule(config.hostBash.deny, shell, safetySubjects, config.cwd);
 	if (rawDeny !== undefined) return { decision: { action: "deny", reason: `matched ${ruleToolFor(shell)} deny rule '${rawDeny}'`, matchedRule: rawDeny }, steps: [], rawDenyRule: rawDeny, breakdown: { available: false, reason: "a whole-command deny rule matched" } };
-	const rawAsk = matchedHostShellRule(config.hostBash.ask, shell, [cmd, shell === "host-bash" ? analysis?.canonicalJoin ?? null : null], config.cwd);
+	const rawAsk = matchedHostShellRule(config.hostBash.ask, shell, safetySubjects, config.cwd);
 
 	if (shell === "pwsh") return evaluatePwshCommand(cmd, policy);
 
@@ -441,7 +443,7 @@ function evaluateHostShell(
 		return { decision: { action: "prompt", reason }, steps: [], splitCause: reason, breakdown };
 	}
 
-	const evaluations = analysis.calls.map((c) => ({ sub: c.rawSubject, ev: evaluateHostShellSub({ subject: c.subject, allowSubject: c.allowSubject, rawSubject: c.rawSubject, tierNoopCdSubject: c.tierNoopCdSubject, argv: c.argv, redirects: c.redirects, hasParameterExpansion: c.hasParameterExpansion, pureAssignment: c.pureAssignment, requiresRedirectAwareAllow: hasWritableRedirect(c.redirects, config.writeRoots, { cwd: config.cwd }), incompleteReason: c.complete ? null : shellAnalysisCauseReason(c.cause ?? "unrecognized-node") }, policy, shell) }));
+	const evaluations = analysis.calls.map((c) => ({ sub: c.rawSubject, ev: evaluateHostShellSub({ subject: c.subject, previousSubject: c.previousSubject, allowSubject: c.allowSubject, rawSubject: c.rawSubject, tierNoopCdSubject: c.tierNoopCdSubject, argv: c.argv, redirects: c.redirects, hasParameterExpansion: c.hasParameterExpansion, pureAssignment: c.pureAssignment, requiresRedirectAwareAllow: hasWritableRedirect(c.redirects, config.writeRoots, { cwd: config.cwd }), incompleteReason: c.complete ? null : shellAnalysisCauseReason(c.cause ?? "unrecognized-node") }, policy, shell) }));
 	const incompleteCall = analysis.calls.find((c) => !c.complete);
 	const reliability: BreakdownReliability = incompleteCall === undefined
 		? { available: analysis.calls.length > 0 }
@@ -479,7 +481,7 @@ function evaluatePwshCommand(cmd: string, policy: PolicyState): HostShellExplana
 	const malformed = pwshMalformedReason(cmd);
 	const subject = stripTimeoutPrefix(stripLineContinuations(cmd).trim());
 	const requiresRedirectAwareAllow = hasTopLevelFileRedirect(cmd, policy.config.writeRoots, { cwd: policy.config.cwd });
-	const ev = evaluateHostShellSub({ subject, allowSubject: requiresRedirectAwareAllow ? subject : stripTrailingHarmlessRedirects(subject), rawSubject: subject, tierNoopCdSubject: subject, argv: [], redirects: [], hasParameterExpansion: false, pureAssignment: false, requiresRedirectAwareAllow, incompleteReason: malformed }, policy, "pwsh");
+	const ev = evaluateHostShellSub({ subject, previousSubject: subject, allowSubject: requiresRedirectAwareAllow ? subject : stripTrailingHarmlessRedirects(subject), rawSubject: subject, tierNoopCdSubject: subject, argv: [], redirects: [], hasParameterExpansion: false, pureAssignment: false, requiresRedirectAwareAllow, incompleteReason: malformed }, policy, "pwsh");
 	if (malformed !== null) return { decision: ev.decision, steps: [], splitCause: malformed, breakdown };
 	const step: HostShellStep = { occurrenceId: 0, display: cmd, rawSubject: subject, subject: ev.subject, allowSubject: ev.allowSubject, requiresRedirectAwareAllow: ev.requiresRedirectAwareAllow, decision: ev.decision };
 	return { decision: ev.decision, steps: [step], breakdown };

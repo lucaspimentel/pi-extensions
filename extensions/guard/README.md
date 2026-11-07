@@ -244,7 +244,7 @@ Registration details:
   failures never grant authority. For compound commands a reliable
   breakdown opens a per-step allow picker (prompting steps preselected and
   selectable, allowed steps unselectable context; esc or confirming zero
-  selections returns to the action menu) and prefills glob rules for the
+  selections returns to the action menu) and prefills allow rules for the
   selected steps only; per-step validation requires every selected step to
   resolve allow, and a partial save opens a fresh approval dialog after the
   commit. Unreliable breakdowns keep the whole-call suggestion path. A rule
@@ -424,26 +424,43 @@ filter stays observe-only:
 
 Bash rules match a canonical AST rendering of the **pre-unwrap chain**:
 `command "custom" arg` becomes `command custom arg`. Literal words needing
-shell quoting use single quotes; expansion words keep their source spelling,
-so `custom "$x"` and `custom $x` remain distinct. Assignments quote only their
-values, and redirects use consistent spacing with descriptors preserved.
+shell quoting use single quotes. Words with unquoted glob, tilde, brace or
+extglob syntax render as `@guard:exp:` followed by the UTF-8 source bytes in
+hex; literal words in that marker namespace are quoted and source-preserving
+words are escaped, case-insensitively. This conservatively
+separates expanding and quoted literal spellings even when the syntax is inert.
+Absent such syntax, parameter expansion words keep their source spelling, so
+`custom "$x"` and `custom $x` remain distinct. Assignment values do not
+undergo pathname or brace expansion; unquoted tilde is conservatively encoded.
+Expanding redirect targets are never exempted as known write-root paths or
+`/dev/null`. Redirects use consistent spacing with descriptors preserved.
+For example, `custom *` renders `custom @guard:exp:2a`, while `custom '*'`
+renders `custom '*'`. A literal marker such as `custom @guard:exp:2a` renders
+`custom '@guard:exp:2a'` instead. The rule grammar is unchanged: broad rules
+can still match encoded words, and an older literal rule such as
+`HostBash(custom @guard:exp:2a)` also happens to allow `custom *` under this
+contract. Review existing rules before relying on the reservation.
 Declarations, arrays and `[[ ... ]]` retain their source spelling, as do words
-containing locale-translated `$"..."` or ANSI-C `$'...'` strings (no static
-decoding is claimed for those forms).
+containing locale-translated `$"..."` or ANSI-C `$'...'` strings when not
+encoded (no static decoding is claimed for those forms).
 
-Allow rules match canonical per-step subjects only. Deny/ask rules also match
-the legacy raw spelling, at both whole-command and per-step levels; the first
-matching rule in the list wins across spellings. Display and reason attribution
-stay raw. Incomplete calls have no canonical subject and cannot be authorized
-by an allow rule; yolo/unrestricted retain their existing precedence.
+Allow rules match the new canonical per-step subjects only. Deny/ask rules
+also match the previous canonical and legacy raw spellings, at both
+whole-command and per-step levels; the first matching rule in the list wins
+across spellings. Display and reason attribution stay raw. Incomplete calls
+have no canonical subject and cannot be authorized by an allow rule;
+yolo/unrestricted retain their existing precedence.
 
 Backslash continuations are folded; genuine newlines remain. A canonical
 compound join is unavailable for comments, unrepresented negation or incomplete
-calls, so whole-command safety matching falls back to raw. Multiline subjects
-can be matched but cannot be saved as per-step rules. Suggestions are canonical
-per-step rules. Pwsh is unchanged. See the [design contract](../../docs/guard-design.md#canonical-bash-rule-subjects).
-Migration coverage and fixture review are still pending; no user rules have
-been rewritten by stage 1.
+calls, so whole-command safety matching falls back to raw. Bash prefill
+generation refuses newlines in either the original command (including folded
+continuations) or the rendered subject. Bash suggestions use
+canonical per-step subjects; subjects containing glob metacharacters, the
+expansion marker or regex-shaped text get anchored exact regex prefills rather
+than accidental wildcard expansion. Users can still edit a prefill to broaden
+it. Pwsh is unchanged. See the [design contract](../../docs/guard-design.md#canonical-bash-rule-subjects).
+Migration coverage and fixture review remain separate from any rule rewrite.
 
 ### Tool classification
 

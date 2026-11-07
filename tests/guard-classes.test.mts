@@ -323,21 +323,19 @@ test("suggestRule: host shell suggests glob commands, never prefixes", () => {
 	const pwsh = suggestRule({ kind: "host-shell", shell: "pwsh", command: "Get-Content x.txt" }, policy);
 	assert.deepEqual(pwsh, { hostBash: { allow: ["Pwsh(Get-Content x.txt)"] } });
 	assert.equal(suggestRule({ kind: "host-shell", shell: "host-bash", command: "" }, policy), null);
-	assert.deepEqual(suggestRule({ kind: "host-shell", shell: "host-bash", command: "echo a\necho b" }, policy), { hostBash: { allow: ["HostBash(echo a)", "HostBash(echo b)"] } });
+	assert.equal(suggestRule({ kind: "host-shell", shell: "host-bash", command: "echo a\necho b" }, policy), null);
 });
 
-test("glob host suggestions stay anchored and do not grow prefixes", () => {
+test("wildcard host suggestions match exactly and do not grow prefixes", () => {
 	const command = "echo 'x*?[]()$|/\\\\foo' > result.txt";
 	const policy = makePolicy();
 	const patch = effectiveAllowSuggestion({ kind: "host-shell", shell: "host-bash", command }, policy);
 	assert.ok(patch);
-	assert.equal(patch.hostBash!.allow![0], `HostBash(${command})`, "the glob is emitted verbatim");
+	assert.ok(patch.hostBash!.allow![0].startsWith("HostBash(/^"), "wildcards use an exact regex");
 	const parsed = parseRule(patch.hostBash!.allow![0])!;
 	assert.equal(ruleMatches(parsed, "HostBash", { command }, policy.cwd), true);
 	assert.equal(ruleMatches(parsed, "HostBash", { command: command + " extra" }, policy.cwd), false, "the glob stays anchored");
-	// `*` and `?` are glob syntax again: the rule also matches variants where
-	// they stand for other text.
-	assert.equal(ruleMatches(parsed, "HostBash", { command: command.replace("*?", "AB") }, policy.cwd), true);
+	assert.equal(ruleMatches(parsed, "HostBash", { command: command.replace("*?", "AB") }, policy.cwd), false);
 	const config = mergeConfig({ hostBash: { deny: ["HostBash(echo *)"] } }, patch, policy.cwd);
 	assert.equal(decide({ ...policy, config }, { kind: "host-shell", shell: "host-bash", command }).action, "deny");
 	assert.equal(effectiveAllowSuggestion({ kind: "host-shell", shell: "host-bash", command }, { ...policy, config }), null);

@@ -348,10 +348,10 @@ export async function runExecutionPrompt(deps: ExecutionPromptDeps): Promise<Exe
 						detail: `${step.decision.action} (${step.decision.reason})`,
 						selectable: step.decision.action !== "allow",
 					}));
-					// Prefills are glob-form (see the not-exact advisory), so the picker
+					// Prefills may be glob or exact regex, so the picker
 					// deliberately does not call them "exact".
 					const picked = await io.picker(
-						`Select the steps to allow (${target})\nFull command:\n  ${truncateCommand(deps.command)}\nEach selected step gets a glob allow rule that also authorizes matching commands outside this sequence; deselect steps to narrow the ${session ? "grant" : "save"}`,
+						`Select the steps to allow (${target})\nFull command:\n  ${truncateCommand(deps.command)}\nEach selected step gets an allow rule that also authorizes matching commands outside this sequence; deselect steps to narrow the ${session ? "grant" : "save"}`,
 						pickerSteps,
 						signal,
 						{ preselectedOccurrenceIds: prompting.map((step) => step.occurrenceId), requireSelection: false },

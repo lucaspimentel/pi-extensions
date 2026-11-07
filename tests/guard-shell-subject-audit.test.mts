@@ -64,7 +64,7 @@ test("audit exposes per-rule losses hidden by tier authorization", async () => {
 	const command = 'echo "arg"';
 	const config = mergeConfig({ hostBash: { allow: ['HostBash(echo "arg")', 'HostBash(echo arg)'] } }, {}, "/work");
 	const analysis = await analyzeHostCommand(command);
-	const raw = { ...analysis, calls: analysis.calls.map((call) => ({ ...call, subject: call.rawSubject })) };
+	const raw = { cause: analysis.cause, calls: analysis.calls.map((call) => ({ ...call, subject: call.rawSubject })) };
 	const compiled = compileRules(config, api);
 	const before = ruleCoverage(command, raw, config, compiled, api, false);
 	const after = ruleCoverage(command, analysis, config, compiled, api, true);
@@ -82,6 +82,70 @@ test("audit counts shadowed safety matches across raw and canonical spellings", 
 	const analysis = await analyzeHostCommand(command);
 	const matches = ruleCoverage(command, analysis, config, compileRules(config, api), api, true);
 	assert.deepEqual(matches.map((r) => r.key), ["deny:0", "deny:1", "deny:2", "ask:0"]);
+});
+
+test("canonical baseline is detected independently of its side label", async () => {
+	const command = 'custom "arg"';
+	const config = mergeConfig({ hostBash: { allow: ['HostBash(custom "arg")', 'HostBash(custom arg)'] } }, {}, "/work");
+	const analysis = await analyzeHostCommand(command);
+	const compiled = compileRules(config, api);
+	assert.deepEqual(ruleCoverage(command, analysis, config, compiled, api, false), ruleCoverage(command, analysis, config, compiled, api, true));
+	assert.deepEqual(ruleCoverage(command, analysis, config, compiled, api, false).map((r) => r.key), ["allow:1"]);
+});
+
+test("previous safety spellings are counted without authorizing allows", () => {
+	const command = "raw whole";
+	const config = mergeConfig({ hostBash: {
+		deny: ["HostBash(raw whole)", "HostBash(new whole)", "HostBash(old whole)", "HostBash(raw step)", "HostBash(new step)", "HostBash(old step)"],
+		allow: ["HostBash(old step)", "HostBash(raw step)", "HostBash(new step)"],
+	} }, {}, "/work");
+	const analysis = { cause: null, canonicalJoin: "new whole", previousCanonicalJoin: "old whole", calls: [
+		{ complete: true, subject: "new step", previousSubject: "old step", rawSubject: "raw step", redirects: [] },
+	] };
+	const matches = ruleCoverage(command, analysis, config, compileRules(config, api), api, true);
+	assert.deepEqual(matches.map((r) => r.key), ["deny:0", "deny:1", "deny:2", "deny:3", "deny:4", "deny:5", "allow:2"]);
+	const failed = { ...analysis, cause: "grouped" };
+	assert.deepEqual(ruleCoverage(command, failed, config, compileRules(config, api), api, true).map((r) => r.key), ["deny:0", "deny:1", "deny:2"]);
+});
+
+test("expanding path no longer shares literal allow coverage but keeps prior safety coverage", async () => {
+	const rule = "HostBash(custom '/tmp/*')";
+	const config = mergeConfig({ hostBash: { allow: [rule], deny: [rule], ask: [rule] } }, {}, "/work");
+	for (const [command, allowed] of [["custom '/tmp/*'", true], ["custom /tmp/*", false]] as const) {
+		const analysis = await analyzeHostCommand(command);
+		const matches = ruleCoverage(command, analysis, config, compileRules(config, api), api, true);
+		assert.deepEqual(matches.map((item) => item.key), allowed ? ["deny:0", "ask:0", "allow:0"] : ["deny:0", "ask:0"]);
+		assert.equal(analysis.calls[0].previousSubject, "custom '/tmp/*'");
+	}
+});
+
+test("per-rule coverage agrees with isolated evaluator across redirects and safety spellings", async () => {
+	const commands = [
+		'custom "arg"', "custom '/tmp/*'", "custom /tmp/*", "custom $value",
+		"custom arg > /outside/out", "custom arg > /work/out", "custom arg > /dev/null",
+		"custom $(date)", 'custom "arg" && other arg', "for x in a; do custom arg; done",
+	];
+	const patterns = [
+		"HostBash(*)", "HostBash(custom *)", 'HostBash(custom "arg")', "HostBash(custom arg)",
+		"HostBash(custom '/tmp/*')", "HostBash(custom * > *)", "HostBash(custom arg > /dev/null)",
+		"HostBash(custom $(date))", "HostBash(other arg)",
+	];
+	for (const command of commands) {
+		const analysis = await analyzeHostCommand(command);
+		const dynamicPatterns = [analysis.canonicalJoin, analysis.previousCanonicalJoin, analysis.calls[0]?.subject, analysis.calls[0]?.previousSubject]
+			.filter((s): s is string => s != null)
+			.map((s) => `HostBash(/^${s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}$/)`);
+		for (const slot of ["deny", "ask", "allow"] as const) for (const rule of [...patterns, ...dynamicPatterns]) {
+			const config = mergeConfig({ hostBash: { [slot]: [rule] }, writeRoots: ["/work"] }, {}, "/work");
+			const coverage = ruleCoverage(command, analysis, config, compileRules(config, api), api, true);
+			const policy = { profile: "default", config, cwd: "/work", sandboxMode: "full", workspaceLocked: false, interactive: true } as const;
+			const explanation = explainHostShellCommand({ kind: "host-shell", shell: "host-bash", command }, policy, analysis);
+			// A multi-step allow can be shadowed by an earlier prompting step in
+			// the aggregate. Inspect each evaluated step as well as the aggregate.
+			const matched = explanation.decision.matchedRule === rule || explanation.steps.some((step) => step.decision.matchedRule === rule);
+			assert.equal(coverage.some((item) => item.key === `${slot}:0`), matched, `${slot}: ${rule}, command: ${command}`);
+		}
+	}
 });
 
 test("audit does not count incomplete or non-redirect-aware allows", async () => {

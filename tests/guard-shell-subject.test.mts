@@ -7,6 +7,10 @@ import { explainHostShellCommand, type PolicyState } from "../extensions/guard/p
 import { planAllowSave, planDenyRules } from "../extensions/guard/policy/save.ts";
 import { suggestRule } from "../extensions/guard/policy/suggest.ts";
 
+function marker(source: string): string {
+	return `@guard:exp:${Buffer.from(source, "utf8").toString("hex")}`;
+}
+
 function policy(rules: { allow?: string[]; deny?: string[]; ask?: string[] } = {}, profile: PolicyState["profile"] = "default"): PolicyState {
 	return { profile, config: mergeConfig({ hostBash: rules }, {}, "/work"), cwd: "/work", sandboxMode: "full", workspaceLocked: false, interactive: true };
 }
@@ -35,12 +39,12 @@ test("harmless canonical redirects are removed from the plain allow subject", as
 	assert.equal(analysis.calls[0].allowSubject, "custom arg");
 });
 
-test("literal decoding and dynamic words follow AST node kinds, not dollar text", async () => {
+test("literal decoding and expanding words retain their distinct identities", async () => {
 	for (const [source, expected] of [
 		['custom "$x"', 'custom "$x"'], ['custom $x', 'custom $x'],
 		['custom $((1+2))', 'custom $((1+2))'],
-		["custom '$x'", "custom '$x'"], ["custom ~/x", "custom '~/x'"],
-		["custom {a,b}", "custom '{a,b}'"], ["custom @(a|b)", "custom '@(a|b)'"],
+		["custom '$x'", "custom '$x'"], ["custom ~/x", `custom ${marker("~/x")}`],
+		["custom {a,b}", `custom ${marker("{a,b}")}`], ["custom @(a|b)", `custom ${marker("@(a|b)")}`],
 		[String.raw`custom a\ b`, "custom 'a b'"],
 		[String.raw`custom "a\$b"`, "custom 'a$b'"],
 		[String.raw`custom "a\qb"`, String.raw`custom 'a\qb'`],
@@ -168,7 +172,7 @@ test("write-root exemptions still strip harmless trailing redirects before plain
 
 test("tilde allow rules migrate while quoted parameter-expansion rules keep matching", async () => {
 	for (const [command, oldRule, newRule, expected] of [
-		['source ~/.nvm/nvm.sh', 'HostBash(source ~/.nvm/nvm.sh)', "HostBash(source '~/.nvm/nvm.sh')", "prompt"],
+		['source ~/.nvm/nvm.sh', 'HostBash(source ~/.nvm/nvm.sh)', `HostBash(source ${marker("~/.nvm/nvm.sh")})`, "prompt"],
 		['source "$HOME/.nvm/nvm.sh"', 'HostBash(source "$HOME/.nvm/nvm.sh")', 'HostBash(source "$HOME/.nvm/nvm.sh")', "allow"],
 	] as const) {
 		const call = { kind: "host-shell", shell: "host-bash", command } as const;
@@ -179,12 +183,174 @@ test("tilde allow rules migrate while quoted parameter-expansion rules keep matc
 	}
 });
 
+test("unquoted expansion syntax cannot collide with quoted or escaped literals", async () => {
+	for (const [expanding, literals] of [
+		["/tmp/*", ["'/tmp/*'", '"/tmp/*"', String.raw`/tmp/\*`]],
+		["file?.txt", ["'file?.txt'", String.raw`file\?.txt`]],
+		["file[ab]", ["'file[ab]'", String.raw`file\[ab]`]],
+		["{a,b}", ["'{a,b}'", String.raw`\{a,b}`]],
+		["~/x", ["'~/x'", String.raw`\~/x`]],
+		["@(a|b)", ["'@(a|b)'"]],
+	] as const) {
+		const expanded = await analyzeHostCommand(`custom ${expanding}`);
+		assert.equal(expanded.calls[0].chainArgv[1].kind, "expanding", expanding);
+		assert.equal(expanded.calls[0].subject, `custom ${marker(expanding)}`);
+		for (const literal of literals) {
+			const call = { kind: "host-shell", shell: "host-bash", command: `custom ${literal}` } as const;
+			const analysis = await analyzeHostCommand(call.command);
+			assert.equal(analysis.calls[0].chainArgv[1].kind, "literal", literal);
+			assert.notEqual(analysis.calls[0].subject, expanded.calls[0].subject, literal);
+			const literalRule = `HostBash(${analysis.calls[0].subject})`;
+			assert.equal(explainHostShellCommand(call, policy({ allow: [literalRule] }), analysis).decision.action, "allow", literal);
+			const expandedCall = { ...call, command: `custom ${expanding}` };
+			assert.equal(explainHostShellCommand(expandedCall, policy({ allow: [literalRule] }), expanded).decision.action, "prompt", expanding);
+		}
+	}
+});
+
+test("tilde is recognized at the start of a word and in assignment values", async () => {
+	for (const source of ["~/x", "~user/x"]) {
+		assert.equal((await analyzeHostCommand(`custom ${source}`)).calls[0].subject, `custom ${marker(source)}`);
+	}
+	assert.equal((await analyzeHostCommand("custom v~1")).calls[0].subject, "custom 'v~1'");
+	assert.equal((await analyzeHostCommand('custom ""~/x')).calls[0].subject, "custom '~/x'");
+	assert.equal((await analyzeHostCommand('X=foo:~/x custom')).calls[0].subject, `X=${marker("foo:~/x")} custom`);
+});
+
+test("expansion marker is source-exact, UTF-8 encoded and reserved against forged literal words", async () => {
+	for (const source of ["é*", "a\"*\"*", "$HOME/*", "~user/é"]) {
+		const analysis = await analyzeHostCommand(`custom ${source}`);
+		const encoded = marker(source);
+		assert.equal(analysis.calls[0].subject, `custom ${encoded}`, source);
+		for (const literalSource of [encoded, `'${encoded}'`, `"${encoded}"`, encoded.toUpperCase()]) {
+			const literal = await analyzeHostCommand(`custom ${literalSource}`);
+			assert.equal(literal.calls[0].subject, `custom '${literalSource.replace(/^['"]|['"]$/g, "")}'`);
+			assert.notEqual(literal.calls[0].subject, analysis.calls[0].subject);
+			const call = { kind: "host-shell", shell: "host-bash", command: `custom ${source}` } as const;
+			assert.equal(explainHostShellCommand(call, policy({ allow: [`HostBash(${literal.calls[0].subject})`] }), analysis).decision.action, "prompt");
+		}
+	}
+	assert.notEqual(marker("a*"), marker("a'*'*."));
+});
+
+test("legacy broad and marker-shaped allow patterns can match the new marker", async () => {
+	// The matching grammar is still arbitrary case-insensitive glob/regex. A
+	// marker does not carry rule provenance, so an existing rule may happen to
+	// match it; migration/audit must account for this compatibility boundary.
+	for (const [command, rule] of [
+		["custom *", "HostBash(custom @guard:exp:2a)"],
+		["custom ~/localpkg", "HostBash(custom @*)"],
+		["custom 'a b' * 'c d'", "HostBash(custom '*')"],
+	] as const) {
+		const call = { kind: "host-shell", shell: "host-bash", command } as const;
+		const analysis = await analyzeHostCommand(command);
+		assert.equal(explainHostShellCommand(call, policy({ allow: [rule] }), analysis).decision.action, "allow");
+	}
+});
+
+test("previous canonical safety subjects survive expansion changes, with rule-first precedence", async () => {
+	const command = 'custom "x" /tmp/* && custom "y"';
+	const call = { kind: "host-shell", shell: "host-bash", command } as const;
+	const analysis = await analyzeHostCommand(command);
+	assert.equal(analysis.calls[0].previousSubject, "custom x '/tmp/*'");
+	assert.equal(analysis.previousCanonicalJoin, "custom x '/tmp/*' && custom y");
+	assert.equal(analysis.canonicalJoin, `custom x ${marker("/tmp/*")} && custom y`);
+	for (const slot of ["deny", "ask"] as const) {
+		const oldStep = "HostBash(custom x '/tmp/*')";
+		const currentStep = `HostBash(custom x ${marker("/tmp/*")})`;
+		const oldWhole = "HostBash(custom x '/tmp/*' && custom y)";
+		for (const rules of [[oldStep, currentStep], [currentStep, oldStep]]) {
+			const result = explainHostShellCommand(call, policy({ [slot]: rules }), analysis);
+			assert.equal(result.decision.matchedRule, rules[0]);
+			assert.equal(result.decision.action, slot === "deny" ? "deny" : "prompt");
+		}
+		assert.equal(explainHostShellCommand(call, policy({ [slot]: [oldWhole] }), analysis).decision.matchedRule, oldWhole);
+		assert.equal(explainHostShellCommand(call, policy({ [slot]: [oldStep] }, "yolo"), analysis).decision.matchedRule, oldStep);
+	}
+	assert.equal(explainHostShellCommand(call, policy({ allow: ["HostBash(custom x '/tmp/*')", "HostBash(custom y)"] }), analysis).decision.action, "prompt");
+});
+
+test("expansion-aware subjects cover assignments and redirects without weakening redirect gating", async () => {
+	const command = 'X=~/x custom > /tmp/* 2>&1';
+	const call = { kind: "host-shell", shell: "host-bash", command } as const;
+	const analysis = await analyzeHostCommand(command);
+	const current = `X=${marker("~/x")} custom > ${marker("/tmp/*")} 2>& 1`;
+	const old = "X='~/x' custom > '/tmp/*' 2>& 1";
+	assert.equal(analysis.calls[0].subject, current);
+	assert.equal(analysis.calls[0].previousSubject, old);
+	assert.equal(analysis.calls[0].requiresRedirectAwareAllow, true);
+	assert.equal(explainHostShellCommand(call, policy({ allow: ["HostBash(*)"] }), analysis).decision.action, "prompt");
+	assert.equal(explainHostShellCommand(call, policy({ allow: [`HostBash(${old})`] }), analysis).decision.action, "prompt");
+	assert.equal(explainHostShellCommand(call, policy({ allow: [`HostBash(${current})`] }), analysis).decision.action, "allow");
+	assert.equal(explainHostShellCommand(call, policy({ deny: [`HostBash(${old})`] }), analysis).decision.action, "deny");
+	const harmless = await analyzeHostCommand('custom /tmp/* 2>&1');
+	assert.equal(harmless.calls[0].allowSubject, `custom ${marker("/tmp/*")}`);
+});
+
+test("expanding redirects are unresolved even under a write root", async () => {
+	for (const target of ["/allowed/[ab]", "/allowed/{a,b}", "/allowed/*", "/dev/nul[l]"]) {
+		const command = `custom > ${target}`;
+		const call = { kind: "host-shell", shell: "host-bash", command } as const;
+		const analysis = await analyzeHostCommand(command);
+		assert.equal(analysis.calls[0].redirects[0].target, null, target);
+		const p = policy({ allow: ["HostBash(custom *)"] });
+		p.config = { ...p.config, writeRoots: ["/allowed", "/dev"] };
+		assert.equal(explainHostShellCommand(call, p, analysis).decision.action, "prompt", target);
+		assert.equal(explainHostShellCommand(call, p, analysis).steps[0].requiresRedirectAwareAllow, true, target);
+	}
+	// Literal bracket names are statically resolved and may be covered by a root.
+	const literal = await analyzeHostCommand("custom > '/allowed/[ab]'");
+	assert.equal(literal.calls[0].redirects[0].target, "/allowed/[ab]");
+});
+
+test("assignment values do not perform pathname or brace expansion", async () => {
+	for (const value of ["*", "[ab]", "{a,b}"]) {
+		const analysis = await analyzeHostCommand(`X=${value} custom`);
+		assert.equal(analysis.calls[0].subject, analysis.calls[0].previousSubject, value);
+	}
+});
+
+test("encoded source newlines cannot produce allow or deny prefills", async () => {
+	const command = 'custom "a\nb"*';
+	const call = { kind: "host-shell", shell: "host-bash", command } as const;
+	const analysis = await analyzeHostCommand(command);
+	assert.ok(!analysis.calls[0].subject!.includes("\n"), "the encoded subject hides the source newline");
+	const p = policy();
+	const explanation = explainHostShellCommand(call, p, analysis);
+	assert.equal(suggestRule(call, p, analysis), null);
+	assert.equal(planAllowSave(call, p, explanation, analysis), null);
+	assert.deepEqual(planDenyRules(call, explanation, [0]), []);
+});
+
+test("source-preserving dynamic words cannot use the reserved prefix", async () => {
+	for (const source of ['@guard:exp:$x', '@GUARD:EXP:$"value"']) {
+		const analysis = await analyzeHostCommand(`custom ${source}`);
+		assert.equal(analysis.calls[0].subject, `custom ''${source}`);
+		assert.equal(analysis.calls[0].previousSubject, `custom ${source}`);
+	}
+});
+
+test("previous safety projection retains old marker literals and incomplete analysis behavior", async () => {
+	const call = { kind: "host-shell", shell: "host-bash", command: 'custom "@guard:exp:2a" && custom x' } as const;
+	const analysis = await analyzeHostCommand(call.command);
+	assert.equal(analysis.calls[0].subject, "custom '@guard:exp:2a'");
+	assert.equal(analysis.calls[0].previousSubject, "custom @guard:exp:2a");
+	assert.equal(analysis.previousCanonicalJoin, "custom @guard:exp:2a && custom x");
+	assert.equal(explainHostShellCommand(call, policy({ deny: ["HostBash(custom @guard:exp:2a)"] }), analysis).decision.action, "deny");
+	const incomplete = await analyzeHostCommand('custom $(date) && custom /tmp/*');
+	assert.equal(incomplete.calls[0].previousSubject, null);
+	assert.equal(incomplete.canonicalJoin, null);
+	assert.equal(incomplete.previousCanonicalJoin, null);
+	assert.equal(incomplete.calls[1].previousSubject, "custom '/tmp/*'");
+});
+
 // Public renderer seam: literal expectations come from the accepted subject contract.
 test("literal rule words use one stable shell spelling", () => {
 	for (const [value, expected] of [
 		["simple", "simple"], ["", "''"], ["two words", "'two words'"],
 		["a'b", "'a'\\''b'"], ["~/.pi", "'~/.pi'"], ["$HOME", "'$HOME'"],
 		["a\nb", "'a\nb'"], ["{a,b}", "'{a,b}'"], ["*.ts", "'*.ts'"],
+		["@guard:exp:2a", "'@guard:exp:2a'"], ["@GUARD:EXP:2A", "'@GUARD:EXP:2A'"],
 	] as const) {
 		assert.equal(renderRuleWord({ kind: "literal", value, source: value, span: { start: 0, end: 0 } }), expected);
 	}

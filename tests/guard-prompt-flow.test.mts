@@ -500,12 +500,12 @@ test("save allow: a whole-call pwsh suggestion keeps the Pwsh namespace", async 
 	assert.match(calls.editor[0], /@@note:Note: this rule is not limited to the exact command shown/);
 });
 
-test("save allow: a broadened glob shows the advisory in the editor and the preview", async () => {
-	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: ["HostBash(curl 'https://example.com/*')"] });
-	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: "curl https://example.com/*" }));
+test("save allow: a deliberately broadened glob shows the advisory in the preview", async () => {
+	const { io, calls } = makeIO({ select: ["Save allow for project", "Confirm"], editor: ["HostBash(curl *)"] });
+	const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command: "curl 'https://example.com/*'" }));
 	assert.equal(outcome.kind, "save-allow");
 	assert.match(calls.editor[0], /@@noteFor:present/);
-	assert.match(calls.editor[0], /@@note:Note: this rule is not limited to the exact command shown/);
+	assert.match(calls.editor[0], /@@note:none/, "the prefill is exact");
 	const preview = calls.select[1].split("\n@@")[0];
 	assert.match(preview, /Note: this rule is not limited to the exact command shown/);
 	assert.ok(preview.includes("Rules to save:"), preview);
@@ -535,6 +535,35 @@ test("the preview advisory is order-independent and counts every non-exact rule"
 });
 
 // ── Session allow flow ──────────────────────────────────────────────────────
+
+test("persistent and session allows review the same exact wildcard and expansion-marker prefills", async () => {
+	for (const command of ["curl 'https://example.com/*'", "curl https://example.com/*"]) {
+		const real = realDeps(command);
+		assert.ok(real.allowPlan && real.allowPlan.kind === "per-step");
+		const [rule] = planRules(real.allowPlan);
+		assert.match(rule, /^HostBash\(\/\^/);
+		if (!command.includes("'")) assert.match(rule, /@guard:exp:/);
+		for (const [action, kind] of [["Save allow for project", "save-allow"], ["Allow for this session", "session-allow"]] as const) {
+			const { io, calls } = makeIO({ select: [action, "Confirm"], editor: [rule] });
+			const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command, sessionAllowSupported: true }));
+			assert.equal(outcome.kind, kind);
+			assert.match(calls.editor[0], /@@note:none/);
+			assert.ok(calls.editor[0].includes(`@@prefill:${rule}`));
+			assert.doesNotMatch(calls.select[1], /Note: this rule is not limited/);
+		}
+	}
+});
+
+test("a multiline source offers neither persistent nor session allow", async () => {
+	const command = "curl https://example.com\ncurl https://example.org";
+	const real = realDeps(command);
+	assert.equal(real.allowPlan, null);
+	const { io, calls } = makeIO({ select: [undefined] });
+	await runExecutionPrompt(baseExecutionDeps({ io, command, sessionAllowSupported: true }));
+	const options = calls.select[0].split("\n@@")[1];
+	assert.doesNotMatch(options, /Allow for this session|Save allow for/);
+	assert.match(options, /Allow once/);
+});
 
 test("the session allow action follows Allow once when supported and is hidden otherwise", async () => {
 	const real = realDeps();

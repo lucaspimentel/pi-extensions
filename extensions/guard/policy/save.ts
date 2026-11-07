@@ -5,10 +5,9 @@
  * runtime/queue access. Parsing and validation operate on the exact
  * evaluation subjects from decision.ts so suggestions anchor to what the
  * evaluator matched, and edited patches are validated as complete
- * hypothetical merges against the whole original call. Allow prefills are
- * glob-form rules for those subjects (a subject containing `*` or `?`, or
- * one that both starts and ends with `/`, broadens the rule by the existing
- * grammar); deny prefills stay anchored exact. Allow saves use per-step
+ * hypothetical merges against the whole original call. Bash allow prefills
+ * use anchored exact patterns when a verbatim pattern would broaden the rule
+ * or contain an expansion marker; deny prefills stay anchored exact. Allow saves use per-step
  * validation when the breakdown is reliable; the whole-call suggestion
  * survives only for unreliable breakdowns.
  */
@@ -22,32 +21,9 @@ import { normalizeMatchPath } from "./paths.ts";
 import { normalizeTool, parseRule } from "./rules.ts";
 import { dedupe } from "./config.ts";
 import { homedir } from "node:os";
+import { escapeExactPattern, exactDenyRule, globAllowRule, ruleToolForNamespace } from "./shell-rule-prefill.ts";
 
-/** The rule tool name for a shell namespace (mirrors decision.ts). */
-export function ruleToolForNamespace(shell: "host-bash" | "pwsh"): "HostBash" | "Pwsh" {
-	return shell === "pwsh" ? "Pwsh" : "HostBash";
-}
-
-/** Escape a subject into an anchored exact pattern (the deny-prefill form). */
-export function escapeExactPattern(subject: string): string {
-	return subject.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-}
-
-/**
- * The glob-form allow rule for one step's plain-allow matching subject.
- * The subject is emitted verbatim: an ordinary command compiles to the same
- * anchored match as the old escaped `/^...$/` form, while a subject carrying
- * `*` or `?`, or one that both starts and ends with `/` (parsed as a regex),
- * matches more than the subject.
- */
-export function globAllowRule(shell: "host-bash" | "pwsh", allowSubject: string): string {
-	return `${ruleToolForNamespace(shell)}(${allowSubject})`;
-}
-
-/** The anchored exact deny rule for one step's deny/ask matching subject. */
-export function exactDenyRule(shell: "host-bash" | "pwsh", subject: string): string {
-	return `${ruleToolForNamespace(shell)}(/^${escapeExactPattern(subject)}$/)`;
-}
+export { escapeExactPattern, exactDenyRule, globAllowRule, ruleToolForNamespace } from "./shell-rule-prefill.ts";
 
 /** True when one rule line is provably limited to one of the reference subjects. */
 function shellRuleLineIsExact(line: string, references: readonly string[]): boolean {
@@ -210,7 +186,7 @@ export function validateShellAllowSave(
 /**
  * An allow-save plan: either the provably effective whole-call rule (kept
  * ONLY for unreliable breakdowns) or a per-step mapping from prompting step
- * occurrence IDs to their glob-form allow rules (reliable breakdowns).
+ * occurrence IDs to their allow rules (reliable breakdowns).
  */
 export type AllowSavePlan =
 	| { kind: "whole-call"; rules: string[]; patch: SuggestedPatch }
@@ -218,9 +194,9 @@ export type AllowSavePlan =
 
 /**
  * Plan the allow-save offer for a prompt. Explicit ask prohibitions apply.
- * A reliable breakdown plans per-step glob rules for every step lacking
+ * A reliable breakdown plans per-step rules for every step lacking
  * effective permission (anchored to each evaluator allow subject; a
- * redirect-requiring step's verbatim subject makes its pattern
+ * redirect-requiring step's subject makes its pattern
  * redirect-aware); the whole-call suggestion is retired on this path, and a
  * per-step validation failure plans nothing rather than falling back to a
  * guessed whole-call rule. An unavailable breakdown keeps the existing
@@ -233,7 +209,7 @@ export function planAllowSave(
 	explanation: HostShellExplanation,
 	analysis: ShellCommandAnalysis | null,
 ): AllowSavePlan | null {
-	if (explanation.decision.provenance === "explicit-ask") return null;
+	if (explanation.decision.provenance === "explicit-ask" || (call.shell === "host-bash" && /[\r\n]/.test(call.command))) return null;
 	if (!explanation.breakdown.available) {
 		const whole = effectiveAllowSuggestion(call, policy, analysis);
 		if (whole?.hostBash?.allow?.length) return { kind: "whole-call", rules: whole.hostBash.allow, patch: whole };
@@ -258,6 +234,7 @@ export function planDenyRules(
 	explanation: HostShellExplanation,
 	selectedOccurrenceIds: readonly number[],
 ): string[] {
+	if (call.shell === "host-bash" && /[\r\n]/.test(call.command)) return [];
 	const byId = new Map(explanation.steps.map((step) => [step.occurrenceId, step]));
 	const rules = selectedOccurrenceIds
 		.map((id) => byId.get(id))

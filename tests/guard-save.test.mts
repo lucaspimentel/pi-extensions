@@ -27,6 +27,7 @@ import {
 } from "../extensions/guard/policy/save.ts";
 import { analysisForSync } from "./shellast-sync.mts";
 import { compilePattern, parseRule } from "../extensions/guard/policy/rules.ts";
+import { suggestRule } from "../extensions/guard/policy/suggest.ts";
 
 function makeConfig(overrides: Partial<GuardConfig> = {}, cwd = "/home/user/proj"): ReturnType<typeof mergeConfig> {
 	return mergeConfig(overrides, {}, cwd);
@@ -348,10 +349,48 @@ test("read-root input rejects multiple lines and multiple tokens", () => {
 	assert.equal(empty.ok, false);
 });
 
-test("allow prefills are glob-form and deny prefills stay anchored exact", () => {
+test("ordinary Bash and PowerShell prefills stay unchanged; deny prefills are exact", () => {
 	assert.equal(globAllowRule("host-bash", "echo a.b(c)"), "HostBash(echo a.b(c))");
 	assert.equal(globAllowRule("pwsh", "Get-Child*"), "Pwsh(Get-Child*)");
+	assert.equal(globAllowRule("pwsh", "/tmp/"), "Pwsh(/tmp/)");
+	assert.equal(globAllowRule("pwsh", "@guard:exp:2a"), "Pwsh(@guard:exp:2a)");
 	assert.equal(exactDenyRule("pwsh", "Get-Child*"), "Pwsh(/^Get-Child\\*$/)");
+});
+
+test("Bash allow prefills are anchored exact for wildcard, regex-shaped, and expansion-marker subjects", () => {
+	const cases = [
+		["curl https://example.com/*", "curl https://example.com/anything"],
+		["curl https://example.com/a?b", "curl https://example.com/acb"],
+		["/tmp/", "rm /tmp/anything"],
+		["/(/", "other"], // invalid as a regex if emitted verbatim
+		["ls @guard:exp:2a", "ls @guard:exp:2b"],
+		["ls '@guard:exp:2a'", "ls '@guard:exp:2b'"],
+	];
+	for (const [subject, different] of cases) {
+		const rule = globAllowRule("host-bash", subject);
+		assert.equal(rule, exactDenyRule("host-bash", subject), subject);
+		const parsed = parseRule(rule);
+		assert.ok(parsed?.regex, rule);
+		assert.equal(parsed.regex.test(subject), true, rule);
+		assert.equal(parsed.regex.test(different), false, rule);
+		assert.deepEqual(notExactShellRules(rule, [subject]), [], rule);
+	}
+});
+
+test("multiline original shell sources produce no allow plan or suggestion even when steps are single-line", () => {
+	const policy = makePolicy();
+	for (const command of ["curl https://example.com\ncurl https://example.org", "curl https://example.com\r\ncurl https://example.org", "curl https://example.com\r", "curl https://example.com \\\n--head"]) {
+		const call = shellCall(command);
+		const analysis = analysisForSync(call);
+		const explanation = explainHostShellCommandPolicy(call, policy, analysis);
+		assert.equal(explanation.breakdown.available, true, JSON.stringify(command));
+		assert.ok(explanation.steps.every((step) => step.allowSubject !== null && !/[\r\n]/.test(step.allowSubject)), JSON.stringify(command));
+		assert.equal(planAllowSavePolicy(call, policy, explanation, analysis), null, JSON.stringify(command));
+		assert.equal(suggestRule(call, policy, analysis), null, JSON.stringify(command));
+	}
+	const pwsh = shellCall("Get-ChildItem\nGet-Location", "pwsh");
+	assert.equal(suggestRule(pwsh, policy, analysisForSync(pwsh)), null);
+	assert.equal(planAllowSave(pwsh, policy, explainHostShellCommand(pwsh, policy)), null);
 });
 
 // ── The not-exact advisory predicate ───────────────────────────────────────
@@ -387,18 +426,12 @@ test("notExactShellRules flags wildcards, bare tool rules, and deviating or malf
 	assert.deepEqual(notExactShellRules(`${broader}\n${faithful}`, ["echo a", "git status"]), [broader]);
 });
 
-test("a regex-shaped subject is emitted verbatim, validates, and broadens", () => {
+test("an intentional broad regex is still accepted and flagged as advisory", () => {
 	const policy = makePolicy();
 	const call = shellCall("/tmp/");
-	assert.equal(globAllowRule("host-bash", "/tmp/"), "HostBash(/tmp/)");
-	// compilePattern treats a pattern that starts and ends with '/' as an
-	// UNANCHORED regex, so the rule matches far more than the subject.
-	assert.equal(parseRule("HostBash(/tmp/)")?.regex?.test("/tmp/"), true);
+	// User-edited broad regexes retain their existing semantics and warning.
 	assert.equal(compilePattern("/tmp/").test("rm -rf /var/tmp"), true);
-	// Validation accepts it because the rule still matches the subject.
-	assert.deepEqual(validateShellAllowSave(call, policy, [globAllowRule("host-bash", "/tmp/")], [0]), { ok: true });
-	// The advisory flags it, and the invalid-regex sibling is rejected on the
-	// save path rather than thrown.
+	assert.deepEqual(validateShellAllowSave(call, policy, ["HostBash(/tmp/)"], [0]), { ok: true });
 	assert.deepEqual(notExactShellRules("HostBash(/tmp/)", ["/tmp/"]), ["HostBash(/tmp/)"]);
 	const bad = parseShellRuleLines("HostBash(/(/)", "host-bash");
 	assert.equal(bad.ok, false);
@@ -422,15 +455,19 @@ test("redirect steps keep the allow-subject versus deny-subject distinction", ()
 	assert.deepEqual(validateShellAllowSave(call, policy, plan.perStep.map((entry) => entry.rule), plan.perStep.map((entry) => entry.occurrenceId)), { ok: true });
 });
 
-test("a broadened glob prefill still validates per-step", () => {
+test("a wildcard step receives the same exact prefill in the plan and suggestion", () => {
 	const policy = makePolicy();
 	const call = shellCall("curl https://example.com/*");
-	const plan = planAllowSave(call, policy, explainHostShellCommand(call, policy));
-	assert.ok(plan);
-	assert.equal(plan.kind, "per-step");
-	if (plan.kind !== "per-step") return;
-	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: "HostBash(curl 'https://example.com/*')" }]);
-	assert.deepEqual(validateShellAllowSave(call, policy, plan.perStep.map((entry) => entry.rule), plan.perStep.map((entry) => entry.occurrenceId)), { ok: true });
+	const analysis = analysisForSync(call);
+	const explanation = explainHostShellCommandPolicy(call, policy, analysis);
+	const subject = explanation.steps[0].allowSubject;
+	assert.ok(subject);
+	assert.match(subject, /@guard:exp:/, "unquoted wildcard is represented by the expansion marker");
+	const plan = planAllowSavePolicy(call, policy, explanation, analysis);
+	assert.ok(plan && plan.kind === "per-step");
+	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: exactDenyRule("host-bash", subject) }]);
+	assert.deepEqual(suggestRule(call, policy, analysis)?.hostBash?.allow, [plan.perStep[0].rule]);
+	assert.deepEqual(validateShellAllowSavePolicy(call, policy, plan.perStep.map((entry) => entry.rule), [0], analysis), { ok: true });
 });
 
 // ── Edited read-root validation (runtime.ts, real filesystem) ────────────────

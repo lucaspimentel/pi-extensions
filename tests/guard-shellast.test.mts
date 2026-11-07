@@ -337,6 +337,22 @@ test("a construct nested in arithmetic or brace expansion is still flagged", asy
 	assert.equal(arith.calls[0].cause, "command-substitution");
 });
 
+test("both canonical joins preserve UTF-8 offsets, operators and incomplete boundaries", async () => {
+	const result = await analyzeHostCommand('custom café && custom "é" /tmp/*');
+	const source = "/tmp/*";
+	assert.equal(result.calls[1].subject, `custom é @guard:exp:${Buffer.from(source).toString("hex")}`);
+	assert.equal(result.calls[1].previousSubject, "custom é '/tmp/*'");
+	assert.equal(result.previousCanonicalJoin, "custom café && custom é '/tmp/*'");
+	assert.equal(result.canonicalJoin, `custom café && ${result.calls[1].subject}`);
+	for (const command of ['custom /* # tail', '! custom /*', 'custom $(date)']) {
+		const analysis = await analyzeHostCommand(command);
+		assert.equal(analysis.canonicalJoin, null, command);
+		assert.equal(analysis.previousCanonicalJoin, null, command);
+	}
+	const failed = await analyzeHostCommand("custom '");
+	assert.equal(failed.previousCanonicalJoin, null);
+});
+
 // ── Per-call completeness names the offending step ──────────────────────────
 
 test("a call bearing a construct is incomplete and names itself as the offending step", async () => {

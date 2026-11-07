@@ -10,9 +10,11 @@ export type Slot = typeof SLOTS[number];
 export interface Analysis {
 	cause: string | null;
 	canonicalJoin?: string | null;
+	previousCanonicalJoin?: string | null;
 	calls: readonly {
 		complete: boolean;
 		subject: string | null;
+		previousSubject?: string | null;
 		rawSubject?: string;
 		redirects: readonly { op: string; target: string | null }[];
 	}[];
@@ -50,14 +52,20 @@ export function ruleCoverage(
 	api: APIs,
 	canonical: boolean,
 ): Coverage[] {
+	// The runner labels the baseline non-canonical, but a baseline can itself
+	// be a canonical revision. Detect its analysis shape instead of assuming
+	// that every baseline predates the switch.
+	canonical ||= Object.hasOwn(analysis, "canonicalJoin");
 	const safety: string[] = [api.tier.stripLineContinuations(command)];
 	if (canonical && analysis.canonicalJoin != null) safety.push(analysis.canonicalJoin);
+	if (canonical && analysis.previousCanonicalJoin != null) safety.push(analysis.previousCanonicalJoin);
 	const allows: Array<{ subject: string; redirectAware: boolean }> = [];
 	if (analysis.cause === null) {
 		for (const call of analysis.calls) {
 			const normalized = call.subject === null ? null : canonical ? call.subject
 				: api.text.stripTimeoutPrefix(api.tier.stripLineContinuations(call.subject).trim());
 			if (normalized !== null) safety.push(normalized);
+			if (canonical && call.previousSubject != null) safety.push(call.previousSubject);
 			if (canonical && call.rawSubject !== undefined) safety.push(call.rawSubject);
 			if (!call.complete || normalized === null) continue;
 			const redirectAware = api.tier.hasWritableRedirect(call.redirects, config.writeRoots, { cwd: config.cwd });

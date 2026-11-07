@@ -404,7 +404,8 @@ stay anchored exact), and any rule that is not the exact rendering of its
 reference subject carries a non-blocking advisory note. REVISED AGAIN
 2026-10-26, user-confirmed and implemented: **Allow for this session** adds
 memory-only, workspace-scoped host-shell allow rules that reuse this whole
-flow. See the decision log entries "Per-step allow saves (2026-10-19)",
+flow. REVISED 2026-11-06: Bash wildcard, regex-shaped, and expansion-marker
+prefills use anchored exact regexes; Pwsh is unchanged. See the decision log entries "Per-step allow saves (2026-10-19)",
 "Glob-form allow prefills and the not-exact advisory (2026-10-26)", and
 "Session-scoped host-shell grants (2026-10-26)". RPC persistent saves and
 RPC session command grants are deferred; step 6 remains unauthorized.**
@@ -429,9 +430,8 @@ RPC session command grants are deferred; step 6 remains unauthorized.**
   offer the session action only where an eligible allow plan exists (which
   already excludes explicit asks and requires the owned stages) and the
   workspace's canonical identity resolves.
-- The allow step picker describes what it prefills: glob allow rules for the
-  selected steps, never "exact" rules (the prefills are glob-form and the
-  not-exact advisory exists precisely because of that). The wording applies to
+- The allow step picker describes what it prefills: allow rules for the
+  selected steps. The wording applies to
   the session and the persistent paths alike; only the trailing verb
   ("grant" versus "save") differs.
 - **Session-scoped allow grants (2026-10-26).** The session action routes
@@ -504,13 +504,12 @@ RPC session command grants are deferred; step 6 remains unauthorized.**
   Escaping the picker or confirming zero selections returns to the action
   menu with nothing granted and nothing executed. A single prompting step
   skips the picker and opens the editor directly.
-- Confirming the picker opens the rule editor prefilled with glob-form
-  allow rules for the selected steps only, anchored to each step's evaluator
-  matching subject; a redirect-requiring step's prefill is its verbatim
-  subject, whose pattern necessarily contains ">". A subject carrying `*`
-  or `?`, or one that both starts and ends with `/`, yields a rule that
-  matches more than the step shown; that widening is accepted and marked by
-  the advisory note. No redundant rules are generated for already allowed
+- Confirming the picker opens the rule editor prefilled with allow rules for
+  the selected steps only, anchored to each step's evaluator matching subject.
+  Bash subjects carrying `*`, `?`, the expansion marker, or regex-shaped text
+  use anchored exact regex prefills. Users may edit them to broaden the rule,
+  with a non-blocking advisory. Redirect-requiring prefills contain `>`.
+  No redundant rules are generated for already allowed
   steps. No whole-call rule is offered when the breakdown is reliable:
   selecting every prompting step covers everything a whole-command rule
   would authorize, and more, because the step rules also authorize other
@@ -555,8 +554,8 @@ RPC session command grants are deferred; step 6 remains unauthorized.**
 ### Editor, validation, and preview
 
 - Every persistent save opens an editor. Shell editors contain one complete
-  rule expression per line, initially using glob-form allow suggestions and
-  anchored exact deny suggestions. Every rule must parse and compile and use
+  rule expression per line, initially using allow prefills and anchored exact
+  deny suggestions. Every rule must parse and compile and use
   the original shell namespace. Scope, allow/deny slot, and destination are
   controlled by the chosen action, not editable configuration fields.
 - Shell rule saves carry a non-blocking advisory for every rule that is not
@@ -1353,9 +1352,10 @@ coverage for both runtimes.
 
 ## Canonical Bash rule subjects
 
-Accepted 2026-11-06, all six contract gates approved. Stage 1 is a working-tree
-implementation, not a measured migration or authorization to rewrite user rules.
-It supersedes the raw-subject contract in the historical Stages 1-2 row above.
+Accepted 2026-11-06, all six contract gates approved; the later expansion-syntax
+correction below supersedes the initial literal-word rendering. Measurement is
+not authorization to rewrite user rules. This contract supersedes the
+raw-subject contract in the historical Stages 1-2 row above.
 
 - `policy/shell-subject.ts` contains pure, JSON-serializable word, assignment,
   redirect and UTF-8 byte-span projections and renderers. `chainArgv` is captured
@@ -1364,16 +1364,25 @@ It supersedes the raw-subject contract in the historical Stages 1-2 row above.
   and quote-context-aware backslash decoding. Empty words render as `''`. Words
   containing whitespace, quotes, backslashes, shell metacharacters, `~`, `$` or
   backticks render single-quoted, escaping embedded quotes as `'\''`.
-  Dynamic means a parser expansion NODE (parameter, command, arithmetic or
-  process substitution), not every runtime Bash expansion. A dynamic word keeps
-  its exact source spelling, including quotes. Tilde, braces, extglob and an
-  inert single-quoted `$` are literal for this contract. Follow-up decision:
-  words containing locale-translated `$"..."` or ANSI-C `$'...'` strings also
-  retain their full source spelling (`kind: "source"`), without claiming a
-  static decoded value. The user selected source preservation rather than new
-  incompleteness or a new Bash byte decoder; dynamic remains node-based.
+  Unquoted glob, tilde, brace and extglob syntax is conservatively detected
+  separately from expansion nodes and rendered as `@guard:exp:` plus the
+  lowercase hex encoding of the whole word's UTF-8 source. Even inert syntax
+  may be encoded; quoted or escaped literal syntax stays literal. Literal
+  values starting with the marker are quoted, and source-preserving words
+  starting with it are escaped, case-insensitively, to reserve the namespace. This
+  prevents an unquoted expanding word from sharing the quoted literal's allow
+  subject; it does not prevent a broad rule matching both. An old literal
+  `HostBash(custom @guard:exp:2a)` also matches the new subject for `custom *`;
+  reserving the marker cannot revoke existing rules under the unchanged grammar.
+  Absent that syntax, a dynamic word (parameter, command, arithmetic or process
+  substitution) keeps its source spelling, including quotes. Words containing
+  locale-translated `$"..."` or ANSI-C `$'...'` strings also retain their full
+  source spelling when not encoded (`kind: "source"`), without claiming a
+  static decoded value.
 - Leading assignments render `NAME=value` (or `NAME+=value`), quoting only the
-  value. Redirects follow the argv in source order as ` [descriptor]op target`,
+  value. Assignment values are not pathname- or brace-expanded; unquoted tilde
+  is conservatively encoded. Expanding redirect targets are unresolved and
+  cannot qualify for a write-root or `/dev/null` exemption. Redirects follow the argv in source order as ` [descriptor]op target`,
   including the target's canonical spelling. Declarations, arrays, indexed
   assignments and `[[ ... ]]` instead keep their source spelling; this preserves
   their existing completeness and accepted tier behavior.
@@ -1382,10 +1391,12 @@ It supersedes the raw-subject contract in the historical Stages 1-2 row above.
   legacy continuation-folded, timeout-stripped slice for display and safety
   matching only. `tierNoopCdSubject` separately preserves the no-op-cd input.
   Spans index the continuation-folded, BOM-free source in UTF-8 bytes.
-- Whole-command deny/ask match raw text and nullable `canonicalJoin`; per-step
-  deny/ask match canonical and raw subjects. Each list is traversed RULES FIRST,
-  so the earliest matching rule retains its identity regardless of spelling.
-  Bash allow rules match canonical per-step subjects ONLY. Display, offending
+- Whole-command deny/ask match raw text, nullable `canonicalJoin` and nullable
+  `previousCanonicalJoin`; per-step deny/ask match the new canonical, previous
+  canonical and raw subjects. Each list is traversed RULES FIRST, so the
+  earliest matching rule retains its identity regardless of spelling. The
+  previous forms preserve prior safety coverage, not allow authority. Bash
+  allow rules match new canonical per-step subjects ONLY. Display, offending
   fragments and aggregate reason attribution retain raw spelling.
 - Compound joins replace call spans and keep the typed operators and genuine
   newlines; backslash continuations are folded as before. A comment, negation
@@ -1395,15 +1406,45 @@ It supersedes the raw-subject contract in the historical Stages 1-2 row above.
   still allows without consulting the analysis; research is unchanged. Pwsh remains raw and
   whole-command, without a Bash canonical projection.
 - Suggestions use canonical per-step subjects, never guessed raw Bash rules.
-  Saving refuses a newline-containing per-step subject; matching still works
-  (ordinary glob `*` cannot cross a newline). Explicit-ask save prohibitions
-  and whole-original-call validation are unchanged.
+  Bash subjects containing `*`, `?`, the expansion marker, or regex-shaped
+  text use anchored exact regex prefills so suggested allow rules do not
+  accidentally treat subject data as wildcard syntax. Users may explicitly
+  broaden the reviewed rule. Bash prefill generation refuses a newline in the
+  original command or rendered subject, including folded continuations, so
+  encoding cannot hide it. Matching still works (ordinary glob `*` cannot cross a newline).
+  Explicit-ask save prohibitions and whole-original-call validation are unchanged.
 
 Verification seam: `tests/guard-shell-subject.test.mts` covers the renderer,
-analysis projection, explanation and save APIs. Stage 2 must freeze/hash its
-inputs and report per-rule old/new coverage as well as decisions before any
-user-config rewrite or curated-fixture regeneration. Existing fixtures remain
-unchanged until that review; no red behavior switch is to be committed.
+analysis projection, explanation and save APIs. The migration audit freezes and
+hashes inputs and reports per-rule eligible coverage as well as decisions;
+coverage is independent of winning-rule and tier/profile authorization, and
+unexercised rules remain unverified. Before any user-config rewrite or curated
+fixture regeneration, review that evidence. Neither follows automatically from
+this correction.
+
+### Expansion-syntax correction measurement (2026-11-06, Linux)
+
+Replayed the existing frozen corpus and config, not a new harvest: 35,439
+observed commands and 6 labelled probes, evaluated as host Bash across seven
+profiles and user/empty configs (496,230 paired cells). Against pre-switch
+`f47aefe`, there were 489 action changes (322 allow to prompt, 161 allow to
+classify, 4 prompt to allow, 2 classify to allow); 31 allow rules lost
+coverage and 117 rules were unexercised. Measurement SHA-256:
+`11b99df2bf8b5979d11dcb444de0477edeafb3083097f3e3a84307b9810a5498`.
+Against committed canonical `7302c00`, the same frozen policy/audit sources
+showed no decision or per-rule coverage changes; 121 rules were unexercised.
+Measurement SHA-256:
+`57f4e55894ff80671d277745f74ace913803c63b8f804b8976216aa80bd345ea`.
+Against the pre-switch baseline, three allow rules gained one command each:
+quote normalization explains both newly allowed GitHub API commands and the
+third, a date command already allowed by the tier. The 31 rule losses include
+four tilde rules and predominantly timeout-prefixed commands among the other
+losses. The final candidate did not gain any rules against committed canonical.
+The original corpus did not exercise the synthetic literal-versus-expanding
+collision; focused tests cover it. The config had 340 allow and 2 ask rules,
+with no deny rules, so zero observed safety losses is not general safety proof.
+Private artifacts and limitations are described in
+`tools/shell-subject-audit/README.md`; no personal rules or fixtures were changed.
 
 ## Shell-ast adoption: final measurement and retirement record
 
