@@ -43,7 +43,7 @@ import type {
 } from "@questi0nm4rk/shell-ast";
 import { stripLineContinuations, hasWritableRedirect, type StructuredRedirect } from "./bashtier.ts";
 import { stripTimeoutPrefix, stripTrailingHarmlessRedirects } from "./shell-text.ts";
-import { renderCanonicalJoin, renderRuleSubject, type ShellSourceSpan, type ShellRuleWord, type ShellAssignmentSubject, type ShellRedirectSubject } from "./shell-subject.ts";
+import { isActiveExpansionWord, renderCanonicalJoin, renderRuleSubject, type ShellSourceSpan, type ShellRuleWord, type ShellAssignmentSubject, type ShellRedirectSubject } from "./shell-subject.ts";
 
 type ShellAstModule = typeof import("@questi0nm4rk/shell-ast");
 type Command = NonNullable<Stmt["cmd"]>;
@@ -127,6 +127,8 @@ export interface ShellExecCall {
 	requiresRedirectAwareAllow: boolean;
 	/** Any ParamExp outside single quotes (the `$` veto). */
 	hasParameterExpansion: boolean;
+	/** True when any projected word (chain arg, assignment value, redirect target) carries active expansion; such steps are ineligible for allow-rule authorization. */
+	hasActiveExpansion: boolean;
 	/** argv empty && assignments present && complete. */
 	pureAssignment: boolean;
 	complete: boolean;
@@ -319,6 +321,7 @@ function analyzeParsed(mod: ShellAstModule, slice: ByteSlicer, file: ShellFile, 
 		redirects: entry.redirects,
 		requiresRedirectAwareAllow: entry.requiresRedirectAwareAllow,
 		hasParameterExpansion: entry.hasParameterExpansion,
+		hasActiveExpansion: entry.hasActiveExpansion,
 		pureAssignment: entry.argv.length === 0 && entry.assignments.length > 0 && entry.complete,
 		complete: entry.complete,
 		cause: entry.cause,
@@ -536,6 +539,7 @@ interface RawCall {
 	redirects: ShellRedirect[];
 	requiresRedirectAwareAllow: boolean;
 	hasParameterExpansion: boolean;
+	hasActiveExpansion: boolean;
 	complete: boolean;
 	cause: ShellAnalysisCause | null;
 	/** The call's source span in UTF-8 byte offsets (construct containment only). */
@@ -606,6 +610,11 @@ function makeCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, call: Call
 	}
 	argv = manualWrapWalk(argv);
 	const redirects = redirectsOf(mod, slice, stmt);
+	// Current projections only: the previous spellings keep the old rendering
+	// on purpose, so deny/ask safety matching stays untouched.
+	const hasActiveExpansion = chainArgv.some(isActiveExpansionWord)
+		|| assignmentSubjects.some((a) => a !== null && isActiveExpansionWord(a.value))
+		|| redirectSubjects.some((r) => isActiveExpansionWord(r.target));
 	return {
 		subject,
 		previousSubject,
@@ -616,6 +625,7 @@ function makeCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, call: Call
 		redirects,
 		requiresRedirectAwareAllow: hasWritableRedirect(redirects),
 		hasParameterExpansion: hasParamExpansion(mod, stmt),
+		hasActiveExpansion,
 		complete,
 		cause,
 		start: span.start,
@@ -638,6 +648,7 @@ function makeDeclCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, decl: 
 		redirects,
 		requiresRedirectAwareAllow: hasWritableRedirect(redirects),
 		hasParameterExpansion: hasParamExpansion(mod, stmt),
+		hasActiveExpansion: decl.args.some((a) => a.value !== null && isActiveExpansionWord(projectRuleWord(mod, slice, a.value, false, true))),
 		complete: true,
 		cause: null,
 		start: span.start,
@@ -660,11 +671,37 @@ function makeTestCall(mod: ShellAstModule, slice: ByteSlicer, stmt: Stmt, test: 
 		redirects,
 		requiresRedirectAwareAllow: hasWritableRedirect(redirects),
 		hasParameterExpansion: hasParamExpansion(mod, stmt),
+		hasActiveExpansion: hasTestClauseExpansion(mod, test),
 		complete: true,
 		cause: null,
 		start: span.start,
 		end: span.end,
 	};
+}
+
+/**
+ * Conservative `[[ ... ]]` scan: any expansion node (parameter, command,
+ * arithmetic, process) or unquoted glob/tilde metacharacter in a Lit part
+ * flags the call. False positives merely prompt (the safe direction); the
+ * test clause keeps its source-spelling subject, so per-word kinds do not
+ * apply here.
+ */
+function hasTestClauseExpansion(mod: ShellAstModule, test: TestClause): boolean {
+	let expansion = false;
+	const visitor: Visitor = {
+		ParamExp: () => { expansion = true; },
+		CmdSubst: () => { expansion = true; },
+		ArithmExp: () => { expansion = true; },
+		ProcSubst: () => { expansion = true; },
+		Lit: (part) => {
+			for (let i = 0; i < part.value.length; i++) {
+				if (part.value[i] === "\\") { i++; continue; }
+				if ("*?[{~".includes(part.value[i])) { expansion = true; return; }
+			}
+		},
+	};
+	mod.walk(test, visitor);
+	return expansion;
 }
 
 /** Literal decoding is quote-context aware; the package's wordToLit retains escapes. */

@@ -88,6 +88,17 @@ spellings; allow sees only complete per-step subjects and enforces redirect
 awareness. Actual winning rule identities are recorded separately in cells.
 Do not infer a broken allow rule is safe merely because the tier still allows.
 
+Active-expansion eligibility: candidate analyses mark calls whose projected
+words carry active shell expansion (kinds `expanding` and `dynamic`). Such
+calls are excluded from allow-slot coverage candidacy, mirroring the
+evaluator's ineligibility contract; frozen baselines without the flag keep
+legacy candidacy so paired comparisons measure exactly the eligibility
+change. `summary.json` reports `markerMatchingAllowRules`: the count of
+distinct user-config allow rules whose pattern textually matches an
+expansion-marker subject in any candidate row. These rules still compile and
+still decide deny/ask, but can no longer authorize expansion-bearing
+commands; they are the compatibility boundary of the marker encoding.
+
 Config rewrites are a separate, backed-up operation requiring reviewed
 manifest/slot/index/text/command-ID/subject/transition evidence. Do not edit
 user rules or regenerate curated fixtures just to hide unexplained differences.

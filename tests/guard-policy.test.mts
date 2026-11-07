@@ -175,16 +175,13 @@ test("a multibyte prefix does not corrupt per-step rule subjects (deny stays enf
 	assert.equal(decide(makePolicy({ profile: "trusted" }), hostShell("echo café && echo x")).action, "allow");
 });
 
-test("an unfaithful projection is never checked against allow rules (allow -> prompt)", () => {
-	// A complete command the tier vetoes is still authorized by a matching allow
-	// rule...
+test("a tier-vetoed substitution command is not rescued by an allow rule (allow -> prompt)", () => {
+	// A complete command the tier vetoes used to be authorized by a matching
+	// allow rule; active-expansion eligibility now makes every $-bearing
+	// command ineligible for allow rules, so it prompts with the veto named.
 	const config = makeConfig({ hostBash: { allow: ["HostBash(echo *)"] } });
 	const allowed = (command: string) => decide(makePolicy({ profile: "default", config }), hostShell(command)).action;
-	assert.equal(allowed("echo $HOME"), "allow");
-	// ...but a substitution makes that call's own projection incomplete, so
-	// rules are not consulted for it and the call prompts. This is a deliberate
-	// tightening over the pre-adapter splitter (which matched the single raw
-	// fragment); it is pinned here until the stage-4 decision-diff enumerates it.
+	assert.equal(allowed("echo $HOME"), "prompt");
 	assert.equal(allowed("echo $(date)"), "prompt");
 });
 

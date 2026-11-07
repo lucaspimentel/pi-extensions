@@ -63,6 +63,14 @@ all step reasons, unwrapped argv, explicit rules, assignment semantics,
 and profile cells. Do not blindly regenerate them. A fresh temp-root run
 verified substitution independently of the collection root.
 
+2026-11-07 active-expansion eligibility: three step expectations were edited
+surgically (`hard.json` `manual-wrapper-17bcc1ed6320`; `incompleteness.json`
+`incomplete-process-substitution-b46ff2b5d435` and
+`incomplete-unrecognized-node-4f0a175add43`): an `echo "$…"` step is no
+longer authorized by `HostBash(echo *)` because a dynamic word makes the
+step ineligible for allow rules; commands, profiles, and the synthetic
+policy are unchanged.
+
 ## Reviewed allow inventory
 
 Every expected aggregate allow is listed below. Compound tier cases were

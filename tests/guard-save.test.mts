@@ -455,7 +455,7 @@ test("redirect steps keep the allow-subject versus deny-subject distinction", ()
 	assert.deepEqual(validateShellAllowSave(call, policy, plan.perStep.map((entry) => entry.rule), plan.perStep.map((entry) => entry.occurrenceId)), { ok: true });
 });
 
-test("a wildcard step receives the same exact prefill in the plan and suggestion", () => {
+test("an expansion-bearing step receives no allow plan or suggestion", () => {
 	const policy = makePolicy();
 	const call = shellCall("curl https://example.com/*");
 	const analysis = analysisForSync(call);
@@ -463,11 +463,12 @@ test("a wildcard step receives the same exact prefill in the plan and suggestion
 	const subject = explanation.steps[0].allowSubject;
 	assert.ok(subject);
 	assert.match(subject, /@guard:exp:/, "unquoted wildcard is represented by the expansion marker");
-	const plan = planAllowSavePolicy(call, policy, explanation, analysis);
-	assert.ok(plan && plan.kind === "per-step");
-	assert.deepEqual(plan.perStep, [{ occurrenceId: 0, rule: exactDenyRule("host-bash", subject) }]);
-	assert.deepEqual(suggestRule(call, policy, analysis)?.hostBash?.allow, [plan.perStep[0].rule]);
-	assert.deepEqual(validateShellAllowSavePolicy(call, policy, plan.perStep.map((entry) => entry.rule), [0], analysis), { ok: true });
+	// Active expansion is never allow-authorizable, so nothing is planned.
+	assert.equal(planAllowSavePolicy(call, policy, explanation, analysis), null);
+	assert.equal(suggestRule(call, policy, analysis), null);
+	// Even a hand-built anchored marker rule cannot pass validation: the
+	// merged policy still prompts on the expansion-bearing step.
+	assert.notEqual(validateShellAllowSavePolicy(call, policy, [exactDenyRule("host-bash", subject)], [0], analysis).ok, true);
 });
 
 // ── Edited read-root validation (runtime.ts, real filesystem) ────────────────

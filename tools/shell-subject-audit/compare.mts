@@ -1,9 +1,14 @@
 /** Streaming comparison; all command text and rule evidence stays in ignored output. */
 import { createHash } from "node:crypto";
 import { appendFileSync, createReadStream, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { coverageDelta } from "./coverage.mts";
+import * as configMod from "../../extensions/guard/policy/config.ts";
+import * as rulesMod from "../../extensions/guard/policy/rules.ts";
+import * as tierMod from "../../extensions/guard/policy/bashtier.ts";
+import * as textMod from "../../extensions/guard/policy/shell-text.ts";
+import { compileRules, coverageDelta, markerMatchingRules, type APIs } from "./coverage.mts";
 
 async function* rows(path: string): AsyncGenerator<any> {
 	for await (const line of createInterface({ input: createReadStream(path), crlfDelay: Infinity })) if (line.trim()) yield JSON.parse(line);
@@ -20,6 +25,17 @@ export async function compare(out: string) {
 	if (oldDone.cells !== manifest.cellsPerSide || oldDone.profiles.length !== 7 || oldDone.configs.length !== 2) throw new Error("incomplete matrix");
 	const rules = json("baseline-rules.json");
 	if (JSON.stringify(rules) !== JSON.stringify(json("candidate-rules.json"))) throw new Error("resolved rules differ between source trees");
+	// The candidate tree's policy modules evaluate marker-matching allow rules
+	// against each candidate analysis; baselines predate the flag and are not
+	// probed for this compatibility signal.
+	const api: APIs = { rules: rulesMod, tier: tierMod, text: textMod };
+	const cwd = manifest.runtime.cwd;
+	const user = json("inputs/user-config.json");
+	const markerConfigs = [
+		{ name: "user", config: configMod.mergeConfig(user, {}, cwd, homedir()) },
+		{ name: "empty", config: configMod.mergeConfig({}, {}, cwd, homedir()) },
+	].map((c) => ({ ...c, compiled: compileRules(c.config, api) }));
+	const markerMatchingKeys = new Set<string>();
 	const inventories = new Map<string, any>();
 	for (const config of rules) for (const rule of config.rules) inventories.set(`${config.name}/${rule.slot}:${rule.index}`, { config: config.name, ...rule, oldCommands: 0, newCommands: 0, oldObservedCommands: 0, newObservedCommands: 0, oldProbeCommands: 0, newProbeCommands: 0, lostIds: [], gainedIds: [] });
 	const affected = join(out, "affected.jsonl");
@@ -80,6 +96,11 @@ export async function compare(out: string) {
 			affectedCommands++;
 			appendFileSync(affected, JSON.stringify({ ...command, changes, coverageChanges, before: old.value.analysis, after: next.value.analysis }) + "\n");
 		}
+		for (let i = 0; i < markerConfigs.length; i++) {
+			for (const match of markerMatchingRules(next.value.analysis, markerConfigs[i].config, markerConfigs[i].compiled, api, true)) {
+				markerMatchingKeys.add(`${next.value.configs[i].name}/${match.key}`);
+			}
+		}
 	}
 	if (!(await before.next()).done || !(await after.next()).done || pairedCommands !== manifest.commands || pairedCells !== manifest.cellsPerSide) throw new Error("extra or missing measurement rows");
 	const inventory = [...inventories.values()];
@@ -94,6 +115,7 @@ export async function compare(out: string) {
 		lostAllowRules: changedRules.filter((r) => r.slot === "allow" && r.lostIds.length).length,
 		lostSafetyRules: changedRules.filter((r) => r.slot !== "allow" && r.lostIds.length).length,
 		gainedSafetyRules: changedRules.filter((r) => r.slot !== "allow" && r.gainedIds.length).length,
+		markerMatchingAllowRules: markerMatchingKeys.size,
 		unexercisedRules: inventory.filter((r) => !r.oldCommands && !r.newCommands).length,
 		observedUnexercisedRules: inventory.filter((r) => !r.oldObservedCommands && !r.newObservedCommands).length,
 		consistencyErrors: 0,

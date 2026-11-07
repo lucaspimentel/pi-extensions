@@ -436,15 +436,25 @@ Expanding redirect targets are never exempted as known write-root paths or
 `/dev/null`. Redirects use consistent spacing with descriptors preserved.
 For example, `custom *` renders `custom @guard:exp:2a`, while `custom '*'`
 renders `custom '*'`. A literal marker such as `custom @guard:exp:2a` renders
-`custom '@guard:exp:2a'` instead. The rule grammar is unchanged: broad rules
-can still match encoded words, and an older literal rule such as
-`HostBash(custom @guard:exp:2a)` also happens to allow `custom *` under this
-contract. Review existing rules before relying on the reservation.
+`custom '@guard:exp:2a'` instead. Active-expansion eligibility (accepted
+2026-11-07) closes the remaining compatibility hole: a command whose words
+carry active shell expansion (unquoted glob/tilde/brace/extglob spellings, or
+parameter/command/arithmetic/process substitution including inside double
+quotes) can no longer be pre-authorized by ANY allow rule, however broad or
+marker-shaped; every such command prompts each time under default, auto and
+allow-edits, while trusted, yolo and unrestricted are unaffected (rule
+eligibility, not profile scope). Deny and ask rules are unchanged: they still
+match current canonical, previous canonical and raw spellings, so existing
+safety rules keep working. The read-only tier and per-invocation approval are
+the remaining authorization paths. No allow rule is suggested or saved for an
+expansion-bearing command; choose Allow once instead. Pwsh is unchanged (no
+parser; documented limitation).
 Declarations, arrays and `[[ ... ]]` retain their source spelling, as do words
 containing locale-translated `$"..."` or ANSI-C `$'...'` strings when not
 encoded (no static decoding is claimed for those forms).
 
-Allow rules match the new canonical per-step subjects only. Deny/ask rules
+Allow rules match the new canonical per-step subjects only, and only for
+steps without active shell expansion (eligibility above). Deny/ask rules
 also match the previous canonical and legacy raw spellings, at both
 whole-command and per-step levels; the first matching rule in the list wins
 across spellings. Display and reason attribution stay raw. Incomplete calls

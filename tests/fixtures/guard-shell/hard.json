@@ -341,9 +341,9 @@
 			"matchedRule": null,
 			"steps": [
 				{
-					"action": "allow",
+					"action": "prompt",
 					"cause": "complete",
-					"matchedRule": "HostBash(echo *)",
+					"matchedRule": null,
 					"redirectAware": false
 				},
 				{

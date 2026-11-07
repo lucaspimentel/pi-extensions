@@ -170,16 +170,19 @@ test("write-root exemptions still strip harmless trailing redirects before plain
 	assert.deepEqual(suggestRule(call, p, analysis)?.hostBash?.allow, ["HostBash(custom > /allowed/out)"]);
 });
 
-test("tilde allow rules migrate while quoted parameter-expansion rules keep matching", async () => {
-	for (const [command, oldRule, newRule, expected] of [
-		['source ~/.nvm/nvm.sh', 'HostBash(source ~/.nvm/nvm.sh)', `HostBash(source ${marker("~/.nvm/nvm.sh")})`, "prompt"],
-		['source "$HOME/.nvm/nvm.sh"', 'HostBash(source "$HOME/.nvm/nvm.sh")', 'HostBash(source "$HOME/.nvm/nvm.sh")', "allow"],
+test("tilde and quoted parameter-expansion commands are never allow-authorizable; safety spellings keep matching", async () => {
+	for (const [command, oldRule, newRule] of [
+		['source ~/.nvm/nvm.sh', 'HostBash(source ~/.nvm/nvm.sh)', `HostBash(source ${marker("~/.nvm/nvm.sh")})`],
+		['source "$HOME/.nvm/nvm.sh"', 'HostBash(source "$HOME/.nvm/nvm.sh")', 'HostBash(source "$HOME/.nvm/nvm.sh")'],
 	] as const) {
 		const call = { kind: "host-shell", shell: "host-bash", command } as const;
 		const analysis = await analyzeHostCommand(command);
-		assert.equal(explainHostShellCommand(call, policy({ allow: [oldRule] }), analysis).decision.action, expected);
-		assert.equal(explainHostShellCommand(call, policy({ allow: [newRule] }), analysis).decision.matchedRule, newRule);
+		// Active shell expansion (kind `expanding` or `dynamic`) is ineligible
+		// for allow rules, even when a rule textually spells the marker.
+		assert.equal(explainHostShellCommand(call, policy({ allow: [oldRule] }), analysis).decision.action, "prompt");
+		assert.equal(explainHostShellCommand(call, policy({ allow: [newRule] }), analysis).decision.action, "prompt");
 		assert.equal(explainHostShellCommand(call, policy({ deny: [oldRule] }), analysis).decision.action, "deny");
+		assert.equal(explainHostShellCommand(call, policy({ deny: [newRule] }), analysis).decision.action, "deny");
 	}
 });
 
@@ -233,10 +236,10 @@ test("expansion marker is source-exact, UTF-8 encoded and reserved against forge
 	assert.notEqual(marker("a*"), marker("a'*'*."));
 });
 
-test("legacy broad and marker-shaped allow patterns can match the new marker", async () => {
-	// The matching grammar is still arbitrary case-insensitive glob/regex. A
-	// marker does not carry rule provenance, so an existing rule may happen to
-	// match it; migration/audit must account for this compatibility boundary.
+test("legacy broad and marker-shaped allow patterns no longer authorize expansion-bearing commands", async () => {
+	// The matching grammar is still arbitrary case-insensitive glob/regex, but
+	// active-expansion eligibility revokes allow authority for expansion-bearing
+	// commands regardless of the pattern; deny and ask keep deciding.
 	for (const [command, rule] of [
 		["custom *", "HostBash(custom @guard:exp:2a)"],
 		["custom ~/localpkg", "HostBash(custom @*)"],
@@ -244,8 +247,34 @@ test("legacy broad and marker-shaped allow patterns can match the new marker", a
 	] as const) {
 		const call = { kind: "host-shell", shell: "host-bash", command } as const;
 		const analysis = await analyzeHostCommand(command);
-		assert.equal(explainHostShellCommand(call, policy({ allow: [rule] }), analysis).decision.action, "allow");
+		const result = explainHostShellCommand(call, policy({ allow: [rule] }), analysis);
+		assert.equal(result.decision.action, "prompt");
+		assert.equal(result.decision.matchedRule, undefined);
+		assert.match(result.decision.reason, /cannot authorize active shell expansion/);
+		assert.equal(explainHostShellCommand(call, policy({ deny: [rule] }), analysis).decision.action, "deny");
+		assert.equal(explainHostShellCommand(call, policy({ ask: [rule] }, "yolo"), analysis).decision.provenance, "explicit-ask");
 	}
+});
+
+test("inert literal spellings stay allow-authorizable while expanding counterparts prompt", async () => {
+	// Broad rules keep authorizing literal words; quoted/escaped glob
+	// metacharacters and quoted marker-bearing literals are inert.
+	for (const [command, rule] of [
+		["custom a b", "HostBash(custom *)"],
+		["custom 'a b'", "HostBash(custom '*')"],
+		["custom '@guard:exp:2a'", "HostBash(custom '@guard:exp:2a')"],
+	] as const) {
+		const call = { kind: "host-shell", shell: "host-bash", command } as const;
+		const analysis = await analyzeHostCommand(command);
+		assert.equal(analysis.calls[0].hasActiveExpansion, false, command);
+		assert.equal(explainHostShellCommand(call, policy({ allow: [rule] }), analysis).decision.action, "allow", command);
+	}
+});
+
+test("trusted still allows expansion-bearing commands through the profile cell", async () => {
+	const call = { kind: "host-shell", shell: "host-bash", command: "echo $HOME" } as const;
+	const analysis = await analyzeHostCommand(call.command);
+	assert.equal(explainHostShellCommand(call, policy({ allow: ["HostBash(echo nope)"] }, "trusted"), analysis).decision.action, "allow");
 });
 
 test("previous canonical safety subjects survive expansion changes, with rule-first precedence", async () => {
@@ -281,7 +310,10 @@ test("expansion-aware subjects cover assignments and redirects without weakening
 	assert.equal(analysis.calls[0].requiresRedirectAwareAllow, true);
 	assert.equal(explainHostShellCommand(call, policy({ allow: ["HostBash(*)"] }), analysis).decision.action, "prompt");
 	assert.equal(explainHostShellCommand(call, policy({ allow: [`HostBash(${old})`] }), analysis).decision.action, "prompt");
-	assert.equal(explainHostShellCommand(call, policy({ allow: [`HostBash(${current})`] }), analysis).decision.action, "allow");
+	// Even a rule textually spelling the current marker subject cannot
+	// authorize the step: active expansion is never allow-authorizable.
+	assert.equal(explainHostShellCommand(call, policy({ allow: [`HostBash(${current})`] }), analysis).decision.action, "prompt");
+	assert.equal(explainHostShellCommand(call, policy({ deny: [`HostBash(${current})`] }), analysis).decision.action, "deny");
 	assert.equal(explainHostShellCommand(call, policy({ deny: [`HostBash(${old})`] }), analysis).decision.action, "deny");
 	const harmless = await analyzeHostCommand('custom /tmp/* 2>&1');
 	assert.equal(harmless.calls[0].allowSubject, `custom ${marker("/tmp/*")}`);

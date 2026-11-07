@@ -217,6 +217,9 @@ export function planAllowSave(
 	}
 	const needed = explanation.steps.filter((step) => step.decision.action !== "allow");
 	if (needed.some((step) => step.allowSubject === null || /[\r\n]/.test(step.allowSubject))) return null;
+	// Active shell expansion is never rule-authorizable, so no allow-save
+	// plan can be built for a needed step that carries it.
+	if (analysis !== null && needed.some((step) => analysis.calls[step.occurrenceId]?.hasActiveExpansion)) return null;
 	const perStep = needed.map((step) => ({ occurrenceId: step.occurrenceId, rule: globAllowRule(call.shell, step.allowSubject!) }));
 	if (perStep.length === 0) return null;
 	const validation = validateShellAllowSave(call, policy, perStep.map((entry) => entry.rule), perStep.map((entry) => entry.occurrenceId), analysis);

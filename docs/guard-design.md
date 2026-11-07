@@ -1371,9 +1371,23 @@ raw-subject contract in the historical Stages 1-2 row above.
   values starting with the marker are quoted, and source-preserving words
   starting with it are escaped, case-insensitively, to reserve the namespace. This
   prevents an unquoted expanding word from sharing the quoted literal's allow
-  subject; it does not prevent a broad rule matching both. An old literal
-  `HostBash(custom @guard:exp:2a)` also matches the new subject for `custom *`;
-  reserving the marker cannot revoke existing rules under the unchanged grammar.
+  subject. Active-expansion eligibility (accepted 2026-11-07) closes the
+  remaining compatibility hole: a call whose projected words include kind
+  `expanding` (unquoted glob/tilde/brace/extglob spellings) or kind `dynamic`
+  (parameter, command, arithmetic or process substitution, including inside
+  double quotes) is INELIGIBLE for allow-rule authorization, so no legacy
+  glob/regex pattern — broad, marker-shaped, or an exact marker spelling such
+  as `HostBash(custom @guard:exp:2a)` — can authorize it; such steps fall
+  through to deny/ask (which keep matching current canonical, previous
+  canonical and raw spellings, rule-first), the read-only tier, and the
+  profile cell, so trusted still allows and default/auto/allow-edits prompt.
+  Kinds `source` and `literal` stay eligible. This is rule eligibility, not
+  profile scope: yolo/unrestricted are unaffected. Save/suggest paths refuse
+  to plan allow rules for expansion-bearing steps (allow once only), and the
+  audit reports allow rules whose patterns textually match marker subjects as
+  the compatibility boundary. Pwsh has no parser: its subjects are unchanged
+  and its matching is out of scope for this eligibility gate (documented
+  limitation).
   Absent that syntax, a dynamic word (parameter, command, arithmetic or process
   substitution) keeps its source spelling, including quotes. Words containing
   locale-translated `$"..."` or ANSI-C `$'...'` strings also retain their full
@@ -1445,6 +1459,29 @@ collision; focused tests cover it. The config had 340 allow and 2 ask rules,
 with no deny rules, so zero observed safety losses is not general safety proof.
 Private artifacts and limitations are described in
 `tools/shell-subject-audit/README.md`; no personal rules or fixtures were changed.
+
+### Active-expansion eligibility (accepted 2026-11-07, Linux)
+
+Decision: allow-rule eligibility now excludes any call whose projected words
+carry active shell expansion (kinds `expanding` and `dynamic`, including
+substitutions inside double quotes), closing the marker-matching widening the
+2026-11-06 audit could not fix: a legacy glob/regex rule such as
+`HostBash(npm install @*)` textually matches the `@guard:exp:` encoding of
+`npm install *`, and reserving the marker namespace cannot revoke that under
+the unchanged grammar, so authority is revoked through eligibility instead.
+Denied/asked commands are unaffected (deny/ask keep current canonical,
+previous canonical and raw spellings, rule-first); the read-only tier and
+profile cells are untouched (trusted still allows, default/auto/allow-edits
+prompt, with the skipped rule named in the prompt reason); save/suggest
+refuse to plan allow rules for expansion-bearing steps (allow once only);
+and the audit excludes expansion-bearing allow candidates and reports
+`markerMatchingAllowRules`. Accepted compatibility loss: every saved allow
+rule that previously authorized `$`-bearing or glob-bearing commands now
+prompts; there is no expansion-aware persistent rule type yet (an explicit,
+versioned contract is a possible future item). Pwsh is unchanged (no
+parser). Fixture expectations were updated surgically for three `echo "$…"`
+steps previously allowed by `HostBash(echo *)` (see
+`tests/fixtures/guard-shell/README.md`).
 
 ## Shell-ast adoption: final measurement and retirement record
 

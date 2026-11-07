@@ -11,7 +11,7 @@ import * as text from "../extensions/guard/policy/shell-text.ts";
 import { mergeConfig } from "../extensions/guard/policy/config.ts";
 import { analyzeHostCommand } from "../extensions/guard/policy/shellast.ts";
 import { explainHostShellCommand } from "../extensions/guard/policy/decision.ts";
-import { compileRules, coverageDelta, ruleCoverage, ruleProbes } from "../tools/shell-subject-audit/coverage.mts";
+import { compileRules, coverageDelta, markerMatchingRules, ruleCoverage, ruleProbes } from "../tools/shell-subject-audit/coverage.mts";
 
 const api = { rules, tier, text };
 
@@ -117,6 +117,28 @@ test("expanding path no longer shares literal allow coverage but keeps prior saf
 		assert.deepEqual(matches.map((item) => item.key), allowed ? ["deny:0", "ask:0", "allow:0"] : ["deny:0", "ask:0"]);
 		assert.equal(analysis.calls[0].previousSubject, "custom '/tmp/*'");
 	}
+});
+
+test("marker-matching allow rules are reported and exclude non-allow slots", async () => {
+	const command = "custom /tmp/*";
+	const analysis = await analyzeHostCommand(command);
+	const config = mergeConfig({ hostBash: {
+		allow: ["HostBash(custom @*)", `HostBash(/^custom ${analysis.calls[0].subject!.split(" ")[1].replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}$/)`, "HostBash(custom arg)"],
+		deny: ["HostBash(custom @*)"],
+	} }, {}, "/work");
+	const compiled = compileRules(config, api);
+	const matches = markerMatchingRules(analysis, config, compiled, api, true);
+	assert.deepEqual(matches.map((r) => r.key), ["allow:0", "allow:1"]);
+	assert.ok(matches[0].subjects[0].includes("@guard:exp:"));
+	// Legacy candidacy keeps the baseline measurable: with the flag absent the
+	// broad rule still counts as allow coverage (the paired comparison then
+	// reports the eligibility loss).
+	const legacy = { cause: null, calls: [{ complete: true, subject: analysis.calls[0].subject, redirects: [] }] };
+	assert.deepEqual(ruleCoverage(command, legacy, config, compiled, api, true).filter((r) => r.key.startsWith("allow")).map((r) => r.key), ["allow:0", "allow:1"]);
+	// Non-canonical analyses and non-marker subjects report nothing.
+	assert.deepEqual(markerMatchingRules(analysis, config, compiled, api, false), []);
+	const literal = await analyzeHostCommand("custom arg");
+	assert.deepEqual(markerMatchingRules(literal, config, compiled, api, true), []);
 });
 
 test("per-rule coverage agrees with isolated evaluator across redirects and safety spellings", async () => {

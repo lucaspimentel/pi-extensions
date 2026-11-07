@@ -536,13 +536,13 @@ test("the preview advisory is order-independent and counts every non-exact rule"
 
 // ── Session allow flow ──────────────────────────────────────────────────────
 
-test("persistent and session allows review the same exact wildcard and expansion-marker prefills", async () => {
-	for (const command of ["curl 'https://example.com/*'", "curl https://example.com/*"]) {
+test("quoted wildcard commands keep exact prefills; expansion-bearing ones offer only allow-once", async () => {
+	{
+		const command = "curl 'https://example.com/*'";
 		const real = realDeps(command);
 		assert.ok(real.allowPlan && real.allowPlan.kind === "per-step");
 		const [rule] = planRules(real.allowPlan);
 		assert.match(rule, /^HostBash\(\/\^/);
-		if (!command.includes("'")) assert.match(rule, /@guard:exp:/);
 		for (const [action, kind] of [["Save allow for project", "save-allow"], ["Allow for this session", "session-allow"]] as const) {
 			const { io, calls } = makeIO({ select: [action, "Confirm"], editor: [rule] });
 			const outcome = await runExecutionPrompt(baseExecutionDeps({ io, command, sessionAllowSupported: true }));
@@ -551,6 +551,18 @@ test("persistent and session allows review the same exact wildcard and expansion
 			assert.ok(calls.editor[0].includes(`@@prefill:${rule}`));
 			assert.doesNotMatch(calls.select[1], /Note: this rule is not limited/);
 		}
+	}
+	{
+		// The unquoted wildcard carries active shell expansion: no allow plan,
+		// no prefill, and the dialog offers only Allow once.
+		const command = "curl https://example.com/*";
+		const real = realDeps(command);
+		assert.equal(real.allowPlan, null);
+		const { io, calls } = makeIO({ select: [undefined] });
+		await runExecutionPrompt(baseExecutionDeps({ io, command, sessionAllowSupported: true }));
+		const options = calls.select[0].split("\n@@")[1];
+		assert.doesNotMatch(options, /Allow for this session|Save allow for/);
+		assert.match(options, /Allow once/);
 	}
 });
 

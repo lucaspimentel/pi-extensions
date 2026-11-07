@@ -904,9 +904,9 @@
 					"redirectAware": false
 				},
 				{
-					"action": "allow",
+					"action": "prompt",
 					"cause": "complete",
-					"matchedRule": "HostBash(echo *)",
+					"matchedRule": null,
 					"redirectAware": false
 				}
 			]
@@ -1238,9 +1238,9 @@
 					"redirectAware": false
 				},
 				{
-					"action": "allow",
+					"action": "prompt",
 					"cause": "complete",
-					"matchedRule": "HostBash(echo *)",
+					"matchedRule": null,
 					"redirectAware": false
 				}
 			]

@@ -341,9 +341,11 @@ test("wildcard host suggestions match exactly and do not grow prefixes", () => {
 	assert.equal(effectiveAllowSuggestion({ kind: "host-shell", shell: "host-bash", command }, { ...policy, config }), null);
 });
 
-test("effective suggestions cannot override ask/deny or authorize only part of a compound", () => {
+test("effective suggestions cannot override ask/deny; expansion-bearing compounds get no suggestion", () => {
 	const call: GuardCall = { kind: "host-shell", shell: "host-bash", command: "echo $UNSET; echo $SECOND" };
-	assert.deepEqual(effectiveAllowSuggestion(call, makePolicy()), { hostBash: { allow: ["HostBash(echo $UNSET)", "HostBash(echo $SECOND)"] } });
+	// Both steps carry dynamic words: active expansion is never
+	// allow-authorizable, so there is nothing to suggest (allow once only).
+	assert.equal(effectiveAllowSuggestion(call, makePolicy()), null);
 	const config = mergeConfig({ hostBash: { ask: ["HostBash(echo *)"], allow: ["HostBash(*)"] } }, {}, "/w");
 	assert.equal(effectiveAllowSuggestion({ kind: "host-shell", shell: "host-bash", command: "echo asked" }, makePolicy("/w", { config })), null);
 });

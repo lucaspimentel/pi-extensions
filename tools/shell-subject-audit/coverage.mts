@@ -16,6 +16,8 @@ export interface Analysis {
 		subject: string | null;
 		previousSubject?: string | null;
 		rawSubject?: string;
+		/** Absent in frozen analyses from revisions before active-expansion eligibility. */
+		hasActiveExpansion?: boolean;
 		redirects: readonly { op: string; target: string | null }[];
 	}[];
 }
@@ -67,6 +69,11 @@ export function ruleCoverage(
 			if (normalized !== null) safety.push(normalized);
 			if (canonical && call.previousSubject != null) safety.push(call.previousSubject);
 			if (canonical && call.rawSubject !== undefined) safety.push(call.rawSubject);
+			// Active-expansion eligibility: an expansion-bearing call is never
+			// allow-authorizable. Frozen baselines from older revisions lack the
+			// flag; keep legacy candidacy there so paired comparisons measure
+			// exactly the eligibility change.
+			if (call.hasActiveExpansion) continue;
 			if (!call.complete || normalized === null) continue;
 			const redirectAware = api.tier.hasWritableRedirect(call.redirects, config.writeRoots, { cwd: config.cwd });
 			allows.push({ subject: redirectAware ? normalized : api.text.stripTrailingHarmlessRedirects(normalized, canonical), redirectAware });
@@ -98,6 +105,37 @@ export function ruleProbes(raw: { hostBash?: Partial<Record<Slot, string[]>> }, 
 		else probes.set(command, { id, tool: "rule-probe", command, probes: [{ slot, index, text }] });
 	}
 	return [...probes.values()];
+}
+
+/**
+ * Allow-slot rules whose pattern happens to match an expansion-marker subject.
+ * These rules are ineligible to authorize expansion-bearing commands under the
+ * active-expansion eligibility contract; this reports the compatibility
+ * boundary (a legacy rule that still textually matches the marker encoding).
+ * Works on frozen analyses regardless of flag presence: any call whose
+ * canonical subject contains the marker namespace is a match surface.
+ */
+export function markerMatchingRules(
+	analysis: Analysis,
+	config: ResolvedGuardConfig,
+	compiled: readonly CompiledRule[],
+	api: APIs,
+	canonical: boolean,
+): Coverage[] {
+	if (!canonical || analysis.cause !== null) return [];
+	const markerCandidates = analysis.calls
+		.filter((call) => call.complete && call.subject !== null && /@guard:exp:/i.test(call.subject))
+		.map((call) => {
+			const redirectAware = api.tier.hasWritableRedirect(call.redirects, config.writeRoots, { cwd: config.cwd });
+			return { subject: redirectAware ? call.subject! : api.text.stripTrailingHarmlessRedirects(call.subject!, true), redirectAware };
+		});
+	if (markerCandidates.length === 0) return [];
+	return compiled.flatMap((rule) => {
+		if (rule.slot !== "allow") return [];
+		const subjects = [...new Set(markerCandidates.filter((c) => !c.redirectAware || api.rules.rulePatternAllowsRedirect(rule.parsed)).map((c) => c.subject))]
+			.filter((subject) => api.rules.ruleMatches(rule.parsed, "HostBash", { command: subject }, config.cwd));
+		return subjects.length === 0 ? [] : [{ key: `${rule.slot}:${rule.index}`, subjects }];
+	});
 }
 
 export function coverageDelta(before: readonly Coverage[], after: readonly Coverage[]): { lost: string[]; gained: string[] } {

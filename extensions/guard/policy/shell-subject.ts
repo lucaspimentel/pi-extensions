@@ -66,6 +66,17 @@ export function renderRuleWord(word: ShellRuleWord): string {
 	return renderWord(word, false);
 }
 
+/**
+ * Active shell expansion: kind `expanding` (unquoted glob/tilde/brace/extglob
+ * spellings, rendered `@guard:exp:<hex>`) plus kind `dynamic`
+ * (ParamExp/CmdSubst/ArithmExp/ProcSubst, including inside double quotes).
+ * Kinds `source` (inert ANSI-C `$'...'` / locale `$"..."` spellings) and
+ * `literal` stay eligible for legacy allow-rule authorization.
+ */
+export function isActiveExpansionWord(word: ShellRuleWord): boolean {
+	return word.kind === "expanding" || word.kind === "dynamic";
+}
+
 function renderWord(word: ShellRuleWord, previous: boolean): string {
 	if (word.kind === "expanding") return `@guard:exp:${Buffer.from(word.source, "utf8").toString("hex")}`;
 	if (word.kind !== "literal") {

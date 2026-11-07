@@ -949,7 +949,7 @@ test("the computed switch applies after the lease and cancels a queued command d
 		const ctx = harnessCtx(h, cwd);
 		await startSession(h, ctx);
 		const selector = installSelector(ctx);
-		const approval = h.registeredTools.get("host_bash")!.execute("id", { command: "echo $GUARD_DIALOGS_UNSET" }, undefined, undefined, ctx);
+		const approval = h.registeredTools.get("host_bash")!.execute("id", { command: "touch guard-dialogs-probe" }, undefined, undefined, ctx);
 		void approval.catch(() => {});
 		await selector.waitFor(1);
 		// The profile picker queues behind the open approval lease.
@@ -1029,12 +1029,12 @@ test("a successful save completes and cancels other pending dialogs instead of i
 		const selector = installSelector(ctx);
 		const owned = installOwnedStages(ctx);
 		const tool = h.registeredTools.get("host_bash")!;
-		const saving = tool.execute("id", { command: "echo $GUARD_DIALOGS_UNSET" }, undefined, undefined, ctx);
+		const saving = tool.execute("id", { command: "touch guard-dialogs-probe" }, undefined, undefined, ctx);
 		void saving.catch(() => {});
 		// With owned stages installed, the action menu itself is an owned overlay;
 		// ctx.ui.select stays unused for the whole interaction.
 		await owned.waitForOverlays(1);
-		const other = tool.execute("id", { command: "echo $GUARD_DIALOGS_UNSET" }, undefined, undefined, ctx);
+		const other = tool.execute("id", { command: "touch guard-dialogs-probe" }, undefined, undefined, ctx);
 		void other.catch(() => {});
 		await tick();
 		owned.pressDown(); owned.pressDown(); // highlight "Save allow for project"

@@ -74,6 +74,9 @@ export function suggestRule(call: GuardCall, policy: PolicyState, analysis: Shel
 				return { hostBash: { allow: [`Pwsh(${call.command})`] } };
 			}
 			if (analysis === null || analysis.cause !== null || analysis.calls.length === 0) return null;
+			// Active shell expansion can never be pre-authorized by a legacy
+			// allow rule, so no suggestion is offered for such commands.
+			if (analysis.calls.some((step) => step.hasActiveExpansion)) return null;
 			const subjects = analysis.calls.map((step) => {
 				if (!step.complete || step.subject === null) return null;
 				return hasWritableRedirect(step.redirects, policy.config.writeRoots, { cwd: policy.config.cwd })

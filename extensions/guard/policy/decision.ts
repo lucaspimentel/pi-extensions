@@ -324,6 +324,8 @@ interface EvaluableStep {
 	argv: readonly string[];
 	redirects: readonly StructuredRedirect[];
 	hasParameterExpansion: boolean;
+	/** True when any projected word carries active shell expansion: such steps are ineligible for allow-rule authorization. */
+	hasActiveExpansion: boolean;
 	pureAssignment: boolean;
 	requiresRedirectAwareAllow: boolean;
 	incompleteReason: string | null;
@@ -369,8 +371,11 @@ function evaluateHostShellSub(step: EvaluableStep, policy: PolicyState, shell: "
 	// Redirect handling: a top-level file redirect (outside the writeRoots
 	// exemptions) may only be authorized by a redirect-aware allow rule (one
 	// whose pattern contains ">"). Broad rules and the profile cell never
-	// authorize a write redirect.
+	// authorize a write redirect. Active shell expansion makes the step
+	// ineligible for every allow rule, redirect-aware or plain: legacy
+	// glob/regex patterns cannot distinguish expanding words from literals.
 	if (requiresRedirectAwareAllow) {
+		if (step.hasActiveExpansion) return { decision: { action: "prompt", reason: "active shell expansion cannot be authorized by an allow rule (a redirect-aware rule matched)" }, subject, allowSubject, requiresRedirectAwareAllow };
 		for (const raw of config.hostBash.allow) {
 			const rule = parseRule(raw);
 			if (rule && rulePatternAllowsRedirect(rule) && ruleMatches(rule, ruleToolFor(shell), { command: cmd }, config.cwd)) {
@@ -379,13 +384,19 @@ function evaluateHostShellSub(step: EvaluableStep, policy: PolicyState, shell: "
 		}
 		return { decision: { action: "prompt", reason: "file redirect requires a redirect-aware allow rule (a pattern containing '>')" }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
-	// Plain allow rules.
+	// Plain allow rules. An expansion-bearing step keeps the match evidence
+	// for the prompt reason but falls through to the profile cell, so profile
+	// scope (trusted allowing, default prompting) is untouched.
 	const allowRule = matchedHostShellRule(config.hostBash.allow, shell, [allowSubject], config.cwd);
-	if (allowRule !== undefined) {
+	if (allowRule !== undefined && !step.hasActiveExpansion) {
 		return { decision: { action: "allow", reason: `matched ${ruleToolFor(shell)} allow rule '${allowRule}'`, matchedRule: allowRule }, subject, allowSubject, requiresRedirectAwareAllow };
 	}
+	const cell = cellAction(hostShellCell(profile), "host shell");
+	if (allowRule !== undefined && step.hasActiveExpansion && cell.action === "prompt") {
+		return { decision: { action: "prompt", reason: `${cell.reason} (allow rule '${allowRule}' cannot authorize active shell expansion)` }, subject, allowSubject, requiresRedirectAwareAllow };
+	}
 	// Profile cell.
-	return { decision: cellAction(hostShellCell(profile), "host shell"), subject, allowSubject, requiresRedirectAwareAllow };
+	return { decision: cell, subject, allowSubject, requiresRedirectAwareAllow };
 }
 
 /**
@@ -443,7 +454,7 @@ function evaluateHostShell(
 		return { decision: { action: "prompt", reason }, steps: [], splitCause: reason, breakdown };
 	}
 
-	const evaluations = analysis.calls.map((c) => ({ sub: c.rawSubject, ev: evaluateHostShellSub({ subject: c.subject, previousSubject: c.previousSubject, allowSubject: c.allowSubject, rawSubject: c.rawSubject, tierNoopCdSubject: c.tierNoopCdSubject, argv: c.argv, redirects: c.redirects, hasParameterExpansion: c.hasParameterExpansion, pureAssignment: c.pureAssignment, requiresRedirectAwareAllow: hasWritableRedirect(c.redirects, config.writeRoots, { cwd: config.cwd }), incompleteReason: c.complete ? null : shellAnalysisCauseReason(c.cause ?? "unrecognized-node") }, policy, shell) }));
+	const evaluations = analysis.calls.map((c) => ({ sub: c.rawSubject, ev: evaluateHostShellSub({ subject: c.subject, previousSubject: c.previousSubject, allowSubject: c.allowSubject, rawSubject: c.rawSubject, tierNoopCdSubject: c.tierNoopCdSubject, argv: c.argv, redirects: c.redirects, hasParameterExpansion: c.hasParameterExpansion, hasActiveExpansion: c.hasActiveExpansion, pureAssignment: c.pureAssignment, requiresRedirectAwareAllow: hasWritableRedirect(c.redirects, config.writeRoots, { cwd: config.cwd }), incompleteReason: c.complete ? null : shellAnalysisCauseReason(c.cause ?? "unrecognized-node") }, policy, shell) }));
 	const incompleteCall = analysis.calls.find((c) => !c.complete);
 	const reliability: BreakdownReliability = incompleteCall === undefined
 		? { available: analysis.calls.length > 0 }
@@ -481,7 +492,7 @@ function evaluatePwshCommand(cmd: string, policy: PolicyState): HostShellExplana
 	const malformed = pwshMalformedReason(cmd);
 	const subject = stripTimeoutPrefix(stripLineContinuations(cmd).trim());
 	const requiresRedirectAwareAllow = hasTopLevelFileRedirect(cmd, policy.config.writeRoots, { cwd: policy.config.cwd });
-	const ev = evaluateHostShellSub({ subject, previousSubject: subject, allowSubject: requiresRedirectAwareAllow ? subject : stripTrailingHarmlessRedirects(subject), rawSubject: subject, tierNoopCdSubject: subject, argv: [], redirects: [], hasParameterExpansion: false, pureAssignment: false, requiresRedirectAwareAllow, incompleteReason: malformed }, policy, "pwsh");
+	const ev = evaluateHostShellSub({ subject, previousSubject: subject, allowSubject: requiresRedirectAwareAllow ? subject : stripTrailingHarmlessRedirects(subject), rawSubject: subject, tierNoopCdSubject: subject, argv: [], redirects: [], hasParameterExpansion: false, hasActiveExpansion: false, pureAssignment: false, requiresRedirectAwareAllow, incompleteReason: malformed }, policy, "pwsh");
 	if (malformed !== null) return { decision: ev.decision, steps: [], splitCause: malformed, breakdown };
 	const step: HostShellStep = { occurrenceId: 0, display: cmd, rawSubject: subject, subject: ev.subject, allowSubject: ev.allowSubject, requiresRedirectAwareAllow: ev.requiresRedirectAwareAllow, decision: ev.decision };
 	return { decision: ev.decision, steps: [step], breakdown };

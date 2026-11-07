@@ -13,6 +13,9 @@ export function escapeExactPattern(subject: string): string {
  * Bash subjects with glob metacharacters, regex-shaped text, or the shell
  * expansion marker need an exact regex to avoid unintentionally broadening
  * the suggested rule. PowerShell prefills retain their existing semantics.
+ * The marker branch is defense in depth: expansion-bearing subjects never
+ * reach a prefill (the evaluator refuses to allow them and the save/suggest
+ * paths refuse to plan them), but any future caller stays safe.
  */
 export function globAllowRule(shell: "host-bash" | "pwsh", subject: string): string {
 	const tool = ruleToolForNamespace(shell);

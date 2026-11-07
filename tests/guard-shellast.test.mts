@@ -232,6 +232,22 @@ test("$ expansion in a redirect target is reported", async () => {
 	assert.equal(literal.calls[0].hasParameterExpansion, false);
 });
 
+test("active expansion is flagged per call across chain args, assignments, redirects, decls and tests", async () => {
+	resetShellAstLoad();
+	for (const command of ["custom /tmp/*", "custom $HOME", 'custom "$HOME"', "X=$V custom", "custom x > /tmp/*", "export X=$Y", "[[ -f $X ]]"]) {
+		const analysis = await analyzeHostCommand(command);
+		assert.equal(analysis.calls[0].hasActiveExpansion, true, command);
+	}
+	for (const command of ["custom arg", "custom $'x'", 'custom $"x"', "custom '/tmp/*'", "custom '\\*'", "export X=1", "[[ a == b ]]"]) {
+		const analysis = await analyzeHostCommand(command);
+		assert.equal(analysis.calls[0].hasActiveExpansion, false, command);
+	}
+	// Decl arguments keep source spelling but are kind-projected for the flag;
+	// tilde in an assignment value expands, while glob metacharacters follow
+	// assignment semantics (an assignment RHS does not pathname-expand).
+	assert.equal((await analyzeHostCommand("export X=~/bin")).calls[0].hasActiveExpansion, true);
+});
+
 // ── Canonical subject / redirect clause ──────────────────────────────────────
 
 test("a redirect clause is appended to the subject and makes the step redirect-aware", async () => {
