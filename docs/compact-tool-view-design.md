@@ -175,7 +175,7 @@ family is meant to be covered by a single prefix pattern. Their typed lines
 | `pup_logs_aggregate` | `N buckets` from `details.parsed.data.buckets` |
 | `pup_metrics_query` | `N series` from `details.parsed.data.series` |
 | `pup_run` | `N items` from the length of `details.parsed.data`, the escape hatch's only verified envelope entry point; any other payload keeps the generic line count |
-| `pup_auth_status` | generic `N lines`: it returns a flat `{ authenticated, site, org, expires_at, ... }` object with nothing to count |
+| `pup_auth_status` | `authenticated (SITE)` / `not authenticated (SITE)` from `details.parsed.{authenticated,site}`, dropping the parenthetical when `site` is missing or empty; no expiry, countdown, or `status_message` text, and any other `parsed` shape (no boolean `authenticated`) keeps the generic line count |
 | any `pup_*` failure | `exit N` from `details.exitCode`, or `timed out` when `details.killed` |
 
 Every `pup` command wraps its payload in pup's own `{ data, metadata, status }`
@@ -184,7 +184,9 @@ that does not match its path (including a non-JSON stdout, which leaves
 `details.parsed` unset) falls through to the generic line count, and every pup
 noun is deliberately fixed plural (`1 monitors`, `1 buckets`). A count line gains
 `, auth refreshed` when `details.refreshed` is set, the only place that state
-surfaces.
+surfaces. `pup_auth_status` is the deliberate exception: its line already
+describes auth state, and `refresh` is only a pre-step that makes the status read
+newer, so no suffix is added.
 
 Deliberate renderer overrides: `host_bash` overrides guard's own shell result
 renderer (`extensions/guard/index.ts`, `extensions/guard/tools/shell-render.ts`),

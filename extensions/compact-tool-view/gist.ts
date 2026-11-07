@@ -239,12 +239,21 @@ const detailGist = (toolName: string, result: GistResult, args: unknown): string
 			const embeddings = typeof details.embeddings === "string" ? details.embeddings : "unknown";
 			return `qmd ok, ${collection}, embeddings ${embeddings}`;
 		}
+		case "pup_auth_status": {
+			// The one flat pup payload: there is nothing to count, so it gets its own
+			// line. Deliberately no expiry, countdown, scope count, or status_message
+			// text (status_message embeds a live countdown), and no `refreshed` suffix:
+			// the line already describes auth state.
+			const parsed = asObject(details?.parsed);
+			if (typeof parsed?.authenticated !== "boolean") return undefined;
+			const site = typeof parsed.site === "string" && parsed.site !== "" ? ` (${parsed.site})` : "";
+			return `${parsed.authenticated ? "authenticated" : "not authenticated"}${site}`;
+		}
 		default: {
 			// pup_*: the payload is the parsed JSON of `pup ... --output json`, and
 			// pup's envelope, not the command, decides where the items sit. Any
 			// other shape (an unexpected payload, a non-JSON stdout, a pup tool
-			// without an entry here such as pup_auth_status) falls
-			// through to the generic line count.
+			// without an entry here) falls through to the generic line count.
 			const spec = PUP_COUNTS[toolName];
 			if (spec === undefined) return undefined;
 			const count = countAt(details?.parsed, spec.path);

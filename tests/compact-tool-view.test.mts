@@ -258,9 +258,8 @@ test("pup_* gists the item count from pup's JSON envelope", () => {
 
 test("pup_* falls back to the line count on an unexpected payload", () => {
 	const withParsed = (parsed: unknown, text: string) => ({ content: [{ type: "text", text }], details: { parsed } });
-	// pup_auth_status has no count path; a wrapper the path does not match and a
-	// non-JSON stdout (no `parsed`) all fall through.
-	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: true }, "a\nb"), {}), ["2 lines"]);
+	// A wrapper the count path does not match, a non-JSON stdout (no `parsed`),
+	// and a pup tool without a typed line all fall through.
 	assert.deepEqual(gistFor("pup_run", withParsed({ data: { items: [] } }, "a"), {}), ["1 lines"]);
 	assert.deepEqual(gistFor("pup_run", withParsed({ items: [{}] }, "a"), {}), ["1 lines"]);
 	assert.deepEqual(gistFor("pup_monitors_list", withParsed({ data: { items: [] } }, "a\nb\nc"), {}), ["3 lines"]);
@@ -268,6 +267,33 @@ test("pup_* falls back to the line count on an unexpected payload", () => {
 		gistFor("pup_monitors_list", { content: [{ type: "text", text: "a\nb" }], details: { argv: [], exitCode: 0, killed: false, refreshed: false } }, {}),
 		["2 lines"],
 	);
+});
+
+test("pup_auth_status gists the auth state and site", () => {
+	const withParsed = (parsed: unknown, text: string) => ({ content: [{ type: "text", text }], details: { parsed } });
+	// Authenticated and not authenticated mirror each other, with the site read
+	// from `parsed.site` (never hardcoded).
+	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: true, site: "datadoghq.com" }, "a\nb"), {}), [
+		"authenticated (datadoghq.com)",
+	]);
+	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: false, site: "datadoghq.com" }, "a\nb"), {}), [
+		"not authenticated (datadoghq.com)",
+	]);
+	// A missing or empty site drops the parenthetical.
+	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: true }, "a\nb"), {}), ["authenticated"]);
+	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: false, site: "" }, "a\nb"), {}), ["not authenticated"]);
+	// `refresh: true` is a pre-step, not a state on this line: no `, auth refreshed`.
+	assert.deepEqual(
+		gistFor(
+			"pup_auth_status",
+			{ content: [{ type: "text", text: "a\nb" }], details: { parsed: { authenticated: true, site: "datadoghq.com" }, refreshed: true } },
+			{},
+		),
+		["authenticated (datadoghq.com)"],
+	);
+	// Any other shape (no boolean `authenticated`, no `parsed`) keeps the generic line count.
+	assert.deepEqual(gistFor("pup_auth_status", withParsed({ authenticated: "yes", site: "datadoghq.com" }, "a\nb"), {}), ["2 lines"]);
+	assert.deepEqual(gistFor("pup_auth_status", withParsed(undefined, "a\nb"), {}), ["2 lines"]);
 });
 
 test("pup failures gist the exit code or a timeout from details", () => {
