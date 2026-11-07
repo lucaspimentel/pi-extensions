@@ -361,6 +361,9 @@ const CACHE_OVERLAY_SPECS: Array<[string, string]> = [
 	["cargo-git", ".cargo/git"],
 	["nuget-packages", ".nuget/packages"],
 	["npm", ".npm"],
+	// Keep in sync with CACHE_OVERLAY_DIRS (spec.ts): the .NET shared-memory
+	// state path must be writable for SDK 11 and later.
+	["dotnet-corefx", ".dotnet/corefx"],
 ];
 
 function makeOverlay(root: string, name: string, lower: string, targetPath: string): OverlaySpec {

@@ -182,6 +182,11 @@ export const CACHE_OVERLAY_DIRS: readonly string[] = [
 	".cargo/git",
 	".nuget/packages",
 	".npm",
+	// .NET 11 creates a user-scoped shared-memory directory for named mutexes at
+	// `~/.dotnet/corefx/Runtime` on every `dotnet` startup (first-run/migration
+	// path), so the whole toolchain cannot stay read-only. Only this state path
+	// is overlaid; `~/.dotnet` itself (SDK, host, tools) stays a read-only bind.
+	".dotnet/corefx",
 ];
 
 /** Toolchain home dirs bound read-only 1:1 when they exist. */

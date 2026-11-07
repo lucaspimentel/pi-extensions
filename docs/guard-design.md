@@ -72,7 +72,15 @@ Holes, verified 2026-10-02:
   inside bwrap with `~/.dotnet` and `~/.nuget` read-only and no network
   succeeded, with `Newtonsoft.Json 13.0.3` from the global packages folder.
   Side effects: `NU1900` vulnerability-audit warnings and about 6 s of restore
-  timeout.
+  timeout. **Superseded for SDK 11 and later:** those SDKs create a
+  user-scoped shared-memory directory for named mutexes at
+  `~/.dotnet/corefx/Runtime` on every `dotnet` startup (the first-run and
+  NuGet-migration path, `System.IO.SharedMemoryHelpers` in
+  `System.Private.CoreLib`), so a fully read-only `~/.dotnet` aborts `dotnet`
+  before it builds anything with `IOException: Read-only file system`. Only
+  that state path is now a per-launch overlay; `~/.dotnet` itself (SDK, host,
+  tools) stays a read-only bind. No environment variable moves the path
+  (`DOTNET_CLI_HOME` has no effect, `TMPDIR` is not consulted).
 - Local paths: dotnet is at `~/.dotnet/dotnet`, cargo at `~/.cargo/bin`, node
   at `/home/linuxbrew/.linuxbrew/bin/node`, pwsh at `~/.dotnet/tools/pwsh`.
 - Reference implementations: pi `examples/extensions/sandbox` (uses
@@ -953,7 +961,11 @@ For every profile except yolo and unrestricted:
   bind-mounted Unix socket and an in-sandbox forwarder, with `HTTP(S)_PROXY`
   set. Until then, restores and installs go through host_bash.
 - **Caches and toolchains** (`~/.cargo`, `~/.rustup`, `~/.dotnet`,
-  `~/.nuget`, `~/.npm`): read-only lowerdir plus a throwaway overlay per call.
+  `~/.nuget`, `~/.npm`): toolchains are read-only binds, with a write exception
+  only where a toolchain demands one. Caches (`~/.cargo/registry`,
+  `~/.cargo/git`, `~/.nuget/packages`, `~/.npm`) and the .NET state path
+  (`~/.dotnet/corefx`, added for SDK 11 named-mutex files) are a read-only
+  lowerdir plus a throwaway overlay per call.
   Lock files and first-time crate extraction work; nothing persists, so a
   sandboxed command cannot poison a package that later runs on the host.
 - **Seccomp:** one policy for bash, python, and node, lighter than today's

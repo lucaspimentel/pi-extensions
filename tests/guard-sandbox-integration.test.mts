@@ -445,6 +445,27 @@ if (supported) {
 		});
 	}
 
+	if (fs.existsSync(path.join(os.homedir(), ".dotnet/corefx"))) {
+		test("the .NET state path is a throwaway overlay while the toolchain stays read-only", async () => {
+			const ws = makeWorkspace();
+			const probe = path.join(os.homedir(), ".dotnet/corefx/guard-int-probe");
+			try {
+				fs.rmSync(probe, { force: true });
+			} catch {
+				/* ignore */
+			}
+			// .NET 11 creates a user-scoped shared-memory directory under this path on
+			// every `dotnet` startup (named mutexes), so it must be writable while the
+			// SDK, host and tools in ~/.dotnet stay read-only.
+			const r = await bash(ws, "touch ~/.dotnet/corefx/guard-int-probe && echo state-ok; touch ~/.dotnet/guard-int-probe 2>/dev/null; echo home=$?; touch ~/.dotnet/sdk 2>/dev/null; echo sdk=$?");
+			assert.equal(r.code, 0, r.err);
+			assert.match(r.out, /state-ok/, r.out);
+			assert.match(r.out, /home=[1-9]/, `~/.dotnet itself must stay read-only: ${r.out}`);
+			assert.match(r.out, /sdk=[1-9]/, `~/.dotnet/sdk must stay read-only: ${r.out}`);
+			assert.equal(fs.existsSync(probe), false, "the state-path write must not persist");
+		});
+	}
+
 	// ── Toolchain credentials ────────────────────────────────────────────────
 
 	test("cargo credentials read empty and NuGet.Config is sanitized (fake home)", async () => {
