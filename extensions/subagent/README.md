@@ -228,8 +228,8 @@ session without the optional search package or the git/GitHub/Slack extensions.
 
 - `scout`: locate code and summarize how it connects; compressed context for
   a handoff.
-- `planner`: turn context and requirements into an ordered implementation
-  plan.
+- `planner`: turn context and requirements into a self-contained implementation
+  plan written as a handoff prompt a fresh session could implement from scratch.
 - `researcher`: investigate a question and synthesize evidence with
   citations, uncertainty, and gaps; no implementation steps or verdicts.
 - `worker`: execute the task with the full default tool set.
