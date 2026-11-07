@@ -76,8 +76,9 @@ The shipped defaults deliberately exclude `subagent`, which renders itself.
 `gistFor(toolName, result, args)` returns element 0 (the primary line) plus any
 extra lines, in this order:
 
-1. Failure: `exit N` when an exit code is available (see below), else
-   `error: <first line of the error text>` from the first text block.
+1. Failure: `timed out` when `details.killed`, else `exit N` when an exit code is
+   available (see below), else `error: <first line of the error text>` from the
+   first text block.
 2. Typed `details`/`structuredContent` per the default table below. Each typed
    branch is gated on the tool name, so a `bash`-shaped details object on an
    unknown tool falls through to the fallback.
@@ -101,9 +102,12 @@ not forwarded, and the error flag lives on `ToolRenderContext.isError` (set from
 on both counts against the installed runtime.
 
 The resolver therefore seeds the error flag from `context.isError` before calling
-`gistFor`, and the failure gist tries, in order: `structuredContent.exit_code`
-when it is present anyway, then `/Command exited with code (\d+)/` in the first
-text block (which the native shell tools always append on a non-zero exit), then
+`gistFor`, and the failure gist tries, in order: `details.killed` (a killed
+process can still report `exitCode: 0`, so it wins; `pup_*` is the first
+consumer), then a non-zero `details.exitCode` (forwarded `details` is the
+reliable structured source), then `structuredContent.exit_code` when a caller
+forwards it anyway, then `/Command exited with code (\d+)/` in the first text
+block (which the native shell tools always append on a non-zero exit), then
 `error: <first line>`. The same forwarding gap means the `bash` line count comes
 from the model-facing first text block rather than the full
 `structuredContent.output`; the count is the model-facing output's line count.
@@ -127,6 +131,59 @@ Every entry below is `gist`.
 | `write` | `N lines written` from `context.args.content` (see the assumption below) |
 | `subagent` | not in the defaults (it renders itself) |
 
+### `pi-memory` tools (typed lines, not in the defaults)
+
+`pi-memory` registers `memory_write`, `scratchpad`, `memory_read`,
+`memory_forget`, `memory_restore`, `memory_search`, and `memory_status`. None is
+a default, so each needs its name in the config; their typed lines (shapes
+verified against pi-memory 0.4.2) are:
+
+| Tool | Gist |
+| --- | --- |
+| `memory_write` | `MEMORY.md appended`, `MEMORY.md overwritten`, or `daily log appended` from `details.{target,mode}`. The result text embeds a preview of the target file, so the generic line count says nothing useful here |
+| `scratchpad` | `A open / B items` from `details.{open,count}` for a non-empty `list`, `empty` for an empty one, and the action for a mutation (`item added`, `item done`, `item reopened`, `cleared N done items`) |
+| `memory_read` | `N daily logs` / `no daily logs` from `details.files` for `list`; `<date> log, N lines` for a `daily` file that exists, `no log` when it does not; `long_term` and `scratchpad` fall through to `N lines` |
+| `memory_forget` | `removed N entries` (or `entry`) from `details.removed`; `nothing removed` when it is 0 |
+| `memory_restore` | `restored N entries` from `details.restored`; `already restored` when it is 0 or `details.restoredAt` is set |
+| `memory_search` | `N results (mode)` from `details.{count,mode}`, with `, embeddings started` / `, embeddings missing` from `details.{embedStarted,needsEmbed}` |
+| `memory_status` | `qmd ok, collection ok/missing, embeddings <state>` from `details.{qmd,collection,embeddings}`; `qmd unavailable` when qmd is missing |
+
+Each branch is gated on its tool name. A `details` shape that matches nothing
+falls through to the generic line count, except `scratchpad` `list` on an empty
+file and `memory_read` `daily` with no `details.path`, which gist `empty` and
+`no log` from the empty shape pi-memory returns there. Mutation claims come from
+`details`, never from `context.args`: the args look identical whether or not the
+mutation matched (a `done` for a string that is not there returns `details: {}`),
+so gating on args would report a change that never happened.
+
+### External tools (typed lines, not in the defaults)
+
+`gitlab_read` and the `pup_*` family are registered outside this repository
+(`lucas-pimentel-coding-agent-tools` and the local `dd-pup-pi` user extension),
+so none of them is a code default: each needs a key in the config file, and the
+family is meant to be covered by a single prefix pattern. Their typed lines
+(shapes verified on 2026-11-07 against the installed tools) are:
+
+| Tool | Gist |
+| --- | --- |
+| `gitlab_read` | `timed out` from `details.timedOut`; `exit N` from a non-zero `details.exitCode`; otherwise generic `N lines`. Its result never sets `isError`, so a failure is recognized in the typed branch, not the failure branch |
+| `pup_monitors_list` | `N monitors` from the length of `details.parsed.data` |
+| `pup_logs_search` | `N logs` from `details.parsed.data` |
+| `pup_traces_search` | `N traces` from `details.parsed.data` |
+| `pup_apm_services` | `N services` from `details.parsed.data.attributes.services` |
+| `pup_logs_aggregate` | `N buckets` from `details.parsed.data.buckets` |
+| `pup_metrics_query` | `N series` from `details.parsed.data.series` |
+| `pup_run`, `pup_auth_status` | generic `N lines`: `pup_auth_status` returns a flat `{ authenticated, site, org, expires_at, ... }` object with nothing to count, and `pup_run` is the escape hatch |
+| any `pup_*` failure | `exit N` from `details.exitCode`, or `timed out` when `details.killed` |
+
+Every `pup` command wraps its payload in pup's own `{ data, metadata, status }`
+envelope, so the count path is per tool rather than a top-level array. A payload
+that does not match its path (including a non-JSON stdout, which leaves
+`details.parsed` unset) falls through to the generic line count, and every pup
+noun is deliberately fixed plural (`1 monitors`, `1 buckets`). A count line gains
+`, auth refreshed` when `details.refreshed` is set, the only place that state
+surfaces.
+
 Deliberate renderer overrides: `host_bash` overrides guard's own shell result
 renderer (`extensions/guard/index.ts`, `extensions/guard/tools/shell-render.ts`),
 and `ffgrep`/`fffind` override the renderers `@ff-labs/pi-fff` registers. The
@@ -137,15 +194,27 @@ gist replaces those collapsed bodies on purpose.
 `~/.pi/agent/compact-tool-view.json`, resolved with `getAgentDir()` from
 `@earendil-works/pi-coding-agent` (never `homedir()`), following the
 `extensions/idle-summary/index.ts` and `extensions/shared/model-pin.ts` patterns.
-A flat JSON map of tool name to `"gist" | "hide" | "stock"`, sparse overrides
-over the code defaults.
+A flat JSON map of tool name or prefix pattern to `"gist" | "hide" | "stock"`,
+sparse overrides over the code defaults.
 
 - Missing file: pure defaults, no warning.
 - Unknown name: kept; it enables the mode for that name.
-- `stock`: deletes the name from the effective map.
+- `stock`: no gist for that name, even over a matching pattern.
 - Invalid value (not one of the three strings), a non-object top level, or
   unparseable JSON: the entry (or the whole file) is ignored and reported once
   at load via `ctx.ui.notify(..., "warning")`.
+- A key whose only `*` is its final character is a prefix pattern: the prefix is
+  the key minus that `*`, so `"mcp__*"` covers `mcp__slack__search` and `"*"`
+  covers every tool name. A key with a `*` anywhere else (for example
+  `"mcp__*__read*"` or `"*foo"`) is an invalid key and joins the same single
+  warning.
+
+Precedence, highest first: a file exact entry, a file exact `stock`, the longest
+matching file pattern (a matching `stock` pattern means no gist and does not fall
+through to a shorter pattern or a default), then the code default. So a pattern
+can cover a name that has a code default, while an explicit exact `stock` in the
+file still suppresses that name; the code defaults themselves stay exact-only.
+Matching is case-sensitive, like the plain name lookup it replaced.
 
 No command, no keybinding, no runtime toggle. The config is read at factory time,
 and `/reload` re-runs the factory, so `/reload` picks up edits.
@@ -183,8 +252,9 @@ Verified at the resolver level: pi's chain is `resolvers[0](name, () => resolver
 ## Tests
 
 `tests/compact-tool-view.test.mts` covers the pure gist table, the config loader
-(defaults, overrides, `stock`, unknown names, invalid values, bad top level),
-and the resolver wiring (collapsed gist replacement, expanded/streaming
-delegation, `hide`, failure-over-`hide`, extra dimmed lines, and unknown/`stock`
+(defaults, overrides, `stock`, unknown names, invalid values, bad top level,
+prefix patterns, pattern precedence, and invalid keys), and the resolver wiring
+(collapsed gist replacement, expanded/streaming delegation, `hide`,
+failure-over-`hide`, extra dimmed lines, pattern wrapping, and unknown/`stock`
 pass-through). The file is listed in the explicit `test:ci` script in
 `package.json`; an unlisted file never runs.

@@ -6,8 +6,10 @@
  * re-registers a tool (that replaces the definition and loses prompt
  * metadata); it returns a spread copy of the base renderers with only
  * `renderResult` replaced, so `renderShell` and `renderCall` are preserved.
- * Names absent from the effective table (or marked `stock`) pass through
- * unchanged. The wrap is collapsed-only: expanded and streaming views delegate
+ * Names the mode table does not resolve (or that resolve to `stock`) pass
+ * through unchanged. The table is resolved with `resolveMode`, where a file
+ * exact entry beats a file prefix pattern and a file pattern beats a code
+ * default. The wrap is collapsed-only: expanded and streaming views delegate
  * to the base renderer when one exists. Display-only: the model-facing content
  * and `structuredContent` are never changed, and neither guard policy nor the
  * call row is touched.
@@ -25,7 +27,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
-import { loadModes, type Mode } from "./config.ts";
+import { loadModes, resolveMode } from "./config.ts";
 import { gistFor } from "./gist.ts";
 
 const CONFIG_FILE = "compact-tool-view.json";
@@ -48,7 +50,7 @@ const hideText = (theme: Theme, context: RenderContextLike): string =>
 	theme.fg("muted", context.keyHint?.(EXPAND_KEYBINDING, "to expand") ?? "ctrl+o to expand");
 
 export default function compactToolViewExtension(pi: ExtensionAPI): void {
-	const { modes, warning } = loadModes(join(getAgentDir(), CONFIG_FILE));
+	const { table, warning } = loadModes(join(getAgentDir(), CONFIG_FILE));
 	if (warning) {
 		// Notified once per factory run (a /reload re-runs the factory); the
 		// first session_start is the earliest point with a UI context.
@@ -61,8 +63,8 @@ export default function compactToolViewExtension(pi: ExtensionAPI): void {
 	}
 
 	const resolver: ToolRendererResolver = (toolName, next) => {
-		const mode: Mode | undefined = modes[toolName];
-		if (mode === undefined || mode === "stock") return next();
+		const mode = resolveMode(table, toolName);
+		if (mode === undefined) return next();
 		const base = next();
 		const renderResult: NonNullable<ToolRenderers["renderResult"]> = (result, options, theme, context) => {
 			// Expanded and streaming views keep the stock rendering; the gist is

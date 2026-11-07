@@ -46,19 +46,26 @@ const extraLines = (content: unknown): string[] => {
 };
 
 /**
- * Failures always surface, ignoring gist/hide: `exit N` for exec tools, else the
- * first error line.
+ * Failures always surface, ignoring gist/hide: `timed out` for a killed exec,
+ * `exit N` when an exit code is available, else the first error line.
  *
  * pi's `ToolExecutionComponent` forwards only `{ content, details }` to a result
  * renderer (`dist/modes/interactive/components/tool-execution.js`), so
  * `structuredContent` (and with it `exit_code`) is normally absent and the error
  * flag arrives on `ToolRenderContext.isError`; the resolver seeds `isError` from
- * the context before calling here. `structuredContent.exit_code` is still
- * honored when a caller forwards it, and the native shell tools append
+ * the context before calling here. Forwarded `details` is the reliable
+ * structured source: `details.killed` wins first because a killed process can
+ * still report `exitCode: 0` (`pup_*` is the first consumer), and a non-zero
+ * `details.exitCode` is next. `structuredContent.exit_code` is still honored
+ * when a caller forwards it, and the native shell tools append
  * `Command exited with code N` to `content`, which covers the real exec case.
  */
 const failureGist = (result: GistResult): string | undefined => {
 	if (!result.isError) return undefined;
+	const details = asObject(result.details);
+	if (details?.killed === true) return "timed out";
+	const detailsExitCode = details?.exitCode;
+	if (typeof detailsExitCode === "number" && detailsExitCode !== 0) return `exit ${detailsExitCode}`;
 	const exitCode = asObject(result.structuredContent)?.exit_code;
 	if (typeof exitCode === "number") return `exit ${exitCode}`;
 	const text = firstText(result.content) ?? "";
@@ -68,10 +75,46 @@ const failureGist = (result: GistResult): string | undefined => {
 	return `error: ${firstLine}`;
 };
 
+/**
+ * pup_* tools, the path inside pup's JSON envelope (`{ data, ... }`) that holds
+ * the items to count, and the noun for them. Every pup command wraps its payload
+ * in that envelope (verified against the installed CLI on 2026-11-07), so the
+ * path is per tool; a payload that does not match a path falls through to the
+ * generic line count. Nouns are deliberately fixed plural (`1 buckets`).
+ */
+const PUP_COUNTS: Record<string, { path: string[]; noun: string }> = {
+	pup_monitors_list: { path: ["data"], noun: "monitors" },
+	pup_logs_search: { path: ["data"], noun: "logs" },
+	pup_traces_search: { path: ["data"], noun: "traces" },
+	pup_apm_services: { path: ["data", "attributes", "services"], noun: "services" },
+	pup_logs_aggregate: { path: ["data", "buckets"], noun: "buckets" },
+	pup_metrics_query: { path: ["data", "series"], noun: "series" },
+};
+
+/** The length of the array at `path` inside `value`, or undefined when it is not one. */
+const countAt = (value: unknown, path: readonly string[]): number | undefined => {
+	let current: unknown = value;
+	for (const key of path) {
+		const obj = asObject(current);
+		if (obj === undefined) return undefined;
+		current = obj[key];
+	}
+	return Array.isArray(current) ? current.length : undefined;
+};
+
 /** The typed gist for one tool, or undefined when the shape is not the expected one. */
 const detailGist = (toolName: string, result: GistResult, args: unknown): string | undefined => {
 	const details = asObject(result.details);
 	switch (toolName) {
+		case "gitlab_read": {
+			// gitlab-read never sets isError, so a timeout or non-zero exit is only
+			// visible here; details carries both. A success returns undefined and
+			// falls through to the generic line count.
+			if (details?.timedOut === true) return "timed out";
+			const exitCode = details?.exitCode;
+			if (typeof exitCode === "number" && exitCode !== 0) return `exit ${exitCode}`;
+			return undefined;
+		}
 		case "read": {
 			if (hasImageBlock(result.content)) return "image";
 			const truncation = asObject(details?.truncation);
@@ -132,8 +175,80 @@ const detailGist = (toolName: string, result: GistResult, args: unknown): string
 			const content = asObject(args)?.content;
 			return typeof content === "string" ? `${lineCount(content)} lines written` : undefined;
 		}
-		default:
+		case "memory_write": {
+			// pi-memory's result text embeds a preview of the whole target file, so its
+			// line count says nothing useful; the target and mode identify the write.
+			const target = details?.target;
+			if (target === "daily") return "daily log appended";
+			if (target === "long_term") return details?.mode === "overwrite" ? "MEMORY.md overwritten" : "MEMORY.md appended";
 			return undefined;
+		}
+		case "scratchpad": {
+			// Successful mutations carry `action`; `list` carries only the counts, and
+			// every failure path (no `text`, no match) carries neither.
+			const action = details?.action;
+			if (action === "add") return "item added";
+			if (action === "done") return "item done";
+			if (action === "undo") return "item reopened";
+			if (action === "clear_done") {
+				const removed = details?.removed;
+				return typeof removed === "number" ? `cleared ${removed} done ${removed === 1 ? "item" : "items"}` : undefined;
+			}
+			const count = details?.count;
+			const open = details?.open;
+			if (typeof count === "number" && typeof open === "number") return `${open} open / ${count} items`;
+			return asObject(args)?.action === "list" ? "empty" : undefined;
+		}
+		case "memory_read": {
+			const target = asObject(args)?.target;
+			if (target === "list") {
+				const files = details?.files;
+				return Array.isArray(files) ? `${files.length} daily logs` : "no daily logs";
+			}
+			// Only `daily` names a file the call row does not show (it defaults to
+			// today); `long_term` and `scratchpad` already gist their line count.
+			if (target !== "daily") return undefined;
+			if (typeof details?.path !== "string") return "no log";
+			const date = details.date;
+			return typeof date === "string" ? `${date} log, ${lineCount(firstText(result.content))} lines` : undefined;
+		}
+		case "memory_forget": {
+			const removed = details?.removed;
+			if (typeof removed !== "number") return undefined;
+			if (removed === 0) return "nothing removed";
+			return `removed ${removed} ${removed === 1 ? "entry" : "entries"}`;
+		}
+		case "memory_restore": {
+			const restored = details?.restored;
+			if (typeof restored === "number" && restored > 0) return `restored ${restored} ${restored === 1 ? "entry" : "entries"}`;
+			return typeof details?.restoredAt === "string" || restored === 0 ? "already restored" : undefined;
+		}
+		case "memory_search": {
+			const count = details?.count;
+			const mode = details?.mode;
+			if (typeof count !== "number" || typeof mode !== "string") return undefined;
+			const embed = details?.embedStarted ? ", embeddings started" : details?.needsEmbed ? ", embeddings missing" : "";
+			return `${count} results (${mode})${embed}`;
+		}
+		case "memory_status": {
+			if (typeof details?.qmd !== "boolean") return undefined;
+			if (!details.qmd) return "qmd unavailable";
+			const collection = details.collection === true ? "collection ok" : "collection missing";
+			const embeddings = typeof details.embeddings === "string" ? details.embeddings : "unknown";
+			return `qmd ok, ${collection}, embeddings ${embeddings}`;
+		}
+		default: {
+			// pup_*: the payload is the parsed JSON of `pup ... --output json`, and
+			// pup's envelope, not the command, decides where the items sit. Any
+			// other shape (an unexpected payload, a non-JSON stdout, a pup tool
+			// without an entry here such as pup_run or pup_auth_status) falls
+			// through to the generic line count.
+			const spec = PUP_COUNTS[toolName];
+			if (spec === undefined) return undefined;
+			const count = countAt(details?.parsed, spec.path);
+			if (count === undefined) return undefined;
+			return `${count} ${spec.noun}${details?.refreshed === true ? ", auth refreshed" : ""}`;
+		}
 	}
 };
 

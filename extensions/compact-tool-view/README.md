@@ -6,7 +6,7 @@ the body entirely. Display-only.
 ## Modes
 
 Per tool name, in `~/.pi/agent/compact-tool-view.json` (a flat JSON map of tool
-name to mode):
+name or prefix pattern to mode):
 
 - `"gist"` (the default for every table entry below): the collapsed body is one
   synthesized summary line, for example `412 lines` for `read` or
@@ -19,12 +19,23 @@ name to mode):
 - `"stock"`: leaves pi's rendering untouched, and removes a name from the
   defaults.
 
+A key whose only `*` is its final character is a prefix pattern, so
+`"mcp__*": "gist"` covers every MCP tool with one line. An exact key beats a
+pattern, the longest matching pattern wins, and a pattern beats a code default;
+a `stock` pattern means no gist, and an exact `stock` still wins over a pattern.
+A key with a `*` anywhere else is invalid and warns.
+
 Presence of a name in the effective table is the opt-in. Unknown names are
 valid and enable the mode for that name. Failures always surface, ignoring the
-mode: `exit N` for exec tools, else `error: <first line>`.
+mode: `exit N` for exec tools (or `timed out` for a killed one), else
+`error: <first line>`.
 
 Nothing hides by default. `subagent` is deliberately absent from the defaults
-because it renders itself.
+because it renders itself. The `pi-memory` tools (`memory_write`, `scratchpad`,
+`memory_read`, `memory_forget`, `memory_restore`, `memory_search`,
+`memory_status`) are absent as well, and so are `gitlab_read` and the `pup_*`
+family (`pup_*` is meant to be enabled as one pattern); each has a typed line of
+its own, so adding its name or pattern to the file enables that line.
 
 ## Files
 
@@ -32,14 +43,16 @@ because it renders itself.
 {
   "read": "hide",
   "bash": "stock",
+  "mcp__*": "gist",
+  "pup_*": "gist",
   "my_tool": "gist"
 }
 ```
 
 A missing file means pure defaults. An invalid value (not one of the three
-strings) is ignored and reported once at load; a non-object top level or
-unparseable JSON is likewise ignored with a warning. The file is re-read when
-extensions reload (`/reload`).
+strings), or a key with a `*` anywhere but the end, is ignored and reported once
+at load; a non-object top level or unparseable JSON is likewise ignored with a
+warning. The file is re-read when extensions reload (`/reload`).
 
 ## Mechanism
 
