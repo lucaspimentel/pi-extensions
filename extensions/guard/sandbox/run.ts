@@ -37,7 +37,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_MASK_EXCEPTIONS, DEFAULT_MASK_PATTERNS, GUARD_LAUNCH_MOUNT, buildEnv, type LaunchSpec, type WorkspaceMode } from "./spec.ts";
+import { CACHE_OVERLAY_DIRS, DEFAULT_MASK_EXCEPTIONS, DEFAULT_MASK_PATTERNS, GUARD_LAUNCH_MOUNT, buildEnv, type LaunchSpec, type WorkspaceMode } from "./spec.ts";
 import { buildBwrapArgs, buildOuterLauncherArgv, filterMountableReadRoots, mountTable, resolveWorktreeCommonDir, type BwrapContext, type MountEntry, type OverlaySpec } from "./bwrap.ts";
 import { detectSandboxMode, chmodTree, type SandboxDetection } from "./detect.ts";
 import { scanWorkspace } from "./scan.ts";
@@ -271,9 +271,9 @@ export function spawnSandboxed(spec: LaunchSpec, options: SpawnOptions = {}): Sp
 			overlays.push(makeOverlay(launchOverlaysRoot, "workspace", workspace, workspace));
 		}
 		if (cacheOverlays) {
-			for (const [name, rel] of CACHE_OVERLAY_SPECS) {
+			for (const rel of CACHE_OVERLAY_DIRS) {
 				const hostDir = path.join(homePath, rel);
-				if (existsSync(hostDir)) overlays.push(makeOverlay(launchOverlaysRoot, name, hostDir, hostDir));
+				if (existsSync(hostDir)) overlays.push(makeOverlay(launchOverlaysRoot, overlayName(rel), hostDir, hostDir));
 			}
 		}
 	}
@@ -356,15 +356,15 @@ export function spawnSandboxed(spec: LaunchSpec, options: SpawnOptions = {}): Sp
 	};
 }
 
-const CACHE_OVERLAY_SPECS: Array<[string, string]> = [
-	["cargo-registry", ".cargo/registry"],
-	["cargo-git", ".cargo/git"],
-	["nuget-packages", ".nuget/packages"],
-	["npm", ".npm"],
-	// Keep in sync with CACHE_OVERLAY_DIRS (spec.ts): the .NET shared-memory
-	// state path must be writable for SDK 11 and later.
-	["dotnet-corefx", ".dotnet/corefx"],
-];
+/**
+ * Overlay scratch directory name for a home-relative overlay path. Derived from
+ * the path so the overlay set has one source of truth, `CACHE_OVERLAY_DIRS` in
+ * spec.ts: `.cargo/registry` becomes `cargo-registry`. The name only labels the
+ * per-launch scratch directory under the session runtime dir.
+ */
+function overlayName(rel: string): string {
+	return rel.replace(/^\./, "").replace(/[^A-Za-z0-9]+/g, "-");
+}
 
 function makeOverlay(root: string, name: string, lower: string, targetPath: string): OverlaySpec {
 	const base = path.join(root, name);
