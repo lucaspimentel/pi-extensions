@@ -28,7 +28,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
-import { StringEnum } from "@earendil-works/pi-ai";
+import { stringEnum } from "../shared/string-enum.ts";
 import {
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
@@ -934,7 +934,7 @@ const ChainItem = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
 
-const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
+const AgentScopeSchema = stringEnum(["user", "project", "both"] as const, {
 	description: 'Which agent directories to use. Default: "user". Use "both" to include project-local agents.',
 	default: "user",
 });
@@ -957,8 +957,8 @@ const SubagentParams = Type.Object({
 
 const SubagentListAgentSchema = Type.Object({
 	name: Type.String(),
-	role: StringEnum(["delegate", "internal"] as const),
-	source: StringEnum(["user", "project", "bundled"] as const),
+	role: stringEnum(["delegate", "internal"] as const),
+	source: stringEnum(["user", "project", "bundled"] as const),
 	description: Type.String(),
 	model: Type.Union([Type.String(), Type.Null()]),
 	tools: Type.Array(Type.String()),
@@ -977,7 +977,7 @@ const SubagentListParams = Type.Object({
 });
 
 const SubagentListOutput = Type.Object({
-	agentScope: StringEnum(["user", "project", "both"] as const),
+	agentScope: stringEnum(["user", "project", "both"] as const),
 	projectAgentsDir: Type.Union([Type.String(), Type.Null()]),
 	agents: Type.Array(SubagentListAgentSchema),
 	panels: Type.Array(RawPanelSchema),

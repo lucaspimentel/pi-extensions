@@ -19,10 +19,10 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { convert as htmlToText } from "html-to-text";
 import { Type } from "typebox";
+import { stringEnum } from "../shared/string-enum.ts";
 
 // --------------------------- shared helpers ---------------------------
 
@@ -201,7 +201,7 @@ function normalizeRawFileUrl(url: string): string {
 const fetchParams = Type.Object({
 	url: Type.String({ description: "Absolute http(s) URL to fetch." }),
 	format: Type.Optional(
-		StringEnum(["markdown", "text", "raw"] as const, {
+		stringEnum(["markdown", "text", "raw"] as const, {
 			description:
 				"markdown/text: convert HTML to readable text. raw: return body as-is (e.g. JSON, source).",
 		}),
@@ -210,13 +210,13 @@ const fetchParams = Type.Object({
 		Type.Integer({ minimum: 1000, maximum: 200_000, description: "Max characters to return. Default 30000." }),
 	),
 	engine: Type.Optional(
-		StringEnum(["auto", "tavily", "raw"] as const, {
+		stringEnum(["auto", "tavily", "raw"] as const, {
 			description:
 				"Fetch backend. 'auto' (default): use Tavily Extract when TAVILY_API_KEY is set, falling back to raw HTTP. 'tavily': force Tavily Extract (requires key, errors on failure). 'raw': always use raw HTTP fetch.",
 		}),
 	),
 	extractDepth: Type.Optional(
-		StringEnum(["basic", "advanced"] as const, {
+		stringEnum(["basic", "advanced"] as const, {
 			description:
 				"Tavily Extract depth. 'basic' (default, 1 credit per 5 URLs) suits most pages. 'advanced' (2 credits per 5 URLs) handles tables, embedded content, and complex layouts. Tavily only.",
 		}),
@@ -231,17 +231,17 @@ const searchParams = Type.Object({
 		Type.Integer({ minimum: 1, maximum: 20, description: "Number of results. Default 8." }),
 	),
 	topic: Type.Optional(
-		StringEnum(["general", "news", "finance"] as const, {
+		stringEnum(["general", "news", "finance"] as const, {
 			description: "Search topic. 'news' is best for current events, breaking changes, and recent releases. 'finance' for markets/economics. Default: general. Tavily only.",
 		}),
 	),
 	timeRange: Type.Optional(
-		StringEnum(["day", "week", "month", "year"] as const, {
+		stringEnum(["day", "week", "month", "year"] as const, {
 			description: "Restrict results to content published/updated within this time window. Useful for time-sensitive queries. Tavily only.",
 		}),
 	),
 	searchDepth: Type.Optional(
-		StringEnum(["basic", "advanced", "fast", "ultra-fast"] as const, {
+		stringEnum(["basic", "advanced", "fast", "ultra-fast"] as const, {
 			description: "Latency vs. relevance tradeoff. 'basic' (default, 1 credit) is balanced. 'advanced' (2 credits) gives higher-precision multi-snippet results. 'fast'/'ultra-fast' minimise latency. Tavily only.",
 		}),
 	),

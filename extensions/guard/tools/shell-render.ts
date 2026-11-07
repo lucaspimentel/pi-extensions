@@ -7,7 +7,7 @@
  * plain-text output and never show the Elapsed/Took duration line.
  */
 import { createBashToolDefinition, type Theme } from "@earendil-works/pi-coding-agent";
-import { Container, Text, type Component } from "@earendil-works/pi-tui";
+import { Container, Text, type Component, type Keybinding } from "@earendil-works/pi-tui";
 
 /** Shape of the shell tools' arguments relevant to call rendering. */
 interface ShellArgs {
@@ -36,6 +36,10 @@ interface ShellRenderContext {
 	outputPad: number;
 	/** Milliseconds the tool's execution took, from the final result; `undefined` while it runs. */
 	durationMs: number | undefined;
+	/** Configured keys for a keybinding id, for example `"ctrl+o"`. Empty when the id has no keys. */
+	keyText: (keybinding: Keybinding) => string;
+	/** Configured keys followed by a description, styled as a hint. */
+	keyHint: (keybinding: Keybinding, description: string) => string;
 }
 
 /**
