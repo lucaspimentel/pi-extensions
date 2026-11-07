@@ -738,17 +738,33 @@ function projectRuleWord(mod: ShellAstModule, slice: ByteSlicer, word: Word, pre
 	// The parser represents unquoted glob, tilde and many brace patterns as
 	// Lit nodes. Examine only top-level parts: quoted/escaped metacharacters
 	// are literals. Conservative detection may also encode inert syntax.
-	if (!previous && word.parts.some((part, index) => (!assignment && (part.type === "ExtGlob" || part.type === "BraceExp")) ||
-		(part.type === "Lit" && hasUnquotedExpansionSyntax(part.value, index === 0, assignment)))) return { kind: "expanding", source, span };
+	const globSyntax = !assignment && word.parts.some((part) => part.type === "ExtGlob" || part.type === "BraceExp"
+		|| (part.type === "Lit" && hasUnquotedGlobSyntax(part.value)));
+	const tildeSyntax = word.parts.some((part, index) => part.type === "Lit" && hasUnquotedTildeSyntax(part.value, index === 0, assignment));
+	// Any glob/brace/extglob syntax, or tilde combined with a dynamic node, stays
+	// `expanding`: marker-encoded and ineligible for allow rules. Only a word
+	// whose sole expansion reason is tilde becomes the dedicated `tilde` kind.
+	// The reason is decided here, where quote context and dynamic nodes are
+	// still known, and never re-derived from the source later.
+	if (!previous && (globSyntax || (tildeSyntax && dynamic))) return { kind: "expanding", source, span };
+	if (!previous && tildeSyntax) return { kind: "tilde", source, span };
 	return dynamic ? { kind: "dynamic", source, span }
 		: preserveSource ? { kind: "source", source, span }
 		: { kind: "literal", value: literalRuleValue(slice, word.parts), source, span };
 }
 
-function hasUnquotedExpansionSyntax(value: string, firstPart: boolean, assignment: boolean): boolean {
+function hasUnquotedGlobSyntax(value: string): boolean {
 	for (let i = 0; i < value.length; i++) {
 		if (value[i] === "\\") { i++; continue; }
-		if ((!assignment && "*?[{".includes(value[i])) || (value[i] === "~" && (assignment || (firstPart && i === 0)))) return true;
+		if ("*?[{".includes(value[i])) return true;
+	}
+	return false;
+}
+
+function hasUnquotedTildeSyntax(value: string, firstPart: boolean, assignment: boolean): boolean {
+	for (let i = 0; i < value.length; i++) {
+		if (value[i] === "\\") { i++; continue; }
+		if (value[i] === "~" && (assignment || (firstPart && i === 0))) return true;
 	}
 	return false;
 }

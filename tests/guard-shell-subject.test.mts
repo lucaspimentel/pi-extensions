@@ -43,7 +43,7 @@ test("literal decoding and expanding words retain their distinct identities", as
 	for (const [source, expected] of [
 		['custom "$x"', 'custom "$x"'], ['custom $x', 'custom $x'],
 		['custom $((1+2))', 'custom $((1+2))'],
-		["custom '$x'", "custom '$x'"], ["custom ~/x", `custom ${marker("~/x")}`],
+		["custom '$x'", "custom '$x'"], ["custom ~/x", "custom ~/x"],
 		["custom {a,b}", `custom ${marker("{a,b}")}`], ["custom @(a|b)", `custom ${marker("@(a|b)")}`],
 		[String.raw`custom a\ b`, "custom 'a b'"],
 		[String.raw`custom "a\$b"`, "custom 'a$b'"],
@@ -170,19 +170,24 @@ test("write-root exemptions still strip harmless trailing redirects before plain
 	assert.deepEqual(suggestRule(call, p, analysis)?.hostBash?.allow, ["HostBash(custom > /allowed/out)"]);
 });
 
-test("tilde and quoted parameter-expansion commands are never allow-authorizable; safety spellings keep matching", async () => {
-	for (const [command, oldRule, newRule] of [
-		['source ~/.nvm/nvm.sh', 'HostBash(source ~/.nvm/nvm.sh)', `HostBash(source ${marker("~/.nvm/nvm.sh")})`],
-		['source "$HOME/.nvm/nvm.sh"', 'HostBash(source "$HOME/.nvm/nvm.sh")', 'HostBash(source "$HOME/.nvm/nvm.sh")'],
-	] as const) {
-		const call = { kind: "host-shell", shell: "host-bash", command } as const;
-		const analysis = await analyzeHostCommand(command);
-		// Active shell expansion (kind `expanding` or `dynamic`) is ineligible
-		// for allow rules, even when a rule textually spells the marker.
-		assert.equal(explainHostShellCommand(call, policy({ allow: [oldRule] }), analysis).decision.action, "prompt");
-		assert.equal(explainHostShellCommand(call, policy({ allow: [newRule] }), analysis).decision.action, "prompt");
-		assert.equal(explainHostShellCommand(call, policy({ deny: [oldRule] }), analysis).decision.action, "deny");
-		assert.equal(explainHostShellCommand(call, policy({ deny: [newRule] }), analysis).decision.action, "deny");
+test("tilde commands stay allow-authorizable by their readable rule; dynamic and marker spellings stay ineligible", async () => {
+	const tilde = { kind: "host-shell", shell: "host-bash", command: "source ~/.nvm/nvm.sh" } as const;
+	const tildeAnalysis = await analyzeHostCommand(tilde.command);
+	assert.equal(tildeAnalysis.calls[0].chainArgv[1].kind, "tilde");
+	assert.equal(tildeAnalysis.calls[0].hasActiveExpansion, false);
+	assert.equal(tildeAnalysis.calls[0].subject, "source ~/.nvm/nvm.sh");
+	// The readable rule the save flow now produces authorizes it.
+	assert.equal(explainHostShellCommand(tilde, policy({ allow: ["HostBash(source ~/.nvm/nvm.sh)"] }), tildeAnalysis).decision.action, "allow");
+	// A rule textually spelling the old marker cannot reach it, and deny still wins.
+	assert.equal(explainHostShellCommand(tilde, policy({ allow: [`HostBash(source ${marker("~/.nvm/nvm.sh")})`] }), tildeAnalysis).decision.action, "prompt");
+	assert.equal(explainHostShellCommand(tilde, policy({ deny: ["HostBash(source ~/.nvm/nvm.sh)"] }), tildeAnalysis).decision.action, "deny");
+	// Quoted parameter expansion stays dynamic: never allow-authorizable.
+	const dynamic = { kind: "host-shell", shell: "host-bash", command: 'source "$HOME/.nvm/nvm.sh"' } as const;
+	const dynamicAnalysis = await analyzeHostCommand(dynamic.command);
+	assert.equal(dynamicAnalysis.calls[0].hasActiveExpansion, true);
+	for (const rule of ['HostBash(source "$HOME/.nvm/nvm.sh")', "HostBash(source *)"]) {
+		assert.equal(explainHostShellCommand(dynamic, policy({ allow: [rule] }), dynamicAnalysis).decision.action, "prompt", rule);
+		assert.equal(explainHostShellCommand(dynamic, policy({ deny: [rule] }), dynamicAnalysis).decision.action, "deny", rule);
 	}
 });
 
@@ -192,7 +197,6 @@ test("unquoted expansion syntax cannot collide with quoted or escaped literals",
 		["file?.txt", ["'file?.txt'", String.raw`file\?.txt`]],
 		["file[ab]", ["'file[ab]'", String.raw`file\[ab]`]],
 		["{a,b}", ["'{a,b}'", String.raw`\{a,b}`]],
-		["~/x", ["'~/x'", String.raw`\~/x`]],
 		["@(a|b)", ["'@(a|b)'"]],
 	] as const) {
 		const expanded = await analyzeHostCommand(`custom ${expanding}`);
@@ -209,19 +213,43 @@ test("unquoted expansion syntax cannot collide with quoted or escaped literals",
 			assert.equal(explainHostShellCommand(expandedCall, policy({ allow: [literalRule] }), expanded).decision.action, "prompt", expanding);
 		}
 	}
+	// Unquoted tilde keeps a readable spelling instead of a marker, and every
+	// literal spelling of `~` still renders quoted, so the two never coincide.
+	const tilde = await analyzeHostCommand("custom ~/x");
+	assert.equal(tilde.calls[0].chainArgv[1].kind, "tilde");
+	assert.equal(tilde.calls[0].subject, "custom ~/x");
+	for (const literal of ["'~/x'", '"~/x"', String.raw`\~/x`]) {
+		const call = { kind: "host-shell", shell: "host-bash", command: `custom ${literal}` } as const;
+		const analysis = await analyzeHostCommand(call.command);
+		assert.equal(analysis.calls[0].chainArgv[1].kind, "literal", literal);
+		assert.equal(analysis.calls[0].subject, "custom '~/x'", literal);
+		assert.notEqual(analysis.calls[0].subject, tilde.calls[0].subject, literal);
+		// A rule anchored to the literal spelling cannot reach the tilde word...
+		assert.equal(explainHostShellCommand({ ...call, command: "custom ~/x" }, policy({ allow: [`HostBash(${analysis.calls[0].subject})`] }), tilde).decision.action, "prompt", literal);
+		// ...and the tilde word's readable rule cannot reach the literal.
+		assert.equal(explainHostShellCommand(call, policy({ allow: ["HostBash(custom ~/x)"] }), analysis).decision.action, "prompt", literal);
+	}
 });
 
 test("tilde is recognized at the start of a word and in assignment values", async () => {
-	for (const source of ["~/x", "~user/x"]) {
-		assert.equal((await analyzeHostCommand(`custom ${source}`)).calls[0].subject, `custom ${marker(source)}`);
+	for (const source of ["~/x", "~user/x", "~", "~+/x", "~-/x"]) {
+		const analysis = await analyzeHostCommand(`custom ${source}`);
+		assert.equal(analysis.calls[0].chainArgv[1].kind, "tilde", source);
+		assert.equal(analysis.calls[0].subject, `custom ${source}`, source);
+		assert.equal(analysis.calls[0].hasActiveExpansion, false, source);
 	}
 	assert.equal((await analyzeHostCommand("custom v~1")).calls[0].subject, "custom 'v~1'");
 	assert.equal((await analyzeHostCommand('custom ""~/x')).calls[0].subject, "custom '~/x'");
-	assert.equal((await analyzeHostCommand('X=foo:~/x custom')).calls[0].subject, `X=${marker("foo:~/x")} custom`);
+	const assignment = await analyzeHostCommand("X=foo:~/x custom");
+	assert.equal(assignment.calls[0].subject, "X=foo:~/x custom");
+	assert.equal(assignment.calls[0].hasActiveExpansion, false);
+	// A tilde combined with a dynamic node stays marker-encoded and ineligible.
+	const combined = await analyzeHostCommand("X=~/x$N custom");
+	assert.equal(combined.calls[0].hasActiveExpansion, true);
 });
 
 test("expansion marker is source-exact, UTF-8 encoded and reserved against forged literal words", async () => {
-	for (const source of ["é*", "a\"*\"*", "$HOME/*", "~user/é"]) {
+	for (const source of ["é*", "a\"*\"*", "$HOME/*"]) {
 		const analysis = await analyzeHostCommand(`custom ${source}`);
 		const encoded = marker(source);
 		assert.equal(analysis.calls[0].subject, `custom ${encoded}`, source);
@@ -242,7 +270,7 @@ test("legacy broad and marker-shaped allow patterns no longer authorize expansio
 	// commands regardless of the pattern; deny and ask keep deciding.
 	for (const [command, rule] of [
 		["custom *", "HostBash(custom @guard:exp:2a)"],
-		["custom ~/localpkg", "HostBash(custom @*)"],
+		["custom {a,b}", "HostBash(custom @*)"],
 		["custom 'a b' * 'c d'", "HostBash(custom '*')"],
 	] as const) {
 		const call = { kind: "host-shell", shell: "host-bash", command } as const;
@@ -303,7 +331,7 @@ test("expansion-aware subjects cover assignments and redirects without weakening
 	const command = 'X=~/x custom > /tmp/* 2>&1';
 	const call = { kind: "host-shell", shell: "host-bash", command } as const;
 	const analysis = await analyzeHostCommand(command);
-	const current = `X=${marker("~/x")} custom > ${marker("/tmp/*")} 2>& 1`;
+	const current = `X=~/x custom > ${marker("/tmp/*")} 2>& 1`;
 	const old = "X='~/x' custom > '/tmp/*' 2>& 1";
 	assert.equal(analysis.calls[0].subject, current);
 	assert.equal(analysis.calls[0].previousSubject, old);
@@ -377,6 +405,12 @@ test("previous safety projection retains old marker literals and incomplete anal
 });
 
 // Public renderer seam: literal expectations come from the accepted subject contract.
+test("tilde rule words render their unquoted source spelling", () => {
+	for (const source of ["~/x", "~user/x", "~", "~+/x", "~-/x", "~/'a b'"]) {
+		assert.equal(renderRuleWord({ kind: "tilde", source, span: { start: 0, end: 0 } }), source);
+	}
+});
+
 test("literal rule words use one stable shell spelling", () => {
 	for (const [value, expected] of [
 		["simple", "simple"], ["", "''"], ["two words", "'two words'"],

@@ -93,11 +93,19 @@ words carry active shell expansion (kinds `expanding` and `dynamic`). Such
 calls are excluded from allow-slot coverage candidacy, mirroring the
 evaluator's ineligibility contract; frozen baselines without the flag keep
 legacy candidacy so paired comparisons measure exactly the eligibility
-change. `summary.json` reports `markerMatchingAllowRules`: the count of
+change. Unquoted tilde is the one exempt expansion: it is projected as its own
+`tilde` kind, stays allow-eligible, and renders as its unquoted source
+spelling. `summary.json` reports `markerMatchingAllowRules`: the count of
 distinct user-config allow rules whose pattern textually matches an
 expansion-marker subject in any candidate row. These rules still compile and
 still decide deny/ask, but can no longer authorize expansion-bearing
-commands; they are the compatibility boundary of the marker encoding.
+commands; they are the compatibility boundary of the marker encoding. The same
+summary reports the differential eligibility counters
+`tildeEligibilityGains` (steps that became allow-eligible and carry only tilde
+chain words), `unexplainedEligibilityGains` (the alarm: anything else became
+eligible) and `eligibilityLosses` (the tightening direction). Word kinds are
+projected for chain arguments only, so assignment-value and redirect-target
+tilde gains are counted in neither gain bucket.
 
 Config rewrites are a separate, backed-up operation requiring reviewed
 manifest/slot/index/text/command-ID/subject/transition evidence. Do not edit

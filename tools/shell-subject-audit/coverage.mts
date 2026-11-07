@@ -18,6 +18,8 @@ export interface Analysis {
 		rawSubject?: string;
 		/** Absent in frozen analyses from revisions before active-expansion eligibility. */
 		hasActiveExpansion?: boolean;
+		/** Present only in revisions that project canonical chain words. */
+		chainArgv?: readonly { kind: string }[];
 		redirects: readonly { op: string; target: string | null }[];
 	}[];
 }
@@ -142,4 +144,45 @@ export function coverageDelta(before: readonly Coverage[], after: readonly Cover
 	const oldKeys = new Set(before.map((r) => r.key));
 	const newKeys = new Set(after.map((r) => r.key));
 	return { lost: [...oldKeys].filter((key) => !newKeys.has(key)), gained: [...newKeys].filter((key) => !oldKeys.has(key)) };
+}
+
+/**
+ * One side's active-expansion eligibility. The flag is authoritative when the
+ * frozen revision has it. A revision that predates it projects only chain
+ * words, so its result is a lower bound: `true` proves an active chain word,
+ * while `false` says nothing about assignment values, redirect targets,
+ * declarations or test clauses.
+ */
+export function legacyActiveExpansion(call: Analysis["calls"][number] | undefined): boolean {
+	if (typeof call?.hasActiveExpansion === "boolean") return call.hasActiveExpansion;
+	return (call?.chainArgv ?? []).some((word) => word.kind === "expanding" || word.kind === "dynamic");
+}
+
+/**
+ * Classify one paired call's allow-rule eligibility change. `gain-tilde` is the
+ * intended effect of moving unquoted tilde to its own eligible word kind: the
+ * baseline provably could not authorize the call (an active chain word, or the
+ * flag) and the candidate can, with its only non-literal chain word being
+ * tilde (or the already-eligible source kind). `gain-unexplained` is the alarm:
+ * the same provable baseline state with no tilde explanation, for example an
+ * active chain word that vanished from the projection. `loss` is the
+ * tightening direction, reported only when the baseline carries the flag,
+ * because a flag-less baseline cannot prove eligibility for a call whose
+ * expansion lives outside the chain arguments (`GWT_ROOT="$tmp" cmd`, `cmd <
+ * "$file"`, `export X=$Y`, `[[ -f $X ]]`).
+ */
+export function eligibilityTransition(
+	oldCall: Analysis["calls"][number] | undefined,
+	newCall: Analysis["calls"][number] | undefined,
+): "gain-tilde" | "gain-unexplained" | "loss" | "none" {
+	const after = newCall?.hasActiveExpansion === true;
+	const before = legacyActiveExpansion(oldCall);
+	if (typeof oldCall?.hasActiveExpansion === "boolean") {
+		if (before === after) return "none";
+		if (!before) return "loss";
+	} else if (!before || after) {
+		return "none";
+	}
+	const kinds = (newCall?.chainArgv ?? []).map((word) => word.kind).filter((kind) => kind !== "literal");
+	return kinds.length > 0 && kinds.every((kind) => kind === "tilde" || kind === "source") ? "gain-tilde" : "gain-unexplained";
 }

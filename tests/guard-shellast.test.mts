@@ -234,18 +234,19 @@ test("$ expansion in a redirect target is reported", async () => {
 
 test("active expansion is flagged per call across chain args, assignments, redirects, decls and tests", async () => {
 	resetShellAstLoad();
-	for (const command of ["custom /tmp/*", "custom $HOME", 'custom "$HOME"', "X=$V custom", "custom x > /tmp/*", "export X=$Y", "[[ -f $X ]]"]) {
+	for (const command of ["custom /tmp/*", "custom $HOME", 'custom "$HOME"', "X=$V custom", "custom x > /tmp/*", "export X=$Y", "[[ -f $X ]]", "custom ~/x*", "custom ~/$N"]) {
 		const analysis = await analyzeHostCommand(command);
 		assert.equal(analysis.calls[0].hasActiveExpansion, true, command);
 	}
-	for (const command of ["custom arg", "custom $'x'", 'custom $"x"', "custom '/tmp/*'", "custom '\\*'", "export X=1", "[[ a == b ]]"]) {
+	for (const command of ["custom arg", "custom $'x'", 'custom $"x"', "custom '/tmp/*'", "custom '\\*'", "export X=1", "[[ a == b ]]", "custom ~/x", "custom ~user/x", "export X=~/bin"]) {
 		const analysis = await analyzeHostCommand(command);
 		assert.equal(analysis.calls[0].hasActiveExpansion, false, command);
 	}
 	// Decl arguments keep source spelling but are kind-projected for the flag;
-	// tilde in an assignment value expands, while glob metacharacters follow
+	// tilde is the one expansion guard authorizes (its own `tilde` kind, so an
+	// assignment-RHS tilde is inert), while glob metacharacters follow
 	// assignment semantics (an assignment RHS does not pathname-expand).
-	assert.equal((await analyzeHostCommand("export X=~/bin")).calls[0].hasActiveExpansion, true);
+	assert.equal((await analyzeHostCommand("export X=$HOME/bin")).calls[0].hasActiveExpansion, true);
 });
 
 // ── Canonical subject / redirect clause ──────────────────────────────────────

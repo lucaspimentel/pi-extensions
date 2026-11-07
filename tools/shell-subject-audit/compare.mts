@@ -8,7 +8,7 @@ import * as configMod from "../../extensions/guard/policy/config.ts";
 import * as rulesMod from "../../extensions/guard/policy/rules.ts";
 import * as tierMod from "../../extensions/guard/policy/bashtier.ts";
 import * as textMod from "../../extensions/guard/policy/shell-text.ts";
-import { compileRules, coverageDelta, markerMatchingRules, type APIs } from "./coverage.mts";
+import { compileRules, coverageDelta, eligibilityTransition, markerMatchingRules, type APIs } from "./coverage.mts";
 
 async function* rows(path: string): AsyncGenerator<any> {
 	for await (const line of createInterface({ input: createReadStream(path), crlfDelay: Infinity })) if (line.trim()) yield JSON.parse(line);
@@ -49,6 +49,7 @@ export async function compare(out: string) {
 	const observedActionTransitions: Record<string, number> = {};
 	const probeActionTransitions: Record<string, number> = {};
 	let observedCommands = 0, ruleProbeCommands = 0;
+	let tildeEligibilityGains = 0, unexplainedEligibilityGains = 0, eligibilityLosses = 0;
 	const byConfigProfile: Record<string, number> = {};
 	const seen = new Set<string>();
 	for await (const command of rows(join(out, "inputs/commands.jsonl"))) {
@@ -101,6 +102,16 @@ export async function compare(out: string) {
 				markerMatchingKeys.add(`${next.value.configs[i].name}/${match.key}`);
 			}
 		}
+		// Differential eligibility: every step that became allow-eligible must
+		// carry only tilde words (see eligibilityTransition for the coverage limit).
+		const oldCalls = old.value.analysis?.calls ?? [], newCalls = next.value.analysis?.calls ?? [];
+		for (let i = 0; i < Math.min(oldCalls.length, newCalls.length); i++) {
+			switch (eligibilityTransition(oldCalls[i], newCalls[i])) {
+				case "gain-tilde": tildeEligibilityGains++; break;
+				case "gain-unexplained": unexplainedEligibilityGains++; break;
+				case "loss": eligibilityLosses++; break;
+			}
+		}
 	}
 	if (!(await before.next()).done || !(await after.next()).done || pairedCommands !== manifest.commands || pairedCells !== manifest.cellsPerSide) throw new Error("extra or missing measurement rows");
 	const inventory = [...inventories.values()];
@@ -116,6 +127,7 @@ export async function compare(out: string) {
 		lostSafetyRules: changedRules.filter((r) => r.slot !== "allow" && r.lostIds.length).length,
 		gainedSafetyRules: changedRules.filter((r) => r.slot !== "allow" && r.gainedIds.length).length,
 		markerMatchingAllowRules: markerMatchingKeys.size,
+		tildeEligibilityGains, unexplainedEligibilityGains, eligibilityLosses,
 		unexercisedRules: inventory.filter((r) => !r.oldCommands && !r.newCommands).length,
 		observedUnexercisedRules: inventory.filter((r) => !r.oldObservedCommands && !r.newObservedCommands).length,
 		consistencyErrors: 0,

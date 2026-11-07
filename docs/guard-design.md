@@ -1367,13 +1367,17 @@ raw-subject contract in the historical Stages 1-2 row above.
   Unquoted glob, tilde, brace and extglob syntax is conservatively detected
   separately from expansion nodes and rendered as `@guard:exp:` plus the
   lowercase hex encoding of the whole word's UTF-8 source. Even inert syntax
-  may be encoded; quoted or escaped literal syntax stays literal. Literal
+  may be encoded; quoted or escaped literal syntax stays literal. A word whose
+  only expansion reason is unquoted tilde is the dedicated `tilde` kind and
+  keeps its unquoted source spelling (see "Tilde is its own eligible word
+  kind"), so it is not encoded. Literal
   values starting with the marker are quoted, and source-preserving words
   starting with it are escaped, case-insensitively, to reserve the namespace. This
   prevents an unquoted expanding word from sharing the quoted literal's allow
   subject. Active-expansion eligibility (accepted 2026-11-07) closes the
   remaining compatibility hole: a call whose projected words include kind
-  `expanding` (unquoted glob/tilde/brace/extglob spellings) or kind `dynamic`
+  `expanding` (unquoted glob/brace/extglob spellings, and tilde combined with a
+  dynamic node) or kind `dynamic`
   (parameter, command, arithmetic or process substitution, including inside
   double quotes) is INELIGIBLE for allow-rule authorization, so no legacy
   glob/regex pattern — broad, marker-shaped, or an exact marker spelling such
@@ -1381,7 +1385,8 @@ raw-subject contract in the historical Stages 1-2 row above.
   through to deny/ask (which keep matching current canonical, previous
   canonical and raw spellings, rule-first), the read-only tier, and the
   profile cell, so trusted still allows and default/auto/allow-edits prompt.
-  Kinds `source` and `literal` stay eligible. This is rule eligibility, not
+  Kinds `tilde`, `source` and `literal` stay eligible. This is rule
+  eligibility, not
   profile scope: yolo/unrestricted are unaffected. Save/suggest paths refuse
   to plan allow rules for expansion-bearing steps (allow once only), and the
   audit reports allow rules whose patterns textually match marker subjects as
@@ -1482,6 +1487,44 @@ versioned contract is a possible future item). Pwsh is unchanged (no
 parser). Fixture expectations were updated surgically for three `echo "$…"`
 steps previously allowed by `HostBash(echo *)` (see
 `tests/fixtures/guard-shell/README.md`).
+
+### Tilde is its own eligible word kind (amended 2026-11-07, Linux)
+
+The first measurement of the eligibility change (frozen corpus, the author's
+guard config) put 1,494 of 2,614 newly prompting commands in the tilde-only
+category, led by `cd ~/…` (1,589 corpus commands), so the user amended the
+scope: unquoted tilde stops being active expansion. It becomes a dedicated
+`tilde` word kind, rendered as its own unquoted source spelling (so
+`cd ~/x` keeps the subject `cd ~/x`) and eligible for legacy allow rules;
+save/suggest therefore plan a readable `HostBash(cd ~/x)` instead of
+refusing.
+
+The kind is decided in `projectRuleWord`, where quote context and the dynamic
+visitor are still available, and is never re-derived from source text later.
+A word with any glob/brace/extglob syntax, or that carries tilde expansion
+*and* a dynamic node (`~/x$N`, `~/$X`), stays `expanding`: marker-encoded and
+ineligible. A quoted or escaped tilde stays a literal.
+
+Distinctness is what keeps this safe. A literal word whose value contains `~`
+is always rendered single-quoted (`'~/x'`), and the escaped spelling `\~/x`
+collapses to that same quoted literal, while a `dynamic` or `source` word
+always retains `$`, a backtick or parentheses. No other word kind can
+produce the unquoted `~/x`, so a rule can never reach a quoted or escaped `~`
+through the tilde kind, and the marker encoding is not needed for it. Scope
+covers `~/x`, `~user/x`, `~+`, `~-` and genuine assignment-value tilde
+(`f=~/x`, previously ineligible); `[[ ... ]]` keeps its conservative scan, so
+a tilde there still flags the clause. Mixed expansion is unchanged and
+negative-tested: `~/x*`, `~/{a,b}`, `~/$X`, `$HOME/x` and `echo "$HOME"`
+still prompt and are still refused by save/suggest.
+
+Covered by `tests/guard-shell-subject.test.mts` (rendering, eligibility,
+collision matrix, deny/ask precedence), `tests/guard-shellast.test.mts` (the
+per-call flag) and `tests/guard-save.test.mts` (save → compile → match round
+trip for `~/x`, `~user/x`, `~/'a b'`, `~/"literal*"`, `~/literal\*`, with
+negative matches against the quoted and escaped spellings). The audit adds
+`tildeEligibilityGains`, `unexplainedEligibilityGains` and
+`eligibilityLosses`: every step that became allow-eligible must carry only
+tilde words, and anything else is reported as an unexplained gain.
 
 ## Shell-ast adoption: final measurement and retirement record
 

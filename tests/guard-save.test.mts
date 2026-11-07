@@ -393,6 +393,45 @@ test("multiline original shell sources produce no allow plan or suggestion even 
 	assert.equal(planAllowSave(pwsh, policy, explainHostShellCommand(pwsh, policy)), null);
 });
 
+test("tilde commands save a readable rule that round-trips through compile and match", () => {
+	const policy = makePolicy();
+	const allowed = (rule: string) => ({ ...policy, config: mergeConfig({ hostBash: { allow: [rule] } }, {}, policy.cwd) });
+	for (const command of ["cd ~/x", "source ~/.nvm/nvm.sh", "mkdir -p ~/'a b'", "cd ~user/x", "cd ~/", 'cd ~/"literal*"', String.raw`cd ~/literal\*`, "cd ~", "cd ~+/x", '"cd" ~/x']) {
+		const call = shellCall(command);
+		const analysis = analysisForSync(call);
+		const explanation = explainHostShellCommandPolicy(call, policy, analysis);
+		assert.ok(analysis.calls.every((step) => step.hasActiveExpansion === false), command);
+		const plan = planAllowSavePolicy(call, policy, explanation, analysis);
+		const suggestion = suggestRule(call, policy, analysis);
+		assert.ok(plan !== null, `plan for ${command}`);
+		const rule = suggestion?.hostBash?.allow?.[0];
+		assert.ok(rule, `suggestion for ${command}`);
+		// The saved rule compiles and matches the subject that produced it...
+		const subject = explanation.steps[0].allowSubject!;
+		assert.equal(parseRule(rule!)?.regex?.test(subject), true, `${rule} !~ ${subject}`);
+		// ...and the merged config lets the original command through.
+		assert.equal(explainHostShellCommandPolicy(call, allowed(rule!), analysis).decision.action, "allow", `${command} via ${rule}`);
+	}
+	// A readable tilde rule never reaches the quoted/escaped literal spelling.
+	const tilde = shellCall("cd ~/x");
+	const tildeRule = suggestRule(tilde, policy, analysisForSync(tilde))!.hostBash!.allow![0];
+	assert.equal(tildeRule, "HostBash(cd ~/x)");
+	for (const literal of ["cd '~/x'", String.raw`cd \~/x`]) {
+		const literalCall = shellCall(literal);
+		assert.equal(explainHostShellCommandPolicy(literalCall, allowed(tildeRule), analysisForSync(literalCall)).decision.action, "prompt", literal);
+		const literalRule = suggestRule(literalCall, policy, analysisForSync(literalCall))!.hostBash!.allow![0];
+		assert.equal(explainHostShellCommandPolicy(tilde, allowed(literalRule), analysisForSync(tilde)).decision.action, "prompt", literalRule);
+	}
+	// Mixed expansion (glob or dynamic anywhere in the word) keeps refusing saves.
+	for (const command of ["cd ~/x*", "cd ~/$HOME/x", "cd $HOME/x", 'echo "$HOME"', "ls *.ts", "cd ~/{a,b}"]) {
+		const call = shellCall(command);
+		const analysis = analysisForSync(call);
+		const explanation = explainHostShellCommandPolicy(call, policy, analysis);
+		assert.equal(planAllowSavePolicy(call, policy, explanation, analysis), null, command);
+		assert.equal(suggestRule(call, policy, analysis), null, command);
+	}
+});
+
 // ── The not-exact advisory predicate ───────────────────────────────────────
 
 test("notExactShellRules stays silent for faithful globs, faithful deny prefills, and slash-bearing references", () => {

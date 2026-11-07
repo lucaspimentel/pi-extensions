@@ -11,7 +11,7 @@ import * as text from "../extensions/guard/policy/shell-text.ts";
 import { mergeConfig } from "../extensions/guard/policy/config.ts";
 import { analyzeHostCommand } from "../extensions/guard/policy/shellast.ts";
 import { explainHostShellCommand } from "../extensions/guard/policy/decision.ts";
-import { compileRules, coverageDelta, markerMatchingRules, ruleCoverage, ruleProbes } from "../tools/shell-subject-audit/coverage.mts";
+import { compileRules, coverageDelta, eligibilityTransition, legacyActiveExpansion, markerMatchingRules, ruleCoverage, ruleProbes } from "../tools/shell-subject-audit/coverage.mts";
 
 const api = { rules, tier, text };
 
@@ -168,6 +168,30 @@ test("per-rule coverage agrees with isolated evaluator across redirects and safe
 			assert.equal(coverage.some((item) => item.key === `${slot}:0`), matched, `${slot}: ${rule}, command: ${command}`);
 		}
 	}
+});
+
+test("incremental eligibility classifies tilde gains and flags anything else", () => {
+	const call = (kinds: string[], hasActiveExpansion?: boolean) => ({ complete: true, subject: "s", redirects: [], chainArgv: kinds.map((kind) => ({ kind })), ...(hasActiveExpansion === undefined ? {} : { hasActiveExpansion }) });
+	// A baseline without the flag falls back to projected chain-word kinds.
+	assert.equal(legacyActiveExpansion(call(["literal", "expanding"])), true);
+	assert.equal(legacyActiveExpansion(call(["literal", "dynamic"])), true);
+	assert.equal(legacyActiveExpansion(call(["literal", "tilde"])), false);
+	assert.equal(legacyActiveExpansion(call(["literal", "tilde"], true)), true);
+	assert.equal(legacyActiveExpansion(call(["literal"], false)), false);
+	// Tilde becoming eligible is the intended gain; a glob or dynamic word that
+	// became eligible is the alarm; the tightening direction is `loss`.
+	assert.equal(eligibilityTransition(call(["literal", "expanding"]), call(["literal", "tilde"], false)), "gain-tilde");
+	assert.equal(eligibilityTransition(call(["literal", "expanding"]), call(["literal", "expanding"], true)), "none");
+	assert.equal(eligibilityTransition(call(["literal", "expanding"]), call(["literal", "dynamic"], false)), "gain-unexplained");
+	assert.equal(eligibilityTransition(call(["literal", "expanding"]), call(["literal"], false)), "gain-unexplained");
+	assert.equal(eligibilityTransition(call(["literal", "tilde"]), call(["literal", "expanding"], true)), "none");
+	assert.equal(eligibilityTransition(call(["literal", "tilde"], false), call(["literal", "expanding"], true)), "loss");
+	// A flag-less baseline cannot prove eligibility for a call whose expansion
+	// lives outside the chain arguments, so no loss is claimed there.
+	assert.equal(eligibilityTransition(call(["literal", "literal"]), call(["literal", "literal"], true)), "none");
+	// A call with no non-literal chain word cannot be a gain either way.
+	assert.equal(eligibilityTransition(call([]), call([], false)), "none");
+	assert.equal(eligibilityTransition(call([]), call([], true)), "none");
 });
 
 test("audit does not count incomplete or non-redirect-aware allows", async () => {

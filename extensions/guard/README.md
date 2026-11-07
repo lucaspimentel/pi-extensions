@@ -424,26 +424,36 @@ filter stays observe-only:
 
 Bash rules match a canonical AST rendering of the **pre-unwrap chain**:
 `command "custom" arg` becomes `command custom arg`. Literal words needing
-shell quoting use single quotes. Words with unquoted glob, tilde, brace or
-extglob syntax render as `@guard:exp:` followed by the UTF-8 source bytes in
-hex; literal words in that marker namespace are quoted and source-preserving
+shell quoting use single quotes. Words with unquoted glob, brace or extglob
+syntax render as `@guard:exp:` followed by the UTF-8 source bytes in hex;
+literal words in that marker namespace are quoted and source-preserving
 words are escaped, case-insensitively. This conservatively
 separates expanding and quoted literal spellings even when the syntax is inert.
-Absent such syntax, parameter expansion words keep their source spelling, so
+A word whose only expansion is unquoted tilde (`~/x`, `~user/x`, `~+`, `~-`,
+or an assignment value such as `f=~/x`) is its own `tilde` kind: it keeps its
+unquoted source spelling, so `cd ~/x` renders `cd ~/x`. No other word kind can
+produce that spelling (a literal containing `~` is always single-quoted, and
+`\~/x` collapses to the same quoted literal), so a rule still cannot reach a
+quoted or escaped `~`. Absent such syntax, parameter expansion words keep
+their source spelling, so
 `custom "$x"` and `custom $x` remain distinct. Assignment values do not
-undergo pathname or brace expansion; unquoted tilde is conservatively encoded.
+undergo pathname or brace expansion; a tilde there is still the `tilde` kind.
 Expanding redirect targets are never exempted as known write-root paths or
 `/dev/null`. Redirects use consistent spacing with descriptors preserved.
 For example, `custom *` renders `custom @guard:exp:2a`, while `custom '*'`
 renders `custom '*'`. A literal marker such as `custom @guard:exp:2a` renders
 `custom '@guard:exp:2a'` instead. Active-expansion eligibility (accepted
-2026-11-07) closes the remaining compatibility hole: a command whose words
-carry active shell expansion (unquoted glob/tilde/brace/extglob spellings, or
+2026-11-07, amended to exempt unquoted tilde) closes the remaining
+compatibility hole: a command whose words
+carry active shell expansion (unquoted glob/brace/extglob spellings, or
 parameter/command/arithmetic/process substitution including inside double
 quotes) can no longer be pre-authorized by ANY allow rule, however broad or
 marker-shaped; every such command prompts each time under default, auto and
 allow-edits, while trusted, yolo and unrestricted are unaffected (rule
-eligibility, not profile scope). Deny and ask rules are unchanged: they still
+eligibility, not profile scope). An unquoted-tilde command stays
+allow-authorizable by a readable rule such as `HostBash(cd ~/x)`, and a tilde
+combined with a glob or a dynamic word (`~/x*`, `~/$X`) remains ineligible.
+Deny and ask rules are unchanged: they still
 match current canonical, previous canonical and raw spellings, so existing
 safety rules keep working. The read-only tier and per-invocation approval are
 the remaining authorization paths. No allow rule is suggested or saved for an
