@@ -606,6 +606,9 @@ function renderResult(summary: string, metadata: ReadonlyArray<[string, string |
 		lines.push(`notice: ${notice}`);
 	}
 	const head = lines.join("\n");
+	// Stable machine boundary between the metadata head and the data block; see
+	// docs/gh-read-design.md, "API result shape and display cap". Split at the FIRST line
+	// whose content is exactly "data:": head lines may themselves contain newlines.
 	const dataLabel = "data:";
 	const overflowNotice =
 		"[gh_read: the API result exceeds 50 KiB. Showing an incomplete UTF-8-safe prefix, NOT complete JSON. Narrow the request (jq filter, line range, subtree path, shallower recursion) and re-run.]";

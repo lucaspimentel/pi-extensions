@@ -683,7 +683,10 @@ test("gh_read guidance steers away from raw gh api and states the write boundary
 	assert.ok(has("html_url", "select(.id =="), "comment by id via html_url and jq");
 	assert.ok(has("do not derive it"), "thread-state unavailability");
 	assert.ok(has("never writes", "host_bash"), "write boundary");
-	assert.equal(tool.promptGuidelines.length, 14, "guideline count");
+	assert.equal(new Set(tool.promptGuidelines).size, tool.promptGuidelines.length, "no duplicate guidelines");
+	assert.ok(tool.promptGuidelines.every((line) => line.trim().length > 0), "no empty guidelines");
+	assert.ok(has("codemode", "Promise.allSettled", "tools.gh_read"), "multi-endpoint fan-out guidance");
+	assert.ok(has("--paginate"), "fan-out guidance names the raw pipeline anti-pattern");
 });
 
 test("execute: rejected issue comments params fail closed with zero spawns", async () => {
@@ -833,7 +836,6 @@ test("gh_read registers the issue timeline literal, the numeric issue field, and
 	assert.ok(tool.promptSnippet.includes("issue timeline"), "promptSnippet names the operation");
 	assert.ok(tool.promptGuidelines.some((line) => line.includes("issues/{n}/timeline") && line.includes("'issue timeline'")), "endpoint-mapping guidance");
 	assert.ok(tool.promptGuidelines.some((line) => line.includes("repos/{owner}/{repo}/issues/{issue}/timeline")), "timeline endpoint guidance");
-	assert.equal(tool.promptGuidelines.length, 14, "guideline count");
 });
 
 test("execute api issue timeline: tool-authored timeline GET, no git gate, verbatim event array", async () => {
@@ -946,7 +948,6 @@ test("gh_read registers the pr threads literal and GraphQL review-thread guidanc
 	assert.ok(has("do not derive it"), "the never-derive-it warning survives");
 	assert.ok(has("never derive it from comment line fields"), "the shapes bullet names the REST reads as the ones without thread state");
 	assert.ok(has("'pr threads'", "page independently"), "the paging bullets enumerate pr threads");
-	assert.equal(tool.promptGuidelines.length, 14, "guideline count");
 	// No reference to the personal gh extension may leak into the guidance.
 	assert.ok(!tool.promptGuidelines.some((line) => line.includes("gh pr-threads")), "no gh-extension reference in the guidance");
 });
@@ -958,7 +959,6 @@ test("gh_read registers the org team literal and the org/slug schema fields", ()
 	assert.equal((schema.properties["org"] as { type?: string } | undefined)?.type, "string", "org is a string schema field");
 	assert.equal((schema.properties["slug"] as { type?: string } | undefined)?.type, "string", "slug is a string schema field");
 	assert.ok(!("outputSchema" in (tool as unknown as Record<string, unknown>)), "no outputSchema");
-	assert.equal(tool.promptGuidelines.length, 14, "guideline count");
 	assert.ok(tool.description.includes("org team"), "description names the operation");
 	assert.ok(tool.description.includes("organization team object"), "description names the returned shape");
 	assert.ok(tool.promptSnippet.includes("org team"), "promptSnippet names the operation");

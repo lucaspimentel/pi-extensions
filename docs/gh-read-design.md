@@ -54,7 +54,7 @@ the main session. Deliberately not tied to any one agent; agents opt in via
 Purpose: steer agents from raw `gh api` and `gh pr-threads` shell calls to
 the operations above and to documented workarounds. Guidance only: no
 allowlist, schema, `description`, or `promptSnippet` change. It lives in the
-`promptGuidelines` array in `extensions/gh-read/index.ts` (14 bullets).
+`promptGuidelines` array in `extensions/gh-read/index.ts`.
 
 Corpus (2026-10-29): all 1277 pi sessions, current session excluded; 1536
 `gh api` occurrences in total, 405 command lines in the 317 sessions where
@@ -116,6 +116,14 @@ Guidance added:
   resolving threads, and submitting reviews need `host_bash`, which guard
   may prompt for depending on the profile. The 60+ review-reply POSTs mean
   `gh_read` can never make PR-review publication shell-free.
+- A multi-endpoint fan-out bullet: for GitHub collection or aggregation
+  across several endpoints, call the `gh_read` API operations from a
+  `codemode` script (`Promise.allSettled` over `tools.gh_read(...)`) rather
+  than running `gh api ... --paginate | jq ...` pipelines through
+  `host_bash`. This keeps each read's bounded paging, caps, completeness
+  metadata, and continuation in force and avoids a host-shell prompt per
+  pipeline. Verify with a corpus refresh (timeline and collector escapes
+  compared by session start date), as in the 2026-11-03 refresh below.
 
 Not covered by guidance: `search/issues`, `commits`, `branches`, and generic
 `graphql` reads other than the review-thread read. `gh pr-threads` is named
@@ -959,6 +967,27 @@ UTF-8-safe prefix preview labeled "NOT complete JSON" plus narrowing
 guidance. Source completeness and display clipping are distinct facts. No
 hidden full payload is retained in details or on disk.
 
+Every API-operation result renders as a metadata head, then exactly one
+separator line whose entire content is `data:`, then the data block. The
+`data:` line is a stable machine boundary: a consumer may split the text at
+the FIRST line whose content is exactly `data:` and treat everything before
+it as the head and everything after it as the data block. Do not parse the
+head as "everything up to the last line before the data": user-supplied
+fields are control-character-free, but content-derived head values can carry
+embedded newlines (a symlink's decoded target echoed into `symlink_target`,
+`followed_symlink`, the summary's `(via symlink ...)` suffix, and the
+symlink notices; a server-provided GraphQL error message echoed into a
+`notice:` line), so only the first exact `data:` line delimits the head. The
+block is the final fetched batch as JSON or the jq output, verbatim except
+for the UTF-8-safe overflow prefix; on overflow it is followed by the
+overflow notice and, when the display was clipped, the clip notice, which
+are not distinguishable from data by position, so read
+`details.output_truncated` instead of inferring truncation from the text.
+The boundary line is present on every API result, including error results
+with empty data. Display clipping remains distinct from source
+completeness. Native command results are plain gh output and carry no
+`data:` boundary; `job logs` is the text-mode exception.
+
 Native command results (the `gh` argv runner and the log runner) carry
 `exitCode: number | null` and `timedOut: boolean` in tool details and set
 `isError: true` on every failure: the worktree gate, a spawn error, a timeout,
@@ -1324,7 +1353,7 @@ Settled in the grill-me review:
   spawns. Review-thread coverage: the `pr threads` schema literal in the
   schema text, description/snippet/guideline assertions (operation-name
   mapping, resolved/outdated pointer, the never-derive-it warning, and the
-  unchanged 14-bullet count), fail-closed validation with zero spawns for
+  unchanged guideline set), fail-closed validation with zero spawns for
   missing/invalid pr, `args`, `ref`, `cursor`, `first`, and `2>&1`, the exact
   tool-authored GraphQL POST argv with a valid payload and no git-gate
   spawn, `details.subcommand`, a resume run whose argv carries
@@ -1342,8 +1371,8 @@ Settled in the grill-me review:
   including `issues/{n}/timeline` is `issue timeline`, `pr diff --name-only`,
   `files,changedFiles`, `pull_request_review_id`, `html_url` plus
   `select(.id ==`, thread-state "do not derive it" together with the
-  `pr threads` pointer, the `host_bash` write boundary) and the 14-bullet
-  count.
+  `pr threads` pointer, the `host_bash` write boundary, and the `codemode`
+  multi-endpoint fan-out guidance).
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 
