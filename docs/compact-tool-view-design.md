@@ -43,7 +43,8 @@ Output is a `@earendil-works/pi-tui` `Text`, as the repo's other renderers use.
 
 Configured per tool name:
 
-- `gist`: the collapsed body is one gist line (plus extra dimmed lines).
+- `gist`: the collapsed body is a gist line set: one normal line plus extra
+  dimmed lines, and two normal lines for a failed `codemode` script.
 - `hide`: no body; the call row plus a dimmed hint built from
   `context.keyHint("app.tools.expand", "to expand")`.
 - `stock`: leave pi's rendering, and remove a name from the defaults.

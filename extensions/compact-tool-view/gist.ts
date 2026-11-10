@@ -30,14 +30,19 @@ const one = (text: string): GistLine[] => [{ text }];
 const asObject = (value: unknown): Record<string, any> | undefined =>
 	value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, any>) : undefined;
 
-const firstText = (content: unknown): string | undefined => {
-	if (!Array.isArray(content)) return undefined;
+/** The `text` of every text content block, in order. */
+const textBlocks = (content: unknown): string[] => {
+	if (!Array.isArray(content)) return [];
+	const texts: string[] = [];
 	for (const block of content) {
 		const obj = asObject(block);
-		if (obj?.type === "text" && typeof obj.text === "string") return obj.text;
+		if (obj?.type === "text" && typeof obj.text === "string") texts.push(obj.text);
 	}
-	return undefined;
+	return texts;
 };
+
+/** The first text content block, or undefined when the result carries none. */
+const firstText = (content: unknown): string | undefined => textBlocks(content)[0];
 
 const hasImageBlock = (content: unknown): boolean =>
 	Array.isArray(content) && content.some((block) => asObject(block)?.type === "image");
@@ -45,7 +50,7 @@ const hasImageBlock = (content: unknown): boolean =>
 /** Line count exactly as the settled design specifies: `text.split("\n").length`. */
 const lineCount = (text: string | undefined): number => (text ?? "").split("\n").length;
 
-/** Text blocks beyond the first, rendered verbatim as one dimmed line each. */
+/** Text blocks beyond the first, one dimmed line each. `codemode` suppresses these (see `gistFor`). */
 const extraLines = (content: unknown): GistLine[] => {
 	if (!Array.isArray(content)) return [];
 	const lines: GistLine[] = [];
@@ -90,16 +95,10 @@ const codemodeCallLine = (verb: "completed" | "failed", calls: any[]): string =>
  * give. pi's `[Image saved to <path>]` block counts as output, on purpose.
  */
 const codemodeOutputLines = (content: unknown): number => {
-	if (!Array.isArray(content)) return 0;
-	const texts: string[] = [];
-	for (let index = 0; index < content.length; index++) {
-		const obj = asObject(content[index]);
-		if (obj?.type !== "text" || typeof obj.text !== "string") continue;
-		if (index === 0 && CODEMODE_HEADER.test(obj.text)) continue;
-		texts.push(obj.text);
-	}
-	if (texts.length === 0) return 0;
-	return lineCount(texts.join("\n"));
+	const texts = textBlocks(content);
+	const header = texts[0];
+	const output = header !== undefined && CODEMODE_HEADER.test(header) ? texts.slice(1) : texts;
+	return output.length === 0 ? 0 : lineCount(output.join("\n"));
 };
 
 /**
@@ -108,12 +107,7 @@ const codemodeOutputLines = (content: unknown): number => {
  * generic `error: <first line>` path run instead.
  */
 const codemodeFailureGist = (result: GistResult): GistLine[] | undefined => {
-	const blocks = Array.isArray(result.content) ? result.content : [];
-	const joined = blocks
-		.map((block) => asObject(block))
-		.filter((block) => block?.type === "text" && typeof block.text === "string")
-		.map((block) => block!.text as string)
-		.join("\n");
+	const joined = textBlocks(result.content).join("\n");
 	const start = joined.indexOf(SCRIPT_ERROR_MARKER);
 	if (start === -1) return undefined;
 	const errorLine = joined.slice(start + SCRIPT_ERROR_MARKER.length).split("\n")[0] ?? "";

@@ -366,28 +366,31 @@ test("content blocks beyond the first render as extra dimmed lines", () => {
 	);
 });
 
+// codemode's result header, exactly as pi writes it (renderer.js SCRIPT_HEADER).
+const codemodeHeader = (verb: string) => `${verb}\nWall time 0.5 seconds\nOutput:\n`;
+
 test("codemode gists the script outcome, nested calls, and output lines", () => {
-	const header = (verb: string) => `${verb}\nWall time 0.5 seconds\nOutput:\n`;
 	// No nested calls and no output: the zero case still names both counts.
-	assert.deepEqual(gistFor("codemode", { content: [{ type: "text", text: header("Script completed") }], details: { calls: [] } }, {}), [
-		{ text: "Script completed, 0 calls, 0 lines" },
-	]);
+	assert.deepEqual(
+		gistFor("codemode", { content: [{ type: "text", text: codemodeHeader("Script completed") }], details: { calls: [] } }, {}),
+		normal("Script completed, 0 calls, 0 lines"),
+	);
 	// Three nested calls with one error, plus a three-line output block.
 	assert.deepEqual(
 		gistFor(
 			"codemode",
 			{
-				content: [{ type: "text", text: header("Script completed") }, { type: "text", text: "a\nb\nc" }],
+				content: [{ type: "text", text: codemodeHeader("Script completed") }, { type: "text", text: "a\nb\nc" }],
 				details: { calls: [{ status: "ok" }, { status: "ok" }, { status: "error" }] },
 			},
 			{},
 		),
-		[{ text: "Script completed, 3 calls, 1 failed, 3 lines" }],
+		normal("Script completed, 3 calls, 1 failed, 3 lines"),
 	);
 	// A cancelled call counts in N, never in the `failed` suffix.
 	assert.deepEqual(
-		gistFor("codemode", { content: [{ type: "text", text: header("Script completed") }, { type: "text", text: "a\nb" }], details: { calls: [{ status: "cancelled" }] } }, {}),
-		[{ text: "Script completed, 1 calls, 2 lines" }],
+		gistFor("codemode", { content: [{ type: "text", text: codemodeHeader("Script completed") }, { type: "text", text: "a\nb" }], details: { calls: [{ status: "cancelled" }] } }, {}),
+		normal("Script completed, 1 calls, 2 lines"),
 	);
 	// Truncation: the count is the head+tail stub the model saw (4 lines), not
 	// the `Total output lines: 400` notice, and the marker is appended.
@@ -396,14 +399,14 @@ test("codemode gists the script outcome, nested calls, and output lines", () => 
 			"codemode",
 			{
 				content: [
-					{ type: "text", text: header("Script completed") },
+					{ type: "text", text: codemodeHeader("Script completed") },
 					{ type: "text", text: "Warning: truncated output (original token count: 500)\nTotal output lines: 400\n\nhead...tail" },
 				],
 				details: { calls: [{ status: "ok" }], fullOutputPath: "/tmp/pi-codemode-x.txt" },
 			},
 			{},
 		),
-		[{ text: "Script completed, 1 calls, 4 lines, truncated" }],
+		normal("Script completed, 1 calls, 4 lines, truncated"),
 	);
 	// An image-only script: pi's `[Image saved to ...]` block is output, and the
 	// image itself is drawn by pi below the gist line.
@@ -412,7 +415,7 @@ test("codemode gists the script outcome, nested calls, and output lines", () => 
 			"codemode",
 			{
 				content: [
-					{ type: "text", text: header("Script completed") },
+					{ type: "text", text: codemodeHeader("Script completed") },
 					{ type: "text", text: "[Image saved to /tmp/a.png (image/png, 1KB)]" },
 					{ type: "image", data: "x", mimeType: "image/png" },
 				],
@@ -420,17 +423,16 @@ test("codemode gists the script outcome, nested calls, and output lines", () => 
 			},
 			{},
 		),
-		[{ text: "Script completed, 0 calls, 1 lines" }],
+		normal("Script completed, 0 calls, 1 lines"),
 	);
 });
 
 test("codemode consumes its content blocks instead of dumping the output", () => {
-	const header = "Script completed\nWall time 0.5 seconds\nOutput:\n";
 	const lines = gistFor(
 		"codemode",
 		{
 			content: [
-				{ type: "text", text: header },
+				{ type: "text", text: codemodeHeader("Script completed") },
 				{ type: "text", text: "first output block" },
 				{ type: "text", text: "second output block" },
 			],
@@ -442,10 +444,9 @@ test("codemode consumes its content blocks instead of dumping the output", () =>
 });
 
 test("codemode failures gist two normal lines: the call summary and the error", () => {
-	const header = "Script failed\nWall time 0.5 seconds\nOutput:\n";
 	const failed = (calls: unknown[]) => ({
 		content: [
-			{ type: "text", text: header },
+			{ type: "text", text: codemodeHeader("Script failed") },
 			{ type: "text", text: "partial output" },
 			{ type: "text", text: "Script error:\nboom\n\nNo tool calls were made." },
 		],
@@ -666,7 +667,7 @@ test("codemode result lines render in the normal output role", () => {
 		wrapped.renderResult(
 			{
 				content: [
-					{ type: "text", text: "Script failed\nWall time 0.5 seconds\nOutput:\n" },
+					{ type: "text", text: codemodeHeader("Script failed") },
 					{ type: "text", text: "Script error:\nboom" },
 				],
 				details: { calls: [] },
