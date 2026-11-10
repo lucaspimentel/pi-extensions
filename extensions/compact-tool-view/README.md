@@ -1,15 +1,17 @@
 # compact-tool-view
 
-Replace the collapsed body of tool result rows with a one-line gist, or hide
-the body entirely. Display-only.
+Replace the collapsed body of tool result rows with a synthesized gist (usually
+one line, two for a failed `codemode` script), or hide the body entirely.
+Display-only.
 
 ## Modes
 
 Per tool name, in `~/.pi/agent/compact-tool-view.json` (a flat JSON map of tool
 name or prefix pattern to mode):
 
-- `"gist"` (the default for every table entry below): the collapsed body is one
-  synthesized summary line, for example `412 lines` for `read` or
+- `"gist"` (the default for every table entry below): the collapsed body is a
+  synthesized summary line set (one line for every tool except `codemode`, whose
+  failure is two normal lines), for example `412 lines` for `read` or
   `7 matches in 3 files` for `ffgrep`. Extra content blocks that pi or guard
   appended (for example guard's warning block) still show, one dimmed line
   each.
@@ -36,6 +38,20 @@ because it renders itself. The `pi-memory` tools (`memory_write`, `scratchpad`,
 `memory_status`) are absent as well, and so are `gitlab_read` and the `pup_*`
 family (`pup_*` is meant to be enabled as one pattern); each has a typed line of
 its own, so adding its name or pattern to the file enables that line.
+
+In the defaults even though they ship their own renderers: `codemode` and
+`tool_search`. Their gists are
+`Script completed, N calls[, M failed], L lines[, truncated]` and
+`N tools loaded` (`no matches` when empty). Only the collapsed result body is
+replaced; expanding shows pi's own view, which for `codemode` means the nested
+calls with their statuses and durations, the model call cost, a five-line output
+preview, the `Full output: <path>` line, and the `Elapsed`/`Took` timer. A failed script collapses to two normal lines instead:
+`Script failed, N calls[, M failed]` and the first line after `Script error:`;
+without pi's error block the single generic `error: <first line>` shows. Counts
+are fixed plural (`1 calls`, `1 lines`), matching the pup lines. Also in the
+defaults: `list_mcp_resources`, `list_mcp_resource_templates`, and
+`read_mcp_resource`, which have no renderer of their own and gist the generic
+line count.
 
 ## Files
 
@@ -64,7 +80,8 @@ the base renderer. Composition: `timestamps` registers its own resolver and
 both delegate through `next()`, so they compose in either load order.
 
 `host_bash`, `ffgrep`, and `fffind` are deliberate overrides of renderers those
-extensions register.
+extensions register, and `codemode` is a deliberate collapsed-only override of
+pi's own codemode renderer.
 
 See [docs/compact-tool-view-design.md](../../docs/compact-tool-view-design.md)
 for the full contract.

@@ -3,9 +3,11 @@
  * imports would be fine too), so plain node test runners can import it via type
  * stripping, matching the ../shared/model-pin.ts convention.
  *
- * `gistFor` returns the gist line plus any extra dimmed lines (content blocks
- * beyond the first, so guard's appended warning blocks stay visible). The
- * renderer styles element 0 as normal tool output and the rest as dim.
+ * `gistFor` returns a line set: each line carries its own `dim` flag and the
+ * renderer styles it from that flag, never by position. Only `codemode` ever
+ * returns more than one line, because its failure is two normal lines. Every
+ * other tool returns one normal line, then the content blocks beyond the first
+ * as verbatim dimmed lines (so guard's appended warning blocks stay visible).
  */
 
 /** Minimal shape of the tool result fields the gist reads. */
@@ -15,6 +17,15 @@ export interface GistResult {
 	structuredContent?: unknown;
 	isError?: boolean;
 }
+
+/** One rendered gist line. `dim` is opt-in; a missing flag means normal output. */
+export interface GistLine {
+	text: string;
+	dim?: boolean;
+}
+
+/** A single normal line, the shape almost every branch returns. */
+const one = (text: string): GistLine[] => [{ text }];
 
 const asObject = (value: unknown): Record<string, any> | undefined =>
 	value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, any>) : undefined;
@@ -35,18 +46,84 @@ const hasImageBlock = (content: unknown): boolean =>
 const lineCount = (text: string | undefined): number => (text ?? "").split("\n").length;
 
 /** Text blocks beyond the first, rendered verbatim as one dimmed line each. */
-const extraLines = (content: unknown): string[] => {
+const extraLines = (content: unknown): GistLine[] => {
 	if (!Array.isArray(content)) return [];
-	const lines: string[] = [];
+	const lines: GistLine[] = [];
 	for (let index = 1; index < content.length; index++) {
 		const obj = asObject(content[index]);
-		if (obj?.type === "text" && typeof obj.text === "string" && obj.text !== "") lines.push(obj.text);
+		if (obj?.type === "text" && typeof obj.text === "string" && obj.text !== "") lines.push({ text: obj.text, dim: true });
 	}
 	return lines;
 };
 
 /**
- * Failures always surface, ignoring gist/hide: `timed out` for a killed or
+ * `codemode`'s result header, copied from pi's own renderer
+ * (`dist/extensions/codemode/renderer.js`, `SCRIPT_HEADER`), and the marker pi
+ * appends to the output text on a failed script. Both are duplicated pi
+ * internals: if pi changes either shape the gist degrades quietly (the header
+ * lines would be counted as output, or a failure would fall back to
+ * `error: Script failed`), which is why they are named constants.
+ */
+const CODEMODE_HEADER = /^Script (completed|failed)\nWall time [\d.]+ seconds\nOutput:\n$/;
+const SCRIPT_ERROR_MARKER = "Script error:\n";
+
+/** The nested tool calls `codemode` reports, or an empty list when there is none. */
+const codemodeCalls = (result: GistResult): any[] => {
+	const calls = asObject(result.details)?.calls;
+	return Array.isArray(calls) ? calls : [];
+};
+
+/**
+ * `Script completed, N calls[, M failed]` or `Script failed, N calls[, M failed]`.
+ * Nouns are deliberately fixed plural (`1 calls`, `1 failed`), matching the pup
+ * convention. `N` counts every nested call including `cancelled` ones; `M` counts
+ * only `status === "error"` and its suffix is omitted when there are none.
+ */
+const codemodeCallLine = (verb: "completed" | "failed", calls: any[]): string => {
+	const failed = calls.filter((call) => asObject(call)?.status === "error").length;
+	return `Script ${verb}, ${calls.length} calls${failed > 0 ? `, ${failed} failed` : ""}`;
+};
+
+/**
+ * Line count of the output the model saw: the text blocks after the header
+ * block, joined. An empty output is `0`, not the `1` that `lineCount("")` would
+ * give. pi's `[Image saved to <path>]` block counts as output, on purpose.
+ */
+const codemodeOutputLines = (content: unknown): number => {
+	if (!Array.isArray(content)) return 0;
+	const texts: string[] = [];
+	for (let index = 0; index < content.length; index++) {
+		const obj = asObject(content[index]);
+		if (obj?.type !== "text" || typeof obj.text !== "string") continue;
+		if (index === 0 && CODEMODE_HEADER.test(obj.text)) continue;
+		texts.push(obj.text);
+	}
+	if (texts.length === 0) return 0;
+	return lineCount(texts.join("\n"));
+};
+
+/**
+ * The two-line `codemode` failure, or undefined when pi's `Script error:` block
+ * is absent (a script rejected before it ran, for example), which lets the
+ * generic `error: <first line>` path run instead.
+ */
+const codemodeFailureGist = (result: GistResult): GistLine[] | undefined => {
+	const blocks = Array.isArray(result.content) ? result.content : [];
+	const joined = blocks
+		.map((block) => asObject(block))
+		.filter((block) => block?.type === "text" && typeof block.text === "string")
+		.map((block) => block!.text as string)
+		.join("\n");
+	const start = joined.indexOf(SCRIPT_ERROR_MARKER);
+	if (start === -1) return undefined;
+	const errorLine = joined.slice(start + SCRIPT_ERROR_MARKER.length).split("\n")[0] ?? "";
+	if (errorLine.trim() === "") return undefined;
+	return [{ text: codemodeCallLine("failed", codemodeCalls(result)) }, { text: errorLine }];
+};
+
+/**
+ * Failures always surface, ignoring gist/hide: `codemode` gets its own two-line
+ * pair when pi's error block is present, then `timed out` for a killed or
  * timed-out exec, `exit N` when an exit code is available, else the first error
  * line.
  *
@@ -61,19 +138,23 @@ const extraLines = (content: unknown): string[] => {
  * still honored when a caller forwards it, and the native shell tools append
  * `Command exited with code N` to `content`, which covers the real exec case.
  */
-const failureGist = (result: GistResult): string | undefined => {
+const failureGist = (toolName: string, result: GistResult): GistLine[] | undefined => {
 	if (!result.isError) return undefined;
+	if (toolName === "codemode") {
+		const codemode = codemodeFailureGist(result);
+		if (codemode !== undefined) return codemode;
+	}
 	const details = asObject(result.details);
-	if (details?.killed === true || details?.timedOut === true) return "timed out";
+	if (details?.killed === true || details?.timedOut === true) return one("timed out");
 	const detailsExitCode = details?.exitCode;
-	if (typeof detailsExitCode === "number" && detailsExitCode !== 0) return `exit ${detailsExitCode}`;
+	if (typeof detailsExitCode === "number" && detailsExitCode !== 0) return one(`exit ${detailsExitCode}`);
 	const exitCode = asObject(result.structuredContent)?.exit_code;
-	if (typeof exitCode === "number") return `exit ${exitCode}`;
+	if (typeof exitCode === "number") return one(`exit ${exitCode}`);
 	const text = firstText(result.content) ?? "";
 	const exited = text.match(/Command exited with code (\d+)/);
-	if (exited) return `exit ${exited[1]}`;
+	if (exited) return one(`exit ${exited[1]}`);
 	const firstLine = text.split("\n")[0] ?? "";
-	return `error: ${firstLine}`;
+	return one(`error: ${firstLine}`);
 };
 
 /**
@@ -104,24 +185,24 @@ const countAt = (value: unknown, path: readonly string[]): number | undefined =>
 	return Array.isArray(current) ? current.length : undefined;
 };
 
-/** The typed gist for one tool, or undefined when the shape is not the expected one. */
-const detailGist = (toolName: string, result: GistResult, args: unknown): string | undefined => {
+/** The typed gist lines for one tool, or undefined when the shape is not the expected one. */
+const detailGist = (toolName: string, result: GistResult, args: unknown): GistLine[] | undefined => {
 	const details = asObject(result.details);
 	switch (toolName) {
 		case "gitlab_read": {
 			// gitlab-read never sets isError, so a timeout or non-zero exit is only
 			// visible here; details carries both. A success returns undefined and
 			// falls through to the generic line count.
-			if (details?.timedOut === true) return "timed out";
+			if (details?.timedOut === true) return one("timed out");
 			const exitCode = details?.exitCode;
-			if (typeof exitCode === "number" && exitCode !== 0) return `exit ${exitCode}`;
+			if (typeof exitCode === "number" && exitCode !== 0) return one(`exit ${exitCode}`);
 			return undefined;
 		}
 		case "read": {
-			if (hasImageBlock(result.content)) return "image";
+			if (hasImageBlock(result.content)) return one("image");
 			const truncation = asObject(details?.truncation);
 			const total = typeof truncation?.totalLines === "number" ? truncation.totalLines : lineCount(firstText(result.content));
-			return `${total} lines${truncation?.truncated ? ", truncated" : ""}`;
+			return one(`${total} lines${truncation?.truncated ? ", truncated" : ""}`);
 		}
 		case "bash":
 		case "host_bash":
@@ -130,7 +211,7 @@ const detailGist = (toolName: string, result: GistResult, args: unknown): string
 			// model-facing first text block is the count source in practice.
 			const output = asObject(result.structuredContent)?.output;
 			const count = lineCount(typeof output === "string" ? output : firstText(result.content));
-			return `done (${count} lines)`;
+			return one(`done (${count} lines)`);
 		}
 		case "edit": {
 			const diff = details?.diff;
@@ -141,103 +222,117 @@ const detailGist = (toolName: string, result: GistResult, args: unknown): string
 				if (line.startsWith("+")) added++;
 				else if (line.startsWith("-")) removed++;
 			}
-			return `+${added} / -${removed}`;
+			return one(`+${added} / -${removed}`);
 		}
 		case "grep": {
 			const limit = details?.matchLimitReached;
 			const count = typeof limit === "number" ? limit : lineCount(firstText(result.content));
-			return `${count}${typeof limit === "number" ? "+" : ""} matches`;
+			return one(`${count}${typeof limit === "number" ? "+" : ""} matches`);
 		}
 		case "find": {
 			const limit = details?.resultLimitReached;
 			const count = typeof limit === "number" ? limit : lineCount(firstText(result.content));
-			return `${count}${typeof limit === "number" ? "+" : ""} files`;
+			return one(`${count}${typeof limit === "number" ? "+" : ""} files`);
 		}
 		case "ls": {
 			const limit = details?.entryLimitReached;
 			const count = typeof limit === "number" ? limit : lineCount(firstText(result.content));
-			return `${count}${typeof limit === "number" ? "+" : ""} entries`;
+			return one(`${count}${typeof limit === "number" ? "+" : ""} entries`);
 		}
 		case "ffgrep": {
 			const matched = details?.totalMatched;
 			if (typeof matched !== "number") return undefined;
 			const files = details?.totalFiles;
-			return `${matched} matches${typeof files === "number" ? ` in ${files} files` : ""}`;
+			return one(`${matched} matches${typeof files === "number" ? ` in ${files} files` : ""}`);
 		}
 		case "fffind": {
 			const matched = details?.totalMatched;
-			return typeof matched === "number" ? `${matched} files` : undefined;
+			return typeof matched === "number" ? one(`${matched} files`) : undefined;
 		}
 		case "python":
 		case "node": {
 			const status = details?.status;
-			return typeof status === "string" ? status : undefined;
+			return typeof status === "string" ? one(status) : undefined;
 		}
 		case "write": {
 			const content = asObject(args)?.content;
-			return typeof content === "string" ? `${lineCount(content)} lines written` : undefined;
+			return typeof content === "string" ? one(`${lineCount(content)} lines written`) : undefined;
+		}
+		case "codemode": {
+			// The gist owns the content blocks for this tool (see gistFor), so the
+			// script output is never dumped as a dimmed extra line. Nested calls,
+			// their durations, the model-call cost, the output preview, the full
+			// output path, and the Elapsed/Took timer all stay on expansion.
+			const lines = codemodeOutputLines(result.content);
+			const truncated = typeof details?.fullOutputPath === "string" ? ", truncated" : "";
+			return one(`${codemodeCallLine("completed", codemodeCalls(result))}, ${lines} lines${truncated}`);
+		}
+		case "tool_search": {
+			const loaded = details?.loaded;
+			if (!Array.isArray(loaded)) return undefined;
+			return one(loaded.length === 0 ? "no matches" : `${loaded.length} tools loaded`);
 		}
 		case "memory_write": {
 			// pi-memory's result text embeds a preview of the whole target file, so its
 			// line count says nothing useful; the target and mode identify the write.
 			const target = details?.target;
-			if (target === "daily") return "daily log appended";
-			if (target === "long_term") return details?.mode === "overwrite" ? "MEMORY.md overwritten" : "MEMORY.md appended";
+			if (target === "daily") return one("daily log appended");
+			if (target === "long_term") return one(details?.mode === "overwrite" ? "MEMORY.md overwritten" : "MEMORY.md appended");
 			return undefined;
 		}
 		case "scratchpad": {
 			// Successful mutations carry `action`; `list` carries only the counts, and
 			// every failure path (no `text`, no match) carries neither.
 			const action = details?.action;
-			if (action === "add") return "item added";
-			if (action === "done") return "item done";
-			if (action === "undo") return "item reopened";
+			if (action === "add") return one("item added");
+			if (action === "done") return one("item done");
+			if (action === "undo") return one("item reopened");
 			if (action === "clear_done") {
 				const removed = details?.removed;
-				return typeof removed === "number" ? `cleared ${removed} done ${removed === 1 ? "item" : "items"}` : undefined;
+				return typeof removed === "number" ? one(`cleared ${removed} done ${removed === 1 ? "item" : "items"}`) : undefined;
 			}
 			const count = details?.count;
 			const open = details?.open;
-			if (typeof count === "number" && typeof open === "number") return `${open} open / ${count} items`;
-			return asObject(args)?.action === "list" ? "empty" : undefined;
+			if (typeof count === "number" && typeof open === "number") return one(`${open} open / ${count} items`);
+			return asObject(args)?.action === "list" ? one("empty") : undefined;
 		}
 		case "memory_read": {
 			const target = asObject(args)?.target;
 			if (target === "list") {
 				const files = details?.files;
-				return Array.isArray(files) ? `${files.length} daily logs` : "no daily logs";
+				return Array.isArray(files) ? one(`${files.length} daily logs`) : one("no daily logs");
 			}
 			// Only `daily` names a file the call row does not show (it defaults to
 			// today); `long_term` and `scratchpad` already gist their line count.
 			if (target !== "daily") return undefined;
-			if (typeof details?.path !== "string") return "no log";
+			if (typeof details?.path !== "string") return one("no log");
 			const date = details.date;
-			return typeof date === "string" ? `${date} log, ${lineCount(firstText(result.content))} lines` : undefined;
+			return typeof date === "string" ? one(`${date} log, ${lineCount(firstText(result.content))} lines`) : undefined;
 		}
 		case "memory_forget": {
 			const removed = details?.removed;
 			if (typeof removed !== "number") return undefined;
-			if (removed === 0) return "nothing removed";
-			return `removed ${removed} ${removed === 1 ? "entry" : "entries"}`;
+			if (removed === 0) return one("nothing removed");
+			return one(`removed ${removed} ${removed === 1 ? "entry" : "entries"}`);
 		}
 		case "memory_restore": {
 			const restored = details?.restored;
-			if (typeof restored === "number" && restored > 0) return `restored ${restored} ${restored === 1 ? "entry" : "entries"}`;
-			return typeof details?.restoredAt === "string" || restored === 0 ? "already restored" : undefined;
+			if (typeof restored === "number" && restored > 0) return one(`restored ${restored} ${restored === 1 ? "entry" : "entries"}`);
+			return typeof details?.restoredAt === "string" || restored === 0 ? one("already restored") : undefined;
 		}
 		case "memory_search": {
 			const count = details?.count;
 			const mode = details?.mode;
 			if (typeof count !== "number" || typeof mode !== "string") return undefined;
 			const embed = details?.embedStarted ? ", embeddings started" : details?.needsEmbed ? ", embeddings missing" : "";
-			return `${count} results (${mode})${embed}`;
+			return one(`${count} results (${mode})${embed}`);
 		}
 		case "memory_status": {
 			if (typeof details?.qmd !== "boolean") return undefined;
-			if (!details.qmd) return "qmd unavailable";
+			if (!details.qmd) return one("qmd unavailable");
 			const collection = details.collection === true ? "collection ok" : "collection missing";
 			const embeddings = typeof details.embeddings === "string" ? details.embeddings : "unknown";
-			return `qmd ok, ${collection}, embeddings ${embeddings}`;
+			return one(`qmd ok, ${collection}, embeddings ${embeddings}`);
 		}
 		case "pup_auth_status": {
 			// The one flat pup payload: there is nothing to count, so it gets its own
@@ -247,7 +342,7 @@ const detailGist = (toolName: string, result: GistResult, args: unknown): string
 			const parsed = asObject(details?.parsed);
 			if (typeof parsed?.authenticated !== "boolean") return undefined;
 			const site = typeof parsed.site === "string" && parsed.site !== "" ? ` (${parsed.site})` : "";
-			return `${parsed.authenticated ? "authenticated" : "not authenticated"}${site}`;
+			return one(`${parsed.authenticated ? "authenticated" : "not authenticated"}${site}`);
 		}
 		default: {
 			// pup_*: the payload is the parsed JSON of `pup ... --output json`, and
@@ -258,7 +353,7 @@ const detailGist = (toolName: string, result: GistResult, args: unknown): string
 			if (spec === undefined) return undefined;
 			const count = countAt(details?.parsed, spec.path);
 			if (count === undefined) return undefined;
-			return `${count} ${spec.noun}${details?.refreshed === true ? ", auth refreshed" : ""}`;
+			return one(`${count} ${spec.noun}${details?.refreshed === true ? ", auth refreshed" : ""}`);
 		}
 	}
 };
@@ -270,11 +365,13 @@ const fallbackGist = (content: unknown): string => {
 };
 
 /**
- * The gist for one tool result: element 0 is the primary line, the rest are
- * extra dimmed lines. Order: failure, typed details, then the generic fallback,
- * with content blocks beyond the first always appended as extras.
+ * The gist lines for one tool result. Order: failure, typed details, then the
+ * generic fallback. Every tool except `codemode` also appends the content blocks
+ * beyond the first as dimmed extras; `codemode` consumes its own blocks so a
+ * long script output never lands in the collapsed row.
  */
-export function gistFor(toolName: string, result: GistResult, args: unknown): string[] {
-	const primary = failureGist(result) ?? detailGist(toolName, result, args) ?? fallbackGist(result.content);
-	return [primary, ...extraLines(result.content)];
+export function gistFor(toolName: string, result: GistResult, args: unknown): GistLine[] {
+	const primary = failureGist(toolName, result) ?? detailGist(toolName, result, args) ?? one(fallbackGist(result.content));
+	if (toolName === "codemode") return primary;
+	return [...primary, ...extraLines(result.content)];
 }

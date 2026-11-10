@@ -17,8 +17,13 @@ export type ActiveMode = Exclude<Mode, "stock">;
  * Code defaults. Every entry gists; nothing hides by default. Presence of a
  * name in the effective table is the opt-in, even for a tool that defines its
  * own renderer. `subagent` is deliberately absent: it renders itself and is
- * left stock. Defaults are exact names only: prefix patterns are a file-only
- * feature.
+ * left stock. `codemode` and `tool_search` do define their own renderers but
+ * are included on purpose: compact-tool-view replaces only their collapsed
+ * result body, while expanded and streaming views delegate to the stock
+ * renderer. The three MCP resource tools have no renderer of their own, so
+ * their gist is the generic line count. Defaults are exact names only: prefix
+ * patterns are a file-only feature, and the `mcp__*` family is a user-config
+ * pattern.
  */
 export const DEFAULT_MODES: Record<string, Mode> = {
 	read: "gist",
@@ -44,6 +49,11 @@ export const DEFAULT_MODES: Record<string, Mode> = {
 	subagent_list: "gist",
 	request_read_access: "gist",
 	write: "gist",
+	codemode: "gist",
+	tool_search: "gist",
+	list_mcp_resources: "gist",
+	list_mcp_resource_templates: "gist",
+	read_mcp_resource: "gist",
 };
 
 /**

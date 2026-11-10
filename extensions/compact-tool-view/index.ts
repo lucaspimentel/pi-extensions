@@ -1,6 +1,7 @@
 /**
  * compact-tool-view: replace the collapsed body of tool result rows with a
- * one-line gist (or, in `hide` mode, no body plus a dimmed expand hint).
+ * synthesized gist line set (usually one line; `codemode` failures are two), or,
+ * in `hide` mode, no body plus a dimmed expand hint.
  *
  * Exactly one `pi.registerToolRenderer` resolver is registered. It never
  * re-registers a tool (that replaces the definition and loses prompt
@@ -28,7 +29,7 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { loadModes, resolveMode } from "./config.ts";
-import { gistFor } from "./gist.ts";
+import { gistFor, type GistLine } from "./gist.ts";
 
 const CONFIG_FILE = "compact-tool-view.json";
 const EXPAND_KEYBINDING = "app.tools.expand";
@@ -42,9 +43,9 @@ interface RenderContextLike {
 	isError?: boolean;
 }
 
-/** The gist line in the normal output role, extra lines (warnings) dimmed. */
-const gistText = (lines: string[], theme: Theme): string =>
-	lines.map((line, index) => theme.fg(index === 0 ? "toolOutput" : "muted", line)).join("\n");
+/** One line per gist line, each styled from its own dim flag. */
+const gistText = (lines: GistLine[], theme: Theme): string =>
+	lines.map((line) => theme.fg(line.dim ? "muted" : "toolOutput", line.text)).join("\n");
 
 const hideText = (theme: Theme, context: RenderContextLike): string =>
 	theme.fg("muted", context.keyHint?.(EXPAND_KEYBINDING, "to expand") ?? "ctrl+o to expand");

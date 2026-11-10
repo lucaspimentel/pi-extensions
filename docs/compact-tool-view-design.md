@@ -50,7 +50,9 @@ Configured per tool name:
 
 All default entries are `gist`; nothing hides by default. Presence of a name in
 the effective table is the opt-in, even when that tool defines its own renderer.
-The shipped defaults deliberately exclude `subagent`, which renders itself.
+The shipped defaults deliberately exclude `subagent`, which renders itself,
+while `codemode` and `tool_search` are included despite defining their own
+renderers, because only their collapsed result body is replaced.
 
 ## Resolver behavior
 
@@ -73,18 +75,25 @@ The shipped defaults deliberately exclude `subagent`, which renders itself.
 
 ## Gist derivation order
 
-`gistFor(toolName, result, args)` returns element 0 (the primary line) plus any
-extra lines, in this order:
+`gistFor(toolName, result, args)` returns a line set: each line carries its own
+`dim` flag and the renderer styles it from that flag, never by position. Only
+`codemode` returns more than one line (its failure is two normal lines). The
+lines are assembled in this order:
 
-1. Failure: `timed out` when `details.killed` or `details.timedOut`, else
-   `exit N` when an exit code is available (see below), else
-   `error: <first line of the error text>` from the first text block.
+1. Failure: `codemode` gets its own two-line pair when pi's `Script error:`
+   block is present (see below), else `timed out` when `details.killed` or
+   `details.timedOut`, else `exit N` when an exit code is available (see below),
+   else `error: <first line of the error text>` from the first text block.
 2. Typed `details`/`structuredContent` per the default table below. Each typed
    branch is gated on the tool name, so a `bash`-shaped details object on an
-   unknown tool falls through to the fallback.
+   unknown tool falls through to the fallback. A branch may return several
+   lines, and a branch whose tool consumes its own content blocks suppresses
+   step 3.
 3. Any content blocks beyond the first render verbatim, one dimmed line each.
    This keeps guard's appended warning blocks (`extensions/guard/index.ts`) and
-   pi's truncation footers visible in a collapsed row.
+   pi's truncation footers visible in a collapsed row. `codemode` is the one
+   exception: its branch consumes its own blocks, so a long script output never
+   lands in the collapsed row.
 4. Fallback: `N lines` from the first text block, or `image` when the result
    carries an image content block.
 
@@ -130,7 +139,46 @@ Every entry below is `gist`.
 | `git_read`, `web_fetch`, `web_search`, `session_search`, `session_excerpt`, `jira_read`, `jira_update`, `subagent_list`, `request_read_access` | generic `N lines` |
 | `gh_read` | `timed out` from `details.timedOut`; `exit N` from a non-zero `details.exitCode`; otherwise generic `N lines` on success. Its `gh` argv and log runners set `isError: true` on every failure and report both fields in `details` (its API path keeps its own `isError` handling, whose failures render through the shared `error: <first line>` path), and a successful read has no count noun because its payloads are heterogeneous |
 | `write` | `N lines written` from `context.args.content` (see the assumption below) |
+| `codemode` | see the `codemode` section below |
+| `tool_search` | `N tools loaded` from `details.loaded`, or `no matches` when the array is empty; without a `loaded` array the generic line count applies |
+| `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource` | generic `N lines`. They define no renderer of their own, and their item counts live in `structuredContent`, which a result renderer never receives |
 | `subagent` | not in the defaults (it renders itself) |
+
+### `codemode` (typed lines, two on failure)
+
+The `codemode` tool ships its own collapsed renderer, and the gist replaces only
+that collapsed body: expanded and streaming views still show pi's own view (the
+last 8 nested calls with status icons and durations, the `Model calls: $x`
+total, a 5-line output preview, a `Full output: <path>` line, and the
+`Elapsed`/`Took` timer). Those are deliberate losses while collapsed, as is the
+duration: the collapsed row still gets `timestamps`' own `ended <time>` line
+when the run crossed a displayed second, but never a duration.
+
+| Case | Gist |
+| --- | --- |
+| success | `Script completed, N calls[, M failed], L lines[, truncated]` |
+| failure | two normal lines: `Script failed, N calls[, M failed]`, then the first line after `Script error:` |
+| failure without a `Script error:` block | the generic single line `error: <first line>` (for example a script rejected before it ran) |
+
+- `N` is `details.calls.length`, counting every nested call including
+  `cancelled` ones, and is always shown, including `0 calls`.
+- `M` counts `details.calls` entries with `status === "error"`; its suffix is
+  omitted when there are none, and a script can succeed while `M` is non-zero
+  when it caught a nested failure.
+- `L` is the line count of the text blocks after the
+  `Script completed|failed\nWall time N seconds\nOutput:\n` header, i.e. the
+  output the model saw; an empty output is `0 lines`, and one of pi's
+  `[Image saved to <path>]` blocks counts. On a truncated result `L` is the
+  head+tail stub, never the `Total output lines:` total, and `, truncated` is
+  appended when `details.fullOutputPath` is set.
+- Images are not mentioned: pi draws image content blocks itself, below the
+  renderer's text, so they stay visible under the gist line.
+- Both branches use the fixed-plural nouns (`1 calls`, `1 failed`), like the pup
+  family.
+- The header regex and the `Script error:` marker are copied from pi
+  (`dist/extensions/codemode/renderer.js`, `.../execute.js`). If pi changes
+  either shape the gist degrades quietly (header lines counted as output, or a
+  failure reduced to `error: Script failed`) rather than crashing.
 
 ### `pi-memory` tools (typed lines, not in the defaults)
 
@@ -190,8 +238,10 @@ newer, so no suffix is added.
 
 Deliberate renderer overrides: `host_bash` overrides guard's own shell result
 renderer (`extensions/guard/index.ts`, `extensions/guard/tools/shell-render.ts`),
-and `ffgrep`/`fffind` override the renderers `@ff-labs/pi-fff` registers. The
-gist replaces those collapsed bodies on purpose.
+and `ffgrep`/`fffind` override the renderers `@ff-labs/pi-fff` registers.
+`codemode` also defines its own renderer and is overridden on purpose, collapsed
+only (see the `codemode` section above). The gist replaces those collapsed
+bodies on purpose.
 
 ## Config
 
@@ -249,7 +299,9 @@ Verified at the resolver level: pi's chain is `resolvers[0](name, () => resolver
 - `!`/`!!` user-bash output (unreachable: `BashExecutionComponent` is constructed
   directly by pi's `interactive-mode.js`).
 - The model-facing `content` and `structuredContent`.
-- Call-row clamping.
+- Call-row clamping, including `codemode`'s collapsed call row (pi's
+  10-visual-line script preview) and any state-dependent variant of it. The
+  deferred options are recorded in `TODO.md`.
 - `-p`/RPC hosts (no renderer path there).
 - Guard policy (no tool name or classification changes).
 
@@ -260,5 +312,8 @@ Verified at the resolver level: pi's chain is `resolvers[0](name, () => resolver
 prefix patterns, pattern precedence, and invalid keys), and the resolver wiring
 (collapsed gist replacement, expanded/streaming delegation, `hide`,
 failure-over-`hide`, extra dimmed lines, pattern wrapping, and unknown/`stock`
-pass-through). The file is listed in the explicit `test:ci` script in
+pass-through). It also covers the line-set shape (per-line `dim` flags), the
+`codemode` success, failure, truncated, image-only, and no-error-block cases,
+`tool_search` with and without matches, the MCP resource tool fallback, and the
+five new shipped defaults. The file is listed in the explicit `test:ci` script in
 `package.json`; an unlisted file never runs.
