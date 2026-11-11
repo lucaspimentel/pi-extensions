@@ -52,8 +52,15 @@ export function isIntelligentTerminalEnabled(
 	return Boolean(env.WT_COM_CLSID) && Boolean(env.WT_SESSION);
 }
 
-export default function (pi: ExtensionAPI) {
-	if (!isIntelligentTerminalEnabled()) return;
+/** Gate inputs a host can override; pi passes only `pi`, so both default to the
+ *  real process. They exist so tests can run the handlers off Windows. */
+export interface IntelligentTerminalOptions {
+	env?: NodeJS.ProcessEnv;
+	platform?: NodeJS.Platform;
+}
+
+export default function (pi: ExtensionAPI, options: IntelligentTerminalOptions = {}): void {
+	if (!isIntelligentTerminalEnabled(options.env ?? process.env, options.platform ?? process.platform)) return;
 
 	let lifecycle = initialLifecycleState();
 	let sessionId: string | null = null;

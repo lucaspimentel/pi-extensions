@@ -112,14 +112,17 @@ function payloadAt(index: number): Record<string, unknown> {
 	return JSON.parse(spawns[index].child.stdin.written[0]);
 }
 
-function loadInstance(): Record<string, Handler> {
+function loadInstance(options: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {}): Record<string, Handler> {
 	const handlers: Record<string, Handler> = {};
 	const pi = {
 		on(event: string, handler: Handler) {
 			handlers[event] = handler;
 		},
 	};
-	(intelligentTerminal as any)(pi);
+	// The real host the extension targets is Windows, and pi passes only `pi`.
+	// Pin the platform here so the suite also exercises the handlers on the
+	// Linux CI runners, where the default gate would register nothing.
+	(intelligentTerminal as any)(pi, { env: process.env, platform: "win32", ...options });
 	return handlers;
 }
 
@@ -197,9 +200,12 @@ test("gate matrix: platform, opt-out, and pane environment", () => {
 });
 
 test("gate failure registers no handlers at all", () => {
-	delete process.env.WT_SESSION;
-	const handlers = loadInstance();
-	assert.deepEqual(Object.keys(handlers), []);
+	// Missing pane identity: no WT_SESSION in the gate environment.
+	assert.deepEqual(Object.keys(loadInstance({ env: { WT_COM_CLSID: "{c}" } })), []);
+
+	// A host that is not Windows registers nothing even with a full pane env.
+	assert.deepEqual(Object.keys(loadInstance({ platform: "linux" })), []);
+
 	assert.deepEqual(spawns, []);
 });
 
