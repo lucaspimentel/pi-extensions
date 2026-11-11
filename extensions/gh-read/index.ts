@@ -7,7 +7,7 @@
  * never through a shell, plus narrowly scoped GitHub API operations
  * (repo contents, repo tree, commit checks, advisory view, check
  * annotations, repo metadata, pr comments, pr reviews, issue comments,
- * issue timeline, pr threads, org team) with tool-authored, encoded
+ * issue timeline, pr threads, org team, pr batch) with tool-authored, encoded
  * requests against github.com only.
  *
  * Argument validation lives in validate.ts; the bounded, sanitized spawn
@@ -54,6 +54,7 @@ const SUBCOMMAND_SCHEMAS = [
 	Type.Literal("issue timeline"),
 	Type.Literal("pr threads"),
 	Type.Literal("org team"),
+	Type.Literal("pr batch"),
 ] as const;
 
 const ghReadParams = Type.Object({
@@ -110,6 +111,15 @@ const ghReadParams = Type.Object({
 	check_run_id: Type.Optional(
 		Type.Number({ description: "check annotations: the check run id whose annotations are fetched; a safe integer >= 1. Never used with native subcommands." }),
 	),
+	targets: Type.Optional(
+		Type.Array(Type.String(), { description: "pr batch: 1 to 15 targets, each exactly OWNER/REPO#N. Full repo required; no bare numbers, PR URLs, or host prefixes. Duplicates are rejected." }),
+	),
+	fields: Type.Optional(
+		Type.Array(Type.String(), { description: "pr batch: gh --json field names applied to every target; omitted uses a default scalar set. projectCards, projectItems, and reactionGroups are rejected." }),
+	),
+	account: Type.Optional(
+		Type.String({ description: "pr batch: optional gh account login. Omitted uses the ambient active account with no pre-check; a named account is validated and its token is injected into the child environment, never into output." }),
+	),
 });
 
 interface GhReadDetails {
@@ -118,7 +128,7 @@ interface GhReadDetails {
 }
 
 const NATIVE_DESCRIPTION =
-	"Run a read-only gh command (pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view) for the current repository (or anywhere, for `auth status`), or a narrowly scoped GitHub API operation: 'repo contents' (decoded file text or directory entries at a pinned ref), 'repo tree' (recursive or shallow tree), 'commit checks' (check runs plus legacy statuses for a commit), 'advisory view' (exact CVE/GHSA lookup), or 'check annotations' (annotations of one check run), or 'repo metadata' (default branch, description, visibility, URLs, and other flat repository facts), or 'pr comments' (inline review comments and replies), or 'pr reviews' (review bodies and verdicts), or 'issue comments' (conversation comments on an issue or PR), or 'issue timeline' (conversation-adjacent events for an issue or PR; a PR number reads that PR's timeline through the same issue field), or 'pr threads' (GraphQL review threads, resolved and outdated included), or 'org team' (one organization team object by bare org login and team slug, a single unpaged object). 'pr comments', 'pr reviews', and 'issue comments' require repo plus a positive safe-integer pr (or issue) number and return verbatim REST arrays with independent bounded continuation paging but no resolved/outdated thread state; 'issue timeline' requires repo plus a positive safe-integer issue number (a PR number reads that PR's timeline) and returns the verbatim event array with bounded continuation paging, narrowable with jq, e.g. [.[] | select(.event == \"reviewed\" or .event == \"commented\") | {event, actor: (.actor.login // .user.login), at: .created_at, body}]; 'pr threads' requires repo plus a positive safe-integer pr number and returns the GraphQL reviewThreads nodes with that state and bounded cursor continuation; 'org team' requires a bare org login plus a team slug and returns one organization team object. All accept optional jq. Native commands take flags in args; API operations take structured fields (repo, path, ref, jq, ...) and work outside a git worktree. Only allowlisted flags and fields are accepted; output is capped and nothing mutates.";
+	"Run a read-only gh command (pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view) for the current repository (or anywhere, for `auth status`), or a narrowly scoped GitHub API operation: 'repo contents' (decoded file text or directory entries at a pinned ref), 'repo tree' (recursive or shallow tree), 'commit checks' (check runs plus legacy statuses for a commit), 'advisory view' (exact CVE/GHSA lookup), or 'check annotations' (annotations of one check run), or 'repo metadata' (default branch, description, visibility, URLs, and other flat repository facts), or 'pr comments' (inline review comments and replies), or 'pr reviews' (review bodies and verdicts), or 'issue comments' (conversation comments on an issue or PR), or 'issue timeline' (conversation-adjacent events for an issue or PR; a PR number reads that PR's timeline through the same issue field), or 'pr threads' (GraphQL review threads, resolved and outdated included), or 'org team' (one organization team object by bare org login and team slug, a single unpaged object). 'pr comments', 'pr reviews', and 'issue comments' require repo plus a positive safe-integer pr (or issue) number and return verbatim REST arrays with independent bounded continuation paging but no resolved/outdated thread state; 'issue timeline' requires repo plus a positive safe-integer issue number (a PR number reads that PR's timeline) and returns the verbatim event array with bounded continuation paging, narrowable with jq, e.g. [.[] | select(.event == \"reviewed\" or .event == \"commented\") | {event, actor: (.actor.login // .user.login), at: .created_at, body}]; 'pr threads' requires repo plus a positive safe-integer pr number and returns the GraphQL reviewThreads nodes with that state and bounded cursor continuation; 'org team' requires a bare org login plus a team slug and returns one organization team object, or 'pr batch' (up to 15 pull requests across repositories named as OWNER/REPO#N targets in one call, one envelope per target, with optional fields, account, and jq). All accept optional jq. Native commands take flags in args; API operations take structured fields (repo, path, ref, jq, ...) and work outside a git worktree. Only allowlisted flags and fields are accepted; output is capped and nothing mutates.";
 
 export default function ghReadExtension(pi: ExtensionAPI): void {
 	pi.registerTool<typeof ghReadParams, GhReadDetails>({
@@ -126,7 +136,7 @@ export default function ghReadExtension(pi: ExtensionAPI): void {
 		label: "GitHub Read",
 		description: NATIVE_DESCRIPTION,
 		promptSnippet:
-			"Run read-only gh commands (pr/issue view, list, pr diff, pr checks, auth status, GitHub Actions run list/view with bounded log output) and scoped GitHub API reads (repo contents/tree, commit checks, advisories, check annotations, repo metadata, pr comments/reviews, issue comments, issue timeline, pr threads, org team)",
+			"Run read-only gh commands (pr/issue view, list, pr diff, pr checks, auth status, GitHub Actions run list/view with bounded log output) and scoped GitHub API reads (repo contents/tree, commit checks, advisories, check annotations, repo metadata, pr comments/reviews, issue comments, issue timeline, pr threads, org team, pr batch)",
 		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 		promptGuidelines: [
 			"Prefer gh_read over asking the user to paste PR descriptions, review comments, or issue bodies; native commands run in the session's repository, while scoped API operations name an explicit target and work outside a worktree.",
@@ -144,6 +154,7 @@ export default function ghReadExtension(pi: ExtensionAPI): void {
 			"Shapes with no dedicated operation; do not fall back to raw `gh api`. Changed-file list: use subcommand 'pr diff' with args ['--name-only', '<pr number>'] (add '-R', 'OWNER/REPO' outside the worktree), or 'pr view' with args ['--json', 'files,changedFiles', '<pr number>'] when you need per-file additions/deletions or change type; compare the length of files with changedFiles to detect a truncated list. One review's own comments: 'pr comments' with jq '.[] | select(.pull_request_review_id == <review id>)'; jq applies to each fetched batch, so an empty filtered batch proves nothing until source_complete is true. Review bodies are separate: use 'pr reviews' for those. A comment by id: take the PR or issue number from the comment's html_url (review comments also expose pull_request_url) and run 'pr comments' (or 'issue comments') on that number with jq '.[] | select(.id == <comment id>)'. The REST comment reads ('pr comments', 'pr reviews', 'issue comments') provide no resolved/outdated thread state; use 'pr threads' for that and never derive it from comment line fields.",
 			"gh_read never writes. Posting review replies or comments, resolving threads, and submitting reviews require the host shell (host_bash); the sandboxed bash tool has no network or gh credentials. Guard may prompt before running host_bash commands, so state the exact command and target.",
 			"Multi-endpoint GitHub collection or aggregation: fan out over the gh_read API operations from a codemode script, e.g. Promise.allSettled over tools.gh_read(...) calls, instead of building `gh api ... --paginate | jq ...` pipelines in host_bash; each call keeps its own bounded paging, caps, completeness metadata, and continuation.",
+			"Reading several pull requests across repositories: use subcommand 'pr batch' with targets such as ['owner/repo#123', 'other/repo#45'] instead of a `for` loop over `gh pr view` in host_bash, because any loop, conditional, or block is treated as one command that always prompts. It returns one envelope per target in input order, defaults to a compact scalar field set, and accepts an optional account for a secondary GitHub login.",
 		],
 		parameters: ghReadParams,
 		async execute(_id, params, signal, _onUpdate, ctx) {

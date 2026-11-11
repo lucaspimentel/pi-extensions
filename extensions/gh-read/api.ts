@@ -3,8 +3,9 @@
  * commit checks, exact advisory lookup, check-run annotations, repository
  * metadata, mutable PR comments/reviews and issue comments/issue timeline,
  * PR review threads (resolved and outdated included) over a tool-authored
- * GraphQL POST, and one organization team by org + slug. Operation
- * orchestration and result rendering live together in this module.
+ * GraphQL POST, one organization team by org + slug, and a batched
+ * multi-target PR read that runs one plain `gh pr view` per target.
+ * Operation orchestration and result rendering live together in this module.
  *
  * Contract highlights (docs/gh-read-design.md, "GitHub API operations"):
  * - Omitted refs resolve through repository default-branch metadata, then
@@ -1362,6 +1363,9 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 		graphql: async (query, variables) => clock.now() >= requester.deadline()
 			? { kind: "stop", reason: "shared deadline exceeded between responses" }
 			: await requester.graphql(query, variables),
+		plain: async (argv, env) => clock.now() >= requester.deadline()
+			? { exitCode: null, stdout: "", stderr: "shared deadline exceeded before request" }
+			: await requester.plain(argv, env),
 		capturedBytes: () => requester.capturedBytes(),
 		budgetExhausted: () => requester.budgetExhausted(),
 		deadline: () => requester.deadline(),
@@ -1454,6 +1458,9 @@ async function opIssueTimeline(invocation: ValidApiInvocation, requester: ApiReq
 		graphql: async (query, variables) => clock.now() >= requester.deadline()
 			? { kind: "stop", reason: "shared deadline exceeded between responses" }
 			: await requester.graphql(query, variables),
+		plain: async (argv, env) => clock.now() >= requester.deadline()
+			? { exitCode: null, stdout: "", stderr: "shared deadline exceeded before request" }
+			: await requester.plain(argv, env),
 		capturedBytes: () => requester.capturedBytes(),
 		budgetExhausted: () => requester.budgetExhausted(),
 		deadline: () => requester.deadline(),
@@ -1600,6 +1607,8 @@ async function opPrThreads(invocation: ValidApiInvocation, requester: ApiRequest
 			clock.now() >= requester.deadline() ? { kind: "stop", reason: "shared deadline exceeded between responses" } : await requester.request(path),
 		graphql: async (query, variables) =>
 			clock.now() >= requester.deadline() ? { kind: "stop", reason: "shared deadline exceeded between responses" } : await requester.graphql(query, variables),
+		plain: async (argv, env) =>
+			clock.now() >= requester.deadline() ? { exitCode: null, stdout: "", stderr: "shared deadline exceeded before request" } : await requester.plain(argv, env),
 		capturedBytes: () => requester.capturedBytes(),
 		budgetExhausted: () => requester.budgetExhausted(),
 		deadline: () => requester.deadline(),
@@ -1789,6 +1798,129 @@ async function opOrgTeam(invocation: ValidApiInvocation, requester: ApiRequester
 	return await renderData(invocation, summary, metadata, body, [], false, requester, deps);
 }
 
+// ── Operation: pr batch ──────────────────────────────────────────────────────
+
+/** gh's own wording for a `--json` field name its decoder does not know. */
+const PR_BATCH_UNKNOWN_FIELD_RE = /unknown JSON field/i;
+
+/**
+ * Removes a resolved account token from externally sourced text before it is
+ * rendered. The token is injected only into the child environment; this is
+ * the last guard against a child echoing it into stderr.
+ */
+function scrubSecret(text: string, secret: string | undefined): string {
+	if (secret === undefined || secret.length === 0) return text;
+	return text.split(secret).join("[redacted]");
+}
+
+/**
+ * True when `gh auth status --json hosts` reports `account` as a login on
+ * github.com. gh's JSON mode exits 0 even when logged out, so an empty or
+ * non-matching hosts map is "not found" rather than a child failure.
+ */
+function accountIsAuthenticatedOnGithub(stdout: string, account: string): boolean {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout);
+	} catch {
+		return false;
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
+	const hosts = (parsed as Record<string, unknown>)["hosts"];
+	if (typeof hosts !== "object" || hosts === null || Array.isArray(hosts)) return false;
+	const entries = (hosts as Record<string, unknown>)["github.com"];
+	if (!Array.isArray(entries)) return false;
+	return entries.some(
+		(entry) => typeof entry === "object" && entry !== null && (entry as Record<string, unknown>)["login"] === account,
+	);
+}
+
+/** Splits an already-validated `OWNER/REPO#N` target into repo and number. */
+function splitBatchTarget(target: string): { repo: string; number: string } {
+	const at = target.lastIndexOf("#");
+	return { repo: target.slice(0, at), number: target.slice(at + 1) };
+}
+
+/**
+ * Reads N pull requests across repositories in one call: one plain
+ * `gh pr view --json <fields> -R <repo> <n>` child per target, sequentially,
+ * sharing the deadline, captured-output budget, and stderr cap. Each target
+ * yields one envelope in input order; a failed target never fails the call.
+ * There is no completeness field and no continuation: gh owns its own list
+ * caps (for example the silent 100-file cap behind `files`).
+ */
+async function opPrBatch(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
+	const targets = invocation.targets ?? [];
+	const fields = invocation.fields ?? [];
+	const summary = "gh_read api: pr batch";
+	const metadata: Array<[string, string | number | boolean | null]> = [
+		["targets", targets.length],
+		["account", invocation.account ?? "(active)"],
+	];
+
+	let token: string | undefined;
+	if (invocation.account !== undefined) {
+		const account = invocation.account;
+		const status = await requester.plain(["auth", "status", "--json", "hosts"]);
+		if (status.exitCode !== 0) {
+			return renderResult(summary, metadata, "", {
+				isError: true,
+				notices: [`gh auth status failed for account '${account}': ${status.stderr !== "" ? status.stderr : "no diagnostic"}`],
+			});
+		}
+		if (!accountIsAuthenticatedOnGithub(status.stdout, account)) {
+			return renderResult(summary, metadata, "", {
+				isError: true,
+				notices: [`account '${account}' is not an authenticated github.com login`],
+			});
+		}
+		const tokenAttempt = await requester.plain(["auth", "token", "--user", account]);
+		if (tokenAttempt.exitCode !== 0 || tokenAttempt.stdout.trim().length === 0) {
+			return renderResult(summary, metadata, "", {
+				isError: true,
+				notices: [`could not resolve a token for account '${account}'`],
+			});
+		}
+		token = tokenAttempt.stdout.trim();
+	}
+
+	const env = token === undefined ? undefined : { GH_TOKEN: token };
+	const envelopes: Array<Record<string, unknown>> = [];
+	let succeeded = 0;
+	for (let index = 0; index < targets.length; index += 1) {
+		const target = targets[index]!;
+		const { repo, number } = splitBatchTarget(target);
+		const attempt = await requester.plain(["pr", "view", "--json", fields.join(","), "-R", repo, number], env);
+		if (attempt.exitCode === 0) {
+			let data: unknown;
+			try {
+				data = JSON.parse(attempt.stdout);
+			} catch {
+				envelopes.push({ target, ok: false, error: { exitCode: null, message: "gh pr view did not return JSON" } });
+				continue;
+			}
+			envelopes.push({ target, ok: true, data });
+			succeeded += 1;
+			continue;
+		}
+		const message = scrubSecret(attempt.stderr.length > 0 ? attempt.stderr : "gh exited without a message", token);
+		envelopes.push({ target, ok: false, error: { exitCode: attempt.exitCode, message } });
+		if (PR_BATCH_UNKNOWN_FIELD_RE.test(message)) {
+			for (const remaining of targets.slice(index + 1)) {
+				envelopes.push({
+					target: remaining,
+					ok: false,
+					error: { exitCode: null, message: "not attempted: an earlier target failed with an unknown --json field" },
+				});
+			}
+			break;
+		}
+	}
+	const failed = envelopes.length - succeeded;
+	if (failed > 0) metadata.push(["failures", `${failed} of ${targets.length} targets failed`]);
+	return await renderData(invocation, summary, metadata, envelopes, [], succeeded === 0, requester, deps);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export async function runApiOperation(
@@ -1830,5 +1962,7 @@ async function dispatchOperation(
 			return await opPrThreads(invocation, requester, deps);
 		case "org team":
 			return await opOrgTeam(invocation, requester, deps);
+		case "pr batch":
+			return await opPrBatch(invocation, requester, deps);
 	}
 }

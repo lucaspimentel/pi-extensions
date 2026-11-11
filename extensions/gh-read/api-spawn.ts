@@ -98,6 +98,31 @@ export function isGhApiStop(outcome: ApiRequestOutcome): outcome is GhApiStop {
 	return (outcome as GhApiStop).kind === "stop";
 }
 
+/**
+ * Outcome of one plain `gh` command: no `--include`, so stdout is the whole
+ * captured body and there is no HTTP status to parse. `stdout` is empty on
+ * every failure, and `stderr` carries the verbatim child stderr or a tool
+ * reason when no child ran.
+ */
+export interface GhPlainResult {
+	exitCode: number | null;
+	stdout: string;
+	stderr: string;
+}
+
+/** Raw result of one bounded child, before any transport interpretation. */
+interface ChildCapture {
+	code: number | null;
+	signal: NodeJS.Signals | null;
+	spawnError?: string;
+	timedOut: boolean;
+	cancelled: boolean;
+	overflow: boolean;
+	headerChunks: Buffer[];
+	bodyChunks: Buffer[];
+	stderr: string;
+}
+
 export interface ApiRequester {
 	/**
 	 * Issues one REST GET against github.com; pathAndQuery is already encoded.
@@ -111,6 +136,12 @@ export interface ApiRequester {
 	 * (string) or `-F` (number) pairs in caller order.
 	 */
 	graphql(query: string, variables: ReadonlyArray<readonly [string, string | number]>): Promise<ApiRequestOutcome>;
+	/**
+	 * Runs one plain `gh` command through the shared bounded child: no
+	 * `--include`, no header or HTTP-status parsing, so stdout is the whole
+	 * captured body. `env` entries override buildGhEnv().
+	 */
+	plain(argv: readonly string[], env?: Record<string, string | undefined>): Promise<GhPlainResult>;
 	/** Cumulative captured response bytes (headers included) so far. */
 	capturedBytes(): number;
 	/** True once the budget has been exhausted mid-response or up front. */
@@ -279,9 +310,39 @@ export class GhApiRunner implements ApiRequester {
 		return await this.executeArgv(argv, "graphql");
 	}
 
+	/**
+	 * Runs one plain `gh` command through the shared bounded child: no
+	 * `--include`, no header or HTTP-status parsing, so stdout is the whole
+	 * captured body. `env` entries override buildGhEnv().
+	 */
+	async plain(argv: readonly string[], env?: Record<string, string | undefined>): Promise<GhPlainResult> {
+		const preflight = this.preflightOutcome();
+		if (preflight !== null) {
+			const reason = preflight.kind === "response" ? "request refused before spawn" : preflight.reason;
+			return { exitCode: null, stdout: "", stderr: reason };
+		}
+		return this.interpretPlain(await this.runChild([...argv], env, false));
+	}
+
 	private async executeArgv(argv: string[], mode: "rest" | "graphql"): Promise<ApiRequestOutcome> {
 		const preflight = this.preflightOutcome();
 		if (preflight !== null) return preflight;
+		return this.interpretApi(await this.runChild(argv, undefined, true), mode);
+	}
+
+	/**
+	 * One bounded child, shared by every transport: continuous drain, the
+	 * cumulative captured-output budget, the per-response stderr cap, the
+	 * shared deadline, abort handling, SIGTERM-then-SIGKILL teardown, and
+	 * reaping before the promise resolves. Interpretation belongs to the
+	 * caller. `splitHeaders` retains the `--include` header block separately;
+	 * plain mode keeps every stdout byte as the body.
+	 */
+	private async runChild(
+		argv: string[],
+		env: Record<string, string | undefined> | undefined,
+		splitHeaders: boolean,
+	): Promise<ChildCapture> {
 		const spawnFn = spawnOverride ?? spawn;
 		let child: ReturnType<typeof spawn>;
 		try {
@@ -289,15 +350,24 @@ export class GhApiRunner implements ApiRequester {
 				cwd: this.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
-				env: buildGhEnv(),
+				env: { ...buildGhEnv(), ...(env ?? {}) },
 				windowsHide: true,
 			});
 		} catch (err) {
-			this.poisoned = true;
-			return { kind: "error", reason: `failed to run gh api: ${err instanceof Error ? err.message : String(err)}` };
+			return {
+				code: null,
+				signal: null,
+				spawnError: err instanceof Error ? err.message : String(err),
+				timedOut: false,
+				cancelled: false,
+				overflow: false,
+				headerChunks: [],
+				bodyChunks: [],
+				stderr: "",
+			};
 		}
 
-		return await new Promise<ApiRequestOutcome>((resolvePromise) => {
+		return await new Promise<ChildCapture>((resolvePromise) => {
 			const headerChunks: Buffer[] = [];
 			const bodyChunks: Buffer[] = [];
 			let headerBytes = 0;
@@ -352,7 +422,7 @@ export class GhApiRunner implements ApiRequester {
 					escalation = schedule(() => teardown(true), TEARDOWN_GRACE_MS);
 					return;
 				}
-				if (!headersDone) {
+				if (splitHeaders && !headersDone) {
 					// Split header block from body on the first blank line once
 					// both halves are visible; headers capped independently.
 					headerChunks.push(chunk);
@@ -393,101 +463,23 @@ export class GhApiRunner implements ApiRequester {
 				const stderr = this.stderrRetained.join("").trim();
 				if (spawnError !== undefined) {
 					this.poisoned = true;
-					resolvePromise({ kind: "error", reason: `failed to run gh api: ${spawnError}`, stderr });
+					resolvePromise({ code: null, signal: null, spawnError, timedOut, cancelled, overflow, headerChunks, bodyChunks, stderr });
 					return;
 				}
 				if (cancelled) {
-					resolvePromise({ kind: "error", reason: "cancelled mid-request", stderr, interrupted: true });
+					resolvePromise({ code: null, signal: null, timedOut, cancelled, overflow, headerChunks, bodyChunks, stderr });
 					return;
 				}
 				if (timedOut) {
-					resolvePromise({
-						kind: "error",
-						reason: `shared ${API_DEADLINE_MS} ms deadline exceeded mid-request`,
-						stderr,
-						interrupted: true,
-					});
+					resolvePromise({ code: null, signal: null, timedOut, cancelled, overflow, headerChunks, bodyChunks, stderr });
 					return;
 				}
 				if (overflow) {
 					this.poisoned = true;
-					resolvePromise({
-						kind: "error",
-						reason: `cumulative captured-output budget of ${API_STDOUT_BUDGET} bytes exceeded mid-response`,
-						stderr,
-						interrupted: true,
-					});
+					resolvePromise({ code: null, signal: null, timedOut, cancelled, overflow, headerChunks, bodyChunks, stderr });
 					return;
 				}
-
-				// Split the (possibly multi-block, redirect) header stream from
-				// the body: skip leading HTTP blocks until the body does not
-				// start with another status line.
-				const raw = Buffer.concat([...headerChunks, ...bodyChunks]);
-				let headers = "";
-				let bodyBuf = raw;
-				for (;;) {
-					const sep = bodyBuf.indexOf("\r\n\r\n");
-					const alt = sep === -1 ? bodyBuf.indexOf("\n\n") : -1;
-					const at = sep !== -1 ? sep + 4 : alt !== -1 ? alt + 2 : -1;
-					if (at === -1) break;
-					const blockStart = bodyBuf.subarray(0, at).toString("utf8");
-					const rest = bodyBuf.subarray(at);
-					const nextIsStatus = /^HTTP\/[\d.]+ \d{3}/.test(rest.subarray(0, 32).toString("utf8").trimStart());
-					headers = blockStart;
-					bodyBuf = rest;
-					if (!nextIsStatus) break;
-				}
-				const statusMatch = /HTTP\/[\d.]+ (\d{3})/.exec(headers);
-				const httpStatus = statusMatch !== null ? Number(statusMatch[1]) : 0;
-
-				// A body is only trustworthy if the child exited cleanly and
-				// the full stream arrived; interrupted responses are rejected
-				// even when the retained bytes would parse.
-				if (signal !== null && signal !== undefined) {
-					resolvePromise({ kind: "error", reason: `gh api terminated by signal ${signal}`, stderr, interrupted: true });
-					return;
-				}
-				let bodyText: string;
-				try {
-					// Strict decode: malformed UTF-8 in the body rejects the
-					// response rather than silently substituting replacement
-					// characters into JSON.
-					bodyText = new TextDecoder("utf-8", { fatal: true }).decode(bodyBuf);
-				} catch {
-					resolvePromise({ kind: "error", reason: "response body contained malformed UTF-8", stderr, interrupted: true });
-					return;
-				}
-				// GraphQL tolerance: GitHub's `api graphql` exits 1 even when the
-				// response carries usable data beside an `errors` array. Accept that
-				// exit only with a 2xx status AND a JSON object body; every other
-				// nonzero code (REST always) keeps the error path below.
-				const graphqlAccepted =
-					mode === "graphql" && code === 1 && httpStatus >= 200 && httpStatus < 300 && isJsonObject(bodyText);
-				if (code !== 0 && !graphqlAccepted) {
-					if (httpStatus >= 400) {
-						resolvePromise({
-							kind: "error",
-							reason: `gh api exited with code ${code}`,
-							httpStatus,
-							stderr: stderr.length > 0 ? stderr : bodyText.slice(0, 512),
-						});
-					} else {
-						resolvePromise({ kind: "error", reason: `gh api exited with code ${code}`, stderr: stderr || bodyText.slice(0, 512) });
-					}
-					return;
-				}
-				if (httpStatus < 200 || httpStatus >= 300) {
-					resolvePromise({ kind: "error", reason: `unexpected HTTP status ${httpStatus}`, httpStatus, stderr });
-					return;
-				}
-				resolvePromise({
-					kind: "response",
-					httpStatus,
-					headers,
-					body: bodyText,
-					bodyBytes: bodyBuf.length,
-				});
+				resolvePromise({ code, signal, timedOut, cancelled, overflow, headerChunks, bodyChunks, stderr });
 			};
 
 			child.on("error", (err: Error) => {
@@ -497,5 +489,125 @@ export class GhApiRunner implements ApiRequester {
 				finish(code, sig);
 			});
 		});
+	}
+
+	/**
+	 * Interprets one captured `--include` child for the REST and GraphQL
+	 * transports: skips leading redirect blocks, parses the final status line,
+	 * applies the strict UTF-8 decode, and tolerates GraphQL's exit 1 when a
+	 * 2xx body still carries usable data beside an `errors` array.
+	 */
+	private interpretApi(capture: ChildCapture, mode: "rest" | "graphql"): ApiRequestOutcome {
+		const { code, signal, spawnError, timedOut, cancelled, overflow, headerChunks, bodyChunks, stderr } = capture;
+		if (spawnError !== undefined) {
+			this.poisoned = true;
+			return { kind: "error", reason: `failed to run gh api: ${spawnError}`, stderr };
+		}
+		if (cancelled) return { kind: "error", reason: "cancelled mid-request", stderr, interrupted: true };
+		if (timedOut) {
+			return { kind: "error", reason: `shared ${API_DEADLINE_MS} ms deadline exceeded mid-request`, stderr, interrupted: true };
+		}
+		if (overflow) {
+			this.poisoned = true;
+			return {
+				kind: "error",
+				reason: `cumulative captured-output budget of ${API_STDOUT_BUDGET} bytes exceeded mid-response`,
+				stderr,
+				interrupted: true,
+			};
+		}
+
+		// Split the (possibly multi-block, redirect) header stream from the
+		// body: skip leading HTTP blocks until the body does not start with
+		// another status line.
+		const raw = Buffer.concat([...headerChunks, ...bodyChunks]);
+		let headers = "";
+		let bodyBuf = raw;
+		for (;;) {
+			const sep = bodyBuf.indexOf("\r\n\r\n");
+			const alt = sep === -1 ? bodyBuf.indexOf("\n\n") : -1;
+			const at = sep !== -1 ? sep + 4 : alt !== -1 ? alt + 2 : -1;
+			if (at === -1) break;
+			const blockStart = bodyBuf.subarray(0, at).toString("utf8");
+			const rest = bodyBuf.subarray(at);
+			const nextIsStatus = /^HTTP\/[\d.]+ \d{3}/.test(rest.subarray(0, 32).toString("utf8").trimStart());
+			headers = blockStart;
+			bodyBuf = rest;
+			if (!nextIsStatus) break;
+		}
+		const statusMatch = /HTTP\/[\d.]+ (\d{3})/.exec(headers);
+		const httpStatus = statusMatch !== null ? Number(statusMatch[1]) : 0;
+
+		// A body is only trustworthy if the child exited cleanly and the full
+		// stream arrived; interrupted responses are rejected even when the
+		// retained bytes would parse.
+		if (signal !== null && signal !== undefined) {
+			return { kind: "error", reason: `gh api terminated by signal ${signal}`, stderr, interrupted: true };
+		}
+		let bodyText: string;
+		try {
+			// Strict decode: malformed UTF-8 in the body rejects the response
+			// rather than silently substituting replacement characters into JSON.
+			bodyText = new TextDecoder("utf-8", { fatal: true }).decode(bodyBuf);
+		} catch {
+			return { kind: "error", reason: "response body contained malformed UTF-8", stderr, interrupted: true };
+		}
+		// GraphQL tolerance: GitHub's `api graphql` exits 1 even when the
+		// response carries usable data beside an `errors` array. Accept that
+		// exit only with a 2xx status AND a JSON object body; every other
+		// nonzero code (REST always) keeps the error path below.
+		const graphqlAccepted =
+			mode === "graphql" && code === 1 && httpStatus >= 200 && httpStatus < 300 && isJsonObject(bodyText);
+		if (code !== 0 && !graphqlAccepted) {
+			if (httpStatus >= 400) {
+				return {
+					kind: "error",
+					reason: `gh api exited with code ${code}`,
+					httpStatus,
+					stderr: stderr.length > 0 ? stderr : bodyText.slice(0, 512),
+				};
+			}
+			return { kind: "error", reason: `gh api exited with code ${code}`, stderr: stderr || bodyText.slice(0, 512) };
+		}
+		if (httpStatus < 200 || httpStatus >= 300) {
+			return { kind: "error", reason: `unexpected HTTP status ${httpStatus}`, httpStatus, stderr };
+		}
+		return {
+			kind: "response",
+			httpStatus,
+			headers,
+			body: bodyText,
+			bodyBytes: bodyBuf.length,
+		};
+	}
+
+	/**
+	 * Interprets one captured plain child. stdout is the whole body, decoded
+	 * strictly; every failure returns an empty stdout plus either the verbatim
+	 * child stderr or a tool reason when no child ran.
+	 */
+	private interpretPlain(capture: ChildCapture): GhPlainResult {
+		const { code, signal, spawnError, timedOut, cancelled, overflow, bodyChunks, stderr } = capture;
+		if (spawnError !== undefined) {
+			this.poisoned = true;
+			return { exitCode: null, stdout: "", stderr: `failed to run gh: ${spawnError}` };
+		}
+		if (cancelled) return { exitCode: null, stdout: "", stderr: "cancelled mid-request" };
+		if (timedOut) return { exitCode: null, stdout: "", stderr: `shared ${API_DEADLINE_MS} ms deadline exceeded mid-request` };
+		if (overflow) {
+			this.poisoned = true;
+			return { exitCode: null, stdout: "", stderr: `cumulative captured-output budget of ${API_STDOUT_BUDGET} bytes exceeded mid-response` };
+		}
+		if (signal !== null && signal !== undefined) {
+			return { exitCode: null, stdout: "", stderr: stderr.length > 0 ? stderr : `gh terminated by signal ${signal}` };
+		}
+		let bodyText: string;
+		try {
+			bodyText = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(bodyChunks));
+		} catch {
+			return { exitCode: null, stdout: "", stderr: stderr.length > 0 ? stderr : "gh output contained malformed UTF-8" };
+		}
+		if (code !== 0) return { exitCode: code, stdout: "", stderr };
+		return { exitCode: 0, stdout: bodyText, stderr };
 	}
 }

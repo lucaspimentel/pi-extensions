@@ -45,8 +45,11 @@ streaming, usage display, security model).
   (review bodies and verdicts), `issue comments` (conversation comments
   on an issue or PR, from the issues endpoint, unlike inline review
   comments), `pr threads` (GraphQL review threads, resolved and outdated
-  included, paged by cursor), and `org team` (one organization team by bare
-  org login and team slug, a single unpaged object) as structured API
+  included, paged by cursor), `org team` (one organization team by bare
+  org login and team slug, a single unpaged object), and `pr batch` (one
+  call reads up to 15 pull requests across repositories, each target exactly
+  `OWNER/REPO#N`, by running one plain `gh pr view` per target and returning
+  per-target envelopes in input order) as structured API
   operations. Every one of them is a network read (guard class
   `remote-read`), and the API operations work outside a git worktree. The PR
   API operations require explicit `repo` + a positive safe-integer `pr`

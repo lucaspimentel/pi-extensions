@@ -7,7 +7,7 @@
  * structured validation for the narrowly scoped GitHub API operations
  * (repo contents, repo tree, commit checks, advisory view, check annotations,
  * repo metadata, pr comments, pr reviews, issue comments, issue timeline,
- * pr threads, org team).
+ * pr threads, org team, pr batch).
  *
  * This module is pure (no pi imports) so the argv layout can be unit-tested
  * directly; spawn.ts consumes `ValidInvocation.argv` as a cross-step contract.
@@ -468,7 +468,7 @@ function appendToolAuthoredTokens(subcommand: GhSubcommand, argv: string[]): str
 // array, never gh api with caller flags). They target github.com only and
 // are exempt from the worktree gate; api-spawn.ts owns the transport.
 
-export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata", "pr comments", "pr reviews", "issue comments", "issue timeline", "pr threads", "org team"] as const;
+export const API_OPERATIONS = ["repo contents", "repo tree", "commit checks", "advisory view", "check annotations", "repo metadata", "pr comments", "pr reviews", "issue comments", "issue timeline", "pr threads", "org team", "pr batch"] as const;
 
 export type ApiOperation = (typeof API_OPERATIONS)[number];
 
@@ -507,6 +507,25 @@ const REF_MAX_CHARS = 512;
 /** Repository-relative paths: segments encoded individually by api.ts. */
 const PATH_MAX_CHARS = 4096;
 
+/** ``pr batch``: flat cap on targets per call (measured latency, see the design doc). */
+export const PR_BATCH_MAX_TARGETS = 15;
+
+/** ``pr batch``: the field set used when the caller omits `fields`. */
+export const PR_BATCH_DEFAULT_FIELDS = ["number", "title", "state", "isDraft", "url", "updatedAt", "headRefName", "reviewDecision", "mergeStateStatus", "mergeable"] as const;
+
+/**
+ * ``pr batch``: gh exposes these, but the tool excludes them as a product
+ * decision (project-board and reaction fields). Every other name is passed
+ * to gh, which validates membership itself.
+ */
+export const PR_BATCH_REJECTED_FIELDS: ReadonlySet<string> = new Set(["projectCards", "projectItems", "reactionGroups"]);
+
+/** ``pr batch`` field names are checked for shape only; gh rejects unknown ones. */
+const PR_BATCH_FIELD_RE = /^[A-Za-z0-9_]+$/;
+
+/** ``pr batch`` targets: exactly OWNER/REPO#N, no host prefix, no URL, no bare number. */
+const PR_BATCH_TARGET_RE = /^([A-Za-z0-9-]+\/[A-Za-z0-9_.-]+)#([1-9]\d*)$/;
+
 const OPERATION_FIELDS: Record<ApiOperation, ReadonlySet<string>> = {
 	"repo contents": new Set(["repo", "path", "ref", "start_line", "end_line", "jq"]),
 	"repo tree": new Set(["repo", "ref", "path", "recursive", "jq"]),
@@ -520,6 +539,7 @@ const OPERATION_FIELDS: Record<ApiOperation, ReadonlySet<string>> = {
 	"issue timeline": new Set(["repo", "issue", "continuation", "jq"]),
 	"pr threads": new Set(["repo", "pr", "jq", "continuation"]),
 	"org team": new Set(["org", "slug", "jq"]),
+	"pr batch": new Set(["targets", "fields", "account", "jq"]),
 };
 
 export interface ValidApiInvocation {
@@ -554,6 +574,12 @@ export interface ValidApiInvocation {
 	org?: string;
 	/** Organization team: bare team slug (no leading '@', no embedded '/'). */
 	slug?: string;
+	/** pr batch: 1..PR_BATCH_MAX_TARGETS targets, each exactly OWNER/REPO#N. */
+	targets?: string[];
+	/** pr batch: gh --json field names applied to every target. */
+	fields?: string[];
+	/** pr batch: optional gh account login; omitted means the ambient active account. */
+	account?: string;
 }
 
 function apiInvalid(reason: string): { ok: false; reason: string } {
@@ -801,6 +827,65 @@ export function validateApiInvocation(params: unknown): ValidApiInvocation | { o
 			return apiInvalid(`slug must be a bare team slug matching ${API_TEAM_SLUG_RE.source}, got '${slug}'`);
 		}
 		result.slug = slug;
+	}
+
+	if (op === "pr batch") {
+		const rawTargets = record["targets"];
+		if (!Array.isArray(rawTargets) || rawTargets.length === 0) {
+			return apiInvalid("targets is required and must be a non-empty array of OWNER/REPO#N");
+		}
+		if (rawTargets.length > PR_BATCH_MAX_TARGETS) {
+			return apiInvalid(`targets must have at most ${PR_BATCH_MAX_TARGETS} entries, got ${rawTargets.length}`);
+		}
+		const seen = new Set<string>();
+		const targets: string[] = [];
+		for (const entry of rawTargets) {
+			if (typeof entry !== "string") {
+				return apiInvalid("every target must be a string of the form OWNER/REPO#N");
+			}
+			const match = PR_BATCH_TARGET_RE.exec(entry);
+			if (match === null || !Number.isSafeInteger(Number(match[2]))) {
+				return apiInvalid(`target must be exactly OWNER/REPO#N with an integer N, got '${entry}'`);
+			}
+			if (seen.has(entry)) return apiInvalid(`duplicate target '${entry}'`);
+			seen.add(entry);
+			targets.push(entry);
+		}
+		result.targets = targets;
+
+		const rawFields = record["fields"];
+		if (rawFields === undefined) {
+			result.fields = [...PR_BATCH_DEFAULT_FIELDS];
+		} else {
+			if (!Array.isArray(rawFields) || rawFields.length === 0) {
+				return apiInvalid("fields must be a non-empty array of gh --json field names");
+			}
+			const fields: string[] = [];
+			for (const entry of rawFields) {
+				if (typeof entry !== "string" || !PR_BATCH_FIELD_RE.test(entry)) {
+					return apiInvalid(`field must be a gh --json field name, got '${String(entry)}'`);
+				}
+				if (PR_BATCH_REJECTED_FIELDS.has(entry)) {
+					return apiInvalid(`field '${entry}' is not supported by pr batch`);
+				}
+				fields.push(entry);
+			}
+			result.fields = fields;
+		}
+
+		const account = record["account"];
+		if (account !== undefined) {
+			if (typeof account !== "string" || account.length === 0) {
+				return apiInvalid("account must be a non-empty gh account login");
+			}
+			if (account.length > ORG_MAX_CHARS) {
+				return apiInvalid(`account must be at most ${ORG_MAX_CHARS} characters`);
+			}
+			if (!API_ORG_RE.test(account)) {
+				return apiInvalid(`account must be a bare GitHub login matching ${API_ORG_RE.source}, got '${account}'`);
+			}
+			result.account = account;
+		}
 	}
 
 	if (record["continuation"] !== undefined) {

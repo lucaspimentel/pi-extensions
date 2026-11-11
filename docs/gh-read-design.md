@@ -54,7 +54,10 @@ the main session. Deliberately not tied to any one agent; agents opt in via
 Purpose: steer agents from raw `gh api` and `gh pr-threads` shell calls to
 the operations above and to documented workarounds. Guidance only: no
 allowlist, schema, `description`, or `promptSnippet` change. It lives in the
-`promptGuidelines` array in `extensions/gh-read/index.ts`.
+`promptGuidelines` array in `extensions/gh-read/index.ts`. One line steers a
+multi-PR read to `pr batch` instead of a `for` loop over `gh pr view` in
+`host_bash`, because guard treats any loop, conditional, or block as one
+command that always prompts.
 
 Corpus (2026-10-29): all 1277 pi sessions, current session excluded; 1536
 `gh api` occurrences in total, 405 command lines in the 317 sessions where
@@ -179,8 +182,12 @@ tags, `search`) and the by-id pair.
   `job logs`, which is designed but not yet implemented, see "job logs"):
   `repo contents`, `repo tree`, `commit checks`, `advisory view`,
   `check annotations`, `repo metadata`, `pr comments`, `pr reviews`,
-  `issue comments`, `issue timeline`, `pr threads`, `org team`, and `job logs`
-  (see "GitHub API operations").
+  `issue comments`, `issue timeline`, `pr threads`, `org team`, `pr batch`,
+  and `job logs`
+  (see "GitHub API operations"). `pr batch` is the one structured operation
+  whose request is a native `gh pr view` command rather than a `gh api`
+  request: it takes structured parameters and rejects `args`, and it is
+  worktree-exempt like the others.
   Mixing shapes is rejected in both directions: native subcommands reject
   structured fields, API operations reject `args`.
 - Command construction happens in validate.ts during validation: it emits the
@@ -300,10 +307,13 @@ Value validation (native commands):
 The designed structured operations (`repo contents`, `repo tree`,
 `commit checks`, `advisory view`, `check annotations`, `repo metadata`,
 `pr comments`, `pr reviews`, `issue comments`, `issue timeline`, `pr threads`,
-`org team`, `job logs`)
+`org team`, `pr batch`, `job logs`)
 make read-only requests to api.github.com ONLY, always inside `gh`, with a
 fixed tool-authored argv (see "API runner"); all are implemented except
-`job logs`, which is designed but not yet implemented. Every operation but
+`job logs`, which is designed but not yet implemented. `pr batch` is the one
+exception to the api.github.com request shape: it runs one plain
+`gh pr view` per target instead (see "pr batch"), still tool-authored and
+still structured-parameters-only. Every operation but
 `job logs` returns JSON; `pr threads` sends a tool-authored GraphQL POST
 instead of a REST GET, and `job logs` returns a job's log as text. They name
 an explicit repository, so they are exempt from the
@@ -503,6 +513,74 @@ filter. The metadata head names `org`, `slug`, and the
 an ordinary error result: it covers both a nonexistent team and a team the
 active token cannot see, and the tool does no body sniffing to tell them
 apart.
+
+### pr batch
+
+One call reads up to 15 pull requests across repositories, replacing the
+hand-written `for ...; do gh pr view ...; done` loops that `host_bash`
+always prompts on: guard treats any loop, conditional, or block as one
+fail-closed command that no allow rule can authorize.
+
+Required `targets`: a non-empty array of at most 15 strings, each exactly
+`OWNER/REPO#N` (a full repository plus an integer PR number; no bare number,
+no PR URL, no `[HOST/]` prefix, and no duplicate). Optional `fields`: a
+non-empty array of gh `--json` field names applied to every target. Omitting
+`fields` uses the default scalar set `number`, `title`, `state`, `isDraft`,
+`url`, `updatedAt`, `headRefName`, `reviewDecision`, `mergeStateStatus`,
+`mergeable`. Each name is shape-checked (`^[A-Za-z0-9_]+$`);
+`projectCards`, `projectItems`, and `reactionGroups` are rejected as a
+product decision; every other name is passed to gh, which validates
+membership itself. Optional `account` is a bare GitHub login. `args`,
+`continuation`, `repo`, and unrelated structured fields are rejected before
+spawning.
+
+Transport: one `gh pr view --json <fields> -R <repo> <n>` child per target,
+sequentially, through the plain (header-less) mode of the API runner, so the
+shared 30 s deadline, the cumulative 8 MiB captured-output budget, the
+stderr cap, and the SIGTERM-then-SIGKILL teardown all apply. The native
+executor is deliberately NOT used: it is worktree-gated even with `-R`, and
+this operation is worktree-exempt. There is no ref resolution and no
+pinning; gh resolves the target itself.
+
+Result: the data block is an array of per-target envelopes in input order,
+one per target. Success is `{target, ok: true, data: {...}}` where `data` is
+gh's JSON for the requested fields relayed verbatim, with no reshaping.
+Failure is `{target, ok: false, error: {exitCode, message}}` where `message`
+is the child's verbatim stderr. A failed target never fails the call:
+`isError` is true only when NO target succeeded. The metadata head carries
+`targets`, `account` (`(active)` when omitted), and, when any target failed,
+`failures` (`N of M targets failed`). `jq` applies once to the envelope
+array; the head stays outside it.
+
+Bounding and incompleteness: there is no completeness field and no
+continuation. gh owns its own list caps (for example the silent 100-file cap
+behind `files`); a caller that needs to know can compare `files` against
+`changedFiles` itself.
+
+Deadline: when the shared deadline fires partway through the batch,
+completed targets keep their data and every unattempted target gets a
+failure envelope with `exitCode: null`; the same `isError` rule applies.
+
+Unknown-field abort (best effort): when a child fails with gh's "unknown
+JSON field" message, the remaining targets are filled with `exitCode: null`
+envelopes rather than run. If gh ever changes that wording, targets simply
+fail individually, so correctness is unaffected.
+
+Account selection (the one operation that has it): when `account` is
+omitted the ambient active `gh` account is used with NO pre-check. When it is
+named, the operation first runs `gh auth status --json hosts` and requires
+the login to appear on github.com (gh's JSON mode exits 0 when logged out, so
+the empty payload means not found), then resolves the token with
+`gh auth token --user <account>` and injects it as `GH_TOKEN` into every
+target child's environment. The token never enters the data block, the
+metadata head, notices, or `details`; every rendered child text passes
+through a scrub that replaces the resolved token with `[redacted]`.
+
+Cap rationale: measured on the host with gh 2.103.3, per target: scalars
+0.46 s; scalars plus `files` and `commits` 0.96 s; `files`, `reviews`,
+`comments`, and `statusCheckRollup` 1.14 s. Fifteen targets is roughly 7 s
+to 17 s against the shared 30 s deadline, so the cap is 15; a larger batch
+would need concurrency the runner does not have.
 
 ### pr comments and pr reviews
 
@@ -866,7 +944,11 @@ application/vnd.github+json" --header "X-GitHub-Api-Version: 2022-11-28"
 --include <encoded-path>`; no caller flags, field arguments, or
 `--paginate`. The one other transport is the tool-authored GraphQL POST used
 by `pr threads`, documented under "pr threads"; it shares this runner's
-deadline, budget, header/stderr caps, strict decode, and teardown. One
+deadline, budget, header/stderr caps, strict decode, and teardown. A third
+mode, `plain`, runs a native `gh` command with no `--include`, so stdout is
+captured verbatim with no header or HTTP-status parsing; only `pr batch`
+uses it, and it accepts an environment override so a resolved account token
+can be injected into the child. One
 monotonic 30-second deadline is shared across ref resolution, all paged
 children, and jq. The captured-output budget is 8
 MiB of gh response stdout CUMULATIVELY (resolution requests and response
@@ -941,7 +1023,10 @@ different filter. Existing commit-checks, CVE, and PR token formats remain
 unchanged; the version is not bumped.
 
 PR metadata includes `repo`, `pr`, `source_complete`, `items_returned`
-(before jq), `pages_fetched`, and `resumed: true` on resumption. Issue
+(before jq), `pages_fetched`, and `resumed: true` on resumption. `pr batch`
+is the exception to this shape: it emits no `source_complete`, has no
+continuation, and its data block is a per-target envelope array (see
+"pr batch"). Issue
 comments metadata is identical with `issue` in place of `pr`; issue timeline
 metadata is the same plus the `events` inventory, and it appends the clip
 pointer to the text only when the display was clipped. Incomplete
@@ -1125,15 +1210,17 @@ GitHub API and auth errors (including 403 from the wrong active gh account)
 pass through verbatim; the tool does no error-shape matching and appends no
 hints (settled: passthrough only).
 
-## GitHub account caveat (documented, not solved)
+## GitHub account caveat (documented, solved for pr batch)
 
 `gh` has a single active account (no per-host automatic selection like git's
 `includeIf`). A ddoghq EMU repo 403s while the personal account is active
 and vice versa; the tool inherits whatever `gh auth` state exists and
 surfaces the API error verbatim. Switching accounts remains a manual user
-step (see dd-tools/docs/git-multi-account-setup.md). API operations always
-use the ambient `gh` active account and accept no account selector, so a
-read that needs a secondary account must stay on the host shell.
+step (see dd-tools/docs/git-multi-account-setup.md). Every API operation
+except `pr batch` uses the ambient `gh` active account and accepts no
+account selector, so a read that needs a secondary account must stay on the
+host shell. `pr batch` accepts an optional `account` (see "pr batch"); that
+selector is not yet offered by any other operation.
 
 Note on `auth status` JSON output: gh's `--json` mode always exits 0 unless
 there is a fatal error (per gh's `statusRun`: "In machine-friendly mode, we
@@ -1171,7 +1258,9 @@ Settled in the grill-me review:
   fail-fast/template rejections, tool-parameter discrimination (mixed shapes
   rejected both directions), and full API-operation validation (required
   fields, path injection inputs, line bounds, continuation shapes, advisory
-  identifier/type rules, schema-bypass coverage). Run coverage: the `run
+  identifier/type rules, schema-bypass coverage, and the `pr batch` target
+  grammar, target cap, duplicate rejection, field shape, rejected field
+  names, and account shape). Run coverage: the `run
   list` argv matrix (flags in input order, `--limit` bounds incl. attached
   `-L50`, `-R`, `--json`/`--jq` rules, filter-token rejections, `--all`, no
   positionals, `--`/unknown-flag rejections), `run view` (missing and
@@ -1362,6 +1451,14 @@ Settled in the grill-me review:
   the GraphQL message bound applied once per invocation (dedupe across
   pages, at most 10 notice lines plus one omission count) rather than per
   page.
+- `tests/gh-read-api-spawn.test.mts` and `tests/gh-read-api.test.mts`:
+  `pr batch`'s plain runner mode (argv without `--include`, verbatim stdout,
+  nonzero-exit stderr, malformed UTF-8, an expired deadline, and the env
+  override merged over the sanitized environment) and its orchestration
+  (per-target envelopes in input order, the default and caller field lists,
+  partial success, all-fail `isError`, a non-JSON body, a tool-level stop,
+  the unknown-field abort, jq over the envelope array, and named-account
+  validation with the token scrubbed from output).
 - `tests/guard-classes.test.mts`: built-in `gh_read` mapping and every
   discussion operation (`pr comments`, `pr reviews`, `pr threads`,
   `issue comments`) classify as `remote-read`; configured class overrides
@@ -1407,6 +1504,13 @@ Settled in the grill-me review:
   using an explicit `repo` + `job_id` and no worktree, receiving either the
   full text, a first-and-last-50 KiB window with an exact omitted-byte count,
   or an error carrying the retained window when the read times out.
+- A read-only agent can read up to 15 pull requests across repositories in
+  one `pr batch` call, using explicit `OWNER/REPO#N` targets, receiving
+  per-target envelopes in input order, a default or caller-chosen gh `--json`
+  field set, and an optional named account whose token never appears in the
+  result; a single failed target does not fail the call, no worktree gate
+  applies, and the operation removes the need for a prompting `gh pr view`
+  loop in `host_bash`.
 - Non-allowlisted subcommands (including every write verb: `pr create`,
   `pr merge`, `issue close`, `gh api`), unknown flags, and unsafe values are
   rejected with clear errors naming the allowed set, verified by tests.
@@ -1445,9 +1549,13 @@ Settled in the grill-me review:
   resolved/outdated thread state, and no jq filter or comment line field can
   manufacture it.
 - No URL arguments, no `--template`, no `--web` forms.
-- No token handling, masking, or account switching inside the tool. Keeping
-  `--show-token` off the `auth status` allowlist is what keeps this non-goal
-  true: token values never enter tool output through any allowlisted path.
+- No token handling, masking, or account switching inside the tool, with one
+exception: `pr batch`'s optional `account` selector resolves that account's
+token through `gh auth token --user` and injects it into the child
+environment, never into output. Every other operation keeps the non-goal,
+and keeping `--show-token` off the `auth status` allowlist is what
+guarantees token values never enter tool output through any allowlisted
+path.
 - Do not bypass the user's guard/sandbox policies: `remote-read` classification
   means guard profiles still decide, per profile, whether network reads are
   allowed at all.

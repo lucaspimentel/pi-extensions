@@ -641,3 +641,65 @@ test("reaping: the promise resolves only after the child reports close", async (
 	const outcome = await promise;
 	assert.equal(outcome.kind, "response");
 });
+
+// ── Plain child mode (the pr batch transport) ─────────────────────────────
+
+/** Emits a plain child result: stdout, optional stderr, then close. */
+function emitPlain(child: FakeChild, stdout: string, code = 0, stderr = ""): void {
+	if (stdout.length > 0) child.stdout.emit("data", Buffer.from(stdout));
+	if (stderr.length > 0) child.stderr.emit("data", Buffer.from(stderr));
+	child.emit("close", code, null);
+}
+
+test("plain: one gh child with no --include, sanitized env merged with the caller override, no git gate", async () => {
+	const spawns = harness((spawn) => emitPlain(spawn.child, "verbatim-body"));
+	const runner = new GhApiRunner({ cwd: "/anywhere", clock: defaultClock });
+	const result = await runner.plain(["pr", "view", "--json", "number", "-R", "owner/name", "1"], { GH_TOKEN: "tok" });
+	assert.equal(spawns.length, 1, "no rev-parse gate spawn");
+	assert.equal(spawns[0]!.command, "gh");
+	assert.deepEqual(spawns[0]!.args, ["pr", "view", "--json", "number", "-R", "owner/name", "1"]);
+	const options = spawns[0]!.options;
+	assert.equal(options.shell, false);
+	assert.equal(options.windowsHide, true);
+	assert.equal(options.cwd, "/anywhere");
+	const env = options.env as Record<string, string | undefined>;
+	assert.equal(env["GH_TOKEN"], "tok");
+	for (const key of STRIPPED_ENV) assert.equal(env[key], undefined, `${key} must stay stripped`);
+	for (const [key, value] of Object.entries(INJECTED_ENV)) assert.equal(env[key], value);
+	assert.deepEqual(result, { exitCode: 0, stdout: "verbatim-body", stderr: "" });
+});
+
+test("plain: stdout is relayed verbatim and never parsed as an --include header block", async () => {
+	harness((spawn) => emitPlain(spawn.child, "HTTP/1.1 200 OK\r\n\r\nbody-after-headers"));
+	const runner = new GhApiRunner({ clock: defaultClock });
+	const result = await runner.plain(["pr", "view", "--json", "number"]);
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.stdout, "HTTP/1.1 200 OK\r\n\r\nbody-after-headers");
+});
+
+test("plain: a nonzero exit returns the code and verbatim stderr with empty stdout", async () => {
+	harness((spawn) => emitPlain(spawn.child, "partial", 1, "boom: bad credentials\n"));
+	const runner = new GhApiRunner({ clock: defaultClock });
+	const result = await runner.plain(["pr", "view", "--json", "number"]);
+	assert.deepEqual(result, { exitCode: 1, stdout: "", stderr: "boom: bad credentials" });
+});
+
+test("plain: malformed UTF-8 in stdout is an error", async () => {
+	harness((spawn) => {
+		spawn.child.stdout.emit("data", Buffer.from([0xff, 0xfe]));
+		spawn.child.emit("close", 0, null);
+	});
+	const runner = new GhApiRunner({ clock: defaultClock });
+	const result = await runner.plain(["pr", "view", "--json", "number"]);
+	assert.deepEqual(result, { exitCode: null, stdout: "", stderr: "gh output contained malformed UTF-8" });
+});
+
+test("plain: an expired deadline refuses the spawn", async () => {
+	const clock = new FakeClock();
+	const spawns = harness((spawn) => emitPlain(spawn.child, "body"));
+	const runner = new GhApiRunner({ clock, deadlineAt: clock.now() - 1 });
+	const result = await runner.plain(["pr", "view", "--json", "number"]);
+	assert.equal(spawns.length, 0, "no spawn after the deadline");
+	assert.equal(result.exitCode, null);
+	assert.match(result.stderr, /deadline exceeded before request/);
+});

@@ -1126,3 +1126,58 @@ test("org team: org and slug are rejected on every other operation and on native
 		}
 	}
 });
+
+// ── pr batch (API operation) validation ─────────────────────────────────────
+
+test("pr batch: required non-empty targets, a default field set, optional account and jq", () => {
+	assert.deepEqual(apiOk({ subcommand: "pr batch", targets: ["owner/repo#123"] }), {
+		ok: true,
+		op: "pr batch",
+		targets: ["owner/repo#123"],
+		fields: ["number", "title", "state", "isDraft", "url", "updatedAt", "headRefName", "reviewDecision", "mergeStateStatus", "mergeable"],
+	});
+	const withExtras = apiOk({ subcommand: "pr batch", targets: ["o/r#1", "o/r#2"], fields: ["number", "files"], account: "lucaspimentel", jq: ".[]" });
+	assert.deepEqual(withExtras["fields"], ["number", "files"]);
+	assert.equal(withExtras["account"], "lucaspimentel");
+	assert.equal(withExtras["jq"], ".[]");
+});
+
+test("pr batch: target grammar rejects bare numbers, URLs, host prefixes, and duplicates", () => {
+	apiRejects({ subcommand: "pr batch", targets: [] }, ["targets is required"]);
+	apiRejects({ subcommand: "pr batch" }, ["targets is required"]);
+	apiRejects({ subcommand: "pr batch", targets: "o/r#1" }, ["targets is required"]);
+	apiRejects({ subcommand: "pr batch", targets: [123] }, ["every target must be a string"]);
+	for (const bad of ["123", "https://github.com/o/r/pull/1", "o/r", "github.com/o/r#1", "o/r#0", "o/r#-1", "o/r#1x", "o/r#", "#1"]) {
+		apiRejects({ subcommand: "pr batch", targets: [bad] }, ["OWNER/REPO#N"]);
+	}
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1", "o/r#1"] }, ["duplicate target"]);
+});
+
+test("pr batch: the target cap is enforced", () => {
+	const fifteen = Array.from({ length: 15 }, (_, i) => `o/r#${i + 1}`);
+	assert.equal((apiOk({ subcommand: "pr batch", targets: fifteen })["targets"] as string[]).length, 15);
+	apiRejects({ subcommand: "pr batch", targets: [...fifteen, "o/r#16"] }, ["at most 15 entries"]);
+});
+
+test("pr batch: field shape, the rejected names, and empty lists", () => {
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], fields: [] }, ["non-empty array"]);
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], fields: [42] }, ["gh --json field name"]);
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], fields: ["num ber"] }, ["gh --json field name"]);
+	for (const rejected of ["projectCards", "projectItems", "reactionGroups"]) {
+		apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], fields: [rejected] }, [`field '${rejected}' is not supported`]);
+	}
+});
+
+test("pr batch: account shape and unknown fields", () => {
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: "" }, ["account must be a non-empty"]);
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: "a/b" }, ["bare GitHub login"]);
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: "a".repeat(40) }, ["at most 39 characters"]);
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], continuation: "x" }, ["unknown field 'continuation'"]);
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], repo: "o/r" }, ["unknown field 'repo'"]);
+});
+
+test("pr batch: structured shape rejects args, and its fields are rejected elsewhere", () => {
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], args: [] }, ["takes structured parameters, not an args array"]);
+	apiRejects({ subcommand: "org team", org: "o", slug: "s", targets: ["o/r#1"] }, ["unknown field 'targets'"]);
+	apiRejects({ subcommand: "pr view", args: [], targets: ["o/r#1"] }, ["unknown field 'targets'"]);
+});

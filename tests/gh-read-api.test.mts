@@ -20,7 +20,7 @@ import {
 	type ApiToolResult,
 	runApiOperation,
 } from "../extensions/gh-read/api.ts";
-import type { ApiRequester, ApiRequestOutcome, GhApiResponse } from "../extensions/gh-read/api-spawn.ts";
+import type { ApiRequester, ApiRequestOutcome, GhApiResponse, GhPlainResult } from "../extensions/gh-read/api-spawn.ts";
 import { validateToolParams } from "../extensions/gh-read/validate.ts";
 
 // ── Harness ──────────────────────────────────────────────────────────────────
@@ -43,6 +43,9 @@ interface ScriptedRequester extends ApiRequester {
 	requests: string[];
 	/** Separate record so every REST test also proves it makes no GraphQL call. */
 	graphqlCalls: Array<{ query: string; variables: Array<readonly [string, string | number]> }>;
+	/** Plain-child calls, in order, with the env override each one received. */
+	plainCalls: Array<{ argv: readonly string[]; env?: Record<string, string | undefined> }>;
+	plainScript: Array<(argv: readonly string[]) => GhPlainResult>;
 	script: Array<(pathAndQuery: string) => ApiRequestOutcome>;
 }
 
@@ -50,6 +53,8 @@ function requester(script: Array<(pathAndQuery: string) => ApiRequestOutcome>): 
 	const self: ScriptedRequester = {
 		requests: [],
 		graphqlCalls: [],
+		plainCalls: [],
+		plainScript: [],
 		script,
 		async request(pathAndQuery: string) {
 			self.requests.push(pathAndQuery);
@@ -63,6 +68,12 @@ function requester(script: Array<(pathAndQuery: string) => ApiRequestOutcome>): 
 			if (next === undefined) throw new Error(`unexpected graphql call: ${query.slice(0, 40)}`);
 			const cursor = variables.find(([name]) => name === "cursor");
 			return next(cursor !== undefined ? String(cursor[1]) : "");
+		},
+		async plain(argv, env) {
+			self.plainCalls.push({ argv: [...argv], ...(env === undefined ? {} : { env }) });
+			const next = self.plainScript.shift();
+			if (next === undefined) throw new Error(`unexpected plain call: ${argv.join(" ")}`);
+			return next([...argv]);
 		},
 		capturedBytes: () => 0,
 		budgetExhausted: () => false,
@@ -2088,4 +2099,150 @@ test("pr threads: a continuation that cannot be encoded is an error with a notic
 	assert.equal(result.isError, true);
 	assert.match(result.content[0].text, /continuation could not be encoded/);
 	assert.equal(result.details.continuation, undefined);
+});
+
+// ── pr batch (multi-target PR read) ────────────────────────────────────────
+
+/** The envelope array is the data block; split at the stable `data:` line. */
+function batchEnvelopes(result: ApiToolResult): unknown {
+	const at = result.content[0].text.indexOf("\ndata:\n");
+	assert.ok(at !== -1, "expected a data boundary");
+	return JSON.parse(result.content[0].text.slice(at + "\ndata:\n".length));
+}
+
+function plainOk(value: unknown): () => GhPlainResult {
+	return () => ({ exitCode: 0, stdout: JSON.stringify(value), stderr: "" });
+}
+
+function plainFail(exitCode: number | null, stderr: string): () => GhPlainResult {
+	return () => ({ exitCode, stdout: "", stderr });
+}
+
+const BATCH_DEFAULT_FIELDS =
+	"number,title,state,isDraft,url,updatedAt,headRefName,reviewDecision,mergeStateStatus,mergeable";
+
+test("pr batch: one plain gh pr view per target, envelopes in input order, default fields", async () => {
+	const api = requester([]);
+	api.plainScript = [plainOk({ number: 123, title: "a" }), plainOk({ number: 45, title: "b" })];
+	const result = await run({ subcommand: "pr batch", targets: ["owner/repo#123", "other/repo#45"] }, api);
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.deepEqual(api.requests, [], "no REST request");
+	assert.deepEqual(api.graphqlCalls, [], "no GraphQL request");
+	assert.deepEqual(api.plainCalls.map((call) => call.argv), [
+		["pr", "view", "--json", BATCH_DEFAULT_FIELDS, "-R", "owner/repo", "123"],
+		["pr", "view", "--json", BATCH_DEFAULT_FIELDS, "-R", "other/repo", "45"],
+	]);
+	assert.deepEqual(batchEnvelopes(result), [
+		{ target: "owner/repo#123", ok: true, data: { number: 123, title: "a" } },
+		{ target: "other/repo#45", ok: true, data: { number: 45, title: "b" } },
+	]);
+	assert.match(result.content[0].text, /targets: 2/);
+	assert.equal(result.details["account"], "(active)");
+	assert.equal(result.details["failures"], undefined);
+});
+
+test("pr batch: caller fields are joined in order and passed verbatim", async () => {
+	const api = requester([]);
+	api.plainScript = [plainOk({ number: 1 })];
+	await run({ subcommand: "pr batch", targets: ["owner/repo#1"], fields: ["number", "state", "files"] }, api);
+	assert.deepEqual(api.plainCalls[0]!.argv, ["pr", "view", "--json", "number,state,files", "-R", "owner/repo", "1"]);
+});
+
+test("pr batch: a failed target keeps its siblings and does not fail the call", async () => {
+	const message = "GraphQL: Could not resolve to a PullRequest with the number of 2. (repository.pullRequest)";
+	const api = requester([]);
+	api.plainScript = [plainOk({ number: 1 }), plainFail(1, message), plainOk({ number: 3 })];
+	const result = await run({ subcommand: "pr batch", targets: ["o/r#1", "o/r#2", "o/r#3"] }, api);
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.deepEqual(batchEnvelopes(result), [
+		{ target: "o/r#1", ok: true, data: { number: 1 } },
+		{ target: "o/r#2", ok: false, error: { exitCode: 1, message } },
+		{ target: "o/r#3", ok: true, data: { number: 3 } },
+	]);
+	assert.equal(result.details["failures"], "1 of 3 targets failed");
+});
+
+test("pr batch: every target failing sets isError", async () => {
+	const api = requester([]);
+	api.plainScript = [plainFail(1, "boom"), plainFail(1, "boom")];
+	const result = await run({ subcommand: "pr batch", targets: ["o/r#1", "o/r#2"] }, api);
+	assert.equal(result.isError, true);
+	assert.equal(result.details["failures"], "2 of 2 targets failed");
+});
+
+test("pr batch: a non-JSON success body becomes a per-target error", async () => {
+	const api = requester([]);
+	api.plainScript = [() => ({ exitCode: 0, stdout: "not json", stderr: "" })];
+	const result = await run({ subcommand: "pr batch", targets: ["o/r#1"] }, api);
+	assert.equal(result.isError, true);
+	assert.deepEqual(batchEnvelopes(result), [
+		{ target: "o/r#1", ok: false, error: { exitCode: null, message: "gh pr view did not return JSON" } },
+	]);
+});
+
+test("pr batch: a tool-level stop on one target does not stop the batch", async () => {
+	const api = requester([]);
+	api.plainScript = [
+		() => ({ exitCode: null, stdout: "", stderr: "shared 30000 ms deadline exceeded before request" }),
+		plainOk({ number: 2 }),
+	];
+	const result = await run({ subcommand: "pr batch", targets: ["o/r#1", "o/r#2"] }, api);
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.deepEqual(batchEnvelopes(result), [
+		{ target: "o/r#1", ok: false, error: { exitCode: null, message: "shared 30000 ms deadline exceeded before request" } },
+		{ target: "o/r#2", ok: true, data: { number: 2 } },
+	]);
+});
+
+test("pr batch: an unknown --json field aborts the remaining targets as not attempted", async () => {
+	const message = "unknown JSON field: \"nope\"";
+	const api = requester([]);
+	api.plainScript = [plainFail(1, message)];
+	const result = await run({ subcommand: "pr batch", targets: ["o/r#1", "o/r#2", "o/r#3"] }, api);
+	assert.equal(api.plainCalls.length, 1, "the abort stops later children");
+	assert.deepEqual(batchEnvelopes(result), [
+		{ target: "o/r#1", ok: false, error: { exitCode: 1, message } },
+		{ target: "o/r#2", ok: false, error: { exitCode: null, message: "not attempted: an earlier target failed with an unknown --json field" } },
+		{ target: "o/r#3", ok: false, error: { exitCode: null, message: "not attempted: an earlier target failed with an unknown --json field" } },
+	]);
+});
+
+test("pr batch: jq applies once to the envelope array", async () => {
+	const api = requester([]);
+	api.plainScript = [plainOk({ number: 1, title: "x" }), plainOk({ number: 2, title: "y" })];
+	const result = await run(
+		{ subcommand: "pr batch", targets: ["o/r#1", "o/r#2"], jq: "[.[] | select(.ok) | .target] | length" },
+		api,
+		{ jqRun: async () => ({ kind: "result", output: "2", outputTruncated: false, outputBytes: 1 }) },
+	);
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.match(result.content[0].text, /\ndata:\n2$/);
+});
+
+test("pr batch: a named account is validated, its token rides the child env, and it never reaches output", async () => {
+	const secret = "ghp_secrettokenvalue";
+	const api = requester([]);
+	api.plainScript = [
+		() => ({ exitCode: 0, stdout: JSON.stringify({ hosts: { "github.com": [{ login: "lucaspimentel", active: true }] } }), stderr: "" }),
+		() => ({ exitCode: 0, stdout: `${secret}\n`, stderr: "" }),
+		plainFail(1, `bad credentials: ${secret}`),
+	];
+	const result = await run({ subcommand: "pr batch", targets: ["o/r#1"], account: "lucaspimentel" }, api);
+	assert.deepEqual(api.plainCalls[0]!.argv, ["auth", "status", "--json", "hosts"]);
+	assert.deepEqual(api.plainCalls[1]!.argv, ["auth", "token", "--user", "lucaspimentel"]);
+	for (const call of api.plainCalls.slice(2)) assert.deepEqual(call.env, { GH_TOKEN: secret });
+	assert.equal(result.details["account"], "lucaspimentel");
+	assert.ok(!result.content[0].text.includes(secret), "the token never reaches the rendered result");
+	assert.match(result.content[0].text, /\[redacted\]/);
+});
+
+test("pr batch: an account that is not an authenticated github.com login errors before any target child", async () => {
+	const api = requester([]);
+	api.plainScript = [
+		() => ({ exitCode: 0, stdout: JSON.stringify({ hosts: { "github.com": [{ login: "someone-else" }] } }), stderr: "" }),
+	];
+	const result = await run({ subcommand: "pr batch", targets: ["o/r#1"], account: "lucaspimentel" }, api);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /account 'lucaspimentel' is not an authenticated github.com login/);
+	assert.equal(api.plainCalls.length, 1, "no target child runs");
 });

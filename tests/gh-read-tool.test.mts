@@ -1128,3 +1128,43 @@ test("execute api pr threads: a GraphQL exit 1 with usable data beside errors is
 	assert.equal(result.details["source_complete"], true);
 	setApiSpawnOverride(null);
 });
+
+test("schema: pr batch is registered with its parameters, description, and fan-out guidance", () => {
+	const tool = register();
+	const schema = JSON.stringify(tool.parameters);
+	assert.ok(schema.includes("pr batch"), "the subcommand literal is registered");
+	for (const field of ["targets", "fields", "account"]) assert.ok(schema.includes(field), `${field} is registered`);
+	assert.ok(tool.description.includes("pr batch"), "the description names the operation");
+	assert.ok(
+		tool.promptGuidelines.some((line) => line.includes("pr batch") && line.includes("host_bash")),
+		"the fan-out guidance steers away from a host_bash loop",
+	);
+});
+
+test("execute api pr batch: one plain gh pr view per target and no worktree gate", async () => {
+	const tool = register();
+	let gateCalls = 0;
+	setSpawnOverride((() => {
+		gateCalls += 1;
+		throw new Error("no git spawn expected for a repo-explicit batch");
+	}) as never);
+	const apiSpawns: string[][] = [];
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		apiSpawns.push([...args]);
+		const child = fakeChild();
+		queueMicrotask(() => {
+			child.stdout.emit("data", Buffer.from(JSON.stringify({ number: args[args.length - 1] })));
+			child.emit("close", 0, null);
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "pr batch", targets: ["o/r#1", "o/r#2"] }, undefined, null, { cwd: "/w" });
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(gateCalls, 0, "no worktree gate for a repo-explicit batch");
+	assert.equal(apiSpawns.length, 2, "one child per target");
+	assert.ok(result.content[0].text.includes("o/r#1"));
+	assert.ok(result.content[0].text.includes("o/r#2"));
+	setApiSpawnOverride(null);
+	setSpawnOverride(null);
+});
