@@ -1,8 +1,9 @@
 // Shared helpers for wt-tab-status tests.
-// Plain-JS mirrors of the pure functions in index.ts.
-// When index.ts changes, update this file to match.
+// Plain-JS mirrors of the pure functions that now live in
+// ../shared/agent-lifecycle.ts (state model) and index.ts (formatting).
+// When the source changes, update this file to match.
 
-// ── State model (mirror of index.ts) ─────────────────────────────────────────
+// ── State model (mirror of ../shared/agent-lifecycle.ts) ────────────────────
 
 export const STATE_GLYPHS = {
 	idle: "✅",

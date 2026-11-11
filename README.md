@@ -42,6 +42,7 @@ pi -e git:github.com/lucaspimentel/pi-extensions
 - **stash** – `ctrl+alt+s` / `ctrl+alt+r` stash & restore the editor draft on a disk-backed stack under `~/.pi/agent/pi-stash.json`; `/stash list` shows numbered entries (1 = newest), `/stash pop [n]`, `/stash drop <n>`, `/stash clear`
 - **web** – search the web and fetch & convert web pages (depends on `html-to-text`)
 - **wt-tab-status** – updates the Windows Terminal tab title with the current session status
+- **intelligent-terminal** – reports the pi session lifecycle to Microsoft Intelligent Terminal through `wtcli.exe agent-hook --cli-source pi`, so its session list and tab metadata show the session as Idle, Working, Waiting for input, Error, or Ended: session start/end, a pane re-bind plus prompt submit on every user prompt, `agent.tool.starting` per top-level tool (skipped for nested `codemode`-style calls), `agent.notification` while a blocking dialog is open, `agent.stop` on settle, and `agent.error` only when a turn ends with a provider/API error (`outcome === "error"`; an Esc abort settles as idle, and per-tool failures are deliberately not reported). Emits are fire-and-forget through a serialized queue that keeps at most one pending event per topic and never blocks a turn, because each spawn costs ~150-320 ms. Windows-only, no-op unless `WT_COM_CLSID` and `WT_SESSION` are set and the mode is `tui` or `rpc`, and `PI_INTELLIGENT_TERMINAL=0` disables it; one `warning` notification per process if `wtcli.exe` cannot be found, then silence. Rows show the cwd basename with no CLI suffix, since Intelligent Terminal has no built-in pi provider. See [extensions/intelligent-terminal/README.md](extensions/intelligent-terminal/README.md).
 - **external-editor-fix** – fix Ctrl+G external editor on Windows / Git Bash by adding wait flags for GUI editors
 - **session-search** – searches past pi sessions across all projects by keyword, exposed as the model-facing `session_search` tool and the interactive `/session-search` command (lazily maintained index at `~/.pi/agent/session-search-index.jsonl`). See [extensions/session-search/README.md](extensions/session-search/README.md).
 - **update-jira** – validated Jira read/update tools (`jira_read`: get digest/raw payload and comment pages; `jira_update`: transition, comment, link_pr, edit) over the Atlassian remote MCP v2 server, plus a run-boundary pointer that tells the model which ticket the current git branch resolves to. See [extensions/update-jira/README.md](extensions/update-jira/README.md).
@@ -72,7 +73,7 @@ pi-extensions/
 ├── extensions/
 │   ├── *.ts              # single-file extensions
 │   ├── */                # multi-file extensions (web, guard, idle-summary, ...)
-│   └── shared/           # modules imported by several extensions (model pin, model selection, bounded spawn)
+│   └── shared/           # modules imported by several extensions (model pin, model selection, bounded spawn, agent lifecycle)
 └── tests/                # node-runnable test harnesses (*.test.mts)
     └── fixtures/guard-shell/ # curated synthetic-policy shell regressions
 ```
