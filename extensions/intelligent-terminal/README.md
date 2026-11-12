@@ -53,6 +53,7 @@ Each `wtcli` invocation costs ~150-320 ms, dominated by MSIX app-execution-alias
 
 - A nested interactive `pi` or another agent CLI started inside pi's shell tools inherits the pane and will evict this session's binding. The next prompt's re-bind repairs it; nothing can detect the nesting (no env marker exists).
 - A pi crash sends no `session.end`; the row stays live until IT's shell-prompt heuristic or the pane closing corrects it.
+- **Do not run `pi-acp` as IT's agent if you want these hooks to be authoritative.** IT's ACP provider enumerates pi's on-disk session list and registers every session it finds as `custom:npx`, including sessions started in ordinary shell panes. IT's `validate_master_hook_source` then refuses to let a hook adopt a raw session id another provider already owns, logging `rejected agent hook source reason="agent hook raw session ID conflicts with another provider"`, and this extension goes permanently silent for those ids while still paying a spawn per emit. Nothing here can detect or prevent it: pi-acp spawns the pi child with `env: process.env` unchanged, and IT gives the pane no master-pipe path to query. Fix it by configuration: point IT's agent pane at a built-in agent instead (its ACP provider id matches its own hooks' `cli_source`, so no collision), then restart IT, because the catalogued rows live only in IT's in-memory registry. Sessions IT has not catalogued, and any session created after a restart, are unaffected. Note that switching the agent pane to a *different* custom command recreates the same trap for that CLI.
 - Out of scope: token usage/cost in IT's status bar (ACP-only), `agent.cwd.changed` (pi has no in-session cwd change), session-row titles (IT honours `title` only for OpenCode), and resuming a pi session from IT's UI (no ACP).
 
 ## Debugging
@@ -64,3 +65,18 @@ Each `wtcli` invocation costs ~150-320 ms, dominated by MSIX app-execution-alias
 ```
 
 Look for `processed COM agent hook hook_event="…" session_key="…" final_status=Some(…)`.
+
+To see what IT actually holds, ask the running master for its registry. Take the pipe from the **newest** `wta-master starting` line in that log: `master-pipe.txt` in IT's `LocalState\IntelligentTerminal` is not updated by every master and has pointed at a long-dead one here.
+
+```powershell
+$dir  = "$env:LOCALAPPDATA\Packages\Microsoft.IntelligentTerminal_8wekyb3d8bbwe\LocalCache\Local\IntelligentTerminal\logs"
+$log  = (Get-ChildItem "$dir\*\wta-main_master.*.log" | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
+$pipe = (Select-String -Path $log -Pattern 'wta-master starting' | Select-Object -Last 1).Line -replace '.*pipe_name=(\S+).*', '$1'
+& "$env:LOCALAPPDATA\Microsoft\WindowsApps\wta.exe" sessions list --master $pipe --json   # one JSON row per line (NDJSON)
+```
+
+Each row carries `provider_id`, `status`, `pane_session_id`, `title` and `cli_source`, so a healthy session reads `provider_id=pi` bound to the pane's `WT_SESSION`. Three things to know when reading it:
+
+- The registry is in memory. Rows disappear when IT restarts, which is also what clears a `custom:npx` catalog created by an earlier pi-acp agent selection.
+- There is no CLI to delete a row; `wta sessions` offers only `list` and `refresh`.
+- A rejection logs the reason but **not** the session id. To attribute one, match its timestamp against the helper log (`wta-main_helper-*.log`), where this extension's own emits appear as `SessionStarted assigning pane_session_id (first bind) … cli=Unknown("pi")`.
