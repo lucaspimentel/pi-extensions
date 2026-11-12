@@ -76,7 +76,6 @@ interface ConfigLoad {
 
 interface FillResult {
 	parts: string[];
-	used: number;
 	truncated: boolean;
 	cut?: string;
 	omitted: string[];
@@ -122,23 +121,25 @@ function classifyConfiguredPath(value: unknown): { path: string } | { rejected: 
 
 /** Read the configured file list. Missing, malformed, or invalid input yields no files. */
 function loadConfiguredFiles(configPath: string = join(getAgentDir(), CONFIG_FILE)): ConfigLoad {
+	const empty = (error?: string): ConfigLoad => ({
+		files: [],
+		rejected: [],
+		path: configPath,
+		error,
+	});
+
 	let raw: string;
 	try {
 		raw = readFileSync(configPath, "utf8");
 	} catch {
-		return { files: [], rejected: [], path: configPath };
+		return empty();
 	}
 
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
 	} catch {
-		return {
-			files: [],
-			rejected: [],
-			path: configPath,
-			error: `personal-overlay: could not parse ${configPath}`,
-		};
+		return empty(`personal-overlay: could not parse ${configPath}`);
 	}
 
 	const listed = Array.isArray(parsed)
@@ -147,12 +148,7 @@ function loadConfiguredFiles(configPath: string = join(getAgentDir(), CONFIG_FIL
 			? (parsed as { files: unknown[] }).files
 			: undefined;
 	if (!listed) {
-		return {
-			files: [],
-			rejected: [],
-			path: configPath,
-			error: `personal-overlay: ${configPath} has no "files" array`,
-		};
+		return empty(`personal-overlay: ${configPath} has no "files" array`);
 	}
 
 	const files: string[] = [];
@@ -208,6 +204,11 @@ function walkDirectories(startDir: string, repoRoot: string): string[] {
 	return dirs;
 }
 
+/** Case-fold a path for comparison, since Windows paths are case-insensitive. */
+function pathKey(value: string): string {
+	return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
 /**
  * Overlay files found on the walk, root first and working directory last, deduped by real path.
  * Returns nothing when no repository root is reachable.
@@ -238,7 +239,7 @@ function collectOverlayFiles(startDir: string, names: string[]): OverlayFile[] {
 			} catch {
 				// Fall back to the unresolved path for dedupe.
 			}
-			const key = process.platform === "win32" ? realPath.toLowerCase() : realPath;
+			const key = pathKey(realPath);
 			if (seen.has(key)) {
 				continue;
 			}
@@ -293,11 +294,7 @@ function truncateToBytes(text: string, maxBytes: number): string {
 }
 
 function displayPath(cwd: string, target: string): string {
-	const rel = relative(cwd, target);
-	if (!rel) {
-		return target.replace(/\\/g, "/");
-	}
-	return rel.replace(/\\/g, "/");
+	return (relative(cwd, target) || target).replace(/\\/g, "/");
 }
 
 /** Comma-joined display paths for a group, used in its header and in the truncation note. */
@@ -308,19 +305,17 @@ function groupLabel(group: OverlayGroup, cwd: string): string {
 /** Describe a loaded file, naming the resolved target when a symlink points elsewhere. */
 function describeLoadedFile(cwd: string, file: OverlayFile): string {
 	const shown = displayPath(cwd, file.path);
-	const differs =
-		process.platform === "win32"
-			? file.realPath.toLowerCase() !== file.path.toLowerCase()
-			: file.realPath !== file.path;
+	const differs = pathKey(file.realPath) !== pathKey(file.path);
 	return differs ? `${shown} -> ${file.realPath.replace(/\\/g, "/")}` : shown;
 }
 
 /**
- * Fill groups in order under `budget` bytes of headers, bodies, and inter-group separators.
- * A group whose body crosses the budget is cut at a UTF-8 boundary; every later group is
- * omitted. `used` is the exact byte length of `parts.join("\n")`.
+ * Fill groups in order under `budget`, counting header, body, and inter-group separator bytes
+ * so the total matches the length of `parts.join("\n")`. A group whose body crosses the budget
+ * is cut at a UTF-8 boundary; every later group is omitted.
  */
 function fillGroups(groups: OverlayGroup[], cwd: string, budget: number): FillResult {
+	const labels = groups.map((group) => groupLabel(group, cwd));
 	const parts: string[] = [];
 	const omitted: string[] = [];
 	let used = 0;
@@ -329,14 +324,14 @@ function fillGroups(groups: OverlayGroup[], cwd: string, budget: number): FillRe
 
 	for (let index = 0; index < groups.length; index++) {
 		const group = groups[index];
-		const label = groupLabel(group, cwd);
+		const label = labels[index];
 		const header = `${label}:\n\n`;
 		const headerBytes = Buffer.byteLength(header, "utf8");
 		const separatorBytes = parts.length > 0 ? 1 : 0;
 		const available = budget - used - separatorBytes - headerBytes;
 		if (available <= 0) {
 			truncated = true;
-			omitted.push(...groups.slice(index).map((entry) => groupLabel(entry, cwd)));
+			omitted.push(...labels.slice(index));
 			break;
 		}
 
@@ -348,7 +343,7 @@ function fillGroups(groups: OverlayGroup[], cwd: string, budget: number): FillRe
 			used += separatorBytes + headerBytes + Buffer.byteLength(body, "utf8");
 			cut = label;
 			truncated = true;
-			omitted.push(...groups.slice(index + 1).map((entry) => groupLabel(entry, cwd)));
+			omitted.push(...labels.slice(index + 1));
 			break;
 		}
 
@@ -356,7 +351,7 @@ function fillGroups(groups: OverlayGroup[], cwd: string, budget: number): FillRe
 		used += separatorBytes + headerBytes + contentBytes;
 	}
 
-	return { parts, used, truncated, cut, omitted };
+	return { parts, truncated, cut, omitted };
 }
 
 /** Build a truncation note within `budget` bytes, shortening the omitted list when needed. */
