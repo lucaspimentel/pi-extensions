@@ -1,6 +1,6 @@
 # intelligent-terminal
 
-Reports the pi session lifecycle to [Microsoft Intelligent Terminal](https://github.com/microsoft/intelligent-terminal) (IT) so its session list and tab metadata show a pi row with live status: Idle, Working, Waiting for input, Error, or Ended.
+Reports the pi session lifecycle to [Microsoft Intelligent Terminal](https://github.com/microsoft/intelligent-terminal) (IT) so its session list shows a pi row bound to the pane that owns the session, with a live status (Idle, Working, Waiting for input, Error, Ended) and the name of the tool currently running.
 
 This mirrors what Microsoft's shipped `wt-agent-hooks` bundle does for Claude Code, Copilot, Codex, Gemini, OpenCode, and Antigravity.
 
@@ -80,3 +80,16 @@ Each row carries `provider_id`, `status`, `pane_session_id`, `title` and `cli_so
 - The registry is in memory. Rows disappear when IT restarts, which is also what clears a `custom:npx` catalog created by an earlier pi-acp agent selection.
 - There is no CLI to delete a row; `wta sessions` offers only `list` and `refresh`.
 - A rejection logs the reason but **not** the session id. To attribute one, match its timestamp against the helper log (`wta-main_helper-*.log`), where this extension's own emits appear as `SessionStarted assigning pane_session_id (first bind) … cli=Unknown("pi")`.
+
+## Files
+
+- `index.ts` - extension factory: the activation gate, the pi event handlers, and the mapping to IT topics
+- `wtcli.ts` - bridge resolution, the spawn shape, the one-time failure warning, and the serialized coalescing emit queue
+- `../shared/agent-lifecycle.ts` - the lifecycle state machine (states, events, reducer) shared with `wt-tab-status`
+
+## Tests
+
+```
+node tests/intelligent-terminal.test.mts
+node tests/agent-lifecycle.test.mts
+```
