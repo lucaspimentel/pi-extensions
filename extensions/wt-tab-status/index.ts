@@ -32,6 +32,10 @@
  *
  * No-op when:
  *   - WT_SESSION env var is not set (i.e. not running in Windows Terminal)
+ *   - HERDR_ENV is "1" (pi runs inside a herdr pane): herdr owns the Windows
+ *     Terminal tab title and reports its own pane working/blocked state, so
+ *     neither the glyph title nor the OSC 9;4 spinner may be written. There is
+ *     no override env for this gate.
  *   - ctx.hasUI is false (e.g. -p / JSON mode)
  *
  * Mode note:
@@ -100,10 +104,25 @@ export const STATE_PROGRESS: Record<AgentLifecycleState, number> = {
 // each one to dispatch dialog_open / dialog_close around the call.
 export const WRAPPED_UI_METHODS = ["confirm", "select", "input", "editor", "custom"] as const;
 
-// ── Pure helpers (mirrored in test-helpers.mjs) ─────────────────────────────
+// ── Pure helpers ───────────────────────────────────────────────────────────
+//
+// isWindowsTerminal and the formatting helpers are mirrored in
+// test-helpers.mjs for the legacy run-all.mjs suite. isHerdrSession is
+// deliberately not mirrored: that suite covers formatting and the state
+// machine, never this gate.
 
 export function isWindowsTerminal(env: NodeJS.ProcessEnv = process.env): boolean {
 	return Boolean(env.WT_SESSION);
+}
+
+/**
+ * True when pi runs inside a herdr pane. herdr owns the Windows Terminal tab
+ * title and reports its own per-pane working/blocked state, so the title and
+ * OSC 9;4 writes below would fight it. Same marker extensions/herdr-tab-name.ts
+ * gates on; other truthy values ("true", "yes") do not count.
+ */
+export function isHerdrSession(env: NodeJS.ProcessEnv = process.env): boolean {
+	return env.HERDR_ENV === "1";
 }
 
 export function formatTitle(state: AgentLifecycleState, sessionName: string | null, cwdBase: string): string {
@@ -123,7 +142,7 @@ function getCwdBase(): string {
 }
 
 export default function (pi: ExtensionAPI) {
-	if (!isWindowsTerminal()) return;
+	if (!isWindowsTerminal() || isHerdrSession()) return;
 
 	let s = initialLifecycleState();
 	let lastApplied: AgentLifecycleState | null = null;

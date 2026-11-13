@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 process.env.WT_SESSION = process.env.WT_SESSION ?? "test-session"; // extension no-ops otherwise
+delete process.env.HERDR_ENV; // the gate no-ops the extension inside herdr; this suite needs it active
 
 const wtTabStatus = (await import("../extensions/wt-tab-status/index.ts")).default;
 
