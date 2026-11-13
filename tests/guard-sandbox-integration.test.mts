@@ -37,21 +37,25 @@ function trackCleanup(dir: string) {
 	return dir;
 }
 
+/**
+ * Environment for the fixture's own git commands: no user or system git config,
+ * so a developer's signing setup, hooks path, commit template, or default
+ * branch cannot change the repositories this fixture builds. Identity is set on
+ * each fixture repository itself.
+ */
+const HERMETIC_GIT_ENV = { ...process.env, GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+
 function makeWorkspace(opts: { git?: boolean } = {}): string {
 	const dir = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-int-ws-"))));
 	fs.writeFileSync(path.join(dir, "README.md"), "fixture\n", "utf8");
 	fs.writeFileSync(path.join(dir, ".env"), "SECRET_TOKEN=1\n", "utf8");
 	fs.writeFileSync(path.join(dir, ".env.example"), "PUBLIC_VAR=1\n", "utf8");
 	if (opts.git) {
-		const r = spawnSync("git", ["init", "-q", dir], { encoding: "utf8" });
+		const r = spawnSync("git", ["init", "-q", dir], { encoding: "utf8", env: HERMETIC_GIT_ENV });
 		assert.equal(r.status, 0, `git init failed: ${r.stderr}`);
-		// Minimal identity so commits work without global config assumptions;
-		// signing stays off locally because a global commit.gpgsign (an agent
-		// such as 1Password) would need an approval these commits never get.
-		spawnSync("git", ["-C", dir, "config", "user.email", "guard@test"], { encoding: "utf8" });
-		spawnSync("git", ["-C", dir, "config", "user.name", "guard-test"], { encoding: "utf8" });
-		spawnSync("git", ["-C", dir, "config", "commit.gpgsign", "false"], { encoding: "utf8" });
-		spawnSync("git", ["-C", dir, "config", "tag.gpgsign", "false"], { encoding: "utf8" });
+		// Minimal identity so commits work without global config assumptions.
+		spawnSync("git", ["-C", dir, "config", "user.email", "guard@test"], { encoding: "utf8", env: HERMETIC_GIT_ENV });
+		spawnSync("git", ["-C", dir, "config", "user.name", "guard-test"], { encoding: "utf8", env: HERMETIC_GIT_ENV });
 	}
 	return dir;
 }
@@ -396,11 +400,11 @@ if (supported) {
 		test("a git worktree has a read-only .git file and read-only common dir", async () => {
 			const repo = makeWorkspace({ git: true });
 			fs.writeFileSync(path.join(repo, "file.txt"), "tracked\n");
-			spawnSync("git", ["-C", repo, "add", "."], { encoding: "utf8" });
-			const commit = spawnSync("git", ["-C", repo, "commit", "-q", "-m", "init"], { encoding: "utf8" });
+			spawnSync("git", ["-C", repo, "add", "."], { encoding: "utf8", env: HERMETIC_GIT_ENV });
+			const commit = spawnSync("git", ["-C", repo, "commit", "-q", "-m", "init"], { encoding: "utf8", env: HERMETIC_GIT_ENV });
 			assert.equal(commit.status, 0, commit.stderr);
 			const wt = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-int-wt-"))));
-			const add = spawnSync("git", ["-C", repo, "worktree", "add", "--detach", wt], { encoding: "utf8" });
+			const add = spawnSync("git", ["-C", repo, "worktree", "add", "--detach", wt], { encoding: "utf8", env: HERMETIC_GIT_ENV });
 			assert.equal(add.status, 0, add.stderr);
 			const script = [
 				"echo x >> .git 2>/dev/null; echo a=$?",

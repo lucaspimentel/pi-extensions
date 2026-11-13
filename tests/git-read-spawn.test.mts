@@ -360,8 +360,16 @@ test("worktree gate: cwd outside the returned toplevel fails closed", async () =
 
 // ── Integration: real git in temp repos ──────────────────────────────────────
 
+/**
+ * Environment for the fixture's own git commands: no user or system git config,
+ * so a developer's signing setup, hooks path, commit template, or default
+ * branch cannot change the repository this fixture builds. Identity is set on
+ * the fixture repository itself.
+ */
+const HERMETIC_GIT_ENV = { ...process.env, GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+
 function gitSync(args: string[], cwd: string): string {
-	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+	const result = spawnSync("git", args, { cwd, encoding: "utf8", env: HERMETIC_GIT_ENV });
 	assert.equal(result.status, 0, `setup git ${args.join(" ")} failed: ${result.stderr}`);
 	return result.stdout;
 }
@@ -371,10 +379,6 @@ function makeRepo(): string {
 	gitSync(["init"], repo);
 	gitSync(["config", "user.email", "test@example.com"], repo);
 	gitSync(["config", "user.name", "Test"], repo);
-	// Never inherit the developer's signing config: a global commit.gpgsign
-	// (an agent such as 1Password) fails these non-interactive setup commits.
-	gitSync(["config", "commit.gpgsign", "false"], repo);
-	gitSync(["config", "tag.gpgsign", "false"], repo);
 	writeFileSync(path.join(repo, "file.txt"), "hello\n");
 	gitSync(["add", "."], repo);
 	gitSync(["commit", "-m", "init"], repo);

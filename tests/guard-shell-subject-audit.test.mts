@@ -15,20 +15,24 @@ import { compileRules, coverageDelta, eligibilityTransition, legacyActiveExpansi
 
 const api = { rules, tier, text };
 
+/**
+ * Environment for the fixture's own git commands and for the freeze tool it
+ * drives: no user or system git config, so a developer's signing setup, hooks
+ * path, commit template, excludes file, or default branch cannot change what
+ * the fixture creates or what the freeze tool reads. Identity is set on the
+ * fixture repository itself.
+ */
+const HERMETIC_GIT_ENV = { ...process.env, GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+
 test("freeze pins an explicit baseline commit independently of the candidate", () => {
 	const dir = mkdtempSync(join(tmpdir(), "guard-audit-freeze-"));
-	const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+	const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: HERMETIC_GIT_ENV, stdio: ["ignore", "pipe", "pipe"] }).trim();
 	const freeze = fileURLToPath(new URL("../tools/shell-subject-audit/freeze.mts", import.meta.url));
-	const run = (...args: string[]) => spawnSync(process.execPath, [freeze, "--config", "config.json", ...args], { cwd: dir, encoding: "utf8" });
+	const run = (...args: string[]) => spawnSync(process.execPath, [freeze, "--config", "config.json", ...args], { cwd: dir, encoding: "utf8", env: HERMETIC_GIT_ENV });
 	try {
 		git("init");
 		git("config", "user.name", "Test");
 		git("config", "user.email", "test@example.invalid");
-		// The setup commits must not inherit the developer's signing config: a
-		// global commit.gpgsign (an agent such as 1Password) makes these
-		// non-interactive commits fail before the assertion is reached.
-		git("config", "commit.gpgsign", "false");
-		git("config", "tag.gpgsign", "false");
 		writeFileSync(join(dir, ".gitignore"), "build/\nconfig.json\n");
 		writeFileSync(join(dir, "config.json"), "{}");
 		writeFileSync(join(dir, "example.txt"), "baseline");
