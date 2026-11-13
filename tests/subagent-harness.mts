@@ -8,7 +8,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import subagentExtension, { setAgentListCwd, setSpawnOverride } from "../extensions/subagent/index.ts";
-import { SUBAGENT_SNAPSHOT_ACK, SUBAGENT_SNAPSHOT_REQUEST } from "../extensions/subagent/guard-snapshot.ts";
+import {
+	EXTENSION_PRESENT_ACK,
+	EXTENSION_PRESENT_REQUEST,
+	SUBAGENT_SNAPSHOT_ACK,
+	SUBAGENT_SNAPSHOT_REQUEST,
+} from "../extensions/guard/policy/handshake.ts";
 
 export interface ToolResult {
 	content: Array<{ type: string; text: string }>;
@@ -218,6 +223,10 @@ export function makeHarness(fixtures: {
 	tools?: string[];
 	settings?: Record<string, unknown>;
 	guard?: boolean;
+	/** Ack the load-time presence ping without answering the snapshot query. */
+	guardPresence?: boolean;
+	/** Register a guard-layout command, as a loaded guard extension does. */
+	guardCommand?: "cli" | "package" | "package-root" | "windows";
 } = {}): Harness {
 	const listeners: Record<string, Array<(data: any) => void>> = {};
 	const events = {
@@ -234,6 +243,31 @@ export function makeHarness(fixtures: {
 	if (fixtures.guard) events.on(SUBAGENT_SNAPSHOT_REQUEST, (request) => {
 		events.emit(SUBAGENT_SNAPSHOT_ACK, { version: 1, id: request.id, ok: true, profile: "research" });
 	});
+	if (fixtures.guardPresence) events.on(EXTENSION_PRESENT_REQUEST, (request) => {
+		events.emit(EXTENSION_PRESENT_ACK, { version: 1, id: request.id, ok: true });
+	});
+	// A guard extension's command carries the extension file as its provenance,
+	// so the layout itself (an extensions/guard directory) is the signal. The
+	// shapes cover every provenance pi reports: a package extension whose
+	// baseDir is the extension directory, one whose baseDir is the package
+	// root (the file path still proves the layout), one added with --extension
+	// (no baseDir at all), and a backslash, mixed-case path.
+	const guardBaseDir = path.join(path.sep, "fake-package", "extensions", "guard");
+	const guardCommand = fixtures.guardCommand
+		? {
+			name: "guard",
+			description: "guard",
+			source: "extension",
+			sourceInfo: fixtures.guardCommand === "package"
+				? { path: path.join(guardBaseDir, "index.ts"), source: "fake-package", scope: "user", origin: "package", baseDir: guardBaseDir }
+				: fixtures.guardCommand === "package-root"
+					? { path: path.join(guardBaseDir, "index.ts"), source: "fake-package", scope: "user", origin: "package", baseDir: path.dirname(guardBaseDir) }
+					: fixtures.guardCommand === "windows"
+						? { path: "C:\\verify\\Extensions\\Guard\\index.ts", source: "cli", scope: "temporary", origin: "top-level" }
+						: { path: path.join(guardBaseDir, "index.ts"), source: "cli", scope: "temporary", origin: "top-level" },
+		}
+		: null;
+	const commands = guardCommand ? [guardCommand] : [];
 	const api = {
 		on(event: string, handler: (event: unknown, ctx: TestCtx) => unknown) {
 			(h.handlers[event] ??= []).push(handler);
@@ -243,7 +277,7 @@ export function makeHarness(fixtures: {
 		registerCommand: () => {},
 		registerShortcut: () => {},
 		registerFlag: () => {},
-		getCommands: () => [],
+		getCommands: () => commands,
 		getActiveTools: () => [],
 		getAllTools: () => (fixtures.tools ?? []).map((name) => ({ name })),
 		getSettings: () => fixtures.settings ?? {},

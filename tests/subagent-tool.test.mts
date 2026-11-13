@@ -14,6 +14,7 @@ import * as fs from "node:fs";
 import { test } from "node:test";
 
 import { setAgentListCwd, setBootstrapPathOverride } from "../extensions/subagent/index.ts";
+import { INHERIT_ENV } from "../extensions/guard/policy/inheritance.ts";
 import {
 	cleanupHarness,
 	installControlledSpawn,
@@ -508,7 +509,7 @@ test("judge metadata precedence is inline, preset, configured override, session 
 	});
 });
 
-test("partial panel failures preserve successful output and all-failed panels are errors; absent guard refuses meaningfully", async () => {
+test("partial panel failures preserve successful output and all-failed panels are errors; guard presence decides absent versus unresponsive", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
 		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: null } } });
 		let failAll = false;
@@ -525,10 +526,32 @@ test("partial panel failures preserve successful output and all-failed panels ar
 			assert.equal((mixed.details?.results as any[]).length, 2);
 			failAll = true;
 			assert.equal((await runSubagent(h, cwd, { panel: "pair", task: "x" })).isError, true);
-			const refused = await runSubagent(makeHarness(), cwd, { panel: "pair", task: "x" });
-			assert.equal(refused.isError, true);
-			assert.match(refused.content[0].text, /no synchronous guard snapshot response/);
 			assert.equal(recording.spawns.length, 4);
+
+			// A provably absent guard (no snapshot answer, no presence answer, no
+			// guard-layout command) dispatches ungated rather than refusing.
+			failAll = false;
+			const ungated = await runSubagent(makeHarness(), cwd, { panel: "pair", task: "x" });
+			assert.notEqual(ungated.isError, true, "an absent guard dispatches ungated");
+			assert.equal(recording.spawns.length, 6);
+			const ungatedSpawn = recording.spawns[4]!;
+			assert.equal(flag(ungatedSpawn.args, "--extension"), undefined, "the ungated child carries no startup gate");
+			assert.equal(ungatedSpawn.options.env?.[INHERIT_ENV], process.env[INHERIT_ENV], "the ambient contract passes through untouched");
+
+			// A guard that is loaded but never answers the snapshot still refuses.
+			const silent = await runSubagent(makeHarness({ guardPresence: true }), cwd, { panel: "pair", task: "x" });
+			assert.equal(silent.isError, true);
+			assert.match(silent.content[0].text, /guard refused subagent dispatch: a guard extension is loaded but did not answer the snapshot handshake/);
+			assert.equal(recording.spawns.length, 6, "no child is spawned for the unresponsive guard");
+
+			// A guard too old to answer the presence ping is caught by its command,
+			// in both provenance shapes pi reports.
+			for (const shape of ["cli", "package", "package-root", "windows"] as const) {
+				const registered = await runSubagent(makeHarness({ guardCommand: shape }), cwd, { panel: "pair", task: "x" });
+				assert.equal(registered.isError, true, shape);
+				assert.match(registered.content[0].text, /guard refused subagent dispatch: a guard extension is loaded but did not answer the snapshot handshake/);
+				assert.equal(recording.spawns.length, 6, "no child is spawned for a registered guard");
+			}
 		} finally { recording.restore(); }
 	});
 });

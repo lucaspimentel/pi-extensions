@@ -105,20 +105,27 @@ Notes:
   tool set (your `defaultTools` settings apply). Child processes are
   non-interactive, so any guard-owned prompt in a child is denied regardless
   of the legacy `nonInteractiveAsk` setting; sandboxed work stays free.
-- **Guard requirement (guard step 5)**: every dispatch asks the parent
+- **Guard coupling (guard step 5)**: every dispatch asks the parent
   session's guard extension for a fresh snapshot of its effective profile
-  immediately before each spawn (single, parallel, chain, and nested alike)
-  and refuses to spawn when the guard is absent, uninitialized, transitioning,
-  workspace-locked, blocked by unresolved teardown, or mismatched. The child
-  receives that profile via `PI_GUARD_INHERIT` plus a startup gate extension
+  immediately before each spawn (single, parallel, chain, panel, judge, and
+  nested alike). A guard that answers provides the profile, and the child
+  receives it via `PI_GUARD_INHERIT` plus a startup gate extension
   (`guard-bootstrap.ts`, passed with `--extension`); the child's guard may
   only keep the inherited profile or switch to research, and the child exits
   nonzero before any model or tool execution unless its guard proves it
-  consumed the exact contract. Only the profile is inherited: the child loads
-  its own guard configuration for its cwd. This is profile inheritance and
-  startup validation, not complete child-tool containment: non-owned tools
-  other than write/edit remain observe-only, and running children keep their launch
-  snapshot.
+  consumed the exact contract. A guard that is loaded but does not answer
+  (uninitialized, transitioning, workspace-locked, blocked by unresolved
+  teardown, mismatched cwd, or simply silent) refuses the dispatch with a
+  diagnostic. A guard that is **provably absent** does not: the dispatch
+  proceeds ungated, with no startup gate and no inherited profile, exactly
+  like the stock subagent extension. Absence is proven by three silences: no
+  snapshot answer, no answer to guard's load-time presence ping
+  (`guard:extension-present-request`), and no registered `extensions/guard`
+  command. Only the profile is inherited: a child that loads its own guard
+  configuration still uses it, and the ambient environment is passed through
+  untouched. This is profile inheritance and startup validation, not complete
+  child-tool containment: non-owned tools other than write/edit remain
+  observe-only, and running children keep their launch snapshot.
 
 ## Discovering agents
 

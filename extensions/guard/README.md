@@ -10,7 +10,8 @@ non-owned `write`/`edit` calls are also enforced since 2026-10-16 (block on
 deny, approval dialog on prompt); every other tool call stays observe-only**
 (decisions on `guard:decision`, nothing blocked or prompted), except the
 grep/ffgrep secret-mask `tool_result` filter below. **Step 5 adds subagent
-profile inheritance** (below). The old standalone python/node
+profile inheritance and a load-time presence ping that lets the subagent
+extension tell a disabled guard from an unresponsive one** (below). The old standalone python/node
 extensions were unregistered from the manifest on 2026-10-21 (guard's
 ported copies are the only registered python/node tools). The standalone
 implementations and their tests were deleted on 2026-10-28 after porting
@@ -293,11 +294,20 @@ ordering, so there is no ceiling to clamp to); the restriction survives
 commands, the picker, the cycle shortcut, reload, and session replacement.
 An explicitly present but invalid `PI_GUARD_INHERIT` blocks the child's guard
 entirely (no runtime, owned executors fail closed) instead of falling back to
-an ordinary default session. Dispatch is fail-closed: an absent,
-uninitialized, transitioning, workspace-locked, teardown-blocked, or
-mismatched parent guard refuses the spawn with a diagnostic instead of
-defaulting. Only the profile is inherited; the child loads its own guard
-configuration for its cwd, and a locked parent refuses dispatch rather than
+an ordinary default session. Dispatch is fail-closed while a guard extension is loaded: an uninitialized,
+transitioning, workspace-locked, teardown-blocked, or mismatched parent guard
+refuses the spawn with a diagnostic instead of defaulting. A guard extension
+that is loaded but cannot answer at all is detected separately: guard answers
+a load-time presence ping (`guard:extension-present-request`/`ack`) from its
+factory, before any session state exists, and a registered
+`extensions/guard`-layout command counts as presence too, so a loaded guard
+never has to answer the snapshot to be recognized. Only when the snapshot
+goes unanswered, the presence ping stays silent, and no guard command is
+registered does the dispatch proceed ungated, with no `PI_GUARD_INHERIT` and
+no child startup gate, exactly like pi's stock subagent extension; the
+ambient environment is passed through untouched. Only the profile is
+inherited; the child loads its own guard configuration for its cwd, and a
+locked parent refuses dispatch rather than
 transmitting its lock. Each synchronous handshake query requires exactly one
 correlated acknowledgment: every additional matching acknowledgment,
 including an identical duplicate, fails closed (the dispatch refuses; the
@@ -314,7 +324,10 @@ coexistence; child cwd/config differences can change per-call permissions;
 running children keep their launch snapshot (entering research does not
 tighten them retroactively); environment inheritance governs supported
 subagent dispatch, not arbitrary processes launched through permitted raw
-host execution; and trusted extensions run with host privileges, so the
+host execution; a guard that fails during load before registering anything
+reads as absent, so its dispatch proceeds ungated (its enforcement never came
+up in that process either, so this is a silent downgrade of intent rather
+than an escalation); and trusted extensions run with host privileges, so the
 handshake is not a defense against malicious extensions.
 
 ### grep/ffgrep secret-mask filter

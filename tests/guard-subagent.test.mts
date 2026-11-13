@@ -34,16 +34,18 @@ import {
 	setProfile,
 } from "../extensions/guard/policy/state.ts";
 import guardExtension from "../extensions/guard/index.ts";
-import subagentExtension, { setBootstrapPathOverride, setSpawnOverride } from "../extensions/subagent/index.ts";
-import { discoverAgents } from "../extensions/subagent/agents.ts";
 import {
 	CHILD_CONTRACT_ACK,
 	CHILD_CONTRACT_REQUEST,
+	EXTENSION_PRESENT_ACK,
+	EXTENSION_PRESENT_REQUEST,
 	SUBAGENT_SNAPSHOT_ACK,
 	SUBAGENT_SNAPSHOT_REQUEST,
-	queryGuardSnapshot,
-	requestChildContract,
-} from "../extensions/subagent/guard-snapshot.ts";
+} from "../extensions/guard/policy/handshake.ts";
+import subagentExtension, { setBootstrapPathOverride, setSpawnOverride } from "../extensions/subagent/index.ts";
+import { discoverAgents } from "../extensions/subagent/agents.ts";
+import { queryGuardPresence, queryGuardSnapshot, requestChildContract } from "../extensions/subagent/guard-snapshot.ts";
+import type { SnapshotFailureKind } from "../extensions/guard/policy/handshake.ts";
 
 const repoRoot = path.resolve(path.dirname(decodeURI(new URL(import.meta.url).pathname)), "..");
 const tempDirs: string[] = [];
@@ -209,6 +211,22 @@ function contractQuery(h: GuardHarness, contract: InheritanceContract) {
 	return requestChildContract(queryBus, contract);
 }
 
+function presenceQuery(h: GuardHarness) {
+	const queryBus = {
+		on: (channel: string, handler: (data: unknown) => void) => {
+			h.eventListeners[channel] = [...(h.eventListeners[channel] ?? []), handler];
+			return () => {
+				h.eventListeners[channel] = (h.eventListeners[channel] ?? []).filter((f) => f !== handler);
+			};
+		},
+		emit: (channel: string, data: unknown) => {
+			h.emitted.push([channel, data]);
+			for (const fn of [...(h.eventListeners[channel] ?? [])]) fn(data);
+		},
+	};
+	return queryGuardPresence(queryBus);
+}
+
 // ── Subagent extension harness (spawn seam) ───────────────────────────────────
 
 interface CapturedSpawn {
@@ -241,7 +259,7 @@ interface SubagentHarness {
 	holdRemaining: number;
 }
 
-function makeSubagentHarness(): SubagentHarness {
+function makeSubagentHarness(options: { guardCommand?: "cli" | "package" | "package-root" | "windows" } = {}): SubagentHarness {
 	const h: SubagentHarness = {
 		eventListeners: {},
 		emitted: [],
@@ -251,13 +269,34 @@ function makeSubagentHarness(): SubagentHarness {
 		held: [],
 		holdRemaining: 0,
 	};
+	// A loaded guard extension registers commands whose provenance is its own
+	// file, so the layout of the registering directory is the presence signal.
+	// The shapes cover the provenances pi reports: a package extension whose
+	// baseDir is the extension directory, one whose baseDir is the package root
+	// (only the file path proves the layout), one added with --extension (no
+	// baseDir at all), and a backslash, mixed-case path.
+	const guardBaseDir = path.join(path.sep, "fake-package", "extensions", "guard");
+	const commands = options.guardCommand
+		? [{
+			name: "guard",
+			description: "guard",
+			source: "extension",
+			sourceInfo: options.guardCommand === "package"
+				? { path: path.join(guardBaseDir, "index.ts"), source: "fake-package", scope: "user", origin: "package", baseDir: guardBaseDir }
+				: options.guardCommand === "package-root"
+					? { path: path.join(guardBaseDir, "index.ts"), source: "fake-package", scope: "user", origin: "package", baseDir: path.dirname(guardBaseDir) }
+					: options.guardCommand === "windows"
+						? { path: "C:\\verify\\Extensions\\Guard\\index.ts", source: "cli", scope: "temporary", origin: "top-level" }
+						: { path: path.join(guardBaseDir, "index.ts"), source: "cli", scope: "temporary", origin: "top-level" },
+		}]
+		: [];
 	const api = {
 		on: () => () => {},
 		registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => h.registeredTools.set(tool.name, tool),
 		registerCommand: () => {},
 		registerShortcut: () => {},
 		registerFlag: () => {},
-		getCommands: () => [],
+		getCommands: () => commands,
 		getActiveTools: () => [],
 		getAllTools: () => [],
 		events: {
@@ -555,6 +594,38 @@ test("the snapshot responder answers synchronously from valid state and refuses 
 	});
 });
 
+test("the presence responder answers at load, before any session, and stays silent on a malformed request", async () => {
+	await withTempHome(async () => {
+		const h = makeGuardHarness();
+		// No session_start runs first: presence must exist as soon as the
+		// factory ran, unlike the state-aware snapshot responder.
+		assert.deepEqual(presenceQuery(h), { present: true });
+		const before = h.emitted.length;
+		h.emit(EXTENSION_PRESENT_REQUEST, { version: 1 });
+		assert.equal(
+			h.emitted.slice(before).some(([channel]) => channel === EXTENSION_PRESENT_ACK),
+			false,
+			"a request without a correlatable id gets no answer",
+		);
+		assert.equal((h.eventListeners[EXTENSION_PRESENT_ACK] ?? []).length, 0, "the query helper unsubscribed in finally");
+	});
+});
+
+test("the presence responder answers while an invalid inheritance blocks the session", async () => {
+	await withTempHome(async () => {
+		await withInheritanceEnv("{ not json", async () => {
+			const h = makeGuardHarness();
+			const cwd = makeTempDir("guard-sub-presence-blocked-");
+			await startGuardSession(h, cwd);
+			const snapshot = snapshotQuery(h, cwd);
+			assert.equal(snapshot.ok, false, "the blocked session cannot answer the snapshot");
+			assert.equal(snapshot.ok ? "" : snapshot.kind, "refused");
+			assert.match(snapshot.ok ? "" : snapshot.reason, /inheritance is invalid/);
+			assert.deepEqual(presenceQuery(h), { present: true }, "presence is independent of session state");
+		});
+	});
+});
+
 test("the child contract ack proves the exact contract and refuses everything else", async () => {
 	await withTempHome(async () => {
 		await withInheritanceEnv(serializeInheritance("auto", "n-6"), async () => {
@@ -715,18 +786,20 @@ function contractResponder(step: DupStep): (bus: ScriptedBus, request: Record<st
 	};
 }
 
-const DUPLICATE_SCENARIOS: Array<{ label: string; steps: DupStep[]; expectOk: boolean; duplicate: boolean }> = [
+const DUPLICATE_SCENARIOS: Array<{ label: string; steps: DupStep[]; expectOk: boolean; duplicate: boolean; kind?: SnapshotFailureKind }> = [
 	{ label: "a single success succeeds", steps: ["ok"], expectOk: true, duplicate: false },
-	{ label: "a single refusal keeps its diagnostic", steps: ["refuse"], expectOk: false, duplicate: false },
-	{ label: "no correlated response keeps the missing-response refusal", steps: [], expectOk: false, duplicate: false },
-	{ label: "identical duplicate successes refuse", steps: ["ok", "ok"], expectOk: false, duplicate: true },
-	{ label: "success then refusal refuses as a duplicate", steps: ["ok", "refuse"], expectOk: false, duplicate: true },
-	{ label: "refusal then success refuses as a duplicate", steps: ["refuse", "ok"], expectOk: false, duplicate: true },
-	{ label: "two successes with different profiles refuse", steps: ["ok", "ok2"], expectOk: false, duplicate: true },
-	{ label: "success then malformed correlated response refuses", steps: ["ok", "malformed"], expectOk: false, duplicate: true },
-	{ label: "malformed correlated response then success refuses", steps: ["malformed", "ok"], expectOk: false, duplicate: true },
-	{ label: "success then unsupported version refuses", steps: ["ok", "wrong-version"], expectOk: false, duplicate: true },
-	{ label: "three correlated responses refuse", steps: ["ok", "refuse", "malformed"], expectOk: false, duplicate: true },
+	{ label: "a single refusal keeps its diagnostic", steps: ["refuse"], expectOk: false, duplicate: false, kind: "refused" },
+	{ label: "no correlated response keeps the missing-response refusal", steps: [], expectOk: false, duplicate: false, kind: "absent" },
+	{ label: "a single malformed correlated response is malformed", steps: ["malformed"], expectOk: false, duplicate: false, kind: "malformed" },
+	{ label: "a single unsupported version is malformed", steps: ["wrong-version"], expectOk: false, duplicate: false, kind: "malformed" },
+	{ label: "identical duplicate successes refuse", steps: ["ok", "ok"], expectOk: false, duplicate: true, kind: "duplicate" },
+	{ label: "success then refusal refuses as a duplicate", steps: ["ok", "refuse"], expectOk: false, duplicate: true, kind: "duplicate" },
+	{ label: "refusal then success refuses as a duplicate", steps: ["refuse", "ok"], expectOk: false, duplicate: true, kind: "duplicate" },
+	{ label: "two successes with different profiles refuse", steps: ["ok", "ok2"], expectOk: false, duplicate: true, kind: "duplicate" },
+	{ label: "success then malformed correlated response refuses", steps: ["ok", "malformed"], expectOk: false, duplicate: true, kind: "duplicate" },
+	{ label: "malformed correlated response then success refuses", steps: ["malformed", "ok"], expectOk: false, duplicate: true, kind: "duplicate" },
+	{ label: "success then unsupported version refuses", steps: ["ok", "wrong-version"], expectOk: false, duplicate: true, kind: "duplicate" },
+	{ label: "three correlated responses refuse", steps: ["ok", "refuse", "malformed"], expectOk: false, duplicate: true, kind: "duplicate" },
 	{ label: "unrelated acknowledgments around one success succeed", steps: ["unrelated", "ok", "unrelated"], expectOk: true, duplicate: false },
 ];
 
@@ -735,6 +808,7 @@ for (const scenario of DUPLICATE_SCENARIOS) {
 		const { bus, listeners } = makeScriptedBus(SUBAGENT_SNAPSHOT_REQUEST, scenario.steps.map(snapshotResponder));
 		const result = queryGuardSnapshot(bus, "/w");
 		assert.equal(result.ok, scenario.expectOk, JSON.stringify(result));
+		if (!result.ok) assert.equal(result.kind, scenario.kind, "the failure kind names the branch");
 		if (scenario.duplicate) {
 			assert.match(result.ok ? "" : result.reason, /duplicate/i, "diagnostic must identify the duplicate acknowledgment");
 			assert.match(result.ok ? "" : result.reason, /exactly one/i, "diagnostic must state the single-responder requirement");
@@ -778,6 +852,46 @@ test("an emission failure still unsubscribes both handshake listeners", () => {
 	const contractBus = makeThrowingBus();
 	assert.throws(() => requestChildContract(contractBus.bus, AUTO_CONTRACT), /emitter failure/);
 	assert.equal((contractBus.listeners.get(CHILD_CONTRACT_ACK) ?? []).length, 0);
+});
+
+test("the presence query proves a loaded guard, stays absent on silence, and fails closed", () => {
+	const answered = makeScriptedBus(EXTENSION_PRESENT_REQUEST, [
+		(bus, request) => void bus.emit(EXTENSION_PRESENT_ACK, { version: 1, id: request.id, ok: true }),
+	]);
+	assert.deepEqual(queryGuardPresence(answered.bus), { present: true });
+	assert.equal((answered.listeners.get(EXTENSION_PRESENT_ACK) ?? []).length, 0, "the query helper unsubscribed in finally");
+
+	const silent = makeScriptedBus(EXTENSION_PRESENT_REQUEST, []);
+	assert.deepEqual(queryGuardPresence(silent.bus), { present: false }, "silence is the only absence outcome");
+
+	const unrelated = makeScriptedBus(EXTENSION_PRESENT_REQUEST, [
+		(bus) => void bus.emit(EXTENSION_PRESENT_ACK, { version: 1, id: "some-other-query", ok: true }),
+	]);
+	assert.deepEqual(queryGuardPresence(unrelated.bus), { present: false }, "uncorrelated acknowledgments do not count");
+
+	const duplicated = makeScriptedBus(EXTENSION_PRESENT_REQUEST, [
+		(bus, request) => void bus.emit(EXTENSION_PRESENT_ACK, { version: 1, id: request.id, ok: true }),
+		(bus, request) => void bus.emit(EXTENSION_PRESENT_ACK, { version: 1, id: request.id, ok: true }),
+	]);
+	const duplicate = queryGuardPresence(duplicated.bus);
+	assert.equal(duplicate.present, true);
+	assert.match(duplicate.present ? (duplicate.reason ?? "") : "", /duplicate/i);
+
+	const wrongVersion = makeScriptedBus(EXTENSION_PRESENT_REQUEST, [
+		(bus, request) => void bus.emit(EXTENSION_PRESENT_ACK, { version: 2, id: request.id, ok: true }),
+	]);
+	assert.equal(queryGuardPresence(wrongVersion.bus).present, true, "a version this build cannot read still proves a loaded guard");
+
+	const malformed = makeScriptedBus(EXTENSION_PRESENT_REQUEST, [
+		(bus, request) => void bus.emit(EXTENSION_PRESENT_ACK, { id: request.id }),
+	]);
+	assert.equal(queryGuardPresence(malformed.bus).present, true, "a correlated but malformed ack still proves a loaded guard");
+
+	const throwing = makeThrowingBus();
+	const failed = queryGuardPresence(throwing.bus);
+	assert.equal(failed.present, true, "a broken bus never produces an ungated dispatch");
+	assert.match(failed.present ? (failed.reason ?? "") : "", /could not be emitted/);
+	assert.equal((throwing.listeners.get(EXTENSION_PRESENT_ACK) ?? []).length, 0, "the query helper unsubscribed in finally");
 });
 
 // ── D. Subagent dispatch wiring (spawn seam) ──────────────────────────────────
@@ -964,6 +1078,73 @@ test("a missing child startup gate refuses the dispatch", async () => {
 		assert.equal(sub.spawns.length, 0);
 		assert.match(result.content.map((c) => c.text ?? "").join("\n"), /not found/);
 	});
+});
+
+/**
+ * Dispatch with no guard extension loaded at all: only the subagent extension
+ * is instantiated, optionally with a presence responder or a guard-layout
+ * command registration standing in for a guard that never answers snapshots.
+ */
+async function withSubagentOnly(
+	options: { guardCommand?: "cli" | "package" | "package-root" | "windows"; presence?: boolean },
+	fn: (sub: SubagentHarness, cwd: string) => Promise<void> | void,
+) {
+	await withTempHome(async () => {
+		const sub = makeSubagentHarness({ guardCommand: options.guardCommand });
+		const cwd = makeTempDir("guard-sub-absent-");
+		if (options.presence) {
+			(sub.eventListeners[EXTENSION_PRESENT_REQUEST] ??= []).push((raw) => {
+				const request = raw as { id: string };
+				sub.emit(EXTENSION_PRESENT_ACK, { version: 1, id: request.id, ok: true });
+			});
+		}
+		try {
+			await fn(sub, cwd);
+		} finally {
+			setSpawnOverride(null);
+			setBootstrapPathOverride(null);
+		}
+	});
+}
+
+test("a provably absent guard dispatches ungated with no gate and no contract override", async () => {
+	await withSubagentOnly({}, async (sub, cwd) => {
+		await withInheritanceEnv(serializeInheritance("auto", "ambient-n"), async () => {
+			const result = await runSubagent(sub, cwd, { agent: "scout", task: "look around" }) as { content: Array<{ text?: string }>; isError?: boolean };
+			assert.notEqual(result.isError, true, "an absent guard is not a refusal");
+			assert.equal(sub.spawns.length, 1);
+			const spawn = sub.spawns[0];
+			assert.equal(spawn.args.includes("--extension"), false, "the ungated child carries no startup gate");
+			const env = spawn.options.env as Record<string, string | undefined>;
+			const parsed = parseInheritance(env[INHERIT_ENV]);
+			assert.equal(parsed.ok, true, "the ambient contract is passed through, not dropped");
+			if (parsed.ok) assert.equal(parsed.contract.nonce, "ambient-n", "the ambient contract is not replaced");
+			assert.equal((sub.eventListeners[SUBAGENT_SNAPSHOT_ACK] ?? []).length, 0, "no snapshot listener leaks");
+			assert.equal((sub.eventListeners[EXTENSION_PRESENT_ACK] ?? []).length, 0, "no presence listener leaks");
+		});
+	});
+});
+
+test("a loaded but unresponsive guard refuses and names the snapshot handshake", async () => {
+	await withSubagentOnly({ presence: true }, async (sub, cwd) => {
+		const result = await runSubagent(sub, cwd, { agent: "scout", task: "x" }) as { content: Array<{ text?: string }>; isError?: boolean };
+		assert.equal(sub.spawns.length, 0, "no child is spawned for an unresponsive guard");
+		assert.equal(result.isError, true);
+		const text = result.content.map((c) => c.text ?? "").join("\n");
+		assert.match(text, /guard refused subagent dispatch: a guard extension is loaded but did not answer the snapshot handshake/);
+	});
+});
+
+test("a guard-layout command registration refuses even when the presence ping is silent", async () => {
+	for (const shape of ["cli", "package", "package-root", "windows"] as const) {
+		await withSubagentOnly({ guardCommand: shape }, async (sub, cwd) => {
+			const result = await runSubagent(sub, cwd, { agent: "scout", task: "x" }) as { content: Array<{ text?: string }>; isError?: boolean };
+			assert.equal(sub.spawns.length, 0, `no child is spawned for a registered guard (${shape})`);
+			assert.equal(result.isError, true, shape);
+			const text = result.content.map((c) => c.text ?? "").join("\n");
+			assert.match(text, /guard refused subagent dispatch: a guard extension is loaded but did not answer the snapshot handshake/);
+		});
+	}
 });
 
 test("an already-aborted dispatch never spawns or queries", async () => {

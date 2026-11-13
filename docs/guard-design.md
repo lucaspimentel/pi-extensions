@@ -1115,10 +1115,12 @@ The query runs after all asynchronous prompt preparation and immediately
 before `spawn()`, with no await in between; cached `guard:profile` events are
 not used because they cannot distinguish an idle runtime from a transition in
 progress. The responder is synchronous and read-only, and refuses when the
-guard is absent or uninitialized, transitioning, workspace-locked, blocked by
+guard is uninitialized, transitioning, workspace-locked, blocked by
 unresolved teardown, has invalid inheritance, or answers for a mismatched
-cwd. Dispatch fails closed: no defaulting to `default`, no unguarded
-fallback. The handshake requires exactly one correlated synchronous
+cwd. A refusal is final: no defaulting to `default`. Only a snapshot that
+produced no correlated acknowledgment at all reaches the guard-absent test
+described next, which decides between refusing and dispatching ungated. The
+handshake requires exactly one correlated synchronous
 acknowledgment: every additional matching acknowledgment, including an
 identical duplicate, refuses the dispatch, because multiple responses
 indicate an ambiguous or duplicated responder configuration. Responses with
@@ -1126,6 +1128,56 @@ unrelated correlation identifiers are ignored and do not count as
 duplicates. Already-running children keep their launch snapshot; entering
 research does not retroactively tighten existing children, and there is no
 live policy propagation.
+
+### Guard-absent dispatch
+
+A session with no guard extension loaded behaves like the stock subagent
+extension, while a loaded guard that cannot answer still refuses. The querier
+separates those cases with two further signals, both consulted only when the
+snapshot produced no correlated acknowledgment:
+
+- **Presence ping** (`guard:extension-present-request`/`ack`; all channel
+  names and payload types live in `guard/policy/handshake.ts`, shared by both
+  extensions). Guard's factory registers the responder at extension load,
+  before and independently of session state, so it answers even when the
+  session is blocked by invalid inheritance or a workspace lock. It carries
+  no profile and never authorizes a guarded dispatch; its only job is to turn
+  silence into "loaded but unresponsive". The same correlation discipline
+  applies: exactly one matching synchronous acknowledgment, duplicates and
+  unsupported versions count as present, unrelated acknowledgments are
+  ignored, and a request without a correlatable id gets no answer at all.
+- **Command provenance**: any registered extension command whose directory is
+  an `extensions/guard` directory proves a loaded guard. This covers a guard
+  too old to have the presence responder and a handler that yields before
+  acknowledging. It is matched by layout rather than exact path, so a
+  working-tree install next to an installed package still matches. Both
+  `baseDir` and the directory of `path` are checked, because pi reports the
+  package base for a package extension (sometimes the package root, not the
+  directory holding the entry) and no `baseDir` at all for an extension added
+  with `--extension`; either candidate matching is enough. Tool provenance is
+  deliberately not used: `--tools`, `--exclude-tools`, and `defaultTools`
+  filter custom tools out of the registry, which would make a loaded guard
+  look absent.
+
+A presence answer, a duplicate or unreadable presence acknowledgment, a
+presence-query emission failure, or a guard-layout command all resolve to
+"loaded but unresponsive" and refuse with a diagnostic that names the
+snapshot handshake. Only double silence dispatches ungated: no
+`PI_GUARD_INHERIT` override and no `--extension` startup gate, with the
+ambient environment passed through untouched, so a child whose own cwd
+configuration loads guard still applies any inherited restriction rather
+than losing it. The verdict is recomputed at every spawn and never cached;
+there is no configuration knob, no opt-out, and no user-visible notice. The
+snapshot failure shape carries the branch (`kind`: `absent`, `refused`,
+`malformed`, `duplicate`), and only `absent` may reach this test.
+
+A set `PI_GUARD_INHERIT` is deliberately not treated as evidence that guard
+should be present. The child startup gate makes that combination unreachable
+in a real session: a dispatched child that carries the contract without a
+guard extension exits nonzero before its first agent run, and a child that
+carries it with guard present is talking to a live guard anyway. Reading the
+variable would therefore add a branch that no real session can produce while
+reintroducing an authorization decision on inherited environment state.
 
 ### Child startup gate
 
@@ -1167,6 +1219,17 @@ remain useful.
   processes launched through permitted raw host execution.
 - Trusted extensions run with host privileges; the handshake is not a defense
   against malicious extensions.
+- Guard-absent dispatch is a liveness distinction, not an authorization one: a
+  guard that fails during load before registering anything reads as absent, so
+  the dispatch proceeds ungated. Its enforcement never came up in that process
+  either, so this is a silent downgrade of intent rather than an escalation,
+  and it is not detected.
+- The guard-layout command match assumes guard stays at `extensions/guard`;
+  relocating it requires updating that match.
+- A child dispatched ungated sees no guard either, so its own dispatches
+  resolve the same way. A task cwd whose own configuration loads guard yields
+  an ordinary guarded child at `default`, which is stricter than the parent
+  and is accepted rather than detected.
 - **Deferred:** forwarding child prompts to the parent UI.
 - Reminder: children load the **installed** extensions from
   `~/.pi/agent/git/github.com/lucaspimentel/pi-extensions`, not the working
@@ -1304,6 +1367,7 @@ remain useful.
 | Computed host-shell profile switch (2026-11-05) | User-confirmed and implemented. The host-shell approval dialog offers one `Switch to <rung> (this session only)` action per qualifying rung, computed per call as `qualifyingSwitchRungs(call, policy)` (`policy/decision.ts`): the pinned candidate set `SWITCH_CANDIDATES = [allow-edits, auto, trusted]` filtered to rungs whose pure `explainHostShellCommand` re-decision would allow this exact call, excluding the current profile, then filtered by `profileChangeAllowed` so a child with an inherited restriction cannot escalate. The ladder is not a permission ordering, so the candidate set is an eligibility allow-list, not a promise that every rung appears; under today's cells only `trusted` can qualify for a prompting call (`default` and `allow-edits` share the `prompt` cell and rules are profile-independent; `auto`'s `classify` cell is never resolved here), and that collapse is asserted in `tests/guard-policy.test.mts`. The flow surface (`prompt-flow.ts`) gains `switchProfileLabel`, an `ExecutionFlowOutcome` member, and a `switchProfileRungs` dep; an unoffered label falls through to the existing unexpected-answer throw (hiding an action is not an authorization check), and the action is appended last after the save/deny entries. `authorize` applies it AFTER the dialog lease releases through the same `transition` as the write/edit switch (no persistence or command options), emits the exact `Profile: <rung> (this session only)` notice, re-decides the original call against the post-transition policy, and returns the POST-transition epoch (a stale epoch would reject execution). No owned editor/picker stages are required (it is a plain selector choice, mirroring `runWriteEditPrompt`'s `offerSwitch`), so a capability-limited host still sees it; the previously pinned `deepEqual(offered, ["Allow once", "Deny once"])` capability-limited menu assertion was updated accordingly. This supersedes the "no mid-dialog profile switching" clause of the 2026-10-06 Step-3 dialogs row for host-shell prompts only: write/edit prompts keep their separate switch, and no other dialog gains a switch. Suites: `tests/guard-policy.test.mts` (the computed set, the collapse, suppression of explicit asks, ambiguous splits, and the current profile), `tests/guard-prompt-flow.test.mts` (label, last placement, one action per rung, forged-label rejection), `tests/guard-harness.test.mts` (end to end: lands the rung, executes with the post-transition epoch, session-only with no config written, child suppression, capability-limited menu shape), and `tests/guard-dialogs.test.mts` (the switch applies after the lease and invalidates a queued command dialog); all wired into `test:ci` and `test:guard`. |
 
 | Model-visible guard state (2026-11-05) | User-confirmed and implemented. One advisory `guard_state` prompt section per run, written by a `before_agent_start` handler in `index.ts` and rendered by the new pure `policy/mode-line.ts` from the same per-profile cells the decision core uses (`hostShellCell`, `writeEditCell`) plus the runtime-mode and lock adjustments (`bashRunsOnHost`, `effectiveWorkspaceMode`), so the text cannot contradict enforcement; no policy code reads it. Fixed one-line contract `guard: profile <name>[ (inherited, cannot be loosened)]; sandbox <mode>; host shell <consequence>; writes <consequence>[; /guard ack clears the lock]`, naming every profile verbatim (classifier identity excluded), with the degraded/reduced clauses and the lock-aware rewrites plus the remedy tail. Blocked sessions render `guard: session blocked (inherited contract invalid); tool execution denied` or `guard: execution blocked (unresolved teardown); tool execution denied`; an unrenderable clause renders `guard: initialized; effective state unavailable` plus a user notice (as does a failed sections write); nothing is emitted before initialization. Freshness is the run boundary (a mid-run switch or lock appears next turn; every lag is informational), and children render their inherited profile. Chosen over a `<rules>` bullet (a change would re-send the whole rules section, and a custom system prompt suppresses `<rules>` entirely) and over `context_with_system` per-LLM-call freshness (an extra request-rewriting hook that must preserve the index-0 system message and its tool declarations). Suites: `tests/guard-mode-line.test.mts` and `tests/guard-harness.test.mts`, wired into `test:ci` and `test:guard`. |
+| Guard-absent subagent dispatch (2026-11-13) | Settled by an interview after a guard-disabled session found every dispatch refused (`subagent`, `panel`, and `chain` unusable while the parent session was itself unguarded). Guard and subagent now share `guard/policy/handshake.ts` (all three channel pairs and their payload types). Guard's factory registers an unconditional load-time presence responder (`guard:extension-present-request`/`ack`) that answers before and independently of session state, carries no profile, and authorizes nothing. The subagent querier consults it, plus command provenance (an `extensions/guard`-layout registered command), only when the snapshot produced no correlated acknowledgment, distinguished by a new `kind` field on the snapshot failure shape (`absent` | `refused` | `malformed` | `duplicate`). Double silence dispatches ungated (no `PI_GUARD_INHERIT` override, no `--extension` startup gate, ambient environment untouched); a presence answer, duplicate or unreadable presence ack, presence-query emission failure, or guard-layout command refuses with a diagnostic that names the snapshot handshake. Per-spawn, no cache, no knob, no notice. Tool provenance was rejected because `--tools`/`--exclude-tools`/`defaultTools` filter custom tools out of the registry. Tests: `tests/guard-subagent.test.mts` (presence responder, presence-query matrix, failure kinds, ungated/unresponsive dispatch), `tests/subagent-tool.test.mts` + `tests/subagent-harness.mts` (absent vs unresponsive branch fixtures). Two commits: the inert guard ping first, then the subagent side. |
 
 ## Implementation outline (build alongside, switch over)
 

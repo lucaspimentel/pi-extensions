@@ -35,6 +35,7 @@ import {
 	formatReadLineRange,
 	getAgentDir,
 	getMarkdownTheme,
+	type SlashCommandInfo,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
@@ -51,7 +52,7 @@ import {
 	sortAgentsByName,
 } from "./agents.ts";
 import { INHERIT_ENV, serializeInheritance } from "../guard/policy/inheritance.ts";
-import { queryGuardSnapshot, type GuardSnapshot } from "./guard-snapshot.ts";
+import { queryGuardPresence, queryGuardSnapshot, type GuardPresence, type GuardSnapshot } from "./guard-snapshot.ts";
 import {
 	buildPanelJudgeInput,
 	buildToolCallSummary,
@@ -545,15 +546,72 @@ type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 /**
  * Guard step 5: per-spawn coupling with the parent guard. The snapshot query
  * must run synchronously immediately before spawn; the bootstrap path is the
- * child startup gate passed with --extension.
+ * child startup gate passed with --extension. When the snapshot goes
+ * unanswered, the presence query and the command-provenance check decide
+ * whether a guard extension is loaded but unresponsive (refuse) or absent
+ * (dispatch without inheriting anything).
  */
 interface GuardDispatch {
 	bootstrapPath: string;
 	snapshot: (cwd: string) => GuardSnapshot;
+	presence: () => GuardPresence;
+	guardCommands: () => readonly SlashCommandInfo[];
 }
 
 /** Absolute path of the child startup gate, resolved next to this module. */
 const GUARD_BOOTSTRAP_PATH = fileURLToPath(new URL("./guard-bootstrap.ts", import.meta.url));
+
+/**
+ * Refusal used when the snapshot produced no answer but a guard extension is
+ * provably loaded, so the dispatch cannot be treated as guard-absent.
+ */
+const GUARD_UNRESPONSIVE_REASON = "a guard extension is loaded but did not answer the snapshot handshake (uninitialized, transitioning, or not synchronous)";
+
+/**
+ * Candidate directories an extension command could have been loaded from.
+ * `baseDir` is not trusted to be the extension's own directory: for a package
+ * extension pi reports the base that contains the extension entry, which can
+ * be the package root rather than the directory holding the file. Both
+ * candidates are therefore checked, and a synthetic path (`builtin:` or
+ * `<...>`) contributes nothing.
+ */
+function extensionDirectories(info: { path?: string; baseDir?: string } | undefined): string[] {
+	if (!info) return [];
+	const directories: string[] = [];
+	if (typeof info.baseDir === "string" && info.baseDir.length > 0) directories.push(info.baseDir);
+	const filePath = typeof info.path === "string" ? info.path : "";
+	if (filePath.length > 0 && !filePath.startsWith("builtin:") && !(filePath.startsWith("<") && filePath.endsWith(">"))) {
+		directories.push(path.dirname(filePath));
+	}
+	return directories;
+}
+
+/** True when a directory is an `extensions/guard` directory, either separator, any casing. */
+function isGuardLayout(directory: string): boolean {
+	const parts = directory.replace(/[\\/]+$/, "").split(/[\\/]/);
+	const name = parts.at(-1) ?? "";
+	const parent = parts.at(-2) ?? "";
+	return name.toLowerCase() === "guard" && parent.toLowerCase() === "extensions";
+}
+
+/**
+ * Guard step 5: layout-based presence evidence for the absence test. Any
+ * extension command whose directory is an `extensions/guard` directory means a
+ * guard extension is loaded, even when it never answered a handshake, for
+ * example an older build without the presence responder or a handler that
+ * yielded before acknowledging. Matched by layout rather than exact path so a
+ * working-tree install and an installed package both match, and by provenance
+ * rather than name so a renamed command still counts. Tool provenance is
+ * deliberately not used here: --tools, --exclude-tools, and defaultTools
+ * filter custom tools out of the registry, which would make a loaded guard
+ * look absent.
+ */
+function hasGuardRegistration(commands: readonly SlashCommandInfo[]): boolean {
+	return commands.some((command) => {
+		if (command.source !== "extension") return false;
+		return extensionDirectories(command.sourceInfo).some(isGuardLayout);
+	});
+}
 
 type SpawnFunction = typeof spawn;
 let spawnOverride: SpawnFunction | null = null;
@@ -747,11 +805,13 @@ async function runSingleAgent(
 
 		args.push(child.promptMode === "verbatim" ? task : `Task: ${task}`);
 
-		// Guard step 5: fail-closed dispatch. Every child carries the child
+		// Guard step 5: dispatch policy. Every child normally carries the child
 		// startup gate and a fresh snapshot of the parent's effective profile,
-		// taken after all asynchronous prompt preparation and immediately
-		// before spawn, with no await in between. An unavailable or unsafe
-		// parent guard refuses the dispatch instead of defaulting to default.
+		// taken after all asynchronous prompt preparation and immediately before
+		// spawn, with no await in between. Only a provably absent guard unlocks
+		// the ungated path: an unanswered snapshot plus silence on the load-time
+		// presence ping plus no guard-layout command registration. Anything else
+		// refuses instead of defaulting to an unguarded or default-profile run.
 		if (signal?.aborted) {
 			wasAborted = true;
 			if (child.abortMode !== "result") throw new Error("Subagent was aborted");
@@ -761,20 +821,39 @@ async function runSingleAgent(
 			return currentResult;
 		}
 		const bootstrapPath = bootstrapOverride ?? guard.bootstrapPath;
-		if (!fs.existsSync(bootstrapPath)) {
-			return refusedResult(agentName, agent.source, task, step, `child startup gate not found: ${bootstrapPath}`);
-		}
 		const snapshot = guard.snapshot(defaultCwd);
 		if (!snapshot.ok) {
-			return refusedResult(agentName, agent.source, task, step, snapshot.reason);
+			if (snapshot.kind !== "absent") {
+				return refusedResult(agentName, agent.source, task, step, snapshot.reason);
+			}
+			// Absence must be proven twice: the load-time presence ping answers
+			// even when the snapshot responder refuses, and a registered
+			// guard-layout command covers guards too old to answer the ping and
+			// non-synchronous handlers that ack after the emit returns.
+			const presence = guard.presence();
+			if (presence.present || hasGuardRegistration(guard.guardCommands())) {
+				return refusedResult(agentName, agent.source, task, step, GUARD_UNRESPONSIVE_REASON);
+			}
 		}
-		args.push("--extension", bootstrapPath);
-		// Only the profile is inherited. The child loads its own guard
-		// configuration for its cwd; parent rules, masks, roots, grants, locks,
-		// scratch, and workers are never copied. Overriding the key also
-		// replaces stale ambient inheritance so nested dispatch reflects the
-		// current effective profile.
-		const childEnv = { ...process.env, [INHERIT_ENV]: serializeInheritance(snapshot.profile, randomUUID()) };
+		let childEnv: NodeJS.ProcessEnv;
+		if (snapshot.ok) {
+			if (!fs.existsSync(bootstrapPath)) {
+				return refusedResult(agentName, agent.source, task, step, `child startup gate not found: ${bootstrapPath}`);
+			}
+			args.push("--extension", bootstrapPath);
+			// Only the profile is inherited. The child loads its own guard
+			// configuration for its cwd; parent rules, masks, roots, grants, locks,
+			// scratch, and workers are never copied. Overriding the key also
+			// replaces stale ambient inheritance so nested dispatch reflects the
+			// current effective profile.
+			childEnv = { ...process.env, [INHERIT_ENV]: serializeInheritance(snapshot.profile, randomUUID()) };
+		} else {
+			// Provably absent guard: no inherited profile and no startup gate. The
+			// ambient environment passes through untouched, so a child whose own
+			// cwd configuration loads guard still applies any inherited
+			// restriction rather than losing it.
+			childEnv = { ...process.env };
+		}
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
@@ -1042,10 +1121,15 @@ function buildSubagentDescription(): string | undefined {
 export default function (pi: ExtensionAPI) {
 	// Guard step 5: every spawn asks the parent guard for a fresh profile
 	// snapshot over the synchronous bus handshake and passes the child startup
-	// gate to the child. Fail-closed: dispatch without a working guard refuses.
+	// gate to the child. A snapshot that goes unanswered falls back to the
+	// load-time presence query plus command provenance: a guard that is loaded
+	// but unresponsive refuses the dispatch, while a provably absent guard
+	// dispatches ungated.
 	const guardDispatch: GuardDispatch = {
 		bootstrapPath: bootstrapOverride ?? GUARD_BOOTSTRAP_PATH,
 		snapshot: (cwd) => queryGuardSnapshot(pi.events, cwd),
+		presence: () => queryGuardPresence(pi.events),
+		guardCommands: () => pi.getCommands(),
 	};
 	// prepareLoadout has no ctx, so capture the session cwd from the events that
 	// carry one. Before the first event the static description is used.

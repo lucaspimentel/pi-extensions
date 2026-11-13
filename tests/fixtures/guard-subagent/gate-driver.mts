@@ -11,7 +11,7 @@
  */
 
 import bootstrap from "../../../extensions/subagent/guard-bootstrap.ts";
-import { CHILD_CONTRACT_ACK, CHILD_CONTRACT_REQUEST } from "../../../extensions/subagent/guard-snapshot.ts";
+import { CHILD_CONTRACT_ACK, CHILD_CONTRACT_REQUEST } from "../../../extensions/guard/policy/handshake.ts";
 import { INHERIT_ENV, serializeInheritance } from "../../../extensions/guard/policy/inheritance.ts";
 
 const scenario = process.argv[2] ?? "ok";
