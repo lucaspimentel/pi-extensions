@@ -55,6 +55,16 @@ import type { SnapshotFailureKind } from "../extensions/guard/policy/handshake.t
  */
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * Private temp root for this suite. `node --test` runs files in parallel and
+ * another suite dispatching a subagent creates `pi-subagent-*` prompt
+ * directories in the shared temp dir, so the cleanup assertions below would
+ * race with it. Node re-reads these variables on every `os.tmpdir()` call, so
+ * the extension's prompt directories and the scans below both land here.
+ */
+const suiteTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "guard-subagent-suite-"));
+for (const key of ["TMPDIR", "TMP", "TEMP"] as const) process.env[key] = suiteTempRoot;
+
 const tempDirs: string[] = [];
 function makeTempDir(prefix: string): string {
 	const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
@@ -1480,7 +1490,7 @@ if (pi === null) {
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
-for (const dir of [...tempDirs, ...harnessHomeDirs]) {
+for (const dir of [...tempDirs, ...harnessHomeDirs, suiteTempRoot]) {
 	try {
 		fs.rmSync(dir, { recursive: true, force: true });
 	} catch {
