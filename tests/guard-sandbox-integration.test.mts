@@ -45,9 +45,13 @@ function makeWorkspace(opts: { git?: boolean } = {}): string {
 	if (opts.git) {
 		const r = spawnSync("git", ["init", "-q", dir], { encoding: "utf8" });
 		assert.equal(r.status, 0, `git init failed: ${r.stderr}`);
-		// Minimal identity so commits work without global config assumptions.
+		// Minimal identity so commits work without global config assumptions;
+		// signing stays off locally because a global commit.gpgsign (an agent
+		// such as 1Password) would need an approval these commits never get.
 		spawnSync("git", ["-C", dir, "config", "user.email", "guard@test"], { encoding: "utf8" });
 		spawnSync("git", ["-C", dir, "config", "user.name", "guard-test"], { encoding: "utf8" });
+		spawnSync("git", ["-C", dir, "config", "commit.gpgsign", "false"], { encoding: "utf8" });
+		spawnSync("git", ["-C", dir, "config", "tag.gpgsign", "false"], { encoding: "utf8" });
 	}
 	return dir;
 }

@@ -371,6 +371,10 @@ function makeRepo(): string {
 	gitSync(["init"], repo);
 	gitSync(["config", "user.email", "test@example.com"], repo);
 	gitSync(["config", "user.name", "Test"], repo);
+	// Never inherit the developer's signing config: a global commit.gpgsign
+	// (an agent such as 1Password) fails these non-interactive setup commits.
+	gitSync(["config", "commit.gpgsign", "false"], repo);
+	gitSync(["config", "tag.gpgsign", "false"], repo);
 	writeFileSync(path.join(repo, "file.txt"), "hello\n");
 	gitSync(["add", "."], repo);
 	gitSync(["commit", "-m", "init"], repo);

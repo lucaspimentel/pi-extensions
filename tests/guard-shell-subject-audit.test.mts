@@ -24,6 +24,11 @@ test("freeze pins an explicit baseline commit independently of the candidate", (
 		git("init");
 		git("config", "user.name", "Test");
 		git("config", "user.email", "test@example.invalid");
+		// The setup commits must not inherit the developer's signing config: a
+		// global commit.gpgsign (an agent such as 1Password) makes these
+		// non-interactive commits fail before the assertion is reached.
+		git("config", "commit.gpgsign", "false");
+		git("config", "tag.gpgsign", "false");
 		writeFileSync(join(dir, ".gitignore"), "build/\nconfig.json\n");
 		writeFileSync(join(dir, "config.json"), "{}");
 		writeFileSync(join(dir, "example.txt"), "baseline");
