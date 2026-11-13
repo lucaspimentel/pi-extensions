@@ -30,6 +30,7 @@ import { runExecutionPrompt, runReadGrantPrompt, runWriteEditPrompt, type Prompt
 import { createGuardEditorStage, createGuardPickerStage } from "./ask-components.ts";
 import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
 import { constraintFromParse, INHERIT_ENV, INHERITANCE_VERSION, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
+import { CHILD_CONTRACT_ACK, CHILD_CONTRACT_REQUEST, EXTENSION_PRESENT_ACK, EXTENSION_PRESENT_REQUEST, SUBAGENT_SNAPSHOT_ACK, SUBAGENT_SNAPSHOT_REQUEST, type SubagentAckBase } from "./policy/handshake.ts";
 import { resolveWorkspaceScope, scopeContains, SessionShellRuleStore, type SessionShellScope } from "./session-shell-rules.ts";
 import { isProfile, ALL_PROFILES, PROFILE_LADDER, nextProfile, type Profile } from "./policy/profiles.ts";
 import { GUARD_STATE_FALLBACK, GUARD_STATE_SECTION, renderGuardStateSection } from "./policy/mode-line.ts";
@@ -79,13 +80,7 @@ const askSelect = createGuardAskSelect({ ExtensionSelectorComponent, matchesKey,
 const editorStage = createGuardEditorStage();
 const pickerStage = createGuardPickerStage();
 
-/** Shape of the step-5 snapshot/contract ack payloads this extension emits. */
-interface SubagentAckBase {
-	version: 1;
-	ok: boolean;
-	reason?: string;
-}
-
+/** Shape of the step-5 handshake request objects this extension accepts. */
 function isSubagentRequest(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
 	if (typeof value !== "object" || value === null) return false;
 	const record = value as Record<string, unknown>;
@@ -1192,15 +1187,27 @@ export default function guard(pi: ExtensionAPI) {
 		} catch (err) { return { kind: "refused", diagnostic: `Read grant refused: ${String(err)}${capabilityNote}` }; }
 	}
 
+	// Step 5: load-time presence. Answered unconditionally as soon as this
+	// extension is loaded, before and independently of session state, so the
+	// subagent extension can tell "no guard extension is loaded" apart from "a
+	// guard extension is loaded but did not answer the snapshot handshake".
+	// Carries no profile and authorizes nothing: a refusal from the snapshot
+	// responder below is still the only way a guarded dispatch proceeds. A
+	// request without a correlatable id gets no answer.
+	pi.events.on(EXTENSION_PRESENT_REQUEST, (data: unknown) => {
+		if (!isSubagentRequest(data, ["id"])) return;
+		pi.events.emit(EXTENSION_PRESENT_ACK, { version: 1, id: data.id as string, ok: true } satisfies SubagentAckBase & { id: string });
+	});
+
 	// Step 5: subagent dispatch handshake. The subagent's query helper
 	// subscribes, emits, and unsubscribes without yielding, so this responder
 	// must acknowledge synchronously: no await may appear before the emit.
 	// Read-only and fail-closed: only an initialized, valid, unlocked runtime
 	// answers with a profile.
-	pi.events.on("guard:subagent-snapshot-request", (data: unknown) => {
+	pi.events.on(SUBAGENT_SNAPSHOT_REQUEST, (data: unknown) => {
 		const valid = isSubagentRequest(data, ["id", "cwd"]);
 		const request = valid ? (data as Record<string, unknown>) : null;
-		const refuse = (reason: string) => pi.events.emit("guard:subagent-snapshot-ack", { version: 1, id: ackId(request), ok: false, reason } satisfies SubagentAckBase & { id: string | null });
+		const refuse = (reason: string) => pi.events.emit(SUBAGENT_SNAPSHOT_ACK, { version: 1, id: ackId(request), ok: false, reason } satisfies SubagentAckBase & { id: string | null });
 		if (!valid || !request) { refuse("malformed subagent snapshot request"); return; }
 		if (!state || !config) { refuse("guard session state not initialized"); return; }
 		if (inheritedConstraint && "error" in inheritedConstraint) { refuse("guard inheritance is invalid; this session cannot dispatch subagents"); return; }
@@ -1208,7 +1215,7 @@ export default function guard(pi: ExtensionAPI) {
 		try { runtime.assertAvailable(); } catch (err) { refuse(String(err instanceof Error ? err.message : err)); return; }
 		if (runtime.policy.cwd !== request.cwd) { refuse(`guard is bound to ${runtime.policy.cwd}, not ${request.cwd}; reload the session before dispatching`); return; }
 		if (runtime.policy.workspaceLocked) { refuse(`workspace locked (${state.workspaceLockReason ?? "no reason recorded"}); /guard ack is required before dispatching subagents`); return; }
-		pi.events.emit("guard:subagent-snapshot-ack", { version: 1, id: request.id as string, ok: true, profile: state.profile });
+		pi.events.emit(SUBAGENT_SNAPSHOT_ACK, { version: 1, id: request.id as string, ok: true, profile: state.profile });
 	});
 
 	// Step 5: child startup gate (child side). The bootstrap extension in a
@@ -1216,9 +1223,9 @@ export default function guard(pi: ExtensionAPI) {
 	// the exact inheritance contract. An older guard without this responder
 	// never answers, so the gate fails closed. Synchronous for the same
 	// reason as the snapshot responder.
-	pi.events.on("guard:child-contract-request", (data: unknown) => {
+	pi.events.on(CHILD_CONTRACT_REQUEST, (data: unknown) => {
 		const request = data as { version?: unknown; nonce?: unknown; profile?: unknown } | null;
-		const refuse = (reason: string) => pi.events.emit("guard:child-contract-ack", { version: 1, ok: false, reason, nonce: ackNonce(request as Record<string, unknown> | null) } satisfies SubagentAckBase & { nonce: string | null });
+		const refuse = (reason: string) => pi.events.emit(CHILD_CONTRACT_ACK, { version: 1, ok: false, reason, nonce: ackNonce(request as Record<string, unknown> | null) } satisfies SubagentAckBase & { nonce: string | null });
 		if (!request || request.version !== INHERITANCE_VERSION || ackNonce(request) === null || !isProfile(request.profile)) { refuse("malformed child contract request"); return; }
 		if (!inheritedContract) { refuse("guard has no inherited contract; this is not a guard-dispatched subagent"); return; }
 		if (inheritedContract.nonce !== request.nonce) { refuse("child contract nonce mismatch"); return; }
@@ -1227,7 +1234,7 @@ export default function guard(pi: ExtensionAPI) {
 		if (!state.inherited || !("profile" in state.inherited) || state.inherited.profile !== inheritedContract.profile) { refuse("the inherited restriction is not installed"); return; }
 		if (state.profile !== inheritedContract.profile && state.profile !== "research") { refuse(`current profile ${state.profile} is outside the inherited restriction`); return; }
 		try { runtime.assertAvailable(); } catch (err) { refuse(String(err instanceof Error ? err.message : err)); return; }
-		pi.events.emit("guard:child-contract-ack", { version: 1, ok: true, nonce: request.nonce as string, inherited: inheritedContract.profile, profile: state.profile });
+		pi.events.emit(CHILD_CONTRACT_ACK, { version: 1, ok: true, nonce: request.nonce as string, inherited: inheritedContract.profile, profile: state.profile });
 	});
 
 	async function applyProfile(profile: Profile, ctx: ExtensionContext, ownership?: CommandOwnership): Promise<void> {
