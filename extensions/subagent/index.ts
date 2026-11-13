@@ -568,6 +568,19 @@ const GUARD_BOOTSTRAP_PATH = fileURLToPath(new URL("./guard-bootstrap.ts", impor
 const GUARD_UNRESPONSIVE_REASON = "a guard extension is loaded but did not answer the snapshot handshake (uninitialized, transitioning, or not synchronous)";
 
 /**
+ * Directory part of a path, split on both separators. Node's `path.dirname`
+ * is host-specific, so on a POSIX host it returns "." for a Windows-style
+ * path and the layout check below would silently miss a guard loaded with
+ * `--extension` from a Windows path.
+ */
+function directoryPart(filePath: string): string {
+	const trimmed = filePath.replace(/[\\/]+$/, "");
+	const index = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+	if (index < 0) return "";
+	return trimmed.slice(0, index) || "/";
+}
+
+/**
  * Candidate directories an extension command could have been loaded from.
  * `baseDir` is not trusted to be the extension's own directory: for a package
  * extension pi reports the base that contains the extension entry, which can
@@ -581,7 +594,8 @@ function extensionDirectories(info: { path?: string; baseDir?: string } | undefi
 	if (typeof info.baseDir === "string" && info.baseDir.length > 0) directories.push(info.baseDir);
 	const filePath = typeof info.path === "string" ? info.path : "";
 	if (filePath.length > 0 && !filePath.startsWith("builtin:") && !(filePath.startsWith("<") && filePath.endsWith(">"))) {
-		directories.push(path.dirname(filePath));
+		const directory = directoryPart(filePath);
+		if (directory.length > 0) directories.push(directory);
 	}
 	return directories;
 }
