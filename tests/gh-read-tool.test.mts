@@ -687,6 +687,7 @@ test("gh_read guidance steers away from raw gh api and states the write boundary
 	assert.ok(tool.promptGuidelines.every((line) => line.trim().length > 0), "no empty guidelines");
 	assert.ok(has("codemode", "Promise.allSettled", "tools.gh_read"), "multi-endpoint fan-out guidance");
 	assert.ok(has("--paginate"), "fan-out guidance names the raw pipeline anti-pattern");
+	assert.ok(has("output_truncated", "incomplete UTF-8-safe prefix"), "display-clip guidance");
 });
 
 test("execute: rejected issue comments params fail closed with zero spawns", async () => {

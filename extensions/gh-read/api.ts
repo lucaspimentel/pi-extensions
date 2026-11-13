@@ -29,7 +29,8 @@
  * - The displayed result is capped at API_DISPLAY_CAP bytes including
  *   metadata, escaping, diagnostics, and notices; overflow produces an
  *   explicitly incomplete UTF-8-safe prefix preview plus narrowing guidance.
- *   No hidden full payload is retained in details or on disk.
+ *   The head always carries `output_truncated: true|false`. No hidden full
+ *   payload is retained in details or on disk.
  */
 
 import {
@@ -594,36 +595,44 @@ interface RenderOptions {
  * Renders metadata lines plus the data block under API_DISPLAY_CAP. The
  * metadata block is always complete; on overflow the data becomes an
  * explicitly incomplete UTF-8-safe prefix preview with narrowing guidance.
- * An optional clipNotice is appended only on overflow, and its bytes are
- * reserved in the head budget so the preview stays honest. Nothing beyond
- * the displayed text is retained anywhere.
+ * The head always states `output_truncated: true|false`, so a head reader or
+ * a codemode script detects clipping without matching the trailing prose:
+ * the prefix can end mid-line, and the trailing notice is not distinguishable
+ * from data by position. An optional clipNotice is appended only on overflow,
+ * and its bytes are reserved in the head budget so the preview stays honest.
+ * Nothing beyond the displayed text is retained anywhere.
  */
 function renderResult(summary: string, metadata: ReadonlyArray<[string, string | number | boolean | null]>, dataText: string, options: RenderOptions): ApiToolResult {
 	const lines: string[] = [summary];
 	for (const [key, value] of metadata) {
 		lines.push(`${key}: ${String(value)}`);
 	}
-	for (const notice of options.notices ?? []) {
-		lines.push(`notice: ${notice}`);
-	}
-	const head = lines.join("\n");
+	const headBody = lines.join("\n");
+	const notices = (options.notices ?? []).map((notice) => `\nnotice: ${notice}`).join("");
+	// The flag is part of the head for byte accounting but is not known until
+	// after the decision, so both variants are buildable. The decision uses the
+	// longer "false" literal: the rendered "true" head is one byte shorter, so
+	// the prefix can never overshoot API_DISPLAY_CAP, and the flag shown always
+	// matches whether the data was actually clipped.
+	const headWithFlag = (truncated: boolean): string => `${headBody}\noutput_truncated: ${truncated}${notices}`;
 	// Stable machine boundary between the metadata head and the data block; see
 	// docs/gh-read-design.md, "API result shape and display cap". Split at the FIRST line
 	// whose content is exactly "data:": head lines may themselves contain newlines.
 	const dataLabel = "data:";
 	const overflowNotice =
-		"[gh_read: the API result exceeds 50 KiB. Showing an incomplete UTF-8-safe prefix, NOT complete JSON. Narrow the request (jq filter, line range, subtree path, shallower recursion) and re-run.]";
+		"[gh_read: the displayed result was clipped at 50 KiB. The block above is an incomplete UTF-8-safe prefix of the payload, NOT the complete result. Narrow the request (jq filter, line range, subtree path, shallower recursion) and re-run.]";
 
 	const clipLine = options.clipNotice !== undefined ? `\nnotice: ${options.clipNotice}` : "";
-	const headBytes = Buffer.byteLength(head, "utf8") + Buffer.byteLength(dataLabel, "utf8") + 2 + Buffer.byteLength(overflowNotice, "utf8") + 1 + Buffer.byteLength(clipLine, "utf8");
+	const reserveBytes = Buffer.byteLength(headWithFlag(false), "utf8") + Buffer.byteLength(dataLabel, "utf8") + 2 + Buffer.byteLength(overflowNotice, "utf8") + 1 + Buffer.byteLength(clipLine, "utf8");
 	let data = dataText;
 	let outputTruncated = false;
-	if (headBytes + Buffer.byteLength(dataText, "utf8") > API_DISPLAY_CAP) {
+	if (reserveBytes + Buffer.byteLength(dataText, "utf8") > API_DISPLAY_CAP) {
 		outputTruncated = true;
-		const budget = Math.max(0, API_DISPLAY_CAP - headBytes);
+		const budget = Math.max(0, API_DISPLAY_CAP - reserveBytes);
 		data = utf8SafePrefix(dataText, budget);
 	}
 
+	const head = headWithFlag(outputTruncated);
 	const text = outputTruncated ? `${head}\n${dataLabel}\n${data}\n${overflowNotice}${clipLine}` : `${head}\n${dataLabel}\n${data}`;
 	const details: Record<string, unknown> = {
 		output_truncated: outputTruncated,

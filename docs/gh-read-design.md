@@ -1048,9 +1048,21 @@ timeout, jq, and partial-source failures set `isError: true` while
 preserving useful results. The ENTIRE displayed API result is capped at
 50 KiB including metadata, escaping, diagnostics, and notices (metadata
 space reserved); on overflow the data becomes an explicitly incomplete
-UTF-8-safe prefix preview labeled "NOT complete JSON" plus narrowing
-guidance. Source completeness and display clipping are distinct facts. No
-hidden full payload is retained in details or on disk.
+UTF-8-safe prefix preview plus payload-neutral narrowing guidance, and the
+head states `output_truncated: true` (it states `output_truncated: false`
+on every complete result, so completeness is never inferred from absence).
+The flag is rendered rather than only exposed in details because the
+prefix can end mid-line and the overflow notice sits at the tail of the
+block, while a partial reader sees the start of a result: `codemode`
+receives only the text, and a collapsed or previewed result shows its
+opening lines. A head-side flag is therefore the one signal both a model
+and a `codemode` script can read without matching prose. Its byte length is
+reserved pessimistically (the decision counts the longer `output_truncated:
+false` head), so a clipped result can be up to a byte shorter than the cap
+and still be labeled clipped; that one-byte conservatism is deliberate and
+must not be "corrected" into an overshoot. Source completeness and display clipping
+are distinct facts. No hidden full payload is retained in details or on
+disk.
 
 Every API-operation result renders as a metadata head, then exactly one
 separator line whose entire content is `data:`, then the data block. The
@@ -1066,8 +1078,12 @@ symlink notices; a server-provided GraphQL error message echoed into a
 block is the final fetched batch as JSON or the jq output, verbatim except
 for the UTF-8-safe overflow prefix; on overflow it is followed by the
 overflow notice and, when the display was clipped, the clip notice, which
-are not distinguishable from data by position, so read
-`details.output_truncated` instead of inferring truncation from the text.
+are not distinguishable from data by position, so read the head's
+`output_truncated` (also in `details.output_truncated`) instead of
+inferring truncation from the text. The overflow notice names the
+narrowing options (jq filter, line range, subtree path, shallower
+recursion) and makes no claim about the payload's format, because it is
+shared by file text, directory listings, trees, and JSON reads alike.
 The boundary line is present on every API result, including error results
 with empty data. Display clipping remains distinct from source
 completeness. Native command results are plain gh output and carry no
@@ -1086,8 +1102,11 @@ hints.
 
 The text-mode exception is `job logs`: its result is raw log text rendered
 through the window described under "job logs" rather than the JSON pipeline,
-so jq, continuation, and the 50 KiB "NOT complete JSON" prefix preview do not
-apply. Its display bound is the 100 KiB window plus metadata and notices.
+so jq, continuation, and the 50 KiB overflow prefix preview do not
+apply, and there is no `output_truncated` head flag either: a `job logs`
+result is raw log text plus its window metadata and notices, so a missing
+flag on it is not a completeness claim. Its display bound is the 100 KiB
+window plus metadata and notices.
 Metadata is `repo`, `job_id`, `http_status`, `body_bytes`, `retained_bytes`,
 `omitted_bytes`, and `windowed`; a windowed read also carries the exact
 omission notice in the text, and every read carries the standing one-job

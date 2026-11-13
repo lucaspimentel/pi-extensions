@@ -250,7 +250,8 @@ for (const subcommand of ["pr comments", "pr reviews"] as const) {
 			assert.ok(Buffer.byteLength(result.content[0].text, "utf8") <= API_DISPLAY_CAP);
 			if (items.length === 1) {
 				assert.equal(result.details.output_truncated, true);
-				assert.match(result.content[0].text, /NOT complete JSON/);
+				assert.match(result.content[0].text, /^output_truncated: true$/m, "the head states the clip before the data boundary");
+				assert.match(result.content[0].text, /NOT the complete result/);
 				assert.ok(!result.content[0].text.includes("\uFFFD"));
 				assert.ok(Buffer.byteLength(JSON.stringify(result.details)) < 1000, "no hidden full payload");
 			}
@@ -501,7 +502,8 @@ test("issue comments: exactly 100 without next Link is complete; display clippin
 		assert.ok(Buffer.byteLength(result.content[0].text, "utf8") <= API_DISPLAY_CAP);
 		if (items.length === 1) {
 			assert.equal(result.details.output_truncated, true);
-			assert.match(result.content[0].text, /NOT complete JSON/);
+			assert.match(result.content[0].text, /^output_truncated: true$/m, "the head states the clip before the data boundary");
+			assert.match(result.content[0].text, /NOT the complete result/);
 			assert.ok(!result.content[0].text.includes("\uFFFD"));
 			assert.ok(Buffer.byteLength(JSON.stringify(result.details)) < 1000, "no hidden full payload");
 		}
@@ -1480,11 +1482,156 @@ test("display cap: oversized results render an explicitly incomplete UTF-8-safe 
 	]);
 	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "", ref: "main" }, apiRequester);
 	assert.ok(Buffer.byteLength(result.content[0].text, "utf8") <= API_DISPLAY_CAP + 1024, "display text stays near the cap");
-	assert.ok(result.content[0].text.includes("incomplete UTF-8-safe prefix, NOT complete JSON"));
+	assert.ok(result.content[0].text.includes("incomplete UTF-8-safe prefix of the payload, NOT the complete result"));
 	assert.ok(result.content[0].text.includes("Narrow the request"));
 	assert.equal(result.details["output_truncated"], true);
 	// No hidden full payload: details must not contain the data.
 	assert.ok(!JSON.stringify(result.details).includes('"path": "' + "x".repeat(50) + '"'));
+});
+
+/** The documented head rule: everything before the FIRST line whose content is exactly "data:". */
+function headOf(text: string): string {
+	const lines = text.split("\n");
+	const boundary = lines.indexOf("data:");
+	assert.ok(boundary > 0, "every API result carries the data: boundary");
+	return lines.slice(0, boundary).join("\n");
+}
+
+function dataBlockOf(text: string): string {
+	return text.slice(text.indexOf("\ndata:\n") + "\ndata:\n".length);
+}
+
+test("display cap: a clipped file-text read flags the clip in the head and keeps the notice payload-neutral", async () => {
+	const lines = Array.from({ length: 1000 }, (_, i) => `public static final String CONST_${i} = "${"v".repeat(60)}";`);
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", fileEntry(lines.join("\n"))],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main" }, apiRequester);
+	assert.equal(result.details.output_truncated, true);
+	assert.ok(Buffer.byteLength(result.content[0].text, "utf8") <= API_DISPLAY_CAP);
+
+	// The clip is detectable from the head alone, before the data boundary.
+	const head = headOf(result.content[0].text);
+	assert.ok(head.includes("output_truncated: true"), "head states the clip");
+	assert.ok(head.includes("total_lines: 1000"), "the complete head survives clipping");
+
+	// The notice is about a clipped payload, not about JSON.
+	assert.ok(result.content[0].text.includes("incomplete UTF-8-safe prefix of the payload, NOT the complete result"));
+	assert.ok(!result.content[0].text.includes("NOT complete JSON"), "text reads are not labeled as JSON");
+	assert.ok(!result.content[0].text.includes("\uFFFD"), "no torn multibyte character");
+
+	// The prefix is a byte prefix: it may end mid-line, which is why the flag matters.
+	assert.ok(!dataBlockOf(result.content[0].text).includes(lines[999]!), "the tail is not shown");
+});
+
+test("display cap: a complete read states output_truncated: false and carries no overflow notice", async () => {
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", fileEntry("a\nb\nc\n")],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main" }, apiRequester);
+	assert.equal(result.details.output_truncated, false);
+	const head = headOf(result.content[0].text);
+	assert.ok(head.includes("output_truncated: false"), "completeness is stated, not implied by absence");
+	assert.ok(!result.content[0].text.includes("clipped at 50 KiB"), "no overflow notice on a complete read");
+	assert.equal(dataBlockOf(result.content[0].text), "a\nb\nc\n");
+});
+
+test("display cap: a ranged read of an oversized file is not flagged as clipped", async () => {
+	const lines = Array.from({ length: 1000 }, (_, i) => `line ${i} ${"v".repeat(70)}`);
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", fileEntry(lines.join("\n"))],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main", start_line: 875, end_line: 884 }, apiRequester);
+	assert.equal(result.details.output_truncated, false);
+	const head = headOf(result.content[0].text);
+	assert.ok(head.includes("output_truncated: false"));
+	assert.ok(head.includes("total_lines: 1000"), "the full line count is still reported");
+	assert.ok(head.includes("line_range: 875-884"));
+	assert.ok(!result.content[0].text.includes("clipped at 50 KiB"));
+	assert.equal(dataBlockOf(result.content[0].text), lines.slice(874, 884).map((line) => `${line}\n`).join(""));
+});
+
+test("display cap: the flag agrees with the rendered block across the clipping boundary", async () => {
+	// A payload size sweep around the transition: the flag must never claim a
+	// complete block was clipped, nor a clipped block complete.
+	for (let count = 40; count <= 70; count += 1) {
+		const entries = Array.from({ length: count }, (_, i) => ({ type: "file", path: `p${i}-${"x".repeat(900)}`, size: 10 }));
+		const apiRequester = jsonScript([
+			["commits", { sha: SHA }],
+			["contents", entries],
+		]);
+		const result = await run({ subcommand: "repo contents", repo: "o/r", path: "", ref: "main" }, apiRequester);
+		const text = result.content[0].text;
+		const flag = headOf(text).includes("output_truncated: true");
+		assert.equal(flag, result.details.output_truncated, `details and head agree at ${count} entries`);
+		assert.ok(Buffer.byteLength(text, "utf8") <= API_DISPLAY_CAP, `display stays under the cap at ${count} entries`);
+		if (flag) {
+			assert.ok(text.includes("clipped at 50 KiB"), "a clipped result carries the overflow notice");
+		} else {
+			assert.ok(!text.includes("clipped at 50 KiB"), "a complete result carries no overflow notice");
+			assert.deepEqual(JSON.parse(dataBlockOf(text)), entries, "an unclipped block is the complete payload");
+		}
+	}
+});
+
+test("display cap: a one-byte payload growth is the only difference at the clipping flip point", async () => {
+	// The tail notice's bytes are reserved even when nothing is clipped, so a
+	// complete result is never exactly API_DISPLAY_CAP bytes long; the
+	// meaningful boundary is the flip itself. Binary-search the payload padding
+	// at which one extra byte of data turns a complete block into a clipped one.
+	const render = async (padding: number): Promise<ApiToolResult> => {
+		const entries = [{ type: "file", path: `p-${'x'.repeat(padding)}`, size: 10 }];
+		return await run({ subcommand: "repo contents", repo: "o/r", path: "", ref: "main" }, jsonScript([
+			["commits", { sha: SHA }],
+			["contents", entries],
+		]));
+	};
+	let low = 0;
+	let high = 200000;
+	while (low < high) {
+		const mid = Math.floor((low + high) / 2);
+		if ((await render(mid)).details.output_truncated === true) high = mid;
+		else low = mid + 1;
+	}
+	assert.ok(low > 0 && low < 200000, `a flip point exists (found padding ${low})`);
+
+	const clipped = await render(low);
+	const clippedText = clipped.content[0].text;
+	assert.equal(clipped.details.output_truncated, true);
+	assert.ok(headOf(clippedText).includes("output_truncated: true"), "the clipped side states the flag");
+	assert.ok(clippedText.includes("clipped at 50 KiB"), "the clipped side carries the notice");
+	assert.ok(Buffer.byteLength(clippedText, "utf8") <= API_DISPLAY_CAP, "the clipped side stays under the cap");
+
+	const complete = await render(low - 1);
+	const completeText = complete.content[0].text;
+	assert.equal(complete.details.output_truncated, false, "one byte less is complete");
+	assert.ok(headOf(completeText).includes("output_truncated: false"));
+	assert.ok(!completeText.includes("clipped at 50 KiB"));
+	assert.ok(Buffer.byteLength(completeText, "utf8") <= API_DISPLAY_CAP);
+	// The untruncated block is the full payload, and the two payloads differ by exactly one byte.
+	const body = dataBlockOf(completeText);
+	assert.deepEqual(JSON.parse(body), [{ type: "file", path: `p-${'x'.repeat(low - 1)}`, size: 10 }]);
+	assert.equal(Buffer.byteLength(body, "utf8") + 1, Buffer.byteLength(JSON.stringify([{ type: "file", path: `p-${'x'.repeat(low)}`, size: 10 }]), "utf8"));
+});
+
+test("display cap: a multibyte character straddling the cut is dropped whole, never torn", async () => {
+	// ASCII padding puts the budget boundary inside the emoji run, so a naive
+	// byte cut would split a 4-byte sequence.
+	const content = `${'a'.repeat(API_DISPLAY_CAP - 110)}${'\u{1F642}'.repeat(1000)}`;
+	const apiRequester = jsonScript([
+		["commits", { sha: SHA }],
+		["contents", fileEntry(content)],
+	]);
+	const result = await run({ subcommand: "repo contents", repo: "o/r", path: "f.txt", ref: "main" }, apiRequester);
+	assert.equal(result.details.output_truncated, true);
+	const text = result.content[0].text;
+	assert.ok(Buffer.byteLength(text, "utf8") <= API_DISPLAY_CAP);
+	assert.ok(!text.includes("\uFFFD"), "no replacement character from a torn sequence");
+	assert.equal(Buffer.from(text, "utf8").toString("utf8"), text, "the text is valid UTF-8");
+	assert.ok(headOf(text).includes("output_truncated: true"));
 });
 
 test("auth errors surface as errors with the HTTP status", async () => {
@@ -1573,7 +1720,7 @@ test("check annotations: the notice coexists with the 50 KiB display-truncation 
 	const result = await run({ subcommand: "check annotations", repo: "o/r", check_run_id: 42 }, apiRequester);
 	assert.equal(result.isError, undefined);
 	assert.ok(result.content[0].text.includes("only the first page was fetched; the listing may be incomplete"), "incompleteness notice in the metadata head");
-	assert.ok(result.content[0].text.includes("incomplete UTF-8-safe prefix, NOT complete JSON"), "overflow notice present");
+	assert.ok(result.content[0].text.includes("incomplete UTF-8-safe prefix of the payload, NOT the complete result"), "overflow notice present");
 	assert.ok(result.content[0].text.includes("Narrow the request"));
 	assert.equal(result.details["output_truncated"], true);
 });
@@ -1833,7 +1980,7 @@ test("pr threads: happy path issues one GraphQL call, no REST request, and verba
 	const head = result.content[0].text.split("\ndata:\n")[0]!;
 	assert.deepEqual(
 		head.split("\n").slice(1).filter((line) => !line.startsWith("notice:")).map((line) => line.split(":")[0]),
-		["repo", "pr", "pr_url", "threads_total", "source_complete", "threads_returned", "pages_fetched", "threads_with_truncated_comments"],
+		["repo", "pr", "pr_url", "threads_total", "source_complete", "threads_returned", "pages_fetched", "threads_with_truncated_comments", "output_truncated"],
 	);
 });
 
@@ -2086,7 +2233,8 @@ test("pr threads: display clipping keeps metadata and notices complete", async (
 	const huge = thread(1, { comments: { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: 1, body: "界🙂".repeat(API_DISPLAY_CAP) }] } });
 	const result = await run(threadsParams, requester([() => response(threadsPage([huge], false, null))]));
 	assert.equal(result.details.output_truncated, true);
-	assert.match(result.content[0].text, /NOT complete JSON/);
+	assert.match(result.content[0].text, /^output_truncated: true$/m);
+	assert.match(result.content[0].text, /NOT the complete result/);
 	assert.match(result.content[0].text, /source_complete: true/);
 	assert.match(result.content[0].text, /notice: resolved and outdated threads are included/);
 	assert.ok(!result.content[0].text.includes("\uFFFD"));
