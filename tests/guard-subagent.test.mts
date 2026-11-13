@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
@@ -47,7 +48,13 @@ import { discoverAgents } from "../extensions/subagent/agents.ts";
 import { queryGuardPresence, queryGuardSnapshot, requestChildContract } from "../extensions/subagent/guard-snapshot.ts";
 import type { SnapshotFailureKind } from "../extensions/guard/policy/handshake.ts";
 
-const repoRoot = path.resolve(path.dirname(decodeURI(new URL(import.meta.url).pathname)), "..");
+/**
+ * Repository root. `new URL(...).pathname` is a POSIX-shaped string
+ * (`/D:/...` on Windows), so resolving it produced a doubled drive
+ * (`D:\D:\...`) and every path built from it pointed at a nonexistent tree.
+ */
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
 const tempDirs: string[] = [];
 function makeTempDir(prefix: string): string {
 	const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
