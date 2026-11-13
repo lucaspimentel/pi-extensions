@@ -21,7 +21,7 @@ import coloredFooter from "../extensions/colored-footer.ts";
 // (zero-width for visibleWidth, like the actual renderer) with per-source
 // codes so assertions can tell which path a segment took. colorToHex
 // normalizes parsed Color objects back to "#rrggbb" for the truecolor code.
-import { colorToHex } from "@earendil-works/pi-tui";
+import { colorToHex, visibleWidth } from "@earendil-works/pi-tui";
 
 const TOKEN_CODES: Record<string, string> = {
 	dim: "2",
@@ -128,8 +128,9 @@ async function makeCase(options: {
 	model?: unknown;
 	agentDir?: string;
 	ctxPercent?: number;
+	sessionName?: string;
 }): Promise<CaseResult> {
-	const { config, branch = ALIAS_BRANCH, model, ctxPercent = 24 } = options;
+	const { config, branch = ALIAS_BRANCH, model, ctxPercent = 24, sessionName } = options;
 
 	let agentDir = options.agentDir;
 	let createdDir: string | undefined;
@@ -163,7 +164,7 @@ async function makeCase(options: {
 
 	const ctx: any = {
 		cwd,
-		sessionManager: { getBranch: () => branch },
+		sessionManager: { getBranch: () => branch, getSessionName: () => sessionName },
 		getContextUsage: () => ({ percent: ctxPercent }),
 		model: model ?? { id: "claude-sonnet-4", name: "claude-sonnet-4", reasoning: true },
 		ui: {
@@ -428,6 +429,37 @@ async function main() {
 		});
 		test("switched model: shows the dim last-turn segment", rendered.includes("\x1b[2mlast turn: anthropic/claude-sonnet-4"), rendered);
 		test("switched model: does not show the arrow", !rendered.includes("→ anthropic/claude-sonnet-4"), rendered);
+		cleanup();
+	}
+
+	// ── Session name: appended inside the cwd segment, omitted when unset ──────
+	{
+		const { rendered, cleanup } = await makeCase({ sessionName: "refine-footer-name" });
+		const line1 = rendered.split("\n")[1];
+		test("session name: appended to the cwd line", line1.includes("• refine-footer-name"), rendered);
+		test("session name: renders with the cwd color", line1.includes("\x1b[90m"), rendered);
+		cleanup();
+	}
+
+	// ── No session name: the cwd line stays bare ───────────────────────────────
+	{
+		const { rendered, cleanup } = await makeCase({});
+		test("no session name: no separator on the cwd line", !rendered.split("\n")[1].includes("•"), rendered);
+		cleanup();
+	}
+
+	// ── A name wider than the line: the existing truncation clips it ───────────
+	// The width is derived from the rendered cwd line so the case does not depend
+	// on the length of the checkout path, only on the last 4 cells being cut.
+	{
+		const name = "a-name-long-enough-to-overflow-the-line";
+		const { footer, cleanup } = await makeCase({ sessionName: name });
+		const wide = footer.render(200);
+		const width = visibleWidth(wide[1]) - 4;
+		const narrow = footer.render(width);
+		test("long name: the overflowing tail is clipped", !narrow.join("\n").includes(name), narrow.join("\n"));
+		test("long name: the visible prefix survives", narrow[1].includes(name.slice(0, 4)), narrow.join("\n"));
+		test("long name: every line fits the width", narrow.every((line) => visibleWidth(line) <= width), narrow.join("\n"));
 		cleanup();
 	}
 

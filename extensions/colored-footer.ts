@@ -2,7 +2,7 @@
  * Colored footer extension for pi
  *
  * Line 0 (blank):    spacer
- * Line 1 (colored):   cwd
+ * Line 1 (colored):   cwd • session name (name omitted when not set)
  * Line 2 (colored):   branch [PR icon + number]
  * Line 3 (stats):     model • thinking   ↑10 ↓5.4k $0.285   ctx-icon X% context used        
  * Line 4+:            extension statuses (if any)
@@ -304,6 +304,11 @@ export default function (pi: ExtensionAPI) {
 						? "~" + rawCwd.slice(home.length)
 						: rawCwd;
 
+					// ── Session name (appended to the cwd segment, built-in parity) ─
+					// Read at render time: pi re-renders on session_info_changed, and
+					// getSessionName() returns undefined for an empty or whitespace name.
+					const sessionName = ctx.sessionManager.getSessionName();
+
 					// ── Context circle icon ─────────────────────────────────────────
 					let ctxIcon: string, ctxRole: ColorRole;
 					if      (ctxPercentNum <  13) { ctxIcon = "󰝦"; ctxRole = "ctxOk";    }
@@ -314,10 +319,11 @@ export default function (pi: ExtensionAPI) {
 					else                          { ctxIcon = "󰝥"; ctxRole = "ctxError"; }
 
 					// ─────────────────────────────────────────────────────────────────
-					// LINE 1 — directory: cwd
+					// LINE 1 — directory: cwd • session name
 					// ─────────────────────────────────────────────────────────────────
+					const nameSuffix = sessionName ? ` \u2022 ${sessionName}` : "";
 					const line1Parts: string[] = [
-						paint("cwd", `${ICON_FOLDER}  ${shortCwd}`),
+						paint("cwd", `${ICON_FOLDER}  ${shortCwd}${nameSuffix}`),
 					];
 
 					// LINE 2 — git: branch [PR icon + number]
