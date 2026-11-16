@@ -142,6 +142,11 @@ const failureGist = (toolName: string, result: GistResult): GistLine[] | undefin
 	if (details?.killed === true || details?.timedOut === true) return one("timed out");
 	const detailsExitCode = details?.exitCode;
 	if (typeof detailsExitCode === "number" && detailsExitCode !== 0) return one(`exit ${detailsExitCode}`);
+	// A structured reason from the tool itself beats the first text line, which for
+	// an API result is a summary the row's own title already carries. Checked after
+	// the exit code, which says more when the process failed with one.
+	const detailsReason = details?.failureReason;
+	if (typeof detailsReason === "string" && detailsReason.trim() !== "") return one(`error: ${detailsReason}`);
 	const exitCode = asObject(result.structuredContent)?.exit_code;
 	if (typeof exitCode === "number") return one(`exit ${exitCode}`);
 	const text = firstText(result.content) ?? "";
@@ -191,6 +196,15 @@ const detailGist = (toolName: string, result: GistResult, args: unknown): GistLi
 			const exitCode = details?.exitCode;
 			if (typeof exitCode === "number" && exitCode !== 0) return one(`exit ${exitCode}`);
 			return undefined;
+		}
+		case "gh_read":
+		case "git_read": {
+			// Both are line-count rows (their payloads are heterogeneous, so there is
+			// no count noun), and both report a capped result the way the read row
+			// does. The suffix is for a success only: a failure line already carries
+			// its reason, and appending `, truncated` to `timed out` would read badly.
+			const capped = details?.output_truncated === true || details?.truncated === true;
+			return one(`${lineCount(firstText(result.content))} lines${capped ? ", truncated" : ""}`);
 		}
 		case "read": {
 			if (hasImageBlock(result.content)) return one("image");

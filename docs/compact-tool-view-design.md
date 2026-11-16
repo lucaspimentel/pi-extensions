@@ -84,7 +84,12 @@ lines are assembled in this order:
 1. Failure: `codemode` gets its own two-line pair when pi's `Script error:`
    block is present (see below), else `timed out` when `details.killed` or
    `details.timedOut`, else `exit N` when an exit code is available (see below),
-   else `error: <first line of the error text>` from the first text block.
+   else `error: <details.failureReason>` when the tool reported a structured
+   reason, else `error: <first line of the error text>` from the first text
+   block. The structured reason exists because for an API read the first line is
+   the summary line the row title already carries; `gh_read` and `git_read` set
+   it on every failure. It is checked after the exit code, which says more when
+   a process failed with one, and it is ignored when empty or non-string.
 2. Typed `details`/`structuredContent` per the default table below. Each typed
    branch is gated on the tool name, so a `bash`-shaped details object on an
    unknown tool falls through to the fallback. A branch may return several
@@ -138,7 +143,7 @@ Every entry below is `gist`.
 | `fffind` | `N files` from `details.totalMatched` |
 | `python`, `node` | the worker status from `details.status` (`ok`, `runtime_error`, ...) |
 | `git_read`, `web_fetch`, `web_search`, `session_search`, `session_excerpt`, `jira_read`, `jira_update`, `subagent_list`, `request_read_access` | generic `N lines` |
-| `gh_read` | `timed out` from `details.timedOut`; `exit N` from a non-zero `details.exitCode`; otherwise generic `N lines` on success. Its `gh` argv and log runners set `isError: true` on every failure and report both fields in `details` (its API path keeps its own `isError` handling, whose failures render through the shared `error: <first line>` path), and a successful read has no count noun because its payloads are heterogeneous |
+| `gh_read`, `git_read` | `N lines`, plus `, truncated` when the result hit a cap (`details.output_truncated` for an API result, `details.truncated` for git), the wording the `read` row uses. A failure does not take the suffix: `timed out` from `details.timedOut`, then `exit N` from a non-zero `details.exitCode`, then `error: <details.failureReason>` (both tools set one on every failure), then the generic `error: <first line>`. No count noun: their payloads are heterogeneous (JSON arrays, file text, check annotations, PR diffs) |
 | `write` | `N lines written` from `context.args.content` (see the assumption below) |
 | `codemode` | see the `codemode` section below |
 | `tool_search` | `N tools loaded` from `details.loaded`, or `no matches` when the array is empty; without a `loaded` array the generic line count applies |

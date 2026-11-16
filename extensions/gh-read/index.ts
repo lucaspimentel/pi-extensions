@@ -21,7 +21,8 @@
  * Design: docs/gh-read-design.md
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	type ValidApiInvocation,
@@ -31,6 +32,7 @@ import {
 import { runGh } from "./spawn.ts";
 import { runGhLog } from "./log-spawn.ts";
 import { runApiOperation } from "./api.ts";
+import { expandedArgs, joinCallArgs, toolTitle } from "../shared/read-tool-call.ts";
 
 const SUBCOMMAND_SCHEMAS = [
 	Type.Literal("pr view"),
@@ -127,10 +129,162 @@ interface GhReadDetails {
 	[key: string]: unknown;
 }
 
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+	value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+
+const asText = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
+
+const asNumber = (value: unknown): number | undefined =>
+	typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+function asStringList(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+/**
+ * `@ref`, `[account]`, then the narrowing markers, in that fixed order, all
+ * muted: a one-sided range as `:12-` or `:1-40`, `(narrowed)` for a jq filter,
+ * and `(continuation)` for a paged follow-up. Each kind appears at most once
+ * and none carries the raw value (a jq expression or continuation token would
+ * swamp the row).
+ */
+function narrowedTags(record: Record<string, unknown> | undefined, theme: Theme): string[] {
+	if (record === undefined) return [];
+	const muted = (text: string): string => theme.fg("muted", text);
+	const tags: string[] = [];
+	const ref = asText(record["ref"]);
+	if (ref !== undefined) tags.push(muted(`@${ref}`));
+	const account = asText(record["account"]);
+	if (account !== undefined) tags.push(muted(`[${account}]`));
+	const start = asNumber(record["start_line"]);
+	const end = asNumber(record["end_line"]);
+	if (start !== undefined && end !== undefined) tags.push(muted(`:${start}-${end}`));
+	else if (start !== undefined) tags.push(muted(`:${start}-`));
+	else if (end !== undefined) tags.push(muted(`:1-${end}`));
+	if (asText(record["jq"]) !== undefined) tags.push(muted("(narrowed)"));
+	if (asText(record["continuation"]) !== undefined) tags.push(muted("(continuation)"));
+	return tags;
+}
+
+/**
+ * The collapsed call line: the operation, the arguments that identify the call
+ * in the short form the call itself used, then the tags that say how it was
+ * narrowed. Only identifying values appear; the switches that do not change
+ * what you are looking at (`recursive`, `fields`, `type`) and the values that
+ * would swamp the row (a jq expression, a continuation token) stay
+ * expanded-only. Nothing is elided or capped: a long row wraps, and a primary
+ * piece that has not streamed in yet shows `...`.
+ */
+function ghReadCallLine(args: unknown, theme: Theme): string {
+	const title = toolTitle("gh_read", theme);
+	const record = asRecord(args);
+	const subcommand = record === undefined ? undefined : asText(record["subcommand"]);
+	if (subcommand === undefined) return `${title} ${theme.fg("toolOutput", "...")}`;
+	const value = (text: string): string => theme.fg("toolOutput", text);
+	const parts: string[] = [];
+	let missingTarget = false;
+	switch (subcommand) {
+		case "repo contents":
+		case "repo tree": {
+			const repo = asText(record?.["repo"]);
+			if (repo === undefined) missingTarget = true;
+			else parts.push(value(repo));
+			const subpath = asText(record?.["path"]);
+			if (subpath !== undefined) parts.push(value(subpath));
+			break;
+		}
+		case "commit checks":
+		case "repo metadata": {
+			const repo = asText(record?.["repo"]);
+			if (repo === undefined) missingTarget = true;
+			else parts.push(value(repo));
+			break;
+		}
+		case "check annotations": {
+			const repo = asText(record?.["repo"]);
+			const runId = asNumber(record?.["check_run_id"]);
+			if (repo !== undefined && runId !== undefined) parts.push(value(`${repo} ${runId}`));
+			else {
+				if (repo !== undefined) parts.push(value(repo));
+				missingTarget = true;
+			}
+			break;
+		}
+		case "advisory view": {
+			const id = asText(record?.["id"]);
+			if (id === undefined) missingTarget = true;
+			else parts.push(value(id));
+			break;
+		}
+		case "org team": {
+			const org = asText(record?.["org"]);
+			const slug = asText(record?.["slug"]);
+			if (org !== undefined && slug !== undefined) parts.push(value(`${org} ${slug}`));
+			else {
+				if (org !== undefined) parts.push(value(org));
+				missingTarget = true;
+			}
+			break;
+		}
+		case "pr comments":
+		case "pr reviews":
+		case "pr threads": {
+			const repo = asText(record?.["repo"]);
+			const pr = asNumber(record?.["pr"]);
+			if (repo !== undefined && pr !== undefined) parts.push(value(`${repo}#${pr}`));
+			else {
+				if (repo !== undefined) parts.push(value(repo));
+				missingTarget = true;
+			}
+			break;
+		}
+		case "issue comments":
+		case "issue timeline": {
+			const repo = asText(record?.["repo"]);
+			const issue = asNumber(record?.["issue"]);
+			if (repo !== undefined && issue !== undefined) parts.push(value(`${repo}#${issue}`));
+			else {
+				if (repo !== undefined) parts.push(value(repo));
+				missingTarget = true;
+			}
+			break;
+		}
+		case "pr batch": {
+			const targets = asStringList(record?.["targets"]);
+			if (targets.length === 0) missingTarget = true;
+			else parts.push(value(`(${targets.length} PRs)`));
+			break;
+		}
+		default: {
+			// A native subcommand carries its argv, as the command you would type.
+			const command = joinCallArgs(asStringList(record?.["args"]));
+			if (command !== "") parts.push(value(command));
+		}
+	}
+	if (missingTarget) parts.push(value("..."));
+	const body = [...parts, ...narrowedTags(record, theme)].join(" ");
+	const operation = theme.fg("accent", subcommand);
+	return body === "" ? `${title} ${operation}` : `${title} ${operation} ${body}`;
+}
+
+/** Expanded: pi's fallback shape, listing every argument (Ctrl+O, `app.tools.expand`). */
+function ghReadExpandedLine(args: unknown, theme: Theme): string {
+	const title = toolTitle("gh_read", theme);
+	const body = expandedArgs(args, theme);
+	return body === undefined ? title : `${title}\n${body}`;
+}
+
 const NATIVE_DESCRIPTION =
 	"Run a read-only gh command (pr view, pr diff, pr list, pr checks, issue view, issue list, auth status, run list, run view) for the current repository (or anywhere, for `auth status`), or a narrowly scoped GitHub API operation: 'repo contents' (decoded file text or directory entries at a pinned ref), 'repo tree' (recursive or shallow tree), 'commit checks' (check runs plus legacy statuses for a commit), 'advisory view' (exact CVE/GHSA lookup), or 'check annotations' (annotations of one check run), or 'repo metadata' (default branch, description, visibility, URLs, and other flat repository facts), or 'pr comments' (inline review comments and replies), or 'pr reviews' (review bodies and verdicts), or 'issue comments' (conversation comments on an issue or PR), or 'issue timeline' (conversation-adjacent events for an issue or PR; a PR number reads that PR's timeline through the same issue field), or 'pr threads' (GraphQL review threads, resolved and outdated included), or 'org team' (one organization team object by bare org login and team slug, a single unpaged object). 'pr comments', 'pr reviews', and 'issue comments' require repo plus a positive safe-integer pr (or issue) number and return verbatim REST arrays with independent bounded continuation paging but no resolved/outdated thread state; 'issue timeline' requires repo plus a positive safe-integer issue number (a PR number reads that PR's timeline) and returns the verbatim event array with bounded continuation paging, narrowable with jq, e.g. [.[] | select(.event == \"reviewed\" or .event == \"commented\") | {event, actor: (.actor.login // .user.login), at: .created_at, body}]; 'pr threads' requires repo plus a positive safe-integer pr number and returns the GraphQL reviewThreads nodes with that state and bounded cursor continuation; 'org team' requires a bare org login plus a team slug and returns one organization team object, or 'pr batch' (up to 15 pull requests across repositories named as OWNER/REPO#N targets in one call, one envelope per target, with optional fields, account, and jq). All accept optional jq. Native commands take flags in args; API operations take structured fields (repo, path, ref, jq, ...) and work outside a git worktree. Only allowlisted flags and fields are accepted; output is capped and nothing mutates.";
 
 export default function ghReadExtension(pi: ExtensionAPI): void {
+	/**
+	 * The model-facing text carries a `gh_read: ` prefix; `details.failureReason`
+	 * is shown bare in a compact result row, whose own title already names the
+	 * tool. The text itself is untouched.
+	 */
+	const bareFailureReason = (text: string): string => (text.split("\n")[0] ?? "").replace(/^gh_read: /, "");
+
 	pi.registerTool<typeof ghReadParams, GhReadDetails>({
 		name: "gh_read",
 		label: "GitHub Read",
@@ -158,12 +312,19 @@ export default function ghReadExtension(pi: ExtensionAPI): void {
 			"Reading several pull requests across repositories: use subcommand 'pr batch' with targets such as ['owner/repo#123', 'other/repo#45'] instead of a `for` loop over `gh pr view` in host_bash, because any loop, conditional, or block is treated as one command that always prompts. It returns one envelope per target in input order, defaults to a compact scalar field set, and accepts an optional account for a secondary GitHub login.",
 		],
 		parameters: ghReadParams,
+		renderCall(args, theme, context) {
+			const text = context?.expanded === true ? ghReadExpandedLine(args, theme) : ghReadCallLine(args, theme);
+			return new Text(text, 0, 0);
+		},
 		async execute(_id, params, signal, _onUpdate, ctx) {
 			const checked = validateToolParams(params);
 			if (!checked.ok) {
 				return {
 					content: [{ type: "text", text: checked.reason }],
-					details: { subcommand: typeof params.subcommand === "string" ? params.subcommand : "unknown" },
+					details: {
+						subcommand: typeof params.subcommand === "string" ? params.subcommand : "unknown",
+						failureReason: bareFailureReason(checked.reason),
+					},
 					isError: true,
 				};
 			}
@@ -177,7 +338,12 @@ export default function ghReadExtension(pi: ExtensionAPI): void {
 				: await runGh(checked.argv, ctx.cwd);
 			return {
 				content: [{ type: "text", text: result.text }],
-				details: { subcommand: checked.subcommand, exitCode: result.exitCode, timedOut: result.timedOut },
+				details: {
+					subcommand: checked.subcommand,
+					exitCode: result.exitCode,
+					timedOut: result.timedOut,
+					...(result.ok ? {} : { failureReason: bareFailureReason(result.text) }),
+				},
 				...(result.ok ? {} : { isError: true }),
 			};
 		},

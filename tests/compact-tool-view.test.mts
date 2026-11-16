@@ -332,6 +332,43 @@ test("gh_read gists its structured failure and keeps a success on the line count
 		gistFor("gh_read", { content: [{ type: "text", text: "a\nb" }], details: { subcommand: "pr list", exitCode: 0, timedOut: false } }, {}),
 		normal("2 lines"),
 	);
+	// A structured reason from the tool beats the text's first line, which for an
+	// API result is the summary the row title already carries.
+	assert.deepEqual(
+		gistFor(
+			"gh_read",
+			ghFailure(
+				{ subcommand: "repo metadata", failureReason: "metadata read failed: Not Found (HTTP 404)" },
+				"gh_read api: repo metadata o/r\nnotice: metadata read failed: Not Found (HTTP 404)\ndata:",
+			),
+			{},
+		),
+		normal("error: metadata read failed: Not Found (HTTP 404)"),
+	);
+	// An exit code still outranks the reason, and a failure never gains the cap marker.
+	assert.deepEqual(
+		gistFor("gh_read", ghFailure({ subcommand: "run view", exitCode: 1, failureReason: "gh exited with code 1" }, "boom"), {}),
+		normal("exit 1"),
+	);
+	assert.deepEqual(
+		gistFor("gh_read", ghFailure({ subcommand: "repo contents", failureReason: "nope", output_truncated: true }, "a\nb"), {}),
+		normal("error: nope"),
+	);
+});
+
+test("a capped gh_read or git_read success says so, like the read row", () => {
+	const success = (details: Record<string, unknown>, text: string) => ({ content: [{ type: "text", text }], details });
+	assert.deepEqual(gistFor("gh_read", success({ subcommand: "repo contents", output_truncated: true }, "a\nb\nc"), {}), normal("3 lines, truncated"));
+	assert.deepEqual(gistFor("gh_read", success({ subcommand: "repo contents", output_truncated: false }, "a\nb"), {}), normal("2 lines"));
+	assert.deepEqual(gistFor("git_read", success({ subcommand: "show", truncated: true }, "a\nb"), {}), normal("2 lines, truncated"));
+	assert.deepEqual(gistFor("git_read", success({ subcommand: "status", truncated: false }, "a\nb"), {}), normal("2 lines"));
+	// Another tool's cap flag does not leak into its gist.
+	assert.deepEqual(gistFor("unknown_tool", success({ output_truncated: true }, "a\nb"), {}), normal("2 lines"));
+	// A failure keeps its reason even when the payload was capped.
+	assert.deepEqual(
+		gistFor("git_read", { content: [{ type: "text", text: "caps" }], details: { truncated: true, failureReason: "not inside a git worktree" }, isError: true }, {}),
+		normal("error: not inside a git worktree"),
+	);
 });
 
 test("tools without a typed gist fall back to the line count or image", () => {

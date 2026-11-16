@@ -30,7 +30,11 @@ A key with a `*` anywhere else is invalid and warns.
 Presence of a name in the effective table is the opt-in. Unknown names are
 valid and enable the mode for that name. Failures always surface, ignoring the
 mode: `exit N` for exec tools (or `timed out` for a killed or timed-out exec),
-else `error: <first line>`.
+else `error: <details.failureReason>` when the tool reported a structured
+reason (`gh_read` and `git_read` do, on every failure, because for an API read
+the error text's first line is a summary the row title already carries), else
+`error: <first line>`. A capped result is not a failure: `gh_read` and
+`git_read` render `N lines, truncated`, the wording the `read` row uses.
 
 Nothing hides by default. `subagent` is deliberately absent from the defaults
 because it renders itself. The `pi-memory` tools (`memory_write`, `scratchpad`,

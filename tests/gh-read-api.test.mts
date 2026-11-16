@@ -89,7 +89,20 @@ function jsonScript(entries: Array<[string, unknown]>, headers = ""): ScriptedRe
 async function run(params: Record<string, unknown>, apiRequester: ApiRequester, deps?: Omit<ApiOperationDeps, "requester">): Promise<ApiToolResult> {
 	const checked = validateToolParams(params);
 	if (!checked.ok || checked.kind !== "api") throw new Error(`unexpected validation outcome: ${JSON.stringify(checked)}`);
-	return await runApiOperation(checked.api, "/repo", undefined, { requester: apiRequester, ...deps });
+	const result = await runApiOperation(checked.api, "/repo", undefined, { requester: apiRequester, ...deps });
+	// Invariant, checked here rather than per test so that every scripted failure
+	// has to satisfy it: a failed API result carries a nonempty prefix-free
+	// reason for compact result rows (the row title already names the tool), and
+	// a successful one carries none.
+	const reason = result.details["failureReason"];
+	if (result.isError === true) {
+		assert.equal(typeof reason, "string", `failed API result without a failureReason: ${JSON.stringify(result.details)}`);
+		assert.ok((reason as string).trim().length > 0, "failureReason must be nonempty");
+		assert.ok(!(reason as string).startsWith("gh_read"), `failureReason must be prefix-free: ${reason}`);
+	} else {
+		assert.equal(reason, undefined, `successful API result carries a failureReason: ${String(reason)}`);
+	}
+	return result;
 }
 
 const SHA = "a".repeat(40);
@@ -352,6 +365,7 @@ for (const subcommand of ["pr comments", "pr reviews"] as const) {
 				assert.match(result.content[0].text, /mutable reads/);
 				assert.match(result.content[0].text, /resolved\/outdated/);
 				if (partial) assert.equal(result.details.resumed, true);
+				if (partial) assert.match(String(result.details.failureReason), /forbidden/, "a partial source failure is the reason");
 			}
 		}
 		const api = requester([() => response('[{"id":1}]', linkHeader(2, endpoint, "per_page=100")), () => error("forbidden", 403)]);
@@ -360,6 +374,8 @@ for (const subcommand of ["pr comments", "pr reviews"] as const) {
 		assert.equal(failed.details.items_returned, 1);
 		assert.equal(failed.details.source_complete, false);
 		assert.equal(typeof failed.details.continuation, "string");
+		// A jq failure describes the filtering failure, not the source's reason.
+		assert.equal(failed.details.failureReason, "jq filtering failed: compile error");
 		assert.match(failed.content[0].text, /jq filtering failed/);
 	});
 }
@@ -2393,4 +2409,28 @@ test("pr batch: an account that is not an authenticated github.com login errors 
 	assert.equal(result.isError, true);
 	assert.match(result.content[0].text, /account 'lucaspimentel' is not an authenticated github.com login/);
 	assert.equal(api.plainCalls.length, 1, "no target child runs");
+});
+
+// ── Structured failure reasons (compact result rows) ─────────────────────────
+
+test("failure reason: the diagnostic, not the summary line, becomes failureReason", async () => {
+	const result = await run({ subcommand: "repo metadata", repo: "o/r" }, requester([() => error("Not Found", 404)]));
+	assert.equal(result.isError, true);
+	assert.equal(result.details["failureReason"], "metadata read failed: Not Found (HTTP 404)");
+	// The model-facing text is unchanged: the summary is still the first line and
+	// the diagnostic is still the notice line, so only a collapsed row changes.
+	assert.ok(result.content[0].text.startsWith("gh_read api: repo metadata o/r\n"), result.content[0].text);
+	assert.ok(result.content[0].text.includes("notice: metadata read failed: Not Found (HTTP 404)"), result.content[0].text);
+});
+
+test("failure reason: an all-failed pr batch reports its failure count", async () => {
+	const api = requester([]);
+	api.plainScript = [
+		() => ({ exitCode: 1, stdout: "", stderr: "gh: could not resolve host\n" }),
+		() => ({ exitCode: 1, stdout: "", stderr: "gh: could not resolve host\n" }),
+	];
+	const result = await run({ subcommand: "pr batch", targets: ["o/r#1", "o/r#2"] }, api);
+	assert.equal(result.isError, true);
+	assert.equal(result.details["failureReason"], "2 of 2 targets failed");
+	assert.ok(result.content[0].text.includes("2 of 2 targets failed"), result.content[0].text);
 });

@@ -29,6 +29,7 @@ import {
 	runGit,
 	setSpawnOverride,
 } from "../extensions/git-read/spawn.ts";
+import gitReadExtension from "../extensions/git-read/index.ts";
 
 // ── Spawn-seam harness ────────────────────────────────────────────────────────
 
@@ -205,6 +206,10 @@ test("exit 0: ok true with decoded stdout", async () => {
 	const result = await runGit(STATUS_ARGV, "/repo");
 	assert.equal(result.ok, true);
 	assert.equal(result.text, " M file.txt\n");
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.timedOut, false);
+	assert.equal(result.truncated, false);
+	assert.equal(result.failureReason, undefined);
 	assert.equal(spawns.length, 2);
 });
 
@@ -212,6 +217,12 @@ test("non-zero exit: ok false with code, stderr, and any stdout", async () => {
 	harness(scriptOk("/repo", "partial\n", 128, "fatal: bad revision 'nope'\n"));
 	const result = await runGit(showArgv("nope"), "/repo");
 	assert.equal(result.ok, false);
+	assert.equal(result.exitCode, 128);
+	assert.equal(result.timedOut, false);
+	assert.equal(result.truncated, false);
+	assert.equal(typeof result.failureReason, "string");
+	assert.ok(!result.failureReason!.startsWith("git_read: "), "the structured reason is prefix-free");
+	assert.ok(result.failureReason!.includes("128"), result.failureReason);
 	assert.ok(result.text.startsWith("git_read: git exited with code 128\n"), result.text);
 	assert.ok(result.text.includes("fatal: bad revision 'nope'\n"));
 	assert.ok(result.text.includes("partial\n"));
@@ -235,6 +246,8 @@ test("truncation: bytes past the shared cap are dropped, notice shows shown/tota
 	const result = await runGit(STATUS_ARGV, "/repo");
 	// Truncation is not an error.
 	assert.equal(result.ok, true);
+	assert.equal(result.truncated, true);
+	assert.equal(result.failureReason, undefined, "a capped success is still a success");
 	// stdout arrived before the cap was exceeded, so all of it is retained.
 	assert.equal(result.text, `${chunkA.toString("utf8")}\n[git_read: output truncated, showing ${OUTPUT_CAP} of ${30 * 1024 * 2} bytes]`);
 	assert.ok(Buffer.byteLength(result.text) <= OUTPUT_CAP + 200);
@@ -283,6 +296,10 @@ test("timeout: SIGTERM then SIGKILL escalation, reaped on close, error result", 
 		spawns[1]!.child.emit("close", null, "SIGKILL");
 		const result = await promise;
 		assert.equal(result.ok, false);
+		assert.equal(result.timedOut, true);
+		assert.equal(result.exitCode, null);
+		assert.match(result.failureReason ?? "", /timed out after \d+ ms/);
+		assert.ok(!result.failureReason!.startsWith("git_read: "), "the structured reason is prefix-free");
 		assert.ok(result.text.startsWith(`git_read: git timed out after ${TIMEOUT_MS} ms`), result.text);
 	} finally {
 		mock.timers.reset();
@@ -302,6 +319,10 @@ test("spawn failure: error event resolves with a failed-to-run message", async (
 	});
 	const result = await runGit(STATUS_ARGV, "/repo");
 	assert.equal(result.ok, false);
+	assert.equal(result.exitCode, null);
+	assert.equal(result.timedOut, false);
+	assert.equal(result.truncated, false);
+	assert.match(result.failureReason ?? "", /ENOENT/);
 	assert.ok(result.text.startsWith("git_read: failed to run git: "), result.text);
 	assert.ok(result.text.includes("ENOENT"));
 });
@@ -335,6 +356,10 @@ test("worktree gate: rev-parse non-zero exit fails closed with the single messag
 	const result = await runGit(STATUS_ARGV, "/tmp");
 	assert.equal(result.ok, false);
 	assert.equal(result.text, "git_read: not inside a git worktree");
+	assert.equal(result.exitCode, null);
+	assert.equal(result.timedOut, false);
+	assert.equal(result.truncated, false);
+	assert.equal(result.failureReason, "not inside a git worktree");
 	assert.equal(spawns.length, 1);
 });
 
@@ -349,6 +374,8 @@ test("worktree gate: empty toplevel fails closed", async () => {
 	const result = await runGit(STATUS_ARGV, "/tmp");
 	assert.equal(result.ok, false);
 	assert.equal(result.text, "git_read: not inside a git worktree");
+	assert.equal(result.exitCode, null);
+	assert.equal(result.failureReason, "not inside a git worktree");
 });
 
 test("worktree gate: cwd outside the returned toplevel fails closed", async () => {
@@ -356,6 +383,10 @@ test("worktree gate: cwd outside the returned toplevel fails closed", async () =
 	const result = await runGit(STATUS_ARGV, "/elsewhere");
 	assert.equal(result.ok, false);
 	assert.equal(result.text, "git_read: not inside a git worktree");
+	assert.equal(result.exitCode, null);
+	assert.equal(result.timedOut, false);
+	assert.equal(result.truncated, false);
+	assert.equal(result.failureReason, "not inside a git worktree");
 });
 
 // ── Integration: real git in temp repos ──────────────────────────────────────
@@ -457,7 +488,111 @@ test("integration: large committed file truncates with a byte-accurate notice", 
 		const notice = `[git_read: output truncated, showing ${OUTPUT_CAP} of `;
 		assert.ok(result.text.includes(notice), `missing truncation notice: ${result.text.slice(-120)}`);
 		assert.ok(Buffer.byteLength(result.text) <= OUTPUT_CAP + 200, "retained text must stay bounded");
+		assert.equal(result.truncated, true);
+		assert.equal(result.failureReason, undefined);
 	} finally {
 		rmSync(repo, { recursive: true, force: true });
 	}
+});
+
+// ── Registered tool: details shape and error signalling ───────────────────────
+
+interface RegisteredTool {
+	name: string;
+	execute: (
+		id: string,
+		params: Record<string, unknown>,
+		signal: undefined,
+		onUpdate: undefined,
+		ctx: { cwd: string },
+	) => Promise<ToolResult>;
+}
+
+interface ToolResult {
+	content: Array<{ type: string; text: string }>;
+	details: Record<string, unknown>;
+	isError?: boolean;
+}
+
+function register(): RegisteredTool {
+	let captured: RegisteredTool | undefined;
+	gitReadExtension({
+		registerTool: (definition: RegisteredTool) => {
+			captured = definition;
+		},
+	} as never);
+	assert.ok(captured, "extension must register a tool");
+	return captured!;
+}
+
+const callTool = (params: Record<string, unknown>, cwd = "/repo") =>
+	register().execute("id", params, undefined, undefined, { cwd });
+
+test("registered tool: a successful run omits isError and reports a zero exit code", async () => {
+	harness(scriptOk("/repo", " M file.txt\n"));
+	const result = await callTool({ subcommand: "status", args: ["--short", "--branch"] });
+	assert.equal(result.isError, undefined);
+	assert.equal(result.details.subcommand, "status");
+	assert.equal(result.details.exitCode, 0);
+	assert.equal(result.details.timedOut, false);
+	assert.equal(result.details.truncated, false);
+	assert.equal("failureReason" in result.details, false);
+});
+
+test("registered tool: a capped success stays a success but reports truncated", async () => {
+	const chunkA = Buffer.alloc(30 * 1024, 0x61);
+	const chunkB = Buffer.alloc(30 * 1024, 0x62);
+	harness((spawn, index) => {
+		if (index === 0) {
+			spawn.child.stdout.emit("data", Buffer.from("/repo\n"));
+			spawn.child.emit("close", 0);
+			return;
+		}
+		spawn.child.stdout.emit("data", chunkA);
+		spawn.child.stderr.emit("data", chunkB);
+		spawn.child.emit("close", 0);
+	});
+	const result = await callTool({ subcommand: "status", args: ["--short", "--branch"] });
+	assert.equal(result.isError, undefined);
+	assert.equal(result.details.truncated, true);
+	assert.equal("failureReason" in result.details, false);
+});
+
+test("registered tool: a non-zero exit is an error with the code and a bare reason", async () => {
+	harness(scriptOk("/repo", "partial\n", 128, "fatal: bad revision 'nope'\n"));
+	const result = await callTool({ subcommand: "show", args: ["nope"] });
+	assert.equal(result.isError, true);
+	assert.equal(result.details.subcommand, "show");
+	assert.equal(result.details.exitCode, 128);
+	assert.equal(result.details.timedOut, false);
+	assert.equal(typeof result.details.failureReason, "string");
+	assert.ok(!(result.details.failureReason as string).startsWith("git_read: "), "prefix-free reason");
+	assert.ok(result.content[0]!.text.startsWith("git_read: git exited with code 128\n"), result.content[0]!.text);
+});
+
+test("registered tool: rejections are errors that spawn nothing", async () => {
+	const spawns = harness(scriptOk("/repo"));
+	const missing = await callTool({});
+	assert.equal(missing.isError, true);
+	assert.equal(missing.details.subcommand, "unknown");
+	assert.equal(missing.details.exitCode, null);
+	assert.equal(missing.details.timedOut, false);
+	assert.equal(missing.details.truncated, false);
+	assert.equal(typeof missing.details.failureReason, "string");
+	assert.ok(missing.content[0]!.text.startsWith("git_read: "), "the model-facing text keeps its prefix");
+
+	const badFlag = await callTool({ subcommand: "log", args: ["--bogus"] });
+	assert.equal(badFlag.isError, true);
+	assert.equal(badFlag.details.subcommand, "log");
+	assert.equal(typeof badFlag.details.failureReason, "string");
+	assert.ok((badFlag.details.failureReason as string).includes("--bogus"), String(badFlag.details.failureReason));
+	assert.equal(spawns.length, 0, "rejected params must not spawn");
+});
+
+test("registered tool: the worktree gate failure is an error with a bare reason", async () => {
+	harness(scriptOk("/repo"));
+	const result = await callTool({ subcommand: "status", args: ["--short", "--branch"] }, "/elsewhere");
+	assert.equal(result.isError, true);
+	assert.equal(result.details.failureReason, "not inside a git worktree");
+	assert.equal(result.details.exitCode, null);
 });

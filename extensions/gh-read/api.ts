@@ -589,6 +589,15 @@ interface RenderOptions {
 	notices?: string[];
 	/** Appended as a notice line only when the display is actually clipped. */
 	clipNotice?: string;
+	/**
+	 * Prefix-free reason for a failed result. It reaches the model as one of the
+	 * notice lines (whose text is unchanged) and is additionally exposed as
+	 * `details.failureReason`, so a compact result row
+	 * (extensions/compact-tool-view/gist.ts) states the reason itself instead of
+	 * the summary line, which the row title already carries. Ignored when
+	 * `isError` is false, so a success can never report a reason.
+	 */
+	failureReason?: string;
 }
 
 /**
@@ -638,11 +647,34 @@ function renderResult(summary: string, metadata: ReadonlyArray<[string, string |
 		output_truncated: outputTruncated,
 	};
 	for (const [key, value] of metadata) details[key] = value;
+	if (options.isError && options.failureReason !== undefined) details["failureReason"] = options.failureReason;
 	return {
 		content: [{ type: "text", text }],
 		details,
 		...(options.isError ? { isError: true } : {}),
 	};
+}
+
+/**
+ * A failed API result whose reason is both the notice line the model reads and
+ * `details.failureReason`. `standings` are informational notices that render
+ * before the reason, which is the order the call sites use by hand: every
+ * failure site passed its diagnostic as the last notice, so wrapping them here
+ * keeps the text byte-identical while making the reason explicit rather than
+ * inferred from the notice list.
+ */
+function failedResult(
+	summary: string,
+	metadata: ReadonlyArray<[string, string | number | boolean | null]>,
+	reason: string,
+	standings: { notices?: string[]; clipNotice?: string } = {},
+): ApiToolResult {
+	return renderResult(summary, metadata, "", {
+		isError: true,
+		notices: [...(standings.notices ?? []), reason],
+		failureReason: reason,
+		clipNotice: standings.clipNotice,
+	});
 }
 
 /** UTF-8-safe prefix: never splits a multibyte sequence or a surrogate pair. */
@@ -750,24 +782,18 @@ async function opRepoContents(invocation: ValidApiInvocation, requester: ApiRequ
 
 	const resolved = await resolveRef(requester, repo, invocation.ref);
 	if (resolved.kind === "error") {
-		return renderResult(`gh_read api: repo contents ${repo}`, metadata, "", { isError: true, notices: [resolved.reason] });
+		return failedResult(`gh_read api: repo contents ${repo}`, metadata, resolved.reason);
 	}
 	metadata.push(["target", resolved.target], ["resolved_sha", resolved.sha]);
 
 	const outcome = await requester.request(contentsEndpoint(repo, path) + `?${buildQuery([["ref", resolved.sha]])}`);
 	if (!isResponse(outcome)) {
-		return renderResult(`gh_read api: repo contents ${repo}`, metadata, "", {
-			isError: true,
-			notices: [describeRequestFailure("contents read", outcome)],
-		});
+		return failedResult(`gh_read api: repo contents ${repo}`, metadata, describeRequestFailure("contents read", outcome));
 	}
 	const parsed = JSON.parse(outcome.body) as unknown;
 	if (Array.isArray(parsed)) {
 		if (invocation.startLine !== undefined || invocation.endLine !== undefined) {
-			return renderResult(`gh_read api: repo contents ${repo}`, metadata, "", {
-				isError: true,
-				notices: ["line ranges apply only to text files, not directory listings"],
-			});
+			return failedResult(`gh_read api: repo contents ${repo}`, metadata, "line ranges apply only to text files, not directory listings");
 		}
 		const possiblyIncomplete = parsed.length >= DIRECTORY_PAGE_SIZE;
 		const notices = possiblyIncomplete
@@ -776,7 +802,7 @@ async function opRepoContents(invocation: ValidApiInvocation, requester: ApiRequ
 		return await renderData(invocation, `gh_read api: repo contents ${repo} ${path.length === 0 ? "(root)" : path}`, metadata, parsed, notices, false, requester, deps);
 	}
 	if (typeof parsed !== "object" || parsed === null) {
-		return renderResult(`gh_read api: repo contents ${repo}`, metadata, "", { isError: true, notices: ["response body was not a JSON object or array"] });
+		return failedResult(`gh_read api: repo contents ${repo}`, metadata, "response body was not a JSON object or array");
 	}
 	const obj = parsed as Record<string, unknown>;
 	const entryType = typeof obj["type"] === "string" ? obj["type"] : "unknown";
@@ -788,7 +814,7 @@ async function opRepoContents(invocation: ValidApiInvocation, requester: ApiRequ
 
 	const contentOutcome = fileContentOutcome(obj);
 	if (contentOutcome.kind === "error") {
-		return renderResult(`gh_read api: repo contents ${repo}`, metadata, "", { isError: true, notices: [contentOutcome.reason] });
+		return failedResult(`gh_read api: repo contents ${repo}`, metadata, contentOutcome.reason);
 	}
 	if (contentOutcome.kind === "metadata") {
 		metadata.push(["type", entryType], ["size", typeof obj["size"] === "number" ? obj["size"] : null]);
@@ -800,10 +826,7 @@ async function opRepoContents(invocation: ValidApiInvocation, requester: ApiRequ
 
 	// Text file: apply the 1-based inclusive line range.
 	if (invocation.jq !== undefined) {
-		return renderResult(`gh_read api: repo contents ${repo} ${path}`, metadata, "", {
-			isError: true,
-			notices: ["jq is supported only for directory JSON, not file text"],
-		});
+		return failedResult(`gh_read api: repo contents ${repo} ${path}`, metadata, "jq is supported only for directory JSON, not file text");
 	}
 	if (invocation.startLine !== undefined || invocation.endLine !== undefined) {
 		const lines = splitLines(contentOutcome.text);
@@ -839,16 +862,13 @@ async function followSymlink(
 	const rawContent = typeof obj["content"] === "string" ? obj["content"] : "";
 	const decoded = decodeStrictBase64(rawContent);
 	if (!decoded.ok) {
-		return renderResult(`gh_read api: repo contents ${repo} ${path}`, metadata, "", { isError: true, notices: [`GitHub returned ${decoded.reason}`] });
+		return failedResult(`gh_read api: repo contents ${repo} ${path}`, metadata, `GitHub returned ${decoded.reason}`);
 	}
 	const targetPath = decoded.bytes.toString("utf8");
 	metadata.push(["type", "symlink"], ["symlink_target", targetPath]);
 
 	if (invocation.jq !== undefined) {
-		return renderResult(`gh_read api: repo contents ${repo} ${path}`, metadata, "", {
-			isError: true,
-			notices: ["jq is supported only for directory JSON, not symlink or file text"],
-		});
+		return failedResult(`gh_read api: repo contents ${repo} ${path}`, metadata, "jq is supported only for directory JSON, not symlink or file text");
 	}
 
 	// Join the target relative to the symlink's directory, lexically, never
@@ -917,7 +937,7 @@ async function renderData(
 	isError: boolean,
 	requester: ApiRequester,
 	deps?: ApiOperationDeps,
-	renderOptions?: { clipNotice?: string },
+	renderOptions?: { clipNotice?: string; failureReason?: string },
 ): Promise<ApiToolResult> {
 	if (invocation.jq !== undefined) {
 		const document = JSON.stringify(data);
@@ -925,17 +945,21 @@ async function renderData(
 			? await deps.jqRun(invocation.jq, document)
 			: await runToolJq(invocation.jq, document, requester, deps);
 		if (jqResult.kind === "error") {
+			// The filtering failure is the reason even when the payload fetch had
+			// already failed: it is the failure the result now reports.
+			const jqReason = `jq filtering failed: ${jqResult.reason}`;
 			return renderResult(summary, metadata, "", {
 				isError: true,
-				notices: [...notices, `jq filtering failed: ${jqResult.reason}`],
+				notices: [...notices, jqReason],
+				failureReason: jqReason,
 			});
 		}
 		const jqNotices = [...notices];
 		if (jqResult.outputTruncated) jqNotices.push(`jq output exceeded the ${1024 * 1024}-byte capture cap and was clipped`);
 		if (jqResult.output.length === 0) jqNotices.push("jq produced no output values: empty filtered result");
-		return renderResult(summary, metadata, jqResult.output, { isError, notices: jqNotices, clipNotice: renderOptions?.clipNotice });
+		return renderResult(summary, metadata, jqResult.output, { isError, notices: jqNotices, clipNotice: renderOptions?.clipNotice, failureReason: renderOptions?.failureReason });
 	}
-	return renderResult(summary, metadata, JSON.stringify(data), { isError, notices, clipNotice: renderOptions?.clipNotice });
+	return renderResult(summary, metadata, JSON.stringify(data), { isError, notices, clipNotice: renderOptions?.clipNotice, failureReason: renderOptions?.failureReason });
 }
 
 /** Preflight + execute wiring under the requester's shared deadline. */
@@ -955,22 +979,22 @@ async function opRepoTree(invocation: ValidApiInvocation, requester: ApiRequeste
 
 	const resolved = await resolveRef(requester, repo, invocation.ref);
 	if (resolved.kind === "error") {
-		return renderResult(summary, metadata, "", { isError: true, notices: [resolved.reason] });
+		return failedResult(summary, metadata, resolved.reason);
 	}
 	metadata.push(["target", resolved.target], ["resolved_sha", resolved.sha], ["recursive", recursive]);
 
 	// Resolve the commit's tree SHA, then read the tree.
 	const commitOutcome = await requester.request(`repos/${splitRepo(repo)[0]}/${splitRepo(repo)[1]}/git/commits/${resolved.sha}`);
 	if (!isResponse(commitOutcome)) {
-		return renderResult(summary, metadata, "", { isError: true, notices: [describeRequestFailure("tree-sha lookup", commitOutcome)] });
+		return failedResult(summary, metadata, describeRequestFailure("tree-sha lookup", commitOutcome));
 	}
 	const commitBody = parseJsonObject(commitOutcome.body);
 	if (typeof commitBody === "string") {
-		return renderResult(summary, metadata, "", { isError: true, notices: [commitBody] });
+		return failedResult(summary, metadata, commitBody);
 	}
 	const treeObj = commitBody["tree"];
 	if (typeof treeObj !== "object" || treeObj === null || typeof (treeObj as Record<string, unknown>)["sha"] !== "string") {
-		return renderResult(summary, metadata, "", { isError: true, notices: ["git commit lookup did not return a tree sha"] });
+		return failedResult(summary, metadata, "git commit lookup did not return a tree sha");
 	}
 	const treeSha = (treeObj as Record<string, unknown>)["sha"] as string;
 	metadata.push(["tree_sha", treeSha]);
@@ -978,11 +1002,11 @@ async function opRepoTree(invocation: ValidApiInvocation, requester: ApiRequeste
 	// Shallow mode omits the recursive query parameter entirely.
 	const treeOutcome = await requester.request(treeEndpoint(repo, treeSha, recursive));
 	if (!isResponse(treeOutcome)) {
-		return renderResult(summary, metadata, "", { isError: true, notices: [describeRequestFailure("tree read", treeOutcome)] });
+		return failedResult(summary, metadata, describeRequestFailure("tree read", treeOutcome));
 	}
 	const treeBody = parseJsonObject(treeOutcome.body);
 	if (typeof treeBody === "string") {
-		return renderResult(summary, metadata, "", { isError: true, notices: [treeBody] });
+		return failedResult(summary, metadata, treeBody);
 	}
 
 	// Optional subtree filter: entries equal to the path or under it. Truncated
@@ -1092,6 +1116,7 @@ async function opCommitChecks(invocation: ValidApiInvocation, requester: ApiRequ
 	const metadata: Array<[string, string | number | boolean | null]> = [["repo", repo], ["ref", ref]];
 	const notices: string[] = [];
 	let isError = false;
+	let failureReason: string | undefined;
 
 	// Continuation match: the token must name this exact operation, repo, and
 	// ref; a resumed ref is never re-resolved (the pinned SHA is reused).
@@ -1101,10 +1126,7 @@ async function opCommitChecks(invocation: ValidApiInvocation, requester: ApiRequ
 	if (invocation.continuation !== undefined) {
 		const payload = decodeContinuation(invocation.continuation);
 		if (payload === null || payload.op !== "commit checks" || payload.repo !== repo || payload.ref !== ref) {
-			return renderResult(summary, metadata, "", {
-				isError: true,
-				notices: ["continuation does not match this invocation (operation, repo, or ref differ)"],
-			});
+			return failedResult(summary, metadata, "continuation does not match this invocation (operation, repo, or ref differ)");
 		}
 		sha = payload.sha;
 		checksState = { ...payload.checks };
@@ -1118,7 +1140,7 @@ async function opCommitChecks(invocation: ValidApiInvocation, requester: ApiRequ
 	} else {
 		const resolved = await resolveRef(requester, repo, ref);
 		if (resolved.kind === "error") {
-			return renderResult(summary, metadata, "", { isError: true, notices: [resolved.reason] });
+			return failedResult(summary, metadata, resolved.reason);
 		}
 		sha = resolved.sha;
 		checksState = { page: 1, done: false };
@@ -1175,10 +1197,12 @@ async function opCommitChecks(invocation: ValidApiInvocation, requester: ApiRequ
 
 	if (checks.error !== undefined) {
 		isError = true;
+		failureReason ??= checks.error.reason;
 		metadata.push(["checks_error", checks.error.reason]);
 	}
 	if (statuses.error !== undefined) {
 		isError = true;
+		failureReason ??= statuses.error.reason;
 		metadata.push(["statuses_error", statuses.error.reason]);
 	}
 	if (checks.stopReason !== undefined) {
@@ -1218,12 +1242,13 @@ async function opCommitChecks(invocation: ValidApiInvocation, requester: ApiRequ
 			metadata.push(["continuation", encoded.token]);
 		} else {
 			isError = true;
+			failureReason ??= `continuation could not be encoded: ${encoded.reason}`;
 			notices.push(`continuation could not be encoded: ${encoded.reason}`);
 		}
 	}
 
 	const data = { check_runs: checks.items, statuses: latestStatuses };
-	const result = await renderData(invocation, summary, metadata, data, notices, isError, requester, deps);
+	const result = await renderData(invocation, summary, metadata, data, notices, isError, requester, deps, { failureReason });
 	if (continuationToken !== null && result.details["continuation"] === undefined) {
 		result.details["continuation"] = continuationToken;
 	}
@@ -1243,11 +1268,11 @@ async function opAdvisoryView(invocation: ValidApiInvocation, requester: ApiRequ
 		// parameter (type and continuation for GHSAs are rejected at validation).
 		const outcome = await requester.request(advisoryEndpoint(id));
 		if (!isResponse(outcome)) {
-			return renderResult(summary, metadata, "", { isError: true, notices: [describeRequestFailure("advisory lookup", outcome)] });
+			return failedResult(summary, metadata, describeRequestFailure("advisory lookup", outcome));
 		}
 		const body = parseJsonObject(outcome.body);
 		if (typeof body === "string") {
-			return renderResult(summary, metadata, "", { isError: true, notices: [body] });
+			return failedResult(summary, metadata, body);
 		}
 		metadata.push(["lookup", "direct GHSA object"], ["withdrawn", body["withdrawn"] === undefined || body["withdrawn"] === null ? "no" : String(body["withdrawn"])]);
 		notices.push("advisory content is mutable and can be withdrawn or amended after this read");
@@ -1261,10 +1286,7 @@ async function opAdvisoryView(invocation: ValidApiInvocation, requester: ApiRequ
 	if (invocation.continuation !== undefined) {
 		const payload = decodeContinuation(invocation.continuation);
 		if (payload === null || payload.op !== "advisory view" || payload.id !== id || payload.type !== type) {
-			return renderResult(summary, metadata, "", {
-				isError: true,
-				notices: ["continuation does not match this invocation (id or type differ)"],
-			});
+			return failedResult(summary, metadata, "continuation does not match this invocation (id or type differ)");
 		}
 		page = payload.advisories.page;
 		if (payload.advisories.done) {
@@ -1292,7 +1314,7 @@ async function opAdvisoryView(invocation: ValidApiInvocation, requester: ApiRequ
 		{ page, done: false },
 	);
 	if (result.error !== undefined) {
-		return renderResult(summary, metadata, "", { isError: true, notices: [result.error.reason] });
+		return failedResult(summary, metadata, result.error.reason);
 	}
 	if (result.stopReason !== undefined) {
 		metadata.push(["incomplete_reason", result.stopReason]);
@@ -1356,7 +1378,7 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 			}
 		}
 		if (matchedPage === null) {
-			return renderResult(summary, metadata, "", { isError: true, notices: [...notices, `continuation does not match this invocation (operation, repo, ${targetLabel}, or page invariants differ)`] });
+			return failedResult(summary, metadata, `continuation does not match this invocation (operation, repo, ${targetLabel}, or page invariants differ)`, { notices });
 		}
 		page = matchedPage;
 		metadata.push(["resumed", true]);
@@ -1386,6 +1408,7 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 		{ page, done: false },
 	);
 	let isError = result.error !== undefined;
+	let failureReason = result.error?.reason;
 	metadata.push(["source_complete", result.done], ["items_returned", result.items.length], ["pages_fetched", result.pagesFetched]);
 	if (result.error !== undefined) metadata.push(["source_error", result.error.reason]);
 	if (result.stopReason !== undefined) metadata.push(["incomplete_reason", result.stopReason]);
@@ -1396,10 +1419,11 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 		if (encoded.ok) metadata.push(["continuation", encoded.token]);
 		else {
 			isError = true;
+			failureReason ??= `continuation could not be encoded: ${encoded.reason}`;
 			notices.push(`continuation could not be encoded: ${encoded.reason}`);
 		}
 	}
-	return await renderData(invocation, summary, metadata, result.items, notices, isError, requester, deps);
+	return await renderData(invocation, summary, metadata, result.items, notices, isError, requester, deps, { failureReason });
 }
 
 // ── Operation: issue timeline ──────────────────────────────────────────────
@@ -1448,10 +1472,7 @@ async function opIssueTimeline(invocation: ValidApiInvocation, requester: ApiReq
 	if (invocation.continuation !== undefined) {
 		const payload = decodeContinuation(invocation.continuation);
 		if (payload === null || payload.op !== "issue timeline" || payload.repo !== repo || payload.issue !== issue) {
-			return renderResult(summary, metadata, "", {
-				isError: true,
-				notices: [...notices, "continuation does not match this invocation (operation, repo, issue, or page invariants differ)"],
-			});
+			return failedResult(summary, metadata, "continuation does not match this invocation (operation, repo, issue, or page invariants differ)", { notices });
 		}
 		page = payload.source.page;
 		metadata.push(["resumed", true]);
@@ -1481,6 +1502,7 @@ async function opIssueTimeline(invocation: ValidApiInvocation, requester: ApiReq
 		{ page, done: false },
 	);
 	let isError = result.error !== undefined;
+	let failureReason = result.error?.reason;
 	metadata.push(["source_complete", result.done], ["items_returned", result.items.length], ["pages_fetched", result.pagesFetched]);
 	if (result.error !== undefined) metadata.push(["source_error", result.error.reason]);
 	if (result.stopReason !== undefined) metadata.push(["incomplete_reason", result.stopReason]);
@@ -1493,11 +1515,13 @@ async function opIssueTimeline(invocation: ValidApiInvocation, requester: ApiReq
 		if (encoded.ok) metadata.push(["continuation", encoded.token]);
 		else {
 			isError = true;
+			failureReason ??= `continuation could not be encoded: ${encoded.reason}`;
 			notices.push(`continuation could not be encoded: ${encoded.reason}`);
 		}
 	}
 	return await renderData(invocation, summary, metadata, result.items, notices, isError, requester, deps, {
 		clipNotice: "display truncated at 50 KiB; narrow with jq before re-reading, e.g. filter on .event (see the events inventory above)",
+		failureReason,
 	});
 }
 
@@ -1598,10 +1622,7 @@ async function opPrThreads(invocation: ValidApiInvocation, requester: ApiRequest
 						: payload.repo !== repo
 							? "repo"
 							: "pr";
-			return renderResult(summary, metadata, "", {
-				isError: true,
-				notices: [...notices, `continuation does not match this invocation (${field} differs)`],
-			});
+			return failedResult(summary, metadata, `continuation does not match this invocation (${field} differs)`, { notices });
 		}
 		cursor = payload.cursor;
 		metadata.push(["resumed", true]);
@@ -1702,6 +1723,7 @@ async function opPrThreads(invocation: ValidApiInvocation, requester: ApiRequest
 		["threads_with_truncated_comments", threadsWithTruncatedComments],
 	);
 	let isError = error !== undefined;
+	let failureReason = error;
 	if (error !== undefined) metadata.push(["source_error", error]);
 	if (stopReason !== undefined) metadata.push(["incomplete_reason", stopReason]);
 	if (!done && !nonContinuable) {
@@ -1709,11 +1731,12 @@ async function opPrThreads(invocation: ValidApiInvocation, requester: ApiRequest
 		if (encoded.ok) metadata.push(["continuation", encoded.token]);
 		else {
 			isError = true;
+			failureReason ??= `continuation could not be encoded: ${encoded.reason}`;
 			notices.push(`continuation could not be encoded: ${encoded.reason}`);
 		}
 	}
 	notices.push(...boundGraphqlMessages(graphqlMessages));
-	return await renderData(invocation, summary, metadata, nodes, notices, isError, requester, deps);
+	return await renderData(invocation, summary, metadata, nodes, notices, isError, requester, deps, { failureReason });
 }
 
 // ── Operation: check-run annotations ──────────────────────────────────────
@@ -1727,16 +1750,16 @@ async function opCheckAnnotations(invocation: ValidApiInvocation, requester: Api
 	// Exactly one tool-authored GET; 404/403 outcomes pass through verbatim.
 	const outcome = await requester.request(annotationsEndpoint(repo, checkRunId));
 	if (!isResponse(outcome)) {
-		return renderResult(summary, metadata, "", { isError: true, notices: [describeRequestFailure("annotations read", outcome)] });
+		return failedResult(summary, metadata, describeRequestFailure("annotations read", outcome));
 	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(outcome.body) as unknown;
 	} catch {
-		return renderResult(summary, metadata, "", { isError: true, notices: ["check annotations response was not valid JSON"] });
+		return failedResult(summary, metadata, "check annotations response was not valid JSON");
 	}
 	if (!Array.isArray(parsed)) {
-		return renderResult(summary, metadata, "", { isError: true, notices: ["check annotations response was not a JSON array"] });
+		return failedResult(summary, metadata, "check annotations response was not a JSON array");
 	}
 	// Incompleteness is computed from the ORIGINAL response array BEFORE jq,
 	// then carried through renderData, whose jq path preserves notices (and
@@ -1768,11 +1791,11 @@ async function opRepoMetadata(invocation: ValidApiInvocation, requester: ApiRequ
 
 	const outcome = await requester.request(`repos/${splitRepo(repo)[0]}/${splitRepo(repo)[1]}`);
 	if (!isResponse(outcome)) {
-		return renderResult(summary, metadata, "", { isError: true, notices: [describeRequestFailure("metadata read", outcome)] });
+		return failedResult(summary, metadata, describeRequestFailure("metadata read", outcome));
 	}
 	const body = parseJsonObject(outcome.body);
 	if (typeof body === "string") {
-		return renderResult(summary, metadata, "", { isError: true, notices: [body] });
+		return failedResult(summary, metadata, body);
 	}
 	return await renderData(invocation, summary, metadata, body, [], false, requester, deps);
 }
@@ -1798,11 +1821,11 @@ async function opOrgTeam(invocation: ValidApiInvocation, requester: ApiRequester
 
 	const outcome = await requester.request(teamEndpoint(org, slug));
 	if (!isResponse(outcome)) {
-		return renderResult(summary, metadata, "", { isError: true, notices: [describeRequestFailure("org team read", outcome)] });
+		return failedResult(summary, metadata, describeRequestFailure("org team read", outcome));
 	}
 	const body = parseJsonObject(outcome.body);
 	if (typeof body === "string") {
-		return renderResult(summary, metadata, "", { isError: true, notices: [body] });
+		return failedResult(summary, metadata, body);
 	}
 	return await renderData(invocation, summary, metadata, body, [], false, requester, deps);
 }
@@ -1872,23 +1895,14 @@ async function opPrBatch(invocation: ValidApiInvocation, requester: ApiRequester
 		const account = invocation.account;
 		const status = await requester.plain(["auth", "status", "--json", "hosts"]);
 		if (status.exitCode !== 0) {
-			return renderResult(summary, metadata, "", {
-				isError: true,
-				notices: [`gh auth status failed for account '${account}': ${status.stderr !== "" ? status.stderr : "no diagnostic"}`],
-			});
+			return failedResult(summary, metadata, `gh auth status failed for account '${account}': ${status.stderr !== "" ? status.stderr : "no diagnostic"}`);
 		}
 		if (!accountIsAuthenticatedOnGithub(status.stdout, account)) {
-			return renderResult(summary, metadata, "", {
-				isError: true,
-				notices: [`account '${account}' is not an authenticated github.com login`],
-			});
+			return failedResult(summary, metadata, `account '${account}' is not an authenticated github.com login`);
 		}
 		const tokenAttempt = await requester.plain(["auth", "token", "--user", account]);
 		if (tokenAttempt.exitCode !== 0 || tokenAttempt.stdout.trim().length === 0) {
-			return renderResult(summary, metadata, "", {
-				isError: true,
-				notices: [`could not resolve a token for account '${account}'`],
-			});
+			return failedResult(summary, metadata, `could not resolve a token for account '${account}'`);
 		}
 		token = tokenAttempt.stdout.trim();
 	}
@@ -1926,8 +1940,11 @@ async function opPrBatch(invocation: ValidApiInvocation, requester: ApiRequester
 		}
 	}
 	const failed = envelopes.length - succeeded;
-	if (failed > 0) metadata.push(["failures", `${failed} of ${targets.length} targets failed`]);
-	return await renderData(invocation, summary, metadata, envelopes, [], succeeded === 0, requester, deps);
+	const failuresLine = `${failed} of ${targets.length} targets failed`;
+	if (failed > 0) metadata.push(["failures", failuresLine]);
+	return await renderData(invocation, summary, metadata, envelopes, [], succeeded === 0, requester, deps, {
+		failureReason: succeeded === 0 && failed > 0 ? failuresLine : undefined,
+	});
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────

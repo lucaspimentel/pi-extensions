@@ -31,6 +31,35 @@ commands. It is deliberately not tied to any one agent; agents opt in via their
   name like every other entry; the git child process is spawned by the
   extension host itself, so no sandboxed-exec classification is involved.
 
+### Call row
+
+`renderCall` in `extensions/git-read/index.ts` draws the collapsed call line;
+`extensions/shared/read-tool-call.ts` holds the two pieces it shares with
+`gh_read`: quoting one argument into a command line, and the expanded view.
+
+- Collapsed: the raw tool name, bold in `toolTitle`, then the operation in
+  `accent` and its argv in `toolOutput`, space-joined as the command you would
+  type (`git_read diff HEAD~1 -- src/`). An argument is quoted only when it
+  holds whitespace, a quote, or a backslash. An invocation that omits
+  `subcommand` and names it in `args[0]` renders that command once. Nothing is
+  elided or capped: a long command wraps.
+- Streaming: the operation appears as soon as it arrives, and `...` stands in
+  while it has not (`renderCall` runs on every argument delta, so a partial
+  argument object must render rather than throw).
+- Expanded (Ctrl+O, `app.tools.expand`): every argument pi passed, one
+  `key: value` line each, in the shape of pi's own fallback renderer
+  (`dist/core/tools/render-utils.js`, `formatToolCallWithArgs`, which is not
+  exported from the package root): two spaces of indent, strings raw, anything
+  else `JSON.stringify(value, null, 2)`, tabs replaced, CRs removed,
+  continuation lines indented four further spaces, the block `muted`. The
+  `args` array is JSON there, so the expanded view deliberately differs in form
+  from the space-joined collapsed line.
+- Adding `renderCall` makes `timestamps` compose with this tool for the first
+  time: its resolver wraps a call renderer only when the tool defines one
+  (`extensions/timestamps/index.ts`), so the row gains its dim `ran …` /
+  `ended …` line. Exactly one wrap in either load order, because
+  `compact-tool-view` spreads the base renderers.
+
 ## Implementation status
 
 - `extensions/git-read/validate.ts`: argument validation and final argv
@@ -188,6 +217,17 @@ injected by the tool and never user-suppliable:
     then stdout
   - truncation (appended to the text, never an error):
     `[git_read: output truncated, showing <retained> of <total> bytes]`
+- Every failure also sets `isError: true` and reports structured fields in
+  `details`: `exitCode` (the child's code, or null when no child exited),
+  `timedOut`, `truncated`, and a prefix-free `failureReason`. Rejections before
+  spawn report `exitCode: null` with the validation reason. The reason restates
+  the text above without its `git_read: ` prefix, because a compact result row
+  shows it bare under a title that already names the tool. `isError` is a
+  model-facing change (pi forwards the flag to the model) and is what makes a
+  collapsed failure read `exit 128` or `error: not inside a git worktree`
+  instead of a line count.
+- A capped run is not a failure: `ok` stays true and `details.truncated` is
+  true, which a compact row renders as `N lines, truncated`.
 
 ## Rollout
 

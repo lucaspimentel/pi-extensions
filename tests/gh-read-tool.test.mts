@@ -166,7 +166,7 @@ test("execute native: a failed worktree gate is a tool error with no gh spawn", 
 	const result = await tool.execute("id", { subcommand: "pr list" }, undefined, null, { cwd: "/not-a-worktree" });
 	assert.equal(result.isError, true);
 	assert.equal(result.content[0].text, "gh_read: not inside a git worktree");
-	assert.deepEqual(result.details, { subcommand: "pr list", exitCode: null, timedOut: false });
+	assert.deepEqual(result.details, { subcommand: "pr list", exitCode: null, timedOut: false, failureReason: "not inside a git worktree" });
 	assert.equal(argsList.length, 1, "only the git gate ran");
 	setSpawnOverride(null);
 });
@@ -186,7 +186,7 @@ test("execute native: a non-zero gh exit is a tool error carrying the exit code"
 	assert.equal(result.isError, true);
 	assert.ok(result.content[0].text.startsWith("gh_read: gh exited with code 1\n"), result.content[0].text);
 	assert.ok(result.content[0].text.includes("gh: nope"), result.content[0].text);
-	assert.deepEqual(result.details, { subcommand: "pr list", exitCode: 1, timedOut: false });
+	assert.deepEqual(result.details, { subcommand: "pr list", exitCode: 1, timedOut: false, failureReason: "gh exited with code 1" });
 	assert.equal(argsList.length, 2, "gate then the gh argv");
 	setSpawnOverride(null);
 });
@@ -1168,4 +1168,37 @@ test("execute api pr batch: one plain gh pr view per target and no worktree gate
 	assert.ok(result.content[0].text.includes("o/r#2"));
 	setApiSpawnOverride(null);
 	setSpawnOverride(null);
+});
+
+test("execute: an all-failed pr batch reports its failure count as the reason", async () => {
+	const tool = register();
+	setSpawnOverride((() => {
+		throw new Error("no git spawn expected for a repo-explicit batch");
+	}) as never);
+	setApiSpawnOverride(((command: string, args: string[]) => {
+		void command;
+		void args;
+		const child = fakeChild();
+		queueMicrotask(() => {
+			child.stderr.emit("data", Buffer.from("gh: could not resolve host\n"));
+			child.emit("close", 1, null);
+		});
+		return child;
+	}) as never);
+	const result = await tool.execute("id", { subcommand: "pr batch", targets: ["o/r#1", "o/r#2"] }, undefined, null, { cwd: "/w" });
+	assert.equal(result.isError, true);
+	assert.equal(result.details["failureReason"], "2 of 2 targets failed");
+	assert.ok(result.content[0].text.includes("2 of 2 targets failed"), result.content[0].text);
+	setApiSpawnOverride(null);
+	setSpawnOverride(null);
+});
+
+test("execute: a rejected invocation is a tool error with a prefix-free reason", async () => {
+	const tool = register();
+	const result = await tool.execute("id", { subcommand: "pr wiew" }, undefined, null, { cwd: "/repo" });
+	assert.equal(result.isError, true);
+	assert.ok(result.content[0].text.startsWith("gh_read: unknown subcommand 'pr wiew'"), result.content[0].text);
+	assert.equal(typeof result.details["failureReason"], "string");
+	assert.ok(!String(result.details["failureReason"]).startsWith("gh_read"), String(result.details["failureReason"]));
+	assert.ok(String(result.details["failureReason"]).includes("pr wiew"), String(result.details["failureReason"]));
 });

@@ -49,6 +49,45 @@ the main session. Deliberately not tied to any one agent; agents opt in via
   `allow` in every profile (`otherRemoteReadCell`,
   `extensions/guard/policy/profiles.ts:160`).
 
+### Call row
+
+`renderCall` in `extensions/gh-read/index.ts` draws the collapsed call line;
+`extensions/shared/read-tool-call.ts` holds the two pieces it shares with
+`git_read` (argument quoting and the expanded view).
+
+- Collapsed: the raw tool name, bold in `toolTitle`, the operation in `accent`,
+  then the arguments that identify the call in the short form the call itself
+  used, in `toolOutput` — a native subcommand's argv verbatim
+  (`gh_read pr list --limit 3`), `OWNER/REPO path` for `repo contents` and
+  `repo tree`, `OWNER/REPO` for `repo metadata` and `commit checks`,
+  `OWNER/REPO#<n>` for the PR and issue reads, `OWNER/REPO <check_run_id>` for
+  `check annotations`, the id for `advisory view`, `ORG slug` for `org team`,
+  and `(N PRs)` for `pr batch` (fixed plural; the targets themselves never
+  appear).
+- Tags follow in a fixed order, all `muted`: `@ref`, `[account]`, then the
+  narrowing markers, at most one of each kind — a line range as `:12-40`,
+  `:12-`, or `:1-40` (an explicit trail for a one-sided range), `(narrowed)`
+  for a `jq` filter, `(continuation)` for a paged follow-up. A tag never
+  carries a raw value: a jq expression or continuation token would swamp the
+  row.
+- Off the row entirely (expanded-only): the switches that do not change what
+  you are looking at (`recursive`, `fields`, an advisory `type`) and every
+  value the tags summarize.
+- Nothing is elided or capped: a long row wraps. `...` marks a primary piece
+  that has not streamed in yet (the operation, or the target the operation is
+  named by); a value that has already arrived stays visible while a later one
+  is missing (`gh_read pr comments OWNER/REPO ...`).
+- Expanded (Ctrl+O): every argument pi passed, one `key: value` line each, in
+  the shape of pi's own fallback renderer (the same shape `git_read` uses), so
+  the dropped switches and the raw jq/continuation values are reachable there.
+- Adding `renderCall` makes `timestamps` compose with this tool for the first
+  time (its resolver wraps a call renderer only when the tool defines one),
+  appending its dim `ran …` / `ended …` line; exactly one wrap in either load
+  order, because `compact-tool-view` spreads the base renderers.
+- `tests/read-tools-render-call.test.mts` covers both tools' call rows and the
+  shared helpers, and is wired into `test:ci`, `test:gh-read`, `test:git-read`,
+  and `test:guard`.
+
 ## Prompt guidance
 
 Purpose: steer agents from raw `gh api` and `gh pr-threads` shell calls to
@@ -1099,6 +1138,23 @@ compact-tool-view extension reads `details.{timedOut,exitCode}` to render
 `timed out` or `exit N`. The model-facing `content` is unchanged, byte for byte,
 on every path, and the tool still does no error-shape matching and appends no
 hints.
+
+Every failure also carries a prefix-free `failureReason` in details, and a
+rejected invocation carries one without any process having run. For native and
+log results the reason is the diagnostic's first line with the `gh_read: `
+prefix stripped (`not inside a git worktree`, `gh exited with code 1`); for an
+API result it is the diagnostic of the failing step, never the summary line the
+collapsed row's title already carries (`metadata read failed: Not Found (HTTP
+404)`, `jq filtering failed: …` when the filter itself failed) and never one of
+the standing informational notices. A partially successful read (a source
+failed, its data returned) reports the first failure that made the result an
+error, and an all-failed `pr batch` reports its failure count (`3 of 3 targets
+failed`) rather than copying envelopes. The rendered head is unchanged: the
+reason still reaches the model as a `notice:` line, and only `details` gained
+the field, which a compact row renders as `error: <reason>` after the
+`timed out` / `exit N` cases. A capped result is not a failure: it states
+`output_truncated: true`, and a compact row renders `N lines, truncated`, the
+wording the `read` row already uses.
 
 The text-mode exception is `job logs`: its result is raw log text rendered
 through the window described under "job logs" rather than the JSON pipeline,

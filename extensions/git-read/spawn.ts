@@ -14,8 +14,9 @@
  *
  * This module never throws: every failure becomes a failed GitRunResult with
  * a `git_read: `-prefixed message (index.ts wraps result.text verbatim and
- * does not add its prefix to spawn errors). argv is consumed verbatim from
- * validate.ts; nothing is appended here.
+ * does not add its prefix to spawn errors) plus a prefix-free `failureReason`
+ * for compact result rows, which state the reason without the tool name.
+ * argv is consumed verbatim from validate.ts; nothing is appended here.
  */
 
 import { GLOBAL_OPTIONS } from "./validate.ts";
@@ -61,6 +62,18 @@ export const INJECTED_ENV = {
 export interface GitRunResult {
 	ok: boolean;
 	text: string;
+	/** The child's exit code, or null when no child exited (a failed gate, a spawn error, or a timeout). */
+	exitCode: number | null;
+	timedOut: boolean;
+	/** True when the retained output hit the shared byte cap. Never a failure. */
+	truncated: boolean;
+	/**
+	 * Prefix-free human reason, present only on a failed run, for compact result
+	 * rows (extensions/compact-tool-view/gist.ts) that render `error: <reason>`
+	 * when there is no exit code to report. A capped success carries no reason:
+	 * the cap is reported through `truncated` instead.
+	 */
+	failureReason?: string;
 }
 
 /**
@@ -92,25 +105,45 @@ async function worktreeCheckPassed(cwd: string): Promise<boolean> {
 export async function runGit(argv: readonly string[], cwd: string): Promise<GitRunResult> {
 	const gatePassed = await worktreeCheckPassed(cwd);
 	if (!gatePassed) {
-		return { ok: false, text: "git_read: not inside a git worktree" };
+		return {
+			ok: false,
+			text: "git_read: not inside a git worktree",
+			exitCode: null,
+			timedOut: false,
+			truncated: false,
+			failureReason: "not inside a git worktree",
+		};
 	}
 
 	const outcome = await boundedExec("git", argv, buildChildEnv(), cwd);
 
 	let text: string;
+	let failureReason: string;
 	if (outcome.spawnError !== undefined) {
-		text = `git_read: failed to run git: ${outcome.spawnError}`;
+		failureReason = `failed to run git: ${outcome.spawnError}`;
+		text = `git_read: ${failureReason}`;
 	} else if (outcome.timedOut) {
+		failureReason = `git timed out after ${TIMEOUT_MS} ms`;
 		const collected = [outcome.stderr, outcome.stdout].filter((part) => part.length > 0).join("\n");
-		text = `git_read: git timed out after ${TIMEOUT_MS} ms${collected.length > 0 ? `\n${collected}` : ""}`;
+		text = `git_read: ${failureReason}${collected.length > 0 ? `\n${collected}` : ""}`;
 	} else if (outcome.code !== 0) {
-		text = `git_read: git exited with code ${outcome.code}\n${outcome.stderr}${outcome.stdout}`;
+		failureReason = `git exited with code ${outcome.code}`;
+		text = `git_read: ${failureReason}\n${outcome.stderr}${outcome.stdout}`;
 	} else {
+		failureReason = "";
 		text = outcome.stdout;
 	}
 	if (outcome.truncated) {
 		text += `\n[git_read: output truncated, showing ${outcome.retainedBytes} of ${outcome.totalBytes} bytes]`;
 	}
 
-	return { ok: outcome.code === 0 && outcome.spawnError === undefined && !outcome.timedOut, text };
+	const ok = outcome.code === 0 && outcome.spawnError === undefined && !outcome.timedOut;
+	return {
+		ok,
+		text,
+		exitCode: outcome.code,
+		timedOut: outcome.timedOut,
+		truncated: outcome.truncated,
+		...(ok ? {} : { failureReason }),
+	};
 }
