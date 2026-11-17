@@ -604,6 +604,37 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	return { command: "pi", args };
 }
 
+/**
+ * The agents available to one task, resolved from that task's own effective
+ * cwd: a task in another directory gets that directory's project agents, and a
+ * relative `cwd` resolves from the session cwd.
+ */
+interface ResolvedAgent {
+	agent?: AgentConfig;
+	available: AgentConfig[];
+	cwd: string;
+}
+
+function resolveAgent(defaultCwd: string, scope: AgentScope, name: string, cwd?: string): ResolvedAgent {
+	const effectiveCwd = path.resolve(defaultCwd, cwd ?? ".");
+	const discovery = discoverAgents(effectiveCwd, scope);
+	return {
+		agent: discovery.agents.find((candidate) => candidate.name === name),
+		available: discovery.agents,
+		cwd: effectiveCwd,
+	};
+}
+
+/** Real path of a directory, or undefined when it cannot be resolved. */
+function realDirectory(dir: string | null | undefined): string | undefined {
+	if (!dir) return undefined;
+	try {
+		return fs.realpathSync(dir);
+	} catch {
+		return undefined;
+	}
+}
+
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
 /**
@@ -827,13 +858,12 @@ function createChildKillController(proc: ChildProcess): ChildKillController {
 }
 
 async function runSingleAgent(
-	defaultCwd: string,
+	sessionCwd: string,
 	dispatchDefaults: DispatchDefaults,
-	agents: AgentConfig[],
+	resolved: ResolvedAgent,
 	availableTools: Set<string>,
 	agentName: string,
 	task: string,
-	cwd: string | undefined,
 	step: number | undefined,
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
@@ -841,10 +871,11 @@ async function runSingleAgent(
 	guard: GuardDispatch,
 	child: ChildOptions = {},
 ): Promise<SingleResult> {
-	const agent = agents.find((a) => a.name === agentName);
+	const effectiveCwd = resolved.cwd;
+	const agent = resolved.agent;
 
 	if (!agent) {
-		const available = formatAgentNames(sortAgentsByName(agents.filter((a) => a.role !== "internal")));
+		const available = formatAgentNames(sortAgentsByName(resolved.available.filter((a) => a.role !== "internal")));
 		return createUnstartedResult(
 			agentName,
 			"unknown",
@@ -927,7 +958,7 @@ async function runSingleAgent(
 			return currentResult;
 		}
 		const bootstrapPath = bootstrapOverride ?? guard.bootstrapPath;
-		const snapshot = guard.snapshot(defaultCwd);
+		const snapshot = guard.snapshot(sessionCwd);
 		if (!snapshot.ok) {
 			if (snapshot.kind !== "absent") {
 				return refusedResult(agentName, agent.source, task, step, snapshot.reason);
@@ -989,7 +1020,7 @@ async function runSingleAgent(
 			let proc: ReturnType<typeof spawn>;
 			try {
 				proc = spawnFn(invocation.command, invocation.args, {
-					cwd: cwd ?? defaultCwd,
+					cwd: effectiveCwd,
 					shell: false,
 					stdio: ["ignore", "pipe", "pipe"],
 					env: childEnv,
@@ -1128,14 +1159,14 @@ const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	model: Type.Optional(Type.String({ description: "Explicit model ID (provider/id) for this child" })),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process; its project agents are discovered from there" })),
 });
 
 const ChainItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
 	model: Type.Optional(Type.String({ description: "Explicit model ID (provider/id) for this child" })),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process; its project agents are discovered from there" })),
 });
 
 const AgentScopeSchema = stringEnum(["user", "project", "both"] as const, {
@@ -1156,7 +1187,7 @@ const SubagentParams = Type.Object({
 	confirmProjectAgents: Type.Optional(
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
 	),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single or panel mode)" })),
+	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single or panel mode); its project agents are discovered from there" })),
 });
 
 const SubagentListAgentSchema = Type.Object({
@@ -1304,9 +1335,16 @@ export default function (pi: ExtensionAPI) {
 			const mode = hasPanel ? "panel" : hasChain ? "chain" : hasTasks ? "parallel" : "single";
 			let panel: EffectivePanel | undefined;
 			let panelTools: string[] = [];
-			const participants: AgentConfig[] = [];
-			const dispatchable = sortAgentsByName(agents.filter((a) => a.role !== "internal"));
-			const available = formatAgentNames(dispatchable);
+			let panelistResolved: ResolvedAgent | undefined;
+			let judgeResolved: ResolvedAgent | undefined;
+			// Each task resolves its agents from its own effective cwd, before any
+			// validation, so an unknown name is reported against that cwd's agents.
+			const resolvedChain = (params.chain ?? []).map((step) => resolveAgent(ctx.cwd, agentScope, step.agent, step.cwd));
+			const resolvedTasks = (params.tasks ?? []).map((task) => resolveAgent(ctx.cwd, agentScope, task.agent, task.cwd));
+			const resolvedSingle = params.agent ? resolveAgent(ctx.cwd, agentScope, params.agent, params.cwd) : undefined;
+			const namesOf = (candidates: readonly AgentConfig[]): string =>
+				formatAgentNames(sortAgentsByName(candidates.filter((a) => a.role !== "internal")));
+			const available = namesOf(agents);
 			// Legacy modes keep the original detail shape. Panel mode never calls this:
 			// the panel block builds PanelDetails with panelists and the judge.
 			const makeDetails =
@@ -1324,8 +1362,8 @@ export default function (pi: ExtensionAPI) {
 								mergedOutput: null,
 							}
 						: { mode, agentScope, projectAgentsDir: discovery.projectAgentsDir, results };
-			const invalid = (text: string) => ({
-				content: [{ type: "text" as const, text: `${text}\nAvailable agents: ${available}` }],
+			const invalid = (text: string, availableNames = available) => ({
+				content: [{ type: "text" as const, text: `${text}\nAvailable agents: ${availableNames}` }],
 				details: makeDetails(mode)([]),
 				isError: true,
 			});
@@ -1336,11 +1374,10 @@ export default function (pi: ExtensionAPI) {
 			if (params.model !== undefined && mode !== "single") return invalid(`Parameter model is only valid in single mode; use ${hasPanel ? "models for panel" : "per-item model in tasks/chain"}.`);
 			if (hasPanel && !params.task) return invalid("Parameter panel requires task. Use subagent({panel, task}).");
 
-			const agentError = (name: string, field: string, internal = false): string | undefined => {
-				const agent = agents.find((a) => a.name === name);
+			const agentError = (name: string, field: string, resolved: ResolvedAgent, internal = false): string | undefined => {
+				const agent = resolved.agent;
 				if (!agent) return `Unknown agent: "${name}" in ${field}.`;
 				if (!internal && agent.role === "internal") return `Agent "${name}" in ${field} is internal and cannot be dispatched directly or as a panelist. Use subagent({panel, task}) to reach internal judge metadata.`;
-				participants.push(agent);
 			};
 			const usableModels = (ctx.scopedModels ?? []).map(({ model }) => `${model.provider}/${model.id}`).sort();
 			const modelError = (model: string, field: string): string | undefined => {
@@ -1367,9 +1404,10 @@ export default function (pi: ExtensionAPI) {
 				if (!rawModels.length || rawModels.length > 4 || rawModels.some((m) => !m.trim())) return invalid("Parameter models must contain 1 to 4 nonblank model IDs.");
 				const models = [...new Set(rawModels.map((m) => m.trim()))];
 				const agentName = params.agent ?? preset.agent;
-				const error = agentError(agentName, "panel.agent");
-				if (error) return invalid(error);
-				const panelist = agents.find((a) => a.name === agentName)!;
+				panelistResolved = resolveAgent(ctx.cwd, agentScope, agentName, params.cwd);
+				const error = agentError(agentName, "panel.agent", panelistResolved);
+				if (error) return invalid(error, namesOf(panelistResolved.available));
+				const panelist = panelistResolved.agent!;
 				const forbidden = panelist.tools?.filter((t) => ["write", "edit", "bash"].includes(t)) ?? [];
 				if (!panelist.tools?.length) return invalid(`Agent "${agentName}" panel tools declaration is missing or empty; default tools include write, edit, bash. Declare read-only tools explicitly.`);
 				if (forbidden.length) return invalid(`Agent "${agentName}" panel tools contains forbidden tools: ${forbidden.join(", ")}. Declare read-only tools instead.`);
@@ -1381,8 +1419,11 @@ export default function (pi: ExtensionAPI) {
 				const selectedJudge = params.judge !== undefined ? params.judge : preset.judge;
 				let judge: EffectivePanel["judge"] = null;
 				if (selectedJudge !== null && selectedJudge?.trim() !== "none") {
-					const error = agentError("judge", "panel.judge", true);
-					if (error) return invalid(error);
+					// The judge is internal: it resolves from bundled and user scope only, so
+					// a project agent can never shadow the bundled judge.
+					judgeResolved = resolveAgent(ctx.cwd, "user", "judge", params.cwd);
+					const error = agentError("judge", "panel.judge", judgeResolved, true);
+					if (error) return invalid(error, namesOf(judgeResolved.available));
 					const model = selectedJudge?.trim() ?? discovery.configuredModels.judge ?? dispatchDefaults.model;
 					if (model !== undefined) {
 						const error = modelError(model, "judge");
@@ -1393,28 +1434,47 @@ export default function (pi: ExtensionAPI) {
 				panel = { name: preset.name, agent: agentName, models, judge };
 			} else {
 				const requests = hasChain ? params.chain! : hasTasks ? params.tasks! : [{ agent: params.agent!, model: params.model }];
+				const resolvedRequests = hasChain ? resolvedChain : hasTasks ? resolvedTasks : resolvedSingle ? [resolvedSingle] : [];
 				for (let i = 0; i < requests.length; i++) {
 					const request = requests[i];
 					const field = hasChain ? `chain[${i}]` : hasTasks ? `tasks[${i}]` : "single";
-					const error = agentError(request.agent, `${field}.agent`) ?? (request.model !== undefined ? modelError(request.model, `${field}.model`) : undefined);
-					if (error) return invalid(error);
+					const error =
+						agentError(request.agent, `${field}.agent`, resolvedRequests[i]) ??
+						(request.model !== undefined ? modelError(request.model, `${field}.model`) : undefined);
+					if (error) return invalid(error, namesOf(resolvedRequests[i].available));
 				}
 			}
 
-			if (
-				(agentScope === "project" || agentScope === "both") &&
-				confirmProjectAgents &&
-				ctx.hasUI &&
-				!ctx.isProjectTrusted()
-			) {
-				const projectAgentsRequested = [...new Set(participants)].filter((a) => a.source === "project");
+			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
+				const selected = hasPanel
+					? panelistResolved
+						? [panelistResolved]
+						: []
+					: hasChain
+						? resolvedChain
+						: hasTasks
+							? resolvedTasks
+							: resolvedSingle
+								? [resolvedSingle]
+								: [];
+				const byPath = new Map<string, AgentConfig>();
+				for (const resolved of selected) {
+					if (resolved.agent?.source === "project") byPath.set(resolved.agent.filePath, resolved.agent);
+				}
+				// A trusted session project skips the confirmation only for the agents that
+				// come from its own `.pi/agents`; an agent discovered from another task's
+				// cwd, and every project agent in an untrusted session, still needs
+				// explicit approval.
+				const trustedProjectDir = ctx.isProjectTrusted() ? realDirectory(discovery.projectAgentsDir) : undefined;
+				const projectAgentsRequested = [...byPath.values()].filter(
+					(agent) => !trustedProjectDir || realDirectory(path.dirname(agent.filePath)) !== trustedProjectDir,
+				);
 
 				if (projectAgentsRequested.length > 0) {
-					const names = projectAgentsRequested.map((a) => a.name).join(", ");
-					const dir = discovery.projectAgentsDir ?? "(unknown)";
+					const sources = projectAgentsRequested.map((agent) => `- ${agent.name}: ${agent.filePath}`).join("\n");
 					const ok = await ctx.ui.confirm(
 						"Run project-local agents?",
-						`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+						`Sources:\n${sources}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
 					);
 					if (!ok)
 						return {
@@ -1430,7 +1490,7 @@ export default function (pi: ExtensionAPI) {
 				// not the judge merges them.
 				const effective = panel;
 				const settings = pi.getSettings();
-				const panelistSource = agents.find((a) => a.name === effective.agent)!.source;
+				const panelistSource = panelistResolved!.agent!.source;
 				const allResults: SingleResult[] = effective.models.map((model) => ({
 					agent: effective.agent,
 					agentSource: panelistSource,
@@ -1487,11 +1547,10 @@ export default function (pi: ExtensionAPI) {
 					const result = await runSingleAgent(
 						ctx.cwd,
 						dispatchDefaults,
-						agents,
+						panelistResolved!,
 						availableTools,
 						effective.agent,
 						params.task!,
-						params.cwd,
 						undefined,
 						signal,
 						(partial) => {
@@ -1544,11 +1603,10 @@ export default function (pi: ExtensionAPI) {
 						runSingleAgent(
 							ctx.cwd,
 							dispatchDefaults,
-							agents,
+							judgeResolved!,
 							availableTools,
 							"judge",
 							judgeInput,
-							params.cwd,
 							undefined,
 							signal,
 							(partial) => {
@@ -1641,11 +1699,10 @@ export default function (pi: ExtensionAPI) {
 					const result = await runSingleAgent(
 						ctx.cwd,
 						dispatchDefaults,
-						agents,
+						resolvedChain[i],
 						availableTools,
 						step.agent,
 						taskWithContext,
-						step.cwd,
 						i + 1,
 						signal,
 						chainUpdate,
@@ -1716,11 +1773,10 @@ export default function (pi: ExtensionAPI) {
 					const result = await runSingleAgent(
 						ctx.cwd,
 						dispatchDefaults,
-						agents,
+						resolvedTasks[index],
 						availableTools,
 						t.agent,
 						t.task,
-						t.cwd,
 						undefined,
 						signal,
 						// Per-task update callback
@@ -1759,15 +1815,14 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			if (params.agent && params.task) {
+			if (params.agent && params.task && resolvedSingle) {
 				const result = await runSingleAgent(
 					ctx.cwd,
 					dispatchDefaults,
-					agents,
+					resolvedSingle,
 					availableTools,
 					params.agent,
 					params.task,
-					params.cwd,
 					undefined,
 					signal,
 					onUpdate,

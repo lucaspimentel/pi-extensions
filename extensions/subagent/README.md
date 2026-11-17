@@ -34,6 +34,15 @@ where this fork diverges.
 - **Model overrides**: all agents inherit the dispatching session's model. Pin
   per-agent models in `~/.pi/agent/subagent.json` (see below) without
   duplicating agent files.
+- **Per-task agent resolution**: each single, chain, or parallel child resolves
+  its agents from its own `cwd` (a relative `cwd` resolves from the session
+  cwd), and a panel resolves its panelist from the panel's `cwd`. The guard
+  snapshot always comes from the session cwd. The internal `judge` is resolved
+  from bundled and user agents only, so a project `judge.md` never shadows it.
+- **Trust prompt**: before running project agents, the confirmation lists each
+  agent's name and file path. An untrusted session confirms every requested
+  project agent; a trusted session still confirms an agent discovered from a
+  different task `cwd`.
 - **Panels**: `subagent({ panel, task })` fans one task across a named preset's
   read-only models and merges the answers with a judge model, with per-model
   attribution, a bounded judge input, a retry-then-fallback path, and a fixed

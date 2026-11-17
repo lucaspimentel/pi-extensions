@@ -20,6 +20,7 @@ import {
 	setBootstrapPathOverride,
 	truncateModelOutput,
 } from "../extensions/subagent/index.ts";
+import { SUBAGENT_SNAPSHOT_REQUEST } from "../extensions/guard/policy/handshake.ts";
 import { INHERIT_ENV } from "../extensions/guard/policy/inheritance.ts";
 import {
 	cleanupHarness,
@@ -227,6 +228,14 @@ function configure(agentDir: string, value: unknown): void {
 function declaredAgent(dir: string, name: string, tools?: string, extra = ""): void {
 	fs.mkdirSync(dir, { recursive: true });
 	fs.writeFileSync(path.join(dir, `${name}.md`), `---\nname: ${name}\ndescription: Test ${name}\n${tools === undefined ? "" : `tools: ${tools}\n`}${extra}---\nTest prompt.\n`);
+}
+
+/** An agent file with a distinctive body, to tell one directory's agent from another's. */
+function distinctiveAgent(dir: string, name: string, body: string, tools = "read"): string {
+	fs.mkdirSync(dir, { recursive: true });
+	const file = path.join(dir, `${name}.md`);
+	fs.writeFileSync(file, `---\nname: ${name}\ndescription: Test ${name}\ntools: ${tools}\n---\n${body}\n`);
+	return file;
 }
 
 const scopedModels = ["p/a", "p/org/b", "p/judge"].map((id) => ({ model: { provider: "p", id: id.slice(2) } }));
@@ -562,17 +571,25 @@ test("partial panel failures preserve successful output and all-failed panels ar
 	});
 });
 
-test("project panel participants respect scope, trust, UI, opt-out, and confirmation including judge metadata", async () => {
+test("project panel participants respect scope, trust, UI, opt-out, and per-cwd confirmation", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
 		configure(agentDir, { panels: { pair: { agent: "local", models: ["p/a"] } } });
 		declaredAgent(path.join(cwd, ".pi", "agents"), "local", "read");
 		declaredAgent(path.join(cwd, ".pi", "agents"), "judge", "read");
+		declaredAgent(path.join(cwd, "other", ".pi", "agents"), "local", "read");
 		const h = makeHarness({ guard: true });
 		const recording = installRecordingSpawn((spawn) => {
 			if (isJudgeSpawn(spawn)) spawn.child.stdout.emit("data", assistantLine("merge"));
 		});
 		let confirmations = 0;
-		const ui = { confirm: async (_title: string, message: string) => { confirmations++; assert.match(message, /local, judge/); return false; } };
+		const ui = {
+			confirm: async (_title: string, message: string) => {
+				confirmations++;
+				assert.match(message, /^Sources:\n- local: .*\.pi\/agents\/local\.md\n\nProject agents are repo-controlled/);
+				assert.equal(message.includes("judge"), false, "the internal judge is never part of the confirmation");
+				return false;
+			},
+		};
 		try {
 			const unavailable = await runSubagent(h, cwd, { panel: "pair", task: "x" });
 			assert.equal(unavailable.isError, true);
@@ -584,14 +601,18 @@ test("project panel participants respect scope, trust, UI, opt-out, and confirma
 			assert.equal(recording.spawns.length, 0);
 			const accepted = await runSubagent(h, cwd, params, { hasUI: true, isProjectTrusted: () => false, ui: { confirm: async () => { confirmations++; return true; } } });
 			assert.equal(accepted.isError, false);
+			// A trusted session project skips the prompt for its own `.pi/agents`, but
+			// not for a project agent discovered from another task's cwd.
+			const elsewhere = await runSubagent(h, cwd, { ...params, cwd: path.join(cwd, "other") }, { hasUI: true, isProjectTrusted: () => true, ui: { confirm: async () => { confirmations++; return true; } } });
+			assert.equal(elsewhere.isError, false);
 			for (const [extraParams, ctx] of [
 				[{}, { hasUI: false, isProjectTrusted: () => false, ui }],
 				[{}, { hasUI: true, isProjectTrusted: () => true, ui }],
 				[{ confirmProjectAgents: false }, { hasUI: true, isProjectTrusted: () => false, ui }],
 				[{ agentScope: "project" }, { hasUI: false }],
 			] as const) assert.equal((await runSubagent(h, cwd, { ...params, ...extraParams }, ctx)).isError, false);
-			assert.equal(confirmations, 2);
-			assert.equal(recording.spawns.length, 10, "five runs, each one panelist plus one judge attempt");
+			assert.equal(confirmations, 3, "an untrusted session, an accepted prompt, and a trusted cross-cwd agent");
+			assert.equal(recording.spawns.length, 12, "six runs, each one panelist plus one judge attempt");
 		} finally { recording.restore(); }
 	});
 });
@@ -1856,6 +1877,74 @@ test("an oversized single answer is capped for the model while the details keep 
 			assert.match(result.content[0].text, /Full output preserved in tool details\.\]$/);
 			const messages = result.details.results[0].messages;
 			assert.equal(messages[messages.length - 1].content[0].text, answer, "the details keep the whole answer");
+		} finally { recording.restore(); }
+	});
+});
+
+test("each child resolves its agents and spawns in its own cwd while the snapshot stays on the session cwd", async () => {
+	await withIsolatedAgents(async (cwd) => {
+		distinctiveAgent(path.join(cwd, "other", ".pi", "agents"), "local", "Prompt from the other directory.");
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const recording = installRecordingSpawn();
+		const snapshotCwds: string[] = [];
+		h.events.on(SUBAGENT_SNAPSHOT_REQUEST, (data: any) => snapshotCwds.push(data.cwd));
+		try {
+			const result = await runSubagent(h, cwd, {
+				agent: "local",
+				task: "x",
+				cwd: "other",
+				agentScope: "both",
+				confirmProjectAgents: false,
+			});
+			assert.notEqual(result.isError, true, "the agent from the task cwd resolves");
+			assert.equal(result.details.results[0].agentSource, "project");
+			assert.equal(recording.spawns[0].options.cwd, path.join(cwd, "other"), "a relative cwd resolves from the session cwd");
+			assert.deepEqual(snapshotCwds, [cwd], "the guard snapshot still uses the session cwd");
+		} finally { recording.restore(); }
+	});
+});
+
+test("a panel resolves its panelist agent from the panel's own cwd", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		configure(agentDir, { panels: { pair: { models: ["p/a"], judge: null } } });
+		distinctiveAgent(path.join(cwd, "other", ".pi", "agents"), "panelist", "PROMPT FROM THE PANEL CWD");
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const bodies: string[] = [];
+		const recording = installRecordingSpawn((spawn) => {
+			const promptPath = flag(spawn.args, "--append-system-prompt");
+			if (promptPath) bodies.push(fs.readFileSync(promptPath, "utf8"));
+		});
+		try {
+			const promise = runSubagent(h, cwd, { panel: "pair", task: "t", cwd: "other", agentScope: "both", confirmProjectAgents: false });
+			await waitFor(() => recording.spawns.length === 1, "the panelist never spawned");
+			assert.equal(recording.spawns[0].options.cwd, path.join(cwd, "other"));
+			assert.ok(bodies.some((body) => body.includes("PROMPT FROM THE PANEL CWD")), "the panelist body comes from the panel cwd");
+			emitAnswer(recording.spawns[0], "answer");
+			const result = (await promise) as any;
+			assert.equal(result.details.results[0].agentSource, "project");
+		} finally { recording.restore(); }
+	});
+});
+
+test("a project judge agent cannot shadow the bundled judge", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		panelConfig(agentDir, { judge: "p/judge" });
+		distinctiveAgent(path.join(cwd, ".pi", "agents"), "judge", "PROJECT JUDGE PROMPT");
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const bodies: string[] = [];
+		const recording = installControlledSpawn((spawn) => {
+			const promptPath = flag(spawn.args, "--append-system-prompt");
+			if (promptPath) bodies.push(fs.readFileSync(promptPath, "utf8"));
+		});
+		try {
+			const promise = runSubagent(h, cwd, { panel: "pair", task: "t", agentScope: "both", confirmProjectAgents: false });
+			await waitFor(() => recording.spawns.length === 1, "the panelist never spawned");
+			emitAnswer(recording.spawns[0], "answer");
+			await waitFor(() => recording.spawns.length === 2, "the judge never spawned");
+			emitAnswer(recording.spawns[1], "merge");
+			await promise;
+			assert.ok(bodies.some((body) => body.includes("Synthesize the supplied panelist answers")), "the bundled judge supplies the prompt");
+			assert.equal(bodies.some((body) => body.includes("PROJECT JUDGE PROMPT")), false, "the project judge is never used");
 		} finally { recording.restore(); }
 	});
 });

@@ -232,12 +232,13 @@ New `subagent` parameters:
   rejected without `panel`: a one-off pair with no preset is expressed with the
   new per-child `model` on a single task, a `tasks[]` entry, or a `chain[]`
   step instead. The 4-model cap applies to the effective list after overrides.
-- A preset's `agent` resolves through the same discovery as every other agent
-  (bundled, then user, then project, per `agentScope`), so naming a project
-  agent requires `agentScope: "both"` or `"project"`, the existing
-  `confirmProjectAgents` confirmation still applies when the resolved agent is
-  project-sourced, and `cwd` selects the panelists' working directory as it does
-  in parallel mode. A preset naming an internal agent is refused here, the same
+- A preset's `agent` resolves from the panel's `cwd` through the same discovery
+  as every other agent (bundled, then user, then project, per `agentScope`), so
+  naming a project agent requires `agentScope: "both"` or `"project"`, and the
+  existing `confirmProjectAgents` confirmation applies when the resolved agent
+  is project-sourced and its directory is not the trusted session project's
+  `.pi/agents`. `cwd` selects the panelists' working directory as it does in
+  parallel mode. A preset naming an internal agent is refused here, the same
   check the default `panelist` resolution runs, and a directly dispatched
   internal agent is refused before any spawn with an error naming the agent and
   pointing at the panel path (see "Agent roles").
@@ -328,8 +329,9 @@ prompt. Its task is the panelist blocks verbatim (`promptMode: "verbatim"`, no
 set resolved by the panel path itself, never the override agent's declaration;
 its model and thinking level are the resolved effective ones; and every attempt
 carries the parent guard snapshot and its own fresh inheritance nonce. The judge
-prompt is a normal bundled agent file, listed by agent discovery and overridable
-from `~/.pi/agent/agents/judge.md`.
+prompt is a bundled agent file, resolved from bundled and user scope only (a
+project `.pi/agents/judge.md` never shadows it), so
+`~/.pi/agent/agents/judge.md` retunes it.
 
 ## Merge contract
 
