@@ -480,6 +480,13 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
 - Judge attempt failure is a nonzero/error result, a captured spawn error, a
   guard refusal, or a whitespace-only exit-zero answer; the empty answer is
   recorded as a failure rather than as the `(no output)` placeholder.
+- Failed-child text carries every distinct piece of evidence, labeled in the
+  order `Error`, `Signal`, `stderr`, `Assistant output` and deduplicated, so a
+  child that exits nonzero with both an error message and stderr output reports
+  both instead of losing one. The bounded one-line reason (`boundedLine`, 160
+  characters) stays the short form for collapsed rows and the judge input, and
+  it now falls back to `Terminated by signal <signal>` when only a signal was
+  observed.
 - Abort: Ctrl+C kills all children through the existing signal path. Panelist
   aborts keep the default throwing behavior, while the judge phase is
   abort-as-result, so an abort during or before the merge still returns the

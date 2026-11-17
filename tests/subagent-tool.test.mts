@@ -13,7 +13,13 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { test } from "node:test";
 
-import { setAgentListCwd, setBootstrapPathOverride } from "../extensions/subagent/index.ts";
+import {
+	getFailureEvidence,
+	getFailureSummary,
+	setAgentListCwd,
+	setBootstrapPathOverride,
+	truncateModelOutput,
+} from "../extensions/subagent/index.ts";
 import { INHERIT_ENV } from "../extensions/guard/policy/inheritance.ts";
 import {
 	cleanupHarness,
@@ -522,7 +528,7 @@ test("partial panel failures preserve successful output and all-failed panels ar
 			const mixed = await runSubagent(h, cwd, { panel: "pair", task: "x" });
 			assert.equal(mixed.isError, false);
 			assert.match(mixed.content[0].text, /\[p\/a\] completed\n\nsurvivor/);
-			assert.match(mixed.content[0].text, /\[p\/org\/b\] failed\n\nfailed panelist/);
+			assert.match(mixed.content[0].text, /\[p\/org\/b\] failed\n\nstderr: failed panelist/);
 			assert.equal((mixed.details?.results as any[]).length, 2);
 			failAll = true;
 			assert.equal((await runSubagent(h, cwd, { panel: "pair", task: "x" })).isError, true);
@@ -982,7 +988,7 @@ test("an emitted spawn error is a failed attempt and retries", async () => {
 			emitAnswer(recording.spawns[2], "merged after spawn error");
 			const result = (await promise) as any;
 			assert.equal(result.details.judge.attempts.length, 2);
-			assert.equal(result.details.judge.attempts[0].errorMessage, "spawn ENOENT");
+			assert.equal(result.details.judge.attempts[0].errorMessage, "Failed to spawn subagent: spawn ENOENT");
 			assert.equal(result.details.mergedOutput, "merged after spawn error");
 		} finally { recording.restore(); }
 	});
@@ -1007,7 +1013,7 @@ test("a synchronous spawn throw is a failed attempt and retries", async () => {
 			emitAnswer(recording.spawns[2], "merged after throw");
 			const result = (await promise) as any;
 			assert.equal(result.details.judge.attempts.length, 2);
-			assert.equal(result.details.judge.attempts[0].errorMessage, "spawn threw synchronously");
+			assert.equal(result.details.judge.attempts[0].errorMessage, "Failed to spawn subagent: spawn threw synchronously");
 			assert.equal(result.details.mergedOutput, "merged after throw");
 		} finally { recording.restore(); }
 	});
@@ -1351,7 +1357,7 @@ test("a running panel derives progress from details, marking pending models and 
 			await waitFor(() => updates.length > 0, "no streamed update");
 			const update = updates[updates.length - 1];
 			assert.deepEqual(renderPanel(h, update, { expanded: false, isPartial: true }), [
-				"[warning]⏳ [toolTitle][bold]Panel pair[muted] (2 models; judge: p/judge)[accent] 0/2 done, 1 running, 1 pending",
+				"[warning]⏳ [toolTitle][bold]Panel pair[muted] (2 models; judge: p/judge)[accent] 0/2 done, 2 running, 0 pending",
 				"[warning]⏳ [accent]p/a",
 				"[warning]⏳ [accent]p/org/b",
 			]);
@@ -1395,9 +1401,9 @@ test("a streaming parallel update counts a running task as running, never as don
 			await waitFor(() => updates.length > 0, "no streamed update");
 			const update = updates[updates.length - 1];
 			const statuses = update.details.results.map((r: any) => r.status);
-			assert.equal(statuses.filter((s: string) => s === "running").length, 1, "the streamed task is running");
-			assert.equal(statuses.filter((s: string) => s === "pending").length, 4, "the others stay pending");
-			assert.match(update.content[0].text, /^Parallel: 0\/5 done, 1 running, 4 pending/);
+			assert.equal(statuses.filter((s: string) => s === "running").length, 4, "the dispatched tasks are running");
+			assert.equal(statuses.filter((s: string) => s === "pending").length, 1, "only the queued task stays pending");
+			assert.match(update.content[0].text, /^Parallel: 0\/5 done, 4 running, 1 pending/);
 			for (const spawn of recording.spawns) emitAnswer(spawn, "answer");
 			await waitFor(() => recording.spawns.length === 5, "the fifth task never spawned");
 			emitAnswer(recording.spawns[4], "answer");
@@ -1770,6 +1776,88 @@ test("scout-grill-plan-implement template delegates only recon and planning and 
 	assert.ok(template.includes("ask_user_question"), "falls back to ask_user_question when the skill is absent");
 	assert.ok(template.includes("no `subagent` call with agent `worker`"), "forbids delegating the implementation");
 	assert.ok(template.includes("wait for my explicit confirmation"), "gates planning and implementing on design confirmation");
+});
+
+test("failure evidence lists every distinct diagnosis, and nothing when there is none", () => {
+	const base = {
+		agent: "scout",
+		agentSource: "user",
+		task: "t",
+		status: "failed",
+		exitCode: 1,
+		messages: [],
+		stderr: "",
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+	} as any;
+	const assistant = [{ role: "assistant", content: [{ type: "text", text: "partial answer" }] }] as any;
+
+	assert.equal(getFailureEvidence({ ...base }), "(no output)");
+	assert.equal(
+		getFailureEvidence({ ...base, errorMessage: "boom", stderr: "boom", terminationSignal: "SIGKILL" }),
+		"Error: boom\n\nSignal: SIGKILL",
+		"identical text is reported once",
+	);
+	assert.equal(
+		getFailureEvidence({ ...base, errorMessage: "boom", stderr: "details", messages: assistant }),
+		"Error: boom\n\nstderr: details\n\nAssistant output: partial answer",
+		"every distinct diagnosis is kept, in order",
+	);
+	assert.equal(getFailureSummary({ ...base, stderr: "details" }), "details");
+	assert.equal(getFailureSummary({ ...base, terminationSignal: "SIGKILL" }), "Terminated by signal SIGKILL");
+});
+
+test("model-visible output is capped at pi's read limits and points at the tool details", () => {
+	const small = "one\ntwo\n";
+	assert.equal(truncateModelOutput(small), small, "a short answer is returned unchanged");
+
+	const lines = Array.from({ length: 3000 }, (_, i) => `line ${i + 1} ${"x".repeat(40)}`).join("\n");
+	const capped = truncateModelOutput(lines);
+	assert.ok(capped.length < lines.length, "an oversized answer is capped");
+	assert.ok(capped.startsWith("line 1 "), "the head is kept");
+	assert.ok(capped.includes("line 3000") === false, "the tail is dropped");
+	assert.match(capped, /\n\n\[Output truncated: \d+ bytes omitted\. Full output preserved in tool details\.\]$/);
+});
+
+test("a spawn failure in single mode is a failed result that names the real error", async () => {
+	await withIsolatedAgents(async (cwd) => {
+		for (const mode of ["throw", "error"] as const) {
+			const h = makeHarness({ guard: true, tools: ["read"] });
+			const recording = installControlledSpawn(() => {
+				if (mode === "throw") throw new Error("spawn ENOENT");
+			});
+			try {
+				const promise = runSubagent(h, cwd, { agent: "scout", task: "t" });
+				if (mode === "error") {
+					await waitFor(() => recording.spawns.length === 1, "the child never spawned");
+					recording.spawns[0].child.emit("error", new Error("spawn ENOENT"));
+				}
+				const result = (await promise) as any;
+				assert.equal(result.isError, true, `${mode}: a failed spawn is an error result`);
+				assert.equal(result.details.results[0].status, "failed", mode);
+				assert.equal(result.details.results[0].exitCode, null, `${mode}: no exit code was observed`);
+				assert.equal(result.details.results[0].errorMessage, "Failed to spawn subagent: spawn ENOENT", mode);
+				assert.match(result.content[0].text, /Failed to spawn subagent: spawn ENOENT/, mode);
+			} finally { recording.restore(); }
+		}
+	});
+});
+
+test("an oversized single answer is capped for the model while the details keep it whole", async () => {
+	await withIsolatedAgents(async (cwd) => {
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const recording = installControlledSpawn();
+		try {
+			const answer = Array.from({ length: 3000 }, (_, i) => `line ${i + 1} ${"y".repeat(40)}`).join("\n");
+			const promise = runSubagent(h, cwd, { agent: "scout", task: "t" });
+			await waitFor(() => recording.spawns.length === 1, "the child never spawned");
+			emitAnswer(recording.spawns[0], answer);
+			const result = (await promise) as any;
+			assert.ok(result.content[0].text.startsWith("line 1 "), "the head reaches the model");
+			assert.match(result.content[0].text, /Full output preserved in tool details\.\]$/);
+			const messages = result.details.results[0].messages;
+			assert.equal(messages[messages.length - 1].content[0].text, answer, "the details keep the whole answer");
+		} finally { recording.restore(); }
+	});
 });
 
 // ── Cleanup ───────────────────────────────────────────────────────────────────

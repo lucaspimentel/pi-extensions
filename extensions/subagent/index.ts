@@ -31,11 +31,14 @@ import type { Message } from "@earendil-works/pi-ai";
 import { stringEnum } from "../shared/string-enum.ts";
 import {
 	CONFIG_DIR_NAME,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
 	type ExtensionAPI,
 	formatReadLineRange,
 	getAgentDir,
 	getMarkdownTheme,
 	type SlashCommandInfo,
+	truncateHead,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
@@ -70,6 +73,8 @@ const CHILD_KILL_GRACE_MS = 5 * 1000;
 /** Fixed code-reading tool set for the judge, passed by the panel path itself. */
 const JUDGE_TOOL_NAMES = ["read", "ffgrep", "fffind", "ls", "git_read", "gh_read"];
 const ERROR_REASON_CAP = 160;
+/** Bytes reserved for the truncation notice so it still fits pi's byte budget. */
+const TRUNCATION_NOTICE_RESERVE = 256;
 
 /**
  * Preferred tool -> built-in substitute, applied when the preferred tool is not
@@ -304,10 +309,57 @@ function isUnsettled(result: SingleResult | undefined): boolean {
 }
 
 function getResultOutput(result: SingleResult): string {
-	if (isFailedResult(result)) {
-		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
-	}
-	return getFinalOutput(result.messages) || "(no output)";
+	return isFailedResult(result) ? getFailureEvidence(result) : getFinalOutput(result.messages) || "(no output)";
+}
+
+/**
+ * Model-visible failure text: every piece of evidence, labeled and deduplicated,
+ * so a child that exits nonzero with both an error and stderr output reports
+ * both instead of only the first one that happens to be set.
+ */
+export function getFailureEvidence(result: SingleResult): string {
+	const evidence: string[] = [];
+	const seen = new Set<string>();
+	const add = (label: string, value: string | undefined) => {
+		const text = value?.trim();
+		if (!text || seen.has(text)) return;
+		seen.add(text);
+		evidence.push(`${label}: ${text}`);
+	};
+
+	add("Error", result.errorMessage);
+	add("Signal", result.terminationSignal);
+	add("stderr", result.stderr);
+	add("Assistant output", getFinalOutput(result.messages));
+	return evidence.join("\n\n") || "(no output)";
+}
+
+/** One short line for a collapsed row, where the full evidence does not fit. */
+export function getFailureSummary(result: SingleResult): string {
+	return (
+		result.errorMessage?.trim() ||
+		(result.terminationSignal ? `Terminated by signal ${result.terminationSignal}` : "") ||
+		result.stderr.trim() ||
+		getFinalOutput(result.messages) ||
+		"(no output)"
+	);
+}
+
+/**
+ * Cap model-visible text at pi's own read limits, leaving room for the notice,
+ * and point at the tool details that keep the untruncated result.
+ */
+export function truncateModelOutput(output: string): string {
+	const initial = truncateHead(output);
+	if (!initial.truncated) return output;
+
+	const body = truncateHead(output, {
+		maxLines: DEFAULT_MAX_LINES - 2,
+		maxBytes: DEFAULT_MAX_BYTES - TRUNCATION_NOTICE_RESERVE,
+	});
+	const omittedBytes = initial.totalBytes - body.outputBytes;
+	const notice = `[Output truncated: ${omittedBytes} bytes omitted. Full output preserved in tool details.]`;
+	return body.content ? `${body.content}\n\n${notice}` : notice;
 }
 
 /** Legacy parallel truncation now delegates to the shared panel helper. */
@@ -345,7 +397,9 @@ function failureReason(result: SingleResult): string {
 			? "timed out after 10 minutes"
 			: result.terminationReason === "aborted"
 				? "aborted"
-				: result.stopReason || "failed");
+				: result.terminationSignal
+					? `Terminated by signal ${result.terminationSignal}`
+					: result.stopReason || "failed");
 	return boundedLine(reason);
 }
 
@@ -442,9 +496,7 @@ function formatLabeledPanelReviews(results: readonly PanelistResult[]): string {
 				isFailedResult(result) && result.stopReason && result.stopReason !== "end" && result.stopReason !== result.status
 					? `${result.status} (${result.stopReason})`
 					: result.status;
-			const body = isFailedResult(result)
-				? result.errorMessage || result.stderr || result.output || "(no output)"
-				: result.output || "(no output)";
+			const body = isFailedResult(result) ? getFailureEvidence(result) : result.output || "(no output)";
 			return `### [${result.model}] ${status}\n\n${truncateTaskOutput(body)}`;
 		})
 		.join("\n\n---\n\n");
@@ -856,6 +908,9 @@ async function runSingleAgent(
 		}
 
 		args.push(child.promptMode === "verbatim" ? task : `Task: ${task}`);
+		// A dispatched child counts as running from this point, before its first
+		// output, so a queued child is the only one still shown as pending.
+		emitUpdate();
 
 		// Guard step 5: dispatch policy. Every child normally carries the child
 		// startup gate and a fresh snapshot of the parent's effective profile,
@@ -1032,7 +1087,7 @@ async function runSingleAgent(
 			currentResult.errorMessage ||= "Subagent was aborted";
 		} else if (outcome.spawnError) {
 			currentResult.status = "failed";
-			currentResult.errorMessage ||= outcome.spawnError.message;
+			currentResult.errorMessage = `Failed to spawn subagent: ${outcome.spawnError.message}`;
 		} else if (outcome.signal) {
 			currentResult.status = "failed";
 		} else if (outcome.code !== 0) {
@@ -1604,7 +1659,7 @@ export default function (pi: ExtensionAPI) {
 					if (isError) {
 						const errorMsg = getResultOutput(result);
 						return {
-							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
+							content: [{ type: "text", text: truncateModelOutput(`Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}`) }],
 							details: makeDetails("chain")(results),
 							isError: true,
 						};
@@ -1612,7 +1667,12 @@ export default function (pi: ExtensionAPI) {
 					previousOutput = getFinalOutput(result.messages);
 				}
 				return {
-					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
+					content: [
+						{
+							type: "text",
+							text: truncateModelOutput(getFinalOutput(results[results.length - 1].messages) || "(no output)"),
+						},
+					],
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -1719,13 +1779,13 @@ export default function (pi: ExtensionAPI) {
 				if (isError) {
 					const errorMsg = getResultOutput(result);
 					return {
-						content: [{ type: "text", text: `Agent ${result.status}: ${errorMsg}` }],
+						content: [{ type: "text", text: truncateModelOutput(`Agent ${result.status}: ${errorMsg}`) }],
 						details: makeDetails("single")([result]),
 						isError: true,
 					};
 				}
 				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+					content: [{ type: "text", text: truncateModelOutput(getFinalOutput(result.messages) || "(no output)") }],
 					details: makeDetails("single")([result]),
 				};
 			}

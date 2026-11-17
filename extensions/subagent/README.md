@@ -15,6 +15,15 @@ where this fork diverges.
   `terminationReason: "timeout"`. An abort or a spawn failure settles as that
   child's result instead of throwing, so a dispatch always returns its details.
 
+- **Failure reporting**: a failed child reports every distinct diagnosis, labeled
+  in the order `Error`, `Signal`, `stderr`, `Assistant output` and deduplicated,
+  instead of only the first one that happens to be set, and a spawn failure
+  names the real error (`Failed to spawn subagent: <message>`).
+- **Output limits**: single and chain model-visible text is capped at pi's read
+  limits (2000 lines / 50 KB) with an omitted-bytes notice, and the untruncated
+  result stays in the tool details. The chain's `{previous}` handoff is not
+  capped, and parallel mode keeps its own 50 KiB per-task budget with the legacy
+  annotation.
 - **Bundled agents**: `agents/*.md` ship with the extension and are discovered
   next to `agents.ts` (via `import.meta.url`), so no `~/.pi/agent/agents` setup is
   required. Bundled agents load regardless of `agentScope`.
