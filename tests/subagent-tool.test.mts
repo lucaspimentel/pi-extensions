@@ -1949,6 +1949,98 @@ test("a project judge agent cannot shadow the bundled judge", async () => {
 	});
 });
 
+test("aborting a dispatch returns aborted results instead of rejecting", async () => {
+	await withIsolatedAgents(async (cwd) => {
+		for (const [params, expected] of [
+			[{ agent: "scout", task: "t" }, 1],
+			[{ chain: [{ agent: "scout", task: "t" }] }, 1],
+			[{ tasks: [{ agent: "scout", task: "t" }, { agent: "planner", task: "t" }] }, 2],
+		] as const) {
+			const h = makeHarness({ guard: true, tools: ["read"] });
+			const recording = installControlledSpawn();
+			try {
+				const controller = new AbortController();
+				const promise = h.tools.get("subagent")!.execute("id", params, controller.signal, undefined, toolCtx(cwd)) as Promise<any>;
+				await waitFor(() => recording.spawns.length === expected, `expected ${expected} children`);
+				controller.abort();
+				for (const spawn of recording.spawns) spawn.child.emit("close", null, "SIGTERM");
+				const result = await promise;
+				assert.equal(result.isError, true, JSON.stringify(params));
+				for (const child of result.details.results) {
+					assert.equal(child.status, "aborted", JSON.stringify(params));
+					assert.equal(child.exitCode, null);
+					assert.equal(child.terminationReason, "aborted");
+					assert.equal(child.terminationSignal, "SIGTERM");
+				}
+				assert.match(result.content[0].text, /Error: Subagent was aborted/, JSON.stringify(params));
+			} finally { recording.restore(); }
+		}
+	});
+});
+
+test("an abort during the panelist phase keeps the partial answers", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const recording = installControlledSpawn();
+		try {
+			const controller = new AbortController();
+			const promise = h.tools.get("subagent")!.execute("id", { panel: "pair", task: "t" }, controller.signal, undefined, toolCtx(cwd)) as Promise<any>;
+			await waitFor(() => recording.spawns.length === 2, "both panelists must spawn");
+			recording.spawns[0].child.stdout.emit("data", assistantLine("partial answer"));
+			controller.abort();
+			for (const spawn of recording.spawns) spawn.child.emit("close", null, "SIGTERM");
+			const result = await promise;
+			assert.equal(result.isError, true);
+			assert.equal(result.details.results[0].status, "aborted");
+			assert.equal(result.details.results[0].output, "partial answer", "paid-for panel output survives the abort");
+			assert.deepEqual(result.details.notices.map((n: any) => n.kind), ["no-survivors"]);
+			assert.equal(recording.spawns.length, 2, "no judge runs without a survivor");
+		} finally { recording.restore(); }
+	});
+});
+
+test("the result row reports failure diagnostics and bounds stderr", () => {
+	const h = makeHarness();
+	const child = (over: Record<string, unknown>) => ({
+		agent: "scout",
+		agentSource: "user",
+		task: "t",
+		status: "failed",
+		exitCode: 1,
+		messages: [],
+		stderr: "",
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		...over,
+	});
+	const details = (mode: string, results: unknown[]) => ({ content: [{ type: "text", text: "model text" }], details: { mode, agentScope: "user", projectAgentsDir: null, results } });
+
+	const parallelLines = renderPanel(h, details("parallel", [child({ stderr: "provider exploded" })]), { expanded: false });
+	assert.ok(parallelLines.some((line) => line.includes("[error]provider exploded")), parallelLines.join("\n"));
+	const chainLines = renderPanel(h, details("chain", [child({ step: 1, errorMessage: "step exploded" })]), { expanded: false });
+	assert.ok(chainLines.some((line) => line.includes("[error]step exploded")), chainLines.join("\n"));
+
+	const stderr = "e".repeat(3000);
+	const singleLines = renderPanel(
+		h,
+		details("single", [child({ errorMessage: "boom", terminationSignal: "SIGKILL", stderr })]),
+		{ expanded: true },
+		4000,
+	);
+	assert.ok(singleLines.includes("[error]Error: boom"), singleLines.join("\n"));
+	assert.ok(singleLines.includes("[error]Signal: SIGKILL"));
+	const stderrLine = singleLines.find((line) => line.startsWith("[error]stderr: "))!;
+	assert.ok(stderrLine.includes("bytes omitted"), stderrLine.slice(-40));
+	assert.ok(stderrLine.length < 2400, `stderr stays bounded, got ${stderrLine.length} characters`);
+
+	const abortedLines = renderPanel(
+		h,
+		details("single", [child({ status: "aborted", exitCode: null, terminationReason: "aborted", errorMessage: "Subagent was aborted" })]),
+		{ expanded: true },
+	);
+	assert.ok(abortedLines[0].includes("[error][aborted]"), abortedLines[0]);
+});
+
 // ── Cleanup ───────────────────────────────────────────────────────────────────
 
 test("cleanup", () => {

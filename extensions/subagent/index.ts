@@ -75,6 +75,8 @@ const JUDGE_TOOL_NAMES = ["read", "ffgrep", "fffind", "ls", "git_read", "gh_read
 const ERROR_REASON_CAP = 160;
 /** Bytes reserved for the truncation notice so it still fits pi's byte budget. */
 const TRUNCATION_NOTICE_RESERVE = 256;
+/** Stderr shown in an expanded row; the tool details keep the whole text. */
+const STDERR_RENDER_CAP = 2 * 1024;
 
 /**
  * Preferred tool -> built-in substitute, applied when the preferred tool is not
@@ -386,6 +388,15 @@ function boundedLine(text: string, cap = ERROR_REASON_CAP): string {
 	const normalized = text.replace(/\s+/g, " ").trim();
 	if (!normalized) return "(no details)";
 	return normalized.length > cap ? `${normalized.slice(0, cap)}...` : normalized;
+}
+
+/** First bytes of stderr for an expanded row, never a whole chatty child's output. */
+function boundedStderr(stderr: string): string {
+	const total = Buffer.byteLength(stderr, "utf8");
+	if (total <= STDERR_RENDER_CAP) return stderr;
+	let truncated = stderr.slice(0, STDERR_RENDER_CAP);
+	while (Buffer.byteLength(truncated, "utf8") > STDERR_RENDER_CAP) truncated = truncated.slice(0, -1);
+	return `${truncated}… (${total - Buffer.byteLength(truncated, "utf8")} bytes omitted)`;
 }
 
 /** Short, actionable failure reason for content and the judge input. */
@@ -1812,6 +1823,7 @@ export default function (pi: ExtensionAPI) {
 						},
 					],
 					details: makeDetails("parallel")(results),
+					isError: results.some(isFailedResult),
 				};
 			}
 
@@ -1925,6 +1937,24 @@ export default function (pi: ExtensionAPI) {
 				if (isUnsettled(child)) return theme.fg("warning", "⏳");
 				if (isFailedResult(child)) return theme.fg("error", "✗");
 				return theme.fg("success", "✓");
+			};
+
+			/** Failure diagnostics for an expanded child section; stderr stays bounded. */
+			const addDiagnostics = (container: Container, child: SingleResult) => {
+				if (isFailedResult(child) && child.errorMessage)
+					container.addChild(new Text(theme.fg("error", `Error: ${child.errorMessage}`), 0, 0));
+				if (child.terminationSignal)
+					container.addChild(new Text(theme.fg("error", `Signal: ${child.terminationSignal}`), 0, 0));
+				if (child.stderr.trim())
+					container.addChild(new Text(theme.fg("error", `stderr: ${boundedStderr(child.stderr.trim())}`), 0, 0));
+			};
+
+			/** One-line outcome for a collapsed child section with no assistant text. */
+			const collapsedSummary = (child: SingleResult): { text: string; color: "muted" | "error" } => {
+				if (child.status === "pending") return { text: "(pending...)", color: "muted" };
+				if (child.status === "running") return { text: "(running...)", color: "muted" };
+				if (isFailedResult(child)) return { text: getFailureSummary(child), color: "error" };
+				return { text: "(no output)", color: "muted" };
 			};
 
 			if (details.mode === "panel") {
@@ -2081,8 +2111,7 @@ export default function (pi: ExtensionAPI) {
 					if (isRunning) header += ` ${theme.fg("warning", `[${r.status}]`)}`;
 					else if (isError) header += ` ${theme.fg("error", `[${r.stopReason ?? r.status}]`)}`;
 					container.addChild(new Text(header, 0, 0));
-					if (isError && r.errorMessage)
-						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+					addDiagnostics(container, r);
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
 					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
@@ -2165,6 +2194,7 @@ export default function (pi: ExtensionAPI) {
 							),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						addDiagnostics(container, r);
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -2207,8 +2237,10 @@ export default function (pi: ExtensionAPI) {
 					const rIcon = resultIcon(r);
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
-					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
-					else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					if (displayItems.length === 0) {
+						const summary = collapsedSummary(r);
+						text += `\n${theme.fg(summary.color, summary.text)}`;
+					} else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
 				const usageStr = formatUsageStats(aggregateUsage(details.results.map((r) => r.usage)));
 				if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
@@ -2251,6 +2283,7 @@ export default function (pi: ExtensionAPI) {
 							new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						addDiagnostics(container, r);
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -2289,9 +2322,10 @@ export default function (pi: ExtensionAPI) {
 					const rIcon = resultIcon(r);
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
-					if (displayItems.length === 0)
-						text += `\n${theme.fg("muted", isUnsettled(r) ? "(running...)" : "(no output)")}`;
-					else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					if (displayItems.length === 0) {
+						const summary = collapsedSummary(r);
+						text += `\n${theme.fg(summary.color, summary.text)}`;
+					} else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
 				if (!isRunning) {
 					const usageStr = formatUsageStats(aggregateUsage(details.results.map((r) => r.usage)));

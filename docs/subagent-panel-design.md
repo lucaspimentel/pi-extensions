@@ -489,11 +489,13 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
   characters) stays the short form for collapsed rows and the judge input, and
   it now falls back to `Terminated by signal <signal>` when only a signal was
   observed.
-- Abort: Ctrl+C kills all children through the existing signal path. Panelist
-  aborts keep the default throwing behavior, while the judge phase is
-  abort-as-result, so an abort during or before the merge still returns the
-  panelists' answers and the judge's partial output under a `merge-aborted`
-  notice.
+- Abort: Ctrl+C kills all children through the existing signal path, and the
+  run reports the abort as a result in every mode instead of a rejection. The
+  aborted children keep `status: "aborted"`, their collected messages, and
+  their usage, so an abort during the panelist phase still returns the partial
+  answers (and, with no survivor, the `no-survivors` notice), and an abort
+  during or before the merge returns the panelists' answers with the judge's
+  partial output under a `merge-aborted` notice.
 
 ## Display
 
@@ -534,7 +536,10 @@ sections marked `⏳`.
 Only the renderer adds styling; the model-facing content stays ANSI-free.
 Notices describe finished runs only: `buildPanelNotices` returns an empty list
 while any panelist is unsettled or the judge phase is in flight, so a mid-run
-emit never reports a survivor count or a merge verdict.
+emit never reports a survivor count or a merge verdict. The single, chain, and
+parallel rows print the same failure diagnostics in their expanded views (the
+error, the termination signal, and stderr bounded to its first 2 KiB) and their
+collapsed views show a one-line failure summary in place of `(no output)`.
 
 ## Code and test layout
 
