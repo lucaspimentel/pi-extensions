@@ -1812,6 +1812,11 @@ test("review-panel template targets the review preset, resolves the current PR, 
 	assert.ok(template.includes("never substitute one silently"), "a missing review preset is reported, not replaced");
 	assert.ok(template.includes("no positional argument reads the current branch's PR"), "resolves the current branch's PR when no argument names one");
 	assert.ok(template.includes("Never run the panel against a guessed target"));
+	assert.ok(template.includes('subcommand `log` and args `["-n", "1"]`'), "the local commit comes from git log");
+	assert.ok(!template.includes("subcommand `status`"), "git status never prints a commit sha");
+	assert.ok(template.includes("Do not add `--oneline`"), "warns that --oneline would break the sha comparison");
+	assert.ok(template.includes("delete the `<extra review focus>` line"), "an empty focus deletes the contract line");
+	assert.ok(template.includes("reports no uncommitted changes"), "a dirty tree falls back to reading from GitHub");
 	assert.ok(template.includes("`pr diff` for the change set"), "each panelist fetches the diff itself");
 	assert.ok(template.includes("Stay read-only"), "panelists cannot build or test");
 	assert.ok(template.includes("Verdict:"), "each reviewer reports an explicit verdict");
