@@ -40,17 +40,26 @@ const replaceTabs = (text: string): string => text.replace(/\t/g, "   ");
  * pi's own expanded call-row shape: one `key: value` line per argument, two
  * spaces of indent, strings raw and anything else `JSON.stringify(value, null,
  * 2)`, tab replacement and CR removal, continuation lines indented four
- * spaces, and the whole block muted. Returns undefined when there is nothing to
- * list, which leaves the title alone.
+ * spaces, and the whole block muted. `firstKeys` are hoisted to the top in the
+ * order given (the tools pass `["subcommand"]`), because arguments arrive in
+ * whatever order the model emitted them, and the operation is what the row is
+ * about; every other argument keeps its arrival order. Returns undefined when
+ * there is nothing to list, which leaves the title alone.
  */
-export function expandedArgs(args: unknown, theme: Theme): string | undefined {
+export function expandedArgs(args: unknown, theme: Theme, firstKeys: readonly string[] = []): string | undefined {
 	if (args === null || args === undefined) return undefined;
 	const entries =
 		typeof args === "object" && !Array.isArray(args)
 			? Object.entries(args as Record<string, unknown>)
-			: ([["args", args]] as Array<[string, unknown]>);
+			: ([['args', args]] as Array<[string, unknown]>);
 	if (entries.length === 0) return undefined;
-	const lines = entries.map(([key, value]) => {
+	const rank = (key: string): number => {
+		const index = firstKeys.indexOf(key);
+		return index === -1 ? firstKeys.length : index;
+	};
+	// Array.prototype.sort is stable, so equal ranks keep their arrival order.
+	const ordered = [...entries].sort((a, b) => rank(a[0]) - rank(b[0]));
+	const lines = ordered.map(([key, value]) => {
 		const text = typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? String(value));
 		return `  ${key}: ${replaceTabs(text).replace(/\r/g, "").split("\n").join("\n    ")}`;
 	});

@@ -212,6 +212,16 @@ test("expanded lists every argument in pi's fallback shape", () => {
 		line(gitRead, { subcommand: "diff", args: ["HEAD~1", "--", "src/"] }, { expanded: true }),
 		`${title("git_read")}\n${muted('  subcommand: diff\n  args: [\n      "HEAD~1",\n      "--",\n      "src/"\n    ]')}`,
 	);
+	// `subcommand` leads whatever order the arguments streamed in, and the rest
+	// keep their arrival order.
+	assert.equal(
+		line(gitRead, { args: ["-p", "-n", "30"], subcommand: "log" }, { expanded: true }),
+		`${title("git_read")}\n${muted('  subcommand: log\n  args: [\n      "-p",\n      "-n",\n      "30"\n    ]')}`,
+	);
+	assert.equal(
+		line(ghRead, { repo: "o/r", jq: "length", subcommand: "repo metadata" }, { expanded: true }),
+		`${title("gh_read")}\n${muted("  subcommand: repo metadata\n  repo: o/r\n  jq: length")}`,
+	);
 	// A string keeps its own layout, with tabs replaced and CRs dropped.
 	assert.equal(
 		line(ghRead, { subcommand: "pr list", args: ["--limit\t3"] }, { expanded: true }),

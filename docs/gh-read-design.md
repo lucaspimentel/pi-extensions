@@ -80,6 +80,7 @@ the main session. Deliberately not tied to any one agent; agents opt in via
 - Expanded (Ctrl+O): every argument pi passed, one `key: value` line each, in
   the shape of pi's own fallback renderer (the same shape `git_read` uses), so
   the dropped switches and the raw jq/continuation values are reachable there.
+  `subcommand` leads the list whatever order the arguments streamed in.
 - Adding `renderCall` makes `timestamps` compose with this tool for the first
   time (its resolver wraps a call renderer only when the tool defines one),
   appending its dim `ran …` / `ended …` line; exactly one wrap in either load

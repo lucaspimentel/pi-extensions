@@ -270,7 +270,7 @@ function ghReadCallLine(args: unknown, theme: Theme): string {
 /** Expanded: pi's fallback shape, listing every argument (Ctrl+O, `app.tools.expand`). */
 function ghReadExpandedLine(args: unknown, theme: Theme): string {
 	const title = toolTitle("gh_read", theme);
-	const body = expandedArgs(args, theme);
+	const body = expandedArgs(args, theme, ["subcommand"]);
 	return body === undefined ? title : `${title}\n${body}`;
 }
 

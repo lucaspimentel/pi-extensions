@@ -53,7 +53,8 @@ commands. It is deliberately not tied to any one agent; agents opt in via their
   else `JSON.stringify(value, null, 2)`, tabs replaced, CRs removed,
   continuation lines indented four further spaces, the block `muted`. The
   `args` array is JSON there, so the expanded view deliberately differs in form
-  from the space-joined collapsed line.
+  from the space-joined collapsed line, and `subcommand` leads the list
+  whatever order the arguments streamed in.
 - Adding `renderCall` makes `timestamps` compose with this tool for the first
   time: its resolver wraps a call renderer only when the tool defines one
   (`extensions/timestamps/index.ts`), so the row gains its dim `ran …` /
