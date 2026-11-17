@@ -820,13 +820,10 @@ export function validateApiInvocation(params: unknown): ValidApiInvocation | { o
 	}
 
 	if (op === "org team") {
-		const org = record["org"];
-		if (typeof org !== "string" || org.length === 0) {
-			return apiInvalid("org is required and must be a bare organization login");
-		}
-		if (org.length > ORG_MAX_CHARS) {
-			return apiInvalid(`org must be at most ${ORG_MAX_CHARS} characters`);
-		}
+		if (record["org"] === undefined) return apiInvalid("org is required and must be a bare organization login");
+		const orgError = checkPlainString(record["org"], "org", ORG_MAX_CHARS);
+		if (orgError !== null) return apiInvalid(orgError);
+		const org = record["org"] as string;
 		if (!API_ORG_RE.test(org)) {
 			return apiInvalid(`org must be a bare organization login matching ${API_ORG_RE.source}, got '${org}'`);
 		}
@@ -897,13 +894,10 @@ export function validateApiInvocation(params: unknown): ValidApiInvocation | { o
 	}
 
 	if (record["account"] !== undefined) {
-		const account = record["account"];
-		if (typeof account !== "string" || account.length === 0) {
-			return apiInvalid("account must be a non-empty gh account login");
-		}
-		if (account.length > ACCOUNT_MAX_CHARS) {
-			return apiInvalid(`account must be at most ${ACCOUNT_MAX_CHARS} characters`);
-		}
+		const rawAccount = record["account"];
+		const accountError = checkPlainString(rawAccount, "account", ACCOUNT_MAX_CHARS);
+		if (accountError !== null) return apiInvalid(accountError);
+		const account = rawAccount as string;
 		if (!API_ACCOUNT_RE.test(account)) {
 			return apiInvalid(`account must be a bare GitHub login matching ${API_ACCOUNT_RE.source}, got '${account}'`);
 		}

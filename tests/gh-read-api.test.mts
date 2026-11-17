@@ -44,7 +44,7 @@ interface ScriptedRequester extends ApiRequester {
 	/** Separate record so every REST test also proves it makes no GraphQL call. */
 	graphqlCalls: Array<{ query: string; variables: Array<readonly [string, string | number]> }>;
 	/** Plain-child calls, in order, with the env override each one received. */
-	plainCalls: Array<{ argv: readonly string[]; env?: Record<string, string | undefined> }>;
+	plainCalls: Array<{ argv: readonly string[]; env: Record<string, string | undefined> }>;
 	plainScript: Array<(argv: readonly string[]) => GhPlainResult>;
 	script: Array<(pathAndQuery: string) => ApiRequestOutcome>;
 	/**
@@ -76,8 +76,7 @@ function requester(script: Array<(pathAndQuery: string) => ApiRequestOutcome>): 
 			return next(cursor !== undefined ? String(cursor[1]) : "");
 		},
 		async plain(argv, env) {
-			const merged = { ...self.attachedEnv, ...(env ?? {}) };
-			self.plainCalls.push({ argv: [...argv], ...(Object.keys(merged).length > 0 ? { env: merged } : {}) });
+			self.plainCalls.push({ argv: [...argv], env: { ...self.attachedEnv, ...(env ?? {}) } });
 			const next = self.plainScript.shift();
 			if (next === undefined) throw new Error(`unexpected plain call: ${argv.join(" ")}`);
 			return next([...argv]);
@@ -2293,6 +2292,16 @@ function plainFail(exitCode: number | null, stderr: string): () => GhPlainResult
 	return () => ({ exitCode, stdout: "", stderr });
 }
 
+/** A `gh auth status --json hosts` payload reporting exactly these logins. */
+const statusFor = (logins: string[]): (() => GhPlainResult) => () => ({
+	exitCode: 0,
+	stdout: JSON.stringify({ hosts: { "github.com": logins.map((login) => ({ login, active: false })) } }),
+	stderr: "",
+});
+
+/** A `gh auth token --user <login>` payload. */
+const tokenFor = (token: string): (() => GhPlainResult) => () => ({ exitCode: 0, stdout: `${token}\n`, stderr: "" });
+
 const BATCH_DEFAULT_FIELDS =
 	"number,title,state,isDraft,url,updatedAt,headRefName,reviewDecision,mergeStateStatus,mergeable";
 
@@ -2394,49 +2403,27 @@ test("pr batch: jq applies once to the envelope array", async () => {
 	assert.match(result.content[0].text, /\ndata:\n2$/);
 });
 
-test("pr batch: a named account is validated, its token rides the child env, and it never reaches output", async () => {
+test("pr batch: a named account is resolved for its targets, which carry the token and never leak it", async () => {
 	const secret = "ghp_secrettokenvalue";
 	const api = requester([]);
-	api.plainScript = [
-		() => ({ exitCode: 0, stdout: JSON.stringify({ hosts: { "github.com": [{ login: "lucaspimentel", active: true }] } }), stderr: "" }),
-		() => ({ exitCode: 0, stdout: `${secret}\n`, stderr: "" }),
-		plainFail(1, `bad credentials: ${secret}`),
-	];
-	const result = await run({ subcommand: "pr batch", targets: ["o/r#1"], account: "lucaspimentel" }, api);
+	api.plainScript = [statusFor(["lucaspimentel"]), tokenFor(secret), plainFail(1, `bad credentials: ${secret}`)];
+	// Requested in a different case: gh's own spelling is what the token is
+	// resolved for and what the head and the details both report.
+	const result = await run({ subcommand: "pr batch", targets: ["o/r#1"], account: "LucasPimentel" }, api);
 	assert.deepEqual(api.plainCalls[0]!.argv, ["auth", "status", "--json", "hosts"]);
 	assert.deepEqual(api.plainCalls[1]!.argv, ["auth", "token", "--user", "lucaspimentel"]);
 	for (const call of api.plainCalls.slice(2)) assert.deepEqual(call.env, { GH_TOKEN: secret });
+	assert.match(result.content[0].text, /^account: lucaspimentel$/m);
 	assert.equal(result.details["account"], "lucaspimentel");
 	assert.ok(!result.content[0].text.includes(secret), "the token never reaches the rendered result");
 	assert.match(result.content[0].text, /\[redacted\]/);
 });
 
-test("pr batch: an account that is not an authenticated github.com login errors before any target child", async () => {
-	const api = requester([]);
-	api.plainScript = [
-		() => ({ exitCode: 0, stdout: JSON.stringify({ hosts: { "github.com": [{ login: "someone-else" }] } }), stderr: "" }),
-	];
-	const result = await run({ subcommand: "pr batch", targets: ["o/r#1"], account: "lucaspimentel" }, api);
-	assert.equal(result.isError, true);
-	assert.match(result.content[0].text, /account 'lucaspimentel' is not an authenticated github.com login/);
-	assert.equal(api.plainCalls.length, 1, "no target child runs");
-});
-
 // ── account on every API operation (one shared resolution) ──────────────────
-
-/** A `gh auth status --json hosts` payload reporting exactly these logins. */
-const statusFor = (logins: string[]): (() => GhPlainResult) => () => ({
-	exitCode: 0,
-	stdout: JSON.stringify({ hosts: { "github.com": logins.map((login) => ({ login, active: false })) } }),
-	stderr: "",
-});
-
-/** A `gh auth token --user <login>` payload. */
-const tokenFor = (token: string): (() => GhPlainResult) => () => ({ exitCode: 0, stdout: `${token}\n`, stderr: "" });
 
 test("account: any operation resolves it once and its children carry the token", async () => {
 	const secret = "ghp_secrettokenvalue";
-	const api = requester([() => response(JSON.stringify({ full_name: "o/r" }))]);
+	const api = jsonScript([["repos/o/r", { full_name: "o/r" }]]);
 	api.plainScript = [statusFor(["lucaspimentel"]), tokenFor(secret)];
 	const result = await run({ subcommand: "repo metadata", repo: "o/r", account: "lucaspimentel" }, api);
 	assert.equal(result.isError, undefined, result.content[0].text);
@@ -2455,7 +2442,7 @@ test("account: any operation resolves it once and its children carry the token",
 });
 
 test("account: an EMU login validates, resolves, and reports gh's canonical spelling", async () => {
-	const api = requester([() => response(JSON.stringify({ full_name: "o/r" }))]);
+	const api = jsonScript([["repos/o/r", { full_name: "o/r" }]]);
 	api.plainScript = [statusFor(["lucas-pimentel_ddog"]), tokenFor("ghp_emu")];
 	const result = await run({ subcommand: "repo metadata", repo: "o/r", account: "Lucas-Pimentel_DDOG" }, api);
 	assert.equal(result.isError, undefined, result.content[0].text);
@@ -2464,7 +2451,7 @@ test("account: an EMU login validates, resolves, and reports gh's canonical spel
 });
 
 test("account: omitted means no resolution child and no injected token", async () => {
-	const api = requester([() => response(JSON.stringify({ full_name: "o/r" }))]);
+	const api = jsonScript([["repos/o/r", { full_name: "o/r" }]]);
 	const result = await run({ subcommand: "repo metadata", repo: "o/r" }, api);
 	assert.equal(result.isError, undefined, result.content[0].text);
 	assert.deepEqual(api.plainCalls, []);
@@ -2473,16 +2460,22 @@ test("account: omitted means no resolution child and no injected token", async (
 });
 
 test("account: an unknown login fails before any operation child, listing what gh holds", async () => {
-	const api = requester([]);
-	api.plainScript = [statusFor(["lucaspimentel", "lucas-pimentel_ddog"])];
-	const result = await run({ subcommand: "pr threads", repo: "o/r", pr: 1, account: "someone" }, api);
-	assert.equal(result.isError, true);
-	assert.match(
-		result.content[0].text,
-		/account 'someone' is not an authenticated github.com login \(authenticated: lucaspimentel, lucas-pimentel_ddog\)/,
-	);
-	assert.deepEqual(api.graphqlCalls, [], "no operation child runs");
-	assert.deepEqual(api.requests, [], "no operation child runs");
+	for (const params of [
+		{ subcommand: "pr threads", repo: "o/r", pr: 1, account: "someone" },
+		{ subcommand: "pr batch", targets: ["o/r#1"], account: "someone" },
+	]) {
+		const api = requester([]);
+		api.plainScript = [statusFor(["lucaspimentel", "lucas-pimentel_ddog"])];
+		const result = await run(params, api);
+		assert.equal(result.isError, true);
+		assert.match(
+			result.content[0].text,
+			/account 'someone' is not an authenticated github.com login \(authenticated: lucaspimentel, lucas-pimentel_ddog\)/,
+		);
+		assert.equal(api.plainCalls.length, 1, "only the auth status child runs");
+		assert.deepEqual(api.graphqlCalls, [], "no operation child runs");
+		assert.deepEqual(api.requests, [], "no operation child runs");
+	}
 });
 
 test("account: gh auth status failing passes its diagnostic through", async () => {

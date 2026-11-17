@@ -265,11 +265,7 @@ export class GhApiRunner implements ApiRequester {
 		return Math.max(0, this.deadlineAt - this.clock.now());
 	}
 
-	/**
-	 * Attaches environment overrides to every later child and returns this
-	 * requester (see the interface comment: one requester per invocation, and
-	 * the budget, deadline, and poisoned state stay shared).
-	 */
+	/** Attaches the overrides to every later child; see the interface comment. */
 	useEnv(env: Record<string, string | undefined>): ApiRequester {
 		this.env = { ...this.env, ...env };
 		return this;

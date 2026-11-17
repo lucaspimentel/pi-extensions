@@ -1335,6 +1335,34 @@ async function opAdvisoryView(invocation: ValidApiInvocation, requester: ApiRequ
 	return await renderData(invocation, summary, metadata, result.items, notices, false, requester, deps);
 }
 
+/** Reasons the deadline wrapper returns instead of spawning a child. */
+const DEADLINE_BETWEEN_RESPONSES = "shared deadline exceeded between responses";
+const DEADLINE_BEFORE_REQUEST = "shared deadline exceeded before request";
+
+/**
+ * Wraps a requester so every call is refused once the shared deadline has
+ * passed, instead of spawning a child that cannot finish. The three paged
+ * operations that check the deadline between responses share this; they used
+ * to build the same requester literal each, so every new ApiRequester member
+ * had to be added in three places. Nothing else changes: the runner's own
+ * interrupted-response errors and the other operations' paging behavior are
+ * untouched, and every remaining member delegates.
+ */
+function deadlineCheckedRequester(requester: ApiRequester, clock: ApiClock): ApiRequester {
+	const expired = (): boolean => clock.now() >= requester.deadline();
+	return {
+		request: async (path) => (expired() ? { kind: "stop", reason: DEADLINE_BETWEEN_RESPONSES } : await requester.request(path)),
+		graphql: async (query, variables) =>
+			expired() ? { kind: "stop", reason: DEADLINE_BETWEEN_RESPONSES } : await requester.graphql(query, variables),
+		plain: async (argv, env) =>
+			expired() ? { exitCode: null, stdout: "", stderr: DEADLINE_BEFORE_REQUEST } : await requester.plain(argv, env),
+		capturedBytes: () => requester.capturedBytes(),
+		budgetExhausted: () => requester.budgetExhausted(),
+		deadline: () => requester.deadline(),
+		useEnv: (env) => requester.useEnv(env),
+	};
+}
+
 // ── Operations: PR inline comments and reviews, issue conversation comments ─
 
 /**
@@ -1386,22 +1414,7 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 	}
 	// Check the deadline between responses without changing the runner's
 	// interrupted-response errors or the other operations' paging behavior.
-	const clock = deps?.clock ?? defaultClock;
-	const pagedRequester: ApiRequester = {
-		request: async (path) => clock.now() >= requester.deadline()
-			? { kind: "stop", reason: "shared deadline exceeded between responses" }
-			: await requester.request(path),
-		graphql: async (query, variables) => clock.now() >= requester.deadline()
-			? { kind: "stop", reason: "shared deadline exceeded between responses" }
-			: await requester.graphql(query, variables),
-		plain: async (argv, env) => clock.now() >= requester.deadline()
-			? { exitCode: null, stdout: "", stderr: "shared deadline exceeded before request" }
-			: await requester.plain(argv, env),
-		capturedBytes: () => requester.capturedBytes(),
-		budgetExhausted: () => requester.budgetExhausted(),
-		deadline: () => requester.deadline(),
-		useEnv: (env) => requester.useEnv(env),
-	};
+	const pagedRequester = deadlineCheckedRequester(requester, deps?.clock ?? defaultClock);
 	const result = await fetchPagedSource(
 		pagedRequester,
 		(p) => ({ endpoint: endpoint(repo, number, p), query: [["per_page", PAGE_SIZE], ["page", p]] }),
@@ -1481,22 +1494,7 @@ async function opIssueTimeline(invocation: ValidApiInvocation, requester: ApiReq
 	}
 	// Check the deadline between responses without changing the runner's
 	// interrupted-response errors or the other operations' paging behavior.
-	const clock = deps?.clock ?? defaultClock;
-	const pagedRequester: ApiRequester = {
-		request: async (path) => clock.now() >= requester.deadline()
-			? { kind: "stop", reason: "shared deadline exceeded between responses" }
-			: await requester.request(path),
-		graphql: async (query, variables) => clock.now() >= requester.deadline()
-			? { kind: "stop", reason: "shared deadline exceeded between responses" }
-			: await requester.graphql(query, variables),
-		plain: async (argv, env) => clock.now() >= requester.deadline()
-			? { exitCode: null, stdout: "", stderr: "shared deadline exceeded before request" }
-			: await requester.plain(argv, env),
-		capturedBytes: () => requester.capturedBytes(),
-		budgetExhausted: () => requester.budgetExhausted(),
-		deadline: () => requester.deadline(),
-		useEnv: (env) => requester.useEnv(env),
-	};
+	const pagedRequester = deadlineCheckedRequester(requester, deps?.clock ?? defaultClock);
 	const result = await fetchPagedSource(
 		pagedRequester,
 		(p) => ({ endpoint: issueTimelineEndpoint(repo, issue, p), query: [["per_page", PAGE_SIZE], ["page", p]] }),
@@ -1633,19 +1631,7 @@ async function opPrThreads(invocation: ValidApiInvocation, requester: ApiRequest
 
 	// Check the deadline between responses without changing the runner's
 	// interrupted-response errors.
-	const clock = deps?.clock ?? defaultClock;
-	const pagedRequester: ApiRequester = {
-		request: async (path) =>
-			clock.now() >= requester.deadline() ? { kind: "stop", reason: "shared deadline exceeded between responses" } : await requester.request(path),
-		graphql: async (query, variables) =>
-			clock.now() >= requester.deadline() ? { kind: "stop", reason: "shared deadline exceeded between responses" } : await requester.graphql(query, variables),
-		plain: async (argv, env) =>
-			clock.now() >= requester.deadline() ? { exitCode: null, stdout: "", stderr: "shared deadline exceeded before request" } : await requester.plain(argv, env),
-		capturedBytes: () => requester.capturedBytes(),
-		budgetExhausted: () => requester.budgetExhausted(),
-		deadline: () => requester.deadline(),
-		useEnv: (env) => requester.useEnv(env),
-	};
+	const pagedRequester = deadlineCheckedRequester(requester, deps?.clock ?? defaultClock);
 
 	const nodes: unknown[] = [];
 	// Sanitized messages from every page, deduped and capped once at the end
@@ -1855,7 +1841,7 @@ function scrubSecret(text: string, secret: string | undefined): string {
  * appears as an entry with an empty login (its `tokenSource` is GH_TOKEN or
  * GITHUB_TOKEN), which a caller-supplied login can never match.
  */
-function githubLogins(stdout: string): string[] {
+function parseGithubLogins(stdout: string): string[] {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(stdout);
@@ -1884,7 +1870,7 @@ function githubLogins(stdout: string): string[] {
  */
 function canonicalAccountLogin(stdout: string, account: string): string | null {
 	const wanted = account.toLowerCase();
-	return githubLogins(stdout).find((login) => login.toLowerCase() === wanted) ?? null;
+	return parseGithubLogins(stdout).find((login) => login.toLowerCase() === wanted) ?? null;
 }
 
 /**
@@ -1908,7 +1894,7 @@ async function resolveAccountToken(
 	}
 	const login = canonicalAccountLogin(status.stdout, account);
 	if (login === null) {
-		const known = githubLogins(status.stdout);
+		const known = parseGithubLogins(status.stdout);
 		return { ok: false, reason: `account '${account}' is not an authenticated github.com login (authenticated: ${known.length > 0 ? known.join(", ") : "none"})` };
 	}
 	const attempt = await requester.plain(["auth", "token", "--user", login]);
@@ -1930,15 +1916,22 @@ function splitBatchTarget(target: string): { repo: string; number: string } {
  * sharing the deadline, captured-output budget, and stderr cap. Each target
  * yields one envelope in input order; a failed target never fails the call.
  * There is no completeness field and no continuation: gh owns its own list
- * caps (for example the silent 100-file cap behind `files`).
+ * caps (for example the silent 100-file cap behind `files`). `accountLogin` is
+ * the canonical login the caller's `account` was resolved to, so the metadata
+ * head reports the account the read was actually made with.
  */
-async function opPrBatch(invocation: ValidApiInvocation, requester: ApiRequester, deps?: ApiOperationDeps): Promise<ApiToolResult> {
+async function opPrBatch(
+	invocation: ValidApiInvocation,
+	requester: ApiRequester,
+	deps?: ApiOperationDeps,
+	accountLogin?: string,
+): Promise<ApiToolResult> {
 	const targets = invocation.targets ?? [];
 	const fields = invocation.fields ?? [];
 	const summary = "gh_read api: pr batch";
 	const metadata: Array<[string, string | number | boolean | null]> = [
 		["targets", targets.length],
-		["account", invocation.account ?? "(active)"],
+		["account", accountLogin ?? "(active)"],
 	];
 
 	const envelopes: Array<Record<string, unknown>> = [];
@@ -1999,7 +1992,7 @@ export async function runApiOperation(
 		const summary = `gh_read api: ${invocation.op}`;
 		return failedResult(summary, [["operation", invocation.op], ["account", invocation.account]], resolved.reason);
 	}
-	const result = await dispatchOperation(invocation, requester.useEnv({ GH_TOKEN: resolved.token }), deps);
+	const result = await dispatchOperation(invocation, requester.useEnv({ GH_TOKEN: resolved.token }), deps, resolved.login);
 	return hideAccountToken(result, resolved.token, resolved.login);
 }
 
@@ -2026,6 +2019,7 @@ async function dispatchOperation(
 	invocation: ValidApiInvocation,
 	requester: ApiRequester,
 	deps?: ApiOperationDeps,
+	accountLogin?: string,
 ): Promise<ApiToolResult> {
 	switch (invocation.op) {
 		case "repo contents":
@@ -2051,6 +2045,6 @@ async function dispatchOperation(
 		case "org team":
 			return await opOrgTeam(invocation, requester, deps);
 		case "pr batch":
-			return await opPrBatch(invocation, requester, deps);
+			return await opPrBatch(invocation, requester, deps, accountLogin);
 	}
 }

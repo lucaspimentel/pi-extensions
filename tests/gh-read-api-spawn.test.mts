@@ -148,8 +148,8 @@ test("useEnv: a per-call env argument still wins over the attached override", as
 
 test("useEnv: without it, no GH_TOKEN key is added to the child environment", async () => {
 	const original = process.env["GH_TOKEN"];
-	delete process.env["GH_TOKEN"];
 	try {
+		delete process.env["GH_TOKEN"];
 		const spawns = harness((spawn) => emitResponse(spawn.child, "{}"));
 		const runner = new GhApiRunner({ cwd: "/anywhere", clock: defaultClock });
 		await runner.request("repos/owner/name");

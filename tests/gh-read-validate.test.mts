@@ -1102,7 +1102,7 @@ test("org team: jq follows the legacy jq rule; every sibling field is rejected",
 	apiRejects({ ...base, args: ["--json"] }, ["structured parameters, not an args array"]);
 });
 
-test("org team: org and slug are rejected on every other operation and on native subcommands", () => {
+test("org team: org and slug are rejected on every other API operation", () => {
 	const others: Array<Record<string, unknown>> = [
 		{ subcommand: "repo metadata", repo: "o/r" },
 		{ subcommand: "repo contents", repo: "o/r", path: "" },
@@ -1118,13 +1118,6 @@ test("org team: org and slug are rejected on every other operation and on native
 	for (const unrelated of others) {
 		apiRejects({ ...unrelated, org: "DataDog" }, ["unknown field 'org'"]);
 		apiRejects({ ...unrelated, slug: "s" }, ["unknown field 'slug'"]);
-	}
-	for (const native of ["pr view", "issue view", "run list"]) {
-		for (const [field, value] of [["org", "DataDog"], ["slug", "s"]] as const) {
-			const checked = validateToolParams({ subcommand: native, args: [], [field]: value });
-			assert.equal(checked.ok, false);
-			if (!checked.ok) assert.ok(checked.reason.includes(`unknown field '${field}'`));
-		}
 	}
 });
 
@@ -1170,7 +1163,7 @@ test("pr batch: field shape, the rejected names, and empty lists", () => {
 });
 
 test("pr batch: account shape and unknown fields", () => {
-	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: "" }, ["account must be a non-empty"]);
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: "" }, ["account must be non-empty"]);
 	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: "a/b" }, ["bare GitHub login"]);
 	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], continuation: "x" }, ["unknown field 'continuation'"]);
 	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], repo: "o/r" }, ["unknown field 'repo'"]);
@@ -1210,10 +1203,14 @@ test("account: accepted by every API operation, rejected by every native subcomm
 			);
 		}
 	}
+	// Every native subcommand rejects every structured field, not just the ones
+	// this change added.
 	for (const native of [...SUBCOMMANDS]) {
-		const checked = validateToolParams({ subcommand: native, args: [], account: "lucaspimentel" });
-		assert.equal(checked.ok, false, `native '${native}' must reject account`);
-		if (!checked.ok) assert.ok(checked.reason.includes("unknown field 'account'"), checked.reason);
+		for (const [field, value] of [["account", "lucaspimentel"], ["org", "DataDog"], ["slug", "s"]] as const) {
+			const checked = validateToolParams({ subcommand: native, args: [], [field]: value });
+			assert.equal(checked.ok, false, `native '${native}' must reject ${field}`);
+			if (!checked.ok) assert.ok(checked.reason.includes(`unknown field '${field}'`), checked.reason);
+		}
 	}
 });
 
