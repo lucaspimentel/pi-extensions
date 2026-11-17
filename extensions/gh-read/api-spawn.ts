@@ -142,6 +142,16 @@ export interface ApiRequester {
 	 * captured body. `env` entries override buildGhEnv().
 	 */
 	plain(argv: readonly string[], env?: Record<string, string | undefined>): Promise<GhPlainResult>;
+	/**
+	 * Attaches environment overrides to every child this requester spawns
+	 * afterwards, and returns the requester. Used for the one credential the
+	 * tool injects (`account` resolves to that account's token); `plain`'s own
+	 * `env` argument still wins over it. A requester serves exactly one
+	 * invocation, so this mutates in place: the captured-output budget, the
+	 * shared deadline, and the poisoned state must stay shared with the
+	 * children already spawned.
+	 */
+	useEnv(env: Record<string, string | undefined>): ApiRequester;
 	/** Cumulative captured response bytes (headers included) so far. */
 	capturedBytes(): number;
 	/** True once the budget has been exhausted mid-response or up front. */
@@ -228,6 +238,8 @@ export class GhApiRunner implements ApiRequester {
 	private readonly clock: ApiClock;
 	private readonly signal: AbortSignal | undefined;
 	private readonly cwd: string;
+	/** Overrides attached by `useEnv`, applied to every child after that call. */
+	private env: Record<string, string | undefined> = {};
 
 	constructor(options: ApiRunnerOptions = {}) {
 		this.clock = options.clock ?? defaultClock;
@@ -251,6 +263,16 @@ export class GhApiRunner implements ApiRequester {
 	/** Milliseconds left on the shared deadline; never negative. */
 	remainingMs(): number {
 		return Math.max(0, this.deadlineAt - this.clock.now());
+	}
+
+	/**
+	 * Attaches environment overrides to every later child and returns this
+	 * requester (see the interface comment: one requester per invocation, and
+	 * the budget, deadline, and poisoned state stay shared).
+	 */
+	useEnv(env: Record<string, string | undefined>): ApiRequester {
+		this.env = { ...this.env, ...env };
+		return this;
 	}
 
 	/**
@@ -350,7 +372,7 @@ export class GhApiRunner implements ApiRequester {
 				cwd: this.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
-				env: { ...buildGhEnv(), ...(env ?? {}) },
+				env: { ...buildGhEnv(), ...this.env, ...(env ?? {}) },
 				windowsHide: true,
 			});
 		} catch (err) {

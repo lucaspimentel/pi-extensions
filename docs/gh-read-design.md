@@ -570,7 +570,8 @@ non-empty array of gh `--json` field names applied to every target. Omitting
 `mergeable`. Each name is shape-checked (`^[A-Za-z0-9_]+$`);
 `projectCards`, `projectItems`, and `reactionGroups` are rejected as a
 product decision; every other name is passed to gh, which validates
-membership itself. Optional `account` is a bare GitHub login. `args`,
+membership itself. Optional `account` (see "Account selection"; every API
+operation accepts it). `args`,
 `continuation`, `repo`, and unrelated structured fields are rejected before
 spawning.
 
@@ -606,15 +607,26 @@ JSON field" message, the remaining targets are filled with `exitCode: null`
 envelopes rather than run. If gh ever changes that wording, targets simply
 fail individually, so correctness is unaffected.
 
-Account selection (the one operation that has it): when `account` is
-omitted the ambient active `gh` account is used with NO pre-check. When it is
-named, the operation first runs `gh auth status --json hosts` and requires
-the login to appear on github.com (gh's JSON mode exits 0 when logged out, so
-the empty payload means not found), then resolves the token with
-`gh auth token --user <account>` and injects it as `GH_TOKEN` into every
-target child's environment. The token never enters the data block, the
-metadata head, notices, or `details`; every rendered child text passes
-through a scrub that replaces the resolved token with `[redacted]`.
+Account selection (every API operation, before the operation runs): when
+`account` is omitted the ambient active `gh` account is used with NO
+pre-check. When it is named, the call first runs `gh auth status --json hosts`
+and requires the login to appear on github.com (gh's JSON mode exits 0 when
+logged out, so an empty payload means not found, and the refusal lists the
+logins gh does hold). Matching is case-insensitive because GitHub logins are,
+while `gh auth token --user` is case-sensitive on gh 2.104.0, so gh's own
+canonical spelling is what the token is then resolved for; a login gh does not
+hold fails here, before the operation spends its deadline. The resolved token
+is attached to every child the operation spawns, through the runner's
+`useEnv`. The token never enters the data block, the metadata head, notices, or
+`details`: the rendered text and every string value in `details` pass through a
+scrub that replaces it with `[redacted]`, and the result reports the canonical
+login as `details.account`. Verified on gh 2.104.0 that
+`gh auth token --user <login>` reads hosts.yml even when `GH_TOKEN` or
+`GITHUB_TOKEN` is set, so resolution needs no environment stripping, and the
+injected `GH_TOKEN` overrides whatever the child would have inherited. Resolution costs two extra
+`gh` spawns before the operation's own requests, and the token is held only for
+that call: no caching, so a rotated or revoked credential surfaces as a
+passthrough error rather than a stale token.
 
 Cap rationale: measured on the host with gh 2.103.3, per target: scalars
 0.46 s; scalars plus `files` and `commits` 0.96 s; `files`, `reviews`,
@@ -986,9 +998,9 @@ application/vnd.github+json" --header "X-GitHub-Api-Version: 2022-11-28"
 by `pr threads`, documented under "pr threads"; it shares this runner's
 deadline, budget, header/stderr caps, strict decode, and teardown. A third
 mode, `plain`, runs a native `gh` command with no `--include`, so stdout is
-captured verbatim with no header or HTTP-status parsing; only `pr batch`
-uses it, and it accepts an environment override so a resolved account token
-can be injected into the child. One
+captured verbatim with no header or HTTP-status parsing; `pr batch` uses it,
+and every transport honors environment overrides attached with `useEnv`, which
+is how a resolved account token reaches each child. One
 monotonic 30-second deadline is shared across ref resolution, all paged
 children, and jq. The captured-output budget is 8
 MiB of gh response stdout CUMULATIVELY (resolution requests and response
@@ -1286,17 +1298,32 @@ GitHub API and auth errors (including 403 from the wrong active gh account)
 pass through verbatim; the tool does no error-shape matching and appends no
 hints (settled: passthrough only).
 
-## GitHub account caveat (documented, solved for pr batch)
+## GitHub account caveat (solved for the API operations)
 
 `gh` has a single active account (no per-host automatic selection like git's
 `includeIf`). A ddoghq EMU repo 403s while the personal account is active
 and vice versa; the tool inherits whatever `gh auth` state exists and
-surfaces the API error verbatim. Switching accounts remains a manual user
-step (see dd-tools/docs/git-multi-account-setup.md). Every API operation
-except `pr batch` uses the ambient `gh` active account and accepts no
-account selector, so a read that needs a secondary account must stay on the
-host shell. `pr batch` accepts an optional `account` (see "pr batch"); that
-selector is not yet offered by any other operation.
+surfaces the API error verbatim (passthrough only, no hint appended). Every
+API operation therefore accepts an optional `account` (see "Account
+selection"): a bare GitHub login, including an EMU username of the form
+`login_shortcode`, resolved to that account's token for the duration of the
+call. A read that needs a secondary account no longer has to stay on the host
+shell, which guard prompts for because `gh` is in neither read-only host tier
+(`extensions/guard/policy/bashtier.ts`).
+
+Native subcommands (`pr view`, `run view`, ...) accept no `account` and always
+use the ambient active account, so a read through a native subcommand, and any
+write, still needs the account switched on the host shell (see
+dd-tools/docs/git-multi-account-setup.md). The tool never switches accounts: it
+selects one for a single call and restores nothing, because nothing global
+changed.
+
+Threat-model note: the selector is a deliberate widening, recorded here rather
+than left implicit. Public content can prompt-inject a read into naming the
+account that can see a private repository, which pulls that data into context.
+The tool is still read-only, the token stays out of the result, and the account
+is never inferred (a login the caller did not name is never used), but the
+widening is real.
 
 Note on `auth status` JSON output: gh's `--json` mode always exits 0 unless
 there is a fatal error (per gh's `statusRun`: "In machine-friendly mode, we
@@ -1336,7 +1363,15 @@ Settled in the grill-me review:
   fields, path injection inputs, line bounds, continuation shapes, advisory
   identifier/type rules, schema-bypass coverage, and the `pr batch` target
   grammar, target cap, duplicate rejection, field shape, rejected field
-  names, and account shape). Run coverage: the `run
+  names, and the account shape shared by every API operation: an EMU
+  `login_shortcode` login, a separator at either end rejected, its own length
+  cap, and `account` accepted by every operation but rejected by every native
+  subcommand), the same account path orchestration (one resolution for any
+  operation, the token reaching the child env, gh's canonical spelling used
+  for a case-different login, an unknown login failing before any operation
+  child with the held logins listed, and the token scrubbed from the result),
+  and the runner's `useEnv` seam (overrides on every transport, a per-call env
+  still winning, and no `GH_TOKEN` key added when no account is named). Run coverage: the `run
   list` argv matrix (flags in input order, `--limit` bounds incl. attached
   `-L50`, `-R`, `--json`/`--jq` rules, filter-token rejections, `--all`, no
   positionals, `--`/unknown-flag rejections), `run view` (missing and
@@ -1626,9 +1661,9 @@ Settled in the grill-me review:
   manufacture it.
 - No URL arguments, no `--template`, no `--web` forms.
 - No token handling, masking, or account switching inside the tool, with one
-exception: `pr batch`'s optional `account` selector resolves that account's
-token through `gh auth token --user` and injects it into the child
-environment, never into output. Every other operation keeps the non-goal,
+exception: the optional `account` selector every API operation accepts, which
+resolves that account's token through `gh auth token --user` and attaches it to
+that call's children, never to output. Native subcommands keep the non-goal,
 and keeping `--show-token` off the `auth status` allowlist is what
 guarantees token values never enter tool output through any allowlisted
 path.

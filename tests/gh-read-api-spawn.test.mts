@@ -117,6 +117,49 @@ afterEach(() => {
 	setApiSpawnOverride(null);
 });
 
+// ── Unit: the `account` env seam ─────────────────────────────────────────────
+
+test("useEnv: attached overrides reach every child of every transport", async () => {
+	const spawns = harness((spawn) => emitResponse(spawn.child, "{}"));
+	const runner = new GhApiRunner({ cwd: "/anywhere", clock: defaultClock });
+	runner.useEnv({ GH_TOKEN: "account-token" });
+	await runner.request("repos/owner/name");
+	await runner.graphql(REVIEW_THREADS_QUERY, [
+		["owner", "owner"],
+		["repo", "name"],
+		["pr", 1],
+	]);
+	await runner.plain(["api", "user"]);
+	assert.equal(spawns.length, 3);
+	for (const spawn of spawns) {
+		const env = spawn.options.env as Record<string, string | undefined>;
+		assert.equal(env["GH_TOKEN"], "account-token");
+	}
+});
+
+test("useEnv: a per-call env argument still wins over the attached override", async () => {
+	const spawns = harness((spawn) => emitResponse(spawn.child, ""));
+	const runner = new GhApiRunner({ cwd: "/anywhere", clock: defaultClock });
+	runner.useEnv({ GH_TOKEN: "account-token" });
+	await runner.plain(["api", "user"], { GH_TOKEN: "explicit" });
+	const env = spawns[0]!.options.env as Record<string, string | undefined>;
+	assert.equal(env["GH_TOKEN"], "explicit");
+});
+
+test("useEnv: without it, no GH_TOKEN key is added to the child environment", async () => {
+	const original = process.env["GH_TOKEN"];
+	delete process.env["GH_TOKEN"];
+	try {
+		const spawns = harness((spawn) => emitResponse(spawn.child, "{}"));
+		const runner = new GhApiRunner({ cwd: "/anywhere", clock: defaultClock });
+		await runner.request("repos/owner/name");
+		const env = spawns[0]!.options.env as Record<string, string | undefined>;
+		assert.equal("GH_TOKEN" in env, false, "the ambient path must not inject a token key");
+	} finally {
+		if (original !== undefined) process.env["GH_TOKEN"] = original;
+	}
+});
+
 // ── Unit: argv, environment, no git gate ─────────────────────────────────────
 
 test("API request: one gh spawn, tool-authored argv, sanitized gh environment, no git gate", async () => {

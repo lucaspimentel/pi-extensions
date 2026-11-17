@@ -47,6 +47,11 @@ interface ScriptedRequester extends ApiRequester {
 	plainCalls: Array<{ argv: readonly string[]; env?: Record<string, string | undefined> }>;
 	plainScript: Array<(argv: readonly string[]) => GhPlainResult>;
 	script: Array<(pathAndQuery: string) => ApiRequestOutcome>;
+	/**
+	 * Env attached through `useEnv`, merged into every plain call after it: the
+	 * runner applies the same overrides to its REST and GraphQL children.
+	 */
+	attachedEnv: Record<string, string | undefined>;
 }
 
 function requester(script: Array<(pathAndQuery: string) => ApiRequestOutcome>): ScriptedRequester {
@@ -56,6 +61,7 @@ function requester(script: Array<(pathAndQuery: string) => ApiRequestOutcome>): 
 		plainCalls: [],
 		plainScript: [],
 		script,
+		attachedEnv: {},
 		async request(pathAndQuery: string) {
 			self.requests.push(pathAndQuery);
 			const next = self.script.shift();
@@ -70,10 +76,15 @@ function requester(script: Array<(pathAndQuery: string) => ApiRequestOutcome>): 
 			return next(cursor !== undefined ? String(cursor[1]) : "");
 		},
 		async plain(argv, env) {
-			self.plainCalls.push({ argv: [...argv], ...(env === undefined ? {} : { env }) });
+			const merged = { ...self.attachedEnv, ...(env ?? {}) };
+			self.plainCalls.push({ argv: [...argv], ...(Object.keys(merged).length > 0 ? { env: merged } : {}) });
 			const next = self.plainScript.shift();
 			if (next === undefined) throw new Error(`unexpected plain call: ${argv.join(" ")}`);
 			return next([...argv]);
+		},
+		useEnv(env) {
+			self.attachedEnv = { ...self.attachedEnv, ...env };
+			return self;
 		},
 		capturedBytes: () => 0,
 		budgetExhausted: () => false,
@@ -2409,6 +2420,77 @@ test("pr batch: an account that is not an authenticated github.com login errors 
 	assert.equal(result.isError, true);
 	assert.match(result.content[0].text, /account 'lucaspimentel' is not an authenticated github.com login/);
 	assert.equal(api.plainCalls.length, 1, "no target child runs");
+});
+
+// ── account on every API operation (one shared resolution) ──────────────────
+
+/** A `gh auth status --json hosts` payload reporting exactly these logins. */
+const statusFor = (logins: string[]): (() => GhPlainResult) => () => ({
+	exitCode: 0,
+	stdout: JSON.stringify({ hosts: { "github.com": logins.map((login) => ({ login, active: false })) } }),
+	stderr: "",
+});
+
+/** A `gh auth token --user <login>` payload. */
+const tokenFor = (token: string): (() => GhPlainResult) => () => ({ exitCode: 0, stdout: `${token}\n`, stderr: "" });
+
+test("account: any operation resolves it once and its children carry the token", async () => {
+	const secret = "ghp_secrettokenvalue";
+	const api = requester([() => response(JSON.stringify({ full_name: "o/r" }))]);
+	api.plainScript = [statusFor(["lucaspimentel"]), tokenFor(secret)];
+	const result = await run({ subcommand: "repo metadata", repo: "o/r", account: "lucaspimentel" }, api);
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.deepEqual(
+		api.plainCalls.map((call) => call.argv),
+		[
+			["auth", "status", "--json", "hosts"],
+			["auth", "token", "--user", "lucaspimentel"],
+		],
+	);
+	// The runner applies these overrides to its REST and GraphQL children too
+	// (tests/gh-read-api-spawn.test.mts covers the child env itself).
+	assert.deepEqual(api.attachedEnv, { GH_TOKEN: secret });
+	assert.equal(result.details["account"], "lucaspimentel");
+	assert.ok(!result.content[0].text.includes(secret), "the token never reaches the rendered result");
+});
+
+test("account: an EMU login validates, resolves, and reports gh's canonical spelling", async () => {
+	const api = requester([() => response(JSON.stringify({ full_name: "o/r" }))]);
+	api.plainScript = [statusFor(["lucas-pimentel_ddog"]), tokenFor("ghp_emu")];
+	const result = await run({ subcommand: "repo metadata", repo: "o/r", account: "Lucas-Pimentel_DDOG" }, api);
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.deepEqual(api.plainCalls[1]!.argv, ["auth", "token", "--user", "lucas-pimentel_ddog"]);
+	assert.equal(result.details["account"], "lucas-pimentel_ddog");
+});
+
+test("account: omitted means no resolution child and no injected token", async () => {
+	const api = requester([() => response(JSON.stringify({ full_name: "o/r" }))]);
+	const result = await run({ subcommand: "repo metadata", repo: "o/r" }, api);
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.deepEqual(api.plainCalls, []);
+	assert.deepEqual(api.attachedEnv, {});
+	assert.equal(result.details["account"], undefined);
+});
+
+test("account: an unknown login fails before any operation child, listing what gh holds", async () => {
+	const api = requester([]);
+	api.plainScript = [statusFor(["lucaspimentel", "lucas-pimentel_ddog"])];
+	const result = await run({ subcommand: "pr threads", repo: "o/r", pr: 1, account: "someone" }, api);
+	assert.equal(result.isError, true);
+	assert.match(
+		result.content[0].text,
+		/account 'someone' is not an authenticated github.com login \(authenticated: lucaspimentel, lucas-pimentel_ddog\)/,
+	);
+	assert.deepEqual(api.graphqlCalls, [], "no operation child runs");
+	assert.deepEqual(api.requests, [], "no operation child runs");
+});
+
+test("account: gh auth status failing passes its diagnostic through", async () => {
+	const api = requester([]);
+	api.plainScript = [() => ({ exitCode: 1, stdout: "", stderr: "auth status exploded" })];
+	const result = await run({ subcommand: "pr threads", repo: "o/r", pr: 1, account: "lucaspimentel" }, api);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /gh auth status failed for account 'lucaspimentel': auth status exploded/);
 });
 
 // ── Structured failure reasons (compact result rows) ─────────────────────────

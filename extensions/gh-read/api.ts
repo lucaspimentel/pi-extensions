@@ -1400,6 +1400,7 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 		capturedBytes: () => requester.capturedBytes(),
 		budgetExhausted: () => requester.budgetExhausted(),
 		deadline: () => requester.deadline(),
+		useEnv: (env) => requester.useEnv(env),
 	};
 	const result = await fetchPagedSource(
 		pagedRequester,
@@ -1494,6 +1495,7 @@ async function opIssueTimeline(invocation: ValidApiInvocation, requester: ApiReq
 		capturedBytes: () => requester.capturedBytes(),
 		budgetExhausted: () => requester.budgetExhausted(),
 		deadline: () => requester.deadline(),
+		useEnv: (env) => requester.useEnv(env),
 	};
 	const result = await fetchPagedSource(
 		pagedRequester,
@@ -1642,6 +1644,7 @@ async function opPrThreads(invocation: ValidApiInvocation, requester: ApiRequest
 		capturedBytes: () => requester.capturedBytes(),
 		budgetExhausted: () => requester.budgetExhausted(),
 		deadline: () => requester.deadline(),
+		useEnv: (env) => requester.useEnv(env),
 	};
 
 	const nodes: unknown[] = [];
@@ -1846,25 +1849,73 @@ function scrubSecret(text: string, secret: string | undefined): string {
 }
 
 /**
- * True when `gh auth status --json hosts` reports `account` as a login on
- * github.com. gh's JSON mode exits 0 even when logged out, so an empty or
- * non-matching hosts map is "not found" rather than a child failure.
+ * The github.com logins `gh auth status --json hosts` reports, in gh's own
+ * order. gh's JSON mode exits 0 even when logged out, so an empty or malformed
+ * hosts map is "no logins" rather than a child failure. An environment token
+ * appears as an entry with an empty login (its `tokenSource` is GH_TOKEN or
+ * GITHUB_TOKEN), which a caller-supplied login can never match.
  */
-function accountIsAuthenticatedOnGithub(stdout: string, account: string): boolean {
+function githubLogins(stdout: string): string[] {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(stdout);
 	} catch {
-		return false;
+		return [];
 	}
-	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
-	const hosts = (parsed as Record<string, unknown>)["hosts"];
-	if (typeof hosts !== "object" || hosts === null || Array.isArray(hosts)) return false;
-	const entries = (hosts as Record<string, unknown>)["github.com"];
-	if (!Array.isArray(entries)) return false;
-	return entries.some(
-		(entry) => typeof entry === "object" && entry !== null && (entry as Record<string, unknown>)["login"] === account,
-	);
+	if (!isPlainObject(parsed)) return [];
+	const hosts = parsed["hosts"];
+	if (!isPlainObject(hosts)) return [];
+	const entries = hosts["github.com"];
+	if (!Array.isArray(entries)) return [];
+	const logins: string[] = [];
+	for (const entry of entries) {
+		if (!isPlainObject(entry)) continue;
+		const login = entry["login"];
+		if (typeof login === "string" && login.length > 0) logins.push(login);
+	}
+	return logins;
+}
+
+/**
+ * The configured github.com login matching a caller-supplied `account`, or
+ * null. Comparison is case-insensitive because GitHub logins are, while the
+ * lookup the value feeds (`gh auth token --user`) is case-sensitive on gh
+ * 2.104.0; gh's own canonical spelling is what gets returned and used.
+ */
+function canonicalAccountLogin(stdout: string, account: string): string | null {
+	const wanted = account.toLowerCase();
+	return githubLogins(stdout).find((login) => login.toLowerCase() === wanted) ?? null;
+}
+
+/**
+ * Resolves the `account` parameter to that account's token through gh's own
+ * credential store: membership is decided by gh's host list, then gh resolves
+ * the token for the canonical login it reported. Both children run with the
+ * requester's unmodified environment: verified on gh 2.104.0 that
+ * `gh auth token --user` reads hosts.yml even when GH_TOKEN or GITHUB_TOKEN is
+ * set, so no environment stripping is needed. The token is returned to the
+ * caller only and never rendered; `hideAccountToken` removes it from the
+ * result if a child echoes it.
+ */
+async function resolveAccountToken(
+	requester: ApiRequester,
+	account: string,
+): Promise<{ ok: true; login: string; token: string } | { ok: false; reason: string }> {
+	const status = await requester.plain(["auth", "status", "--json", "hosts"]);
+	if (status.exitCode !== 0) {
+		const diagnostic = status.stderr !== "" ? status.stderr : "no diagnostic";
+		return { ok: false, reason: `gh auth status failed for account '${account}': ${diagnostic}` };
+	}
+	const login = canonicalAccountLogin(status.stdout, account);
+	if (login === null) {
+		const known = githubLogins(status.stdout);
+		return { ok: false, reason: `account '${account}' is not an authenticated github.com login (authenticated: ${known.length > 0 ? known.join(", ") : "none"})` };
+	}
+	const attempt = await requester.plain(["auth", "token", "--user", login]);
+	if (attempt.exitCode !== 0 || attempt.stdout.trim().length === 0) {
+		return { ok: false, reason: `could not resolve a token for account '${login}'` };
+	}
+	return { ok: true, login, token: attempt.stdout.trim() };
 }
 
 /** Splits an already-validated `OWNER/REPO#N` target into repo and number. */
@@ -1890,30 +1941,12 @@ async function opPrBatch(invocation: ValidApiInvocation, requester: ApiRequester
 		["account", invocation.account ?? "(active)"],
 	];
 
-	let token: string | undefined;
-	if (invocation.account !== undefined) {
-		const account = invocation.account;
-		const status = await requester.plain(["auth", "status", "--json", "hosts"]);
-		if (status.exitCode !== 0) {
-			return failedResult(summary, metadata, `gh auth status failed for account '${account}': ${status.stderr !== "" ? status.stderr : "no diagnostic"}`);
-		}
-		if (!accountIsAuthenticatedOnGithub(status.stdout, account)) {
-			return failedResult(summary, metadata, `account '${account}' is not an authenticated github.com login`);
-		}
-		const tokenAttempt = await requester.plain(["auth", "token", "--user", account]);
-		if (tokenAttempt.exitCode !== 0 || tokenAttempt.stdout.trim().length === 0) {
-			return failedResult(summary, metadata, `could not resolve a token for account '${account}'`);
-		}
-		token = tokenAttempt.stdout.trim();
-	}
-
-	const env = token === undefined ? undefined : { GH_TOKEN: token };
 	const envelopes: Array<Record<string, unknown>> = [];
 	let succeeded = 0;
 	for (let index = 0; index < targets.length; index += 1) {
 		const target = targets[index]!;
 		const { repo, number } = splitBatchTarget(target);
-		const attempt = await requester.plain(["pr", "view", "--json", fields.join(","), "-R", repo, number], env);
+		const attempt = await requester.plain(["pr", "view", "--json", fields.join(","), "-R", repo, number]);
 		if (attempt.exitCode === 0) {
 			let data: unknown;
 			try {
@@ -1926,7 +1959,7 @@ async function opPrBatch(invocation: ValidApiInvocation, requester: ApiRequester
 			succeeded += 1;
 			continue;
 		}
-		const message = scrubSecret(attempt.stderr.length > 0 ? attempt.stderr : "gh exited without a message", token);
+		const message = attempt.stderr.length > 0 ? attempt.stderr : "gh exited without a message";
 		envelopes.push({ target, ok: false, error: { exitCode: attempt.exitCode, message } });
 		if (PR_BATCH_UNKNOWN_FIELD_RE.test(message)) {
 			for (const remaining of targets.slice(index + 1)) {
@@ -1957,7 +1990,36 @@ export async function runApiOperation(
 ): Promise<ApiToolResult> {
 	const clock = deps?.clock ?? defaultClock;
 	const requester = deps?.requester ?? new GhApiRunner({ cwd, clock, signal });
-	return await dispatchOperation(invocation, requester, deps);
+	if (invocation.account === undefined) return await dispatchOperation(invocation, requester, deps);
+	// The account is resolved before the operation runs: a login that gh does
+	// not hold fails here, without spending the operation's deadline, and every
+	// child the operation spawns then carries that account's token.
+	const resolved = await resolveAccountToken(requester, invocation.account);
+	if (!resolved.ok) {
+		const summary = `gh_read api: ${invocation.op}`;
+		return failedResult(summary, [["operation", invocation.op], ["account", invocation.account]], resolved.reason);
+	}
+	const result = await dispatchOperation(invocation, requester.useEnv({ GH_TOKEN: resolved.token }), deps);
+	return hideAccountToken(result, resolved.token, resolved.login);
+}
+
+/**
+ * The last guard before rendering: no externally sourced text may echo the
+ * token the tool injected into the child environment, and the result reports
+ * the canonical login it actually used, which is also what the call row's
+ * `[account]` tag shows. The token value itself never enters the result.
+ */
+function hideAccountToken(result: ApiToolResult, token: string, login: string): ApiToolResult {
+	const details: Record<string, unknown> = { ...result.details };
+	for (const [key, value] of Object.entries(details)) {
+		if (typeof value === "string") details[key] = scrubSecret(value, token);
+	}
+	details["account"] = login;
+	return {
+		...result,
+		content: [{ type: "text", text: scrubSecret(result.content[0].text, token) }],
+		details,
+	};
 }
 
 async function dispatchOperation(

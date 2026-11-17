@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+	API_OPERATIONS,
 	LIMIT_MAX,
 	PR_CHECKS_JSON_FIELDS,
 	SUBCOMMANDS,
@@ -1171,9 +1172,49 @@ test("pr batch: field shape, the rejected names, and empty lists", () => {
 test("pr batch: account shape and unknown fields", () => {
 	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: "" }, ["account must be a non-empty"]);
 	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: "a/b" }, ["bare GitHub login"]);
-	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: "a".repeat(40) }, ["at most 39 characters"]);
 	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], continuation: "x" }, ["unknown field 'continuation'"]);
 	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], repo: "o/r" }, ["unknown field 'repo'"]);
+});
+
+// ── account shape (shared by every API operation that accepts one) ──────────
+
+test("account shape accepts an EMU login, which is a login plus an underscore shortcode", () => {
+	// `lucas-pimentel_ddog` is a real github.com login: an EMU username is
+	// `{login}_{enterprise shortcode}`, so an underscore is ordinary. The
+	// organization rule (letters, digits, hyphens only) must not be reused.
+	const emu = apiOk({ subcommand: "pr batch", targets: ["o/r#1"], account: "lucas-pimentel_ddog" });
+	assert.equal(emu["account"], "lucas-pimentel_ddog");
+	assert.equal(apiOk({ subcommand: "pr batch", targets: ["o/r#1"], account: "a-b_c" })["account"], "a-b_c");
+});
+
+test("account shape rejects a separator at either end and any other character", () => {
+	for (const bad of ["-lead", "trail-", "_lead", "trail_", "a/b", "a b", "a.b", "@a", "a@b"]) {
+		apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: bad }, ["account must be a bare GitHub login"]);
+	}
+});
+
+test("account length is capped on its own bound, not the organization bound", () => {
+	apiRejects({ subcommand: "pr batch", targets: ["o/r#1"], account: "a".repeat(65) }, ["at most 64 characters"]);
+	assert.equal(apiOk({ subcommand: "pr batch", targets: ["o/r#1"], account: "a".repeat(64) })["account"], "a".repeat(64));
+});
+
+test("account: accepted by every API operation, rejected by every native subcommand", () => {
+	for (const op of API_OPERATIONS) {
+		// Ops with required parameters fail on those instead; the point here is
+		// that `account` itself is never the unknown field.
+		const checked = validateToolParams({ subcommand: op, account: "lucaspimentel" });
+		if (!checked.ok) {
+			assert.ok(
+				!checked.reason.includes("unknown field 'account'"),
+				`${op} must accept account, got: ${checked.reason}`,
+			);
+		}
+	}
+	for (const native of [...SUBCOMMANDS]) {
+		const checked = validateToolParams({ subcommand: native, args: [], account: "lucaspimentel" });
+		assert.equal(checked.ok, false, `native '${native}' must reject account`);
+		if (!checked.ok) assert.ok(checked.reason.includes("unknown field 'account'"), checked.reason);
+	}
 });
 
 test("pr batch: structured shape rejects args, and its fields are rejected elsewhere", () => {

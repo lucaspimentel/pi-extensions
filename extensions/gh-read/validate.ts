@@ -479,6 +479,19 @@ const API_REPO_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/;
 const API_ORG_RE = /^[A-Za-z0-9-]+$/;
 const ORG_MAX_CHARS = 39;
 
+/**
+ * Bare GitHub account login (`account`): a login plus the EMU form
+ * `{login}_{enterprise shortcode}`, which is why the organization rule above
+ * cannot be reused (organization names never contain an underscore). The
+ * separators are ordinary inside the value and forbidden at either end. This
+ * shape is only a cheap filter: whether the login exists on github.com is
+ * decided by `gh auth status --json hosts` at request time (api.ts).
+ */
+const API_ACCOUNT_RE = /^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$/;
+
+/** GitHub logins cap at 39 characters before an EMU shortcode suffix lengthens them. */
+const ACCOUNT_MAX_CHARS = 64;
+
 /** Bare team slug: letters, digits, underscore, dot, hyphen. No '@' or '/'. */
 const API_TEAM_SLUG_RE = /^[A-Za-z0-9_.-]+$/;
 const TEAM_SLUG_MAX_CHARS = 100;
@@ -526,19 +539,24 @@ const PR_BATCH_FIELD_RE = /^[A-Za-z0-9_]+$/;
 /** ``pr batch`` targets: exactly OWNER/REPO#N, no host prefix, no URL, no bare number. */
 const PR_BATCH_TARGET_RE = /^([A-Za-z0-9-]+\/[A-Za-z0-9_.-]+)#([1-9]\d*)$/;
 
+/**
+ * The fields each operation accepts. `account` is on every operation: it
+ * selects which authenticated gh account issues the reads (see api.ts
+ * `resolveAccountToken`), so a secondary account never forces a host shell.
+ */
 const OPERATION_FIELDS: Record<ApiOperation, ReadonlySet<string>> = {
-	"repo contents": new Set(["repo", "path", "ref", "start_line", "end_line", "jq"]),
-	"repo tree": new Set(["repo", "ref", "path", "recursive", "jq"]),
-	"commit checks": new Set(["repo", "ref", "jq", "continuation"]),
-	"advisory view": new Set(["id", "type", "jq", "continuation"]),
-	"check annotations": new Set(["repo", "check_run_id", "jq"]),
-	"repo metadata": new Set(["repo", "jq"]),
-	"pr comments": new Set(["repo", "pr", "continuation", "jq"]),
-	"pr reviews": new Set(["repo", "pr", "continuation", "jq"]),
-	"issue comments": new Set(["repo", "issue", "continuation", "jq"]),
-	"issue timeline": new Set(["repo", "issue", "continuation", "jq"]),
-	"pr threads": new Set(["repo", "pr", "jq", "continuation"]),
-	"org team": new Set(["org", "slug", "jq"]),
+	"repo contents": new Set(["repo", "path", "ref", "start_line", "end_line", "jq", "account"]),
+	"repo tree": new Set(["repo", "ref", "path", "recursive", "jq", "account"]),
+	"commit checks": new Set(["repo", "ref", "jq", "continuation", "account"]),
+	"advisory view": new Set(["id", "type", "jq", "continuation", "account"]),
+	"check annotations": new Set(["repo", "check_run_id", "jq", "account"]),
+	"repo metadata": new Set(["repo", "jq", "account"]),
+	"pr comments": new Set(["repo", "pr", "continuation", "jq", "account"]),
+	"pr reviews": new Set(["repo", "pr", "continuation", "jq", "account"]),
+	"issue comments": new Set(["repo", "issue", "continuation", "jq", "account"]),
+	"issue timeline": new Set(["repo", "issue", "continuation", "jq", "account"]),
+	"pr threads": new Set(["repo", "pr", "jq", "continuation", "account"]),
+	"org team": new Set(["org", "slug", "jq", "account"]),
 	"pr batch": new Set(["targets", "fields", "account", "jq"]),
 };
 
@@ -578,7 +596,11 @@ export interface ValidApiInvocation {
 	targets?: string[];
 	/** pr batch: gh --json field names applied to every target. */
 	fields?: string[];
-	/** pr batch: optional gh account login; omitted means the ambient active account. */
+	/**
+	 * Optional gh account login selecting which authenticated account issues
+	 * the reads; omitted means the ambient active account. Every API operation
+	 * accepts it; native subcommands reject it.
+	 */
 	account?: string;
 }
 
@@ -872,20 +894,20 @@ export function validateApiInvocation(params: unknown): ValidApiInvocation | { o
 			}
 			result.fields = fields;
 		}
+	}
 
+	if (record["account"] !== undefined) {
 		const account = record["account"];
-		if (account !== undefined) {
-			if (typeof account !== "string" || account.length === 0) {
-				return apiInvalid("account must be a non-empty gh account login");
-			}
-			if (account.length > ORG_MAX_CHARS) {
-				return apiInvalid(`account must be at most ${ORG_MAX_CHARS} characters`);
-			}
-			if (!API_ORG_RE.test(account)) {
-				return apiInvalid(`account must be a bare GitHub login matching ${API_ORG_RE.source}, got '${account}'`);
-			}
-			result.account = account;
+		if (typeof account !== "string" || account.length === 0) {
+			return apiInvalid("account must be a non-empty gh account login");
 		}
+		if (account.length > ACCOUNT_MAX_CHARS) {
+			return apiInvalid(`account must be at most ${ACCOUNT_MAX_CHARS} characters`);
+		}
+		if (!API_ACCOUNT_RE.test(account)) {
+			return apiInvalid(`account must be a bare GitHub login matching ${API_ACCOUNT_RE.source}, got '${account}'`);
+		}
+		result.account = account;
 	}
 
 	if (record["continuation"] !== undefined) {
