@@ -65,7 +65,9 @@ streaming, usage display, security model).
 - **Workflow prompt names**: upstream's `/implement`, `/scout-and-plan`, and
   `/implement-and-review` are renamed to `/scout-plan-implement`,
   `/scout-plan`, and `/implement-review`, so each name lists its chain's stages.
-  The chains themselves are unchanged.
+  The chains themselves are unchanged. `/scout-grill-plan-implement` is not one
+  of the renamed chains: it lists its stages and runs the interview and the
+  implementation in the main session instead of a `worker` child.
 
 ## Agents
 
@@ -259,5 +261,6 @@ Each command name lists its stages, so what a command skips is visible:
 - `/scout-plan-implement <task>`: scout → planner → worker. Gathers context, plans, implements
 - `/implement-review <task>`: worker → reviewer → worker. Implements, reviews, applies feedback; no scouting or planning, for well-specified tasks
 - `/scout-plan-implement-review <task>`: scout → planner → worker → reviewer → worker. Full pipeline: context, plan, implement, review, apply feedback; the review-and-fix loop runs unattended (no human checkpoint between implement and fix)
+- `/scout-grill-plan-implement <task>`: scout → grill → planner → main agent. Scouts as a subagent, interviews me about the design (the `grill-me` skill, falling back to the same loop inline) until the frontier is empty, plans as a subagent, then implements in the main session. Verification is not delegated: the only subagents are scout and planner, and implementation never runs as a `worker` child.
 
-Each runs as a subagent chain, passing output between steps via `{previous}`.
+The first four run as subagent chains, passing output between steps via `{previous}`. `/scout-grill-plan-implement` is not a chain, because the interview and the implementation must run in the main session; it calls the `subagent` tool in single mode twice.

@@ -1721,6 +1721,18 @@ test("panel template requires preset and task and uses positional expansion with
 	assert.ok(template.includes("subagent.json"), "the no-preset path says where presets are configured");
 });
 
+test("scout-grill-plan-implement template delegates only recon and planning and implements in the main session", () => {
+	const template = fs.readFileSync(new URL("../extensions/subagent/prompts/scout-grill-plan-implement.md", import.meta.url), "utf8");
+	assert.ok(template.includes('argument-hint: "<task>"'));
+	assert.ok(template.includes("Task: $@"), "expands the whole argument list as the task");
+	assert.ok(template.includes("agent `scout`"), "scouts as a subagent");
+	assert.ok(template.includes("agent `planner`"), "plans as a subagent");
+	assert.ok(template.includes("grill-me"), "names the grill-me skill");
+	assert.ok(template.includes("ask_user_question"), "falls back to ask_user_question when the skill is absent");
+	assert.ok(template.includes("no `subagent` call with agent `worker`"), "forbids delegating the implementation");
+	assert.ok(template.includes("wait for my explicit confirmation"), "gates planning and implementing on design confirmation");
+});
+
 // ── Cleanup ───────────────────────────────────────────────────────────────────
 
 test("cleanup", () => {
