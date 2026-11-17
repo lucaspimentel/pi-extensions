@@ -57,6 +57,11 @@ function assertSortedAppearance(text: string, names: string[]): void {
 	}
 }
 
+/** Reads a prompt template shipped by this extension, by file name. */
+function readPromptTemplate(name: string): string {
+	return fs.readFileSync(new URL(`../extensions/subagent/prompts/${name}`, import.meta.url), "utf8");
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test("both tools are registered with the intended declarations", () => {
@@ -1776,7 +1781,7 @@ test("panel validation names the config file when no preset is usable", async ()
 });
 
 test("panel template requires preset and task and uses positional expansion without guessing a default", () => {
-	const template = fs.readFileSync(new URL("../extensions/subagent/prompts/panel.md", import.meta.url), "utf8");
+	const template = readPromptTemplate("panel.md");
 	assert.ok(template.includes('argument-hint: "<preset> <text>"'));
 	assert.ok(template.includes("Preset: $1"));
 	assert.ok(template.includes("Task: ${@:2}"));
@@ -1788,7 +1793,7 @@ test("panel template requires preset and task and uses positional expansion with
 });
 
 test("scout-grill-plan-implement template delegates only recon and planning and implements in the main session", () => {
-	const template = fs.readFileSync(new URL("../extensions/subagent/prompts/scout-grill-plan-implement.md", import.meta.url), "utf8");
+	const template = readPromptTemplate("scout-grill-plan-implement.md");
 	assert.ok(template.includes('argument-hint: "<task>"'));
 	assert.ok(template.includes("Task: $@"), "expands the whole argument list as the task");
 	assert.ok(template.includes("agent `scout`"), "scouts as a subagent");
@@ -1800,7 +1805,7 @@ test("scout-grill-plan-implement template delegates only recon and planning and 
 });
 
 test("review-panel template targets the review preset, resolves the current PR, and stops at the review", () => {
-	const template = fs.readFileSync(new URL("../extensions/subagent/prompts/review-panel.md", import.meta.url), "utf8");
+	const template = readPromptTemplate("review-panel.md");
 	assert.ok(template.includes('argument-hint: "[<PR number or URL>] [focus]"'));
 	assert.ok(template.includes("Requested: $@"), "expands the whole argument list");
 	assert.ok(template.includes('subagent({panel: "review", task})'), "names the review preset");
