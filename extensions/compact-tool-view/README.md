@@ -80,12 +80,33 @@ One `pi.registerToolRenderer` resolver, never a tool re-registration: it
 returns a copy of the base renderers with only `renderResult` replaced, so
 `renderShell` and `renderCall` (including guard's shell call header) are
 preserved. The gist is collapsed-only; expanded and streaming views delegate to
-the base renderer. Composition: `timestamps` registers its own resolver and
+the base renderer, or to a synthesized fallback body when the base has none.
+Composition: `timestamps` registers its own resolver and
 both delegate through `next()`, so they compose in either load order.
 
 `host_bash`, `ffgrep`, and `fffind` are deliberate overrides of renderers those
 extensions register, and `codemode` is a deliberate collapsed-only override of
 pi's own codemode renderer.
+
+## Expanding
+
+Expanding is never a no-op. When the wrapped tool has a result renderer of its
+own, expanded and streaming views delegate to it (that renderer is the stock
+body). When it has none, pi would have drawn its own fallback body, but any
+`renderResult` suppresses that path, so the extension synthesizes the equivalent
+itself: expanded shows every model-facing line, streaming shows the first five
+plus `... (N more lines, ctrl+o to expand)`, and an empty result keeps the gist
+line. `hide` mode only hides the collapsed final body; expanding it, or watching
+it stream, shows that body as it does for a tool whose own renderer pi delegates
+to.
+
+This matters for every table entry whose tool registers no `renderResult`:
+pi supplies built-in renderers for only `read`, `bash`, `powershell`, `edit`,
+`write`, `grep`, `find`, and `ls`, so `web_fetch` (the `Fetch <url>` row),
+`web_search`, `gh_read`, `git_read`, `jira_read`, `jira_update`,
+`session_search`, `session_excerpt`, `subagent_list`, `request_read_access`,
+`python`, `node`, the MCP resource tools, and the config-only names
+(`gitlab_read`, the `pup_*` and `memory_*` families) all rely on it.
 
 See [docs/compact-tool-view-design.md](../../docs/compact-tool-view-design.md)
 for the full contract.

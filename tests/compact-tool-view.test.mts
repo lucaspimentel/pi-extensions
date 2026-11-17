@@ -1,6 +1,7 @@
 // compact-tool-view tests: pure gist derivation, the config loader, and the
 // registerToolRenderer resolver (collapsed gist replacement, expanded/streaming
-// delegation, hide mode, failure surfacing, and name pass-through).
+// delegation, the synthesized fallback body for a tool with no result renderer,
+// hide mode, failure surfacing, and name pass-through).
 //
 // Run: node --test tests/compact-tool-view.test.mts
 import { test } from "node:test";
@@ -678,14 +679,55 @@ test("a failure carried on the render context overrides hide mode", () => {
 	assert.ok(!lines.some((line) => line.includes("app.tools.expand")), JSON.stringify(lines));
 });
 
-test("a tool with no base renderer still gists, collapsed and expanded", () => {
+test("a tool with no base renderer still gists when collapsed", () => {
 	const loaded = loadExtension(emptyDir());
 	const wrapped = loaded.resolver("write", () => undefined);
 	const result = { content: [{ type: "text", text: "Successfully wrote to /x" }] };
 	const collapsed = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: false }, theme, makeContext({ content: "a\nb\nc" })));
 	assert.ok(collapsed.some((line) => line.includes("3 lines written")), JSON.stringify(collapsed));
-	const expanded = renderLines(wrapped.renderResult(result, { expanded: true, isPartial: false }, theme, makeContext({ content: "a\nb" })));
-	assert.ok(expanded.some((line) => line.includes("2 lines written")), JSON.stringify(expanded));
+	// An empty result has no fallback body to synthesize, so the gist stands in.
+	const empty = renderLines(wrapped.renderResult({ content: [] }, { expanded: true, isPartial: false }, theme, makeContext({ content: "a" })));
+	assert.ok(empty.some((line) => line.includes("1 lines written")), JSON.stringify(empty));
+});
+
+test("expanded renders the synthesized fallback body when the base has no result renderer", () => {
+	const loaded = loadExtension(emptyDir());
+	const wrapped = loaded.resolver("write", () => undefined);
+	const result = { content: [{ type: "text", text: "line one\nline two" }] };
+	const lines = renderLines(wrapped.renderResult(result, { expanded: true, isPartial: false }, theme, makeContext({ content: "a\nb" })));
+	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e9line one")), JSON.stringify(lines));
+	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e9line two")), JSON.stringify(lines));
+	assert.ok(!lines.some((line) => line.includes("lines written")), JSON.stringify(lines));
+	assert.ok(!lines.some((line) => line.includes("app.tools.expand")), JSON.stringify(lines));
+	// An error result is styled the same way: pi's fallback body never switches role.
+	const failed = renderLines(
+		wrapped.renderResult({ content: [{ type: "text", text: "boom" }] }, { expanded: true, isPartial: false }, theme, makeContext({}, true)),
+	);
+	assert.ok(failed.some((line) => line.includes("\u27e8toolOutput\u27e9boom")), JSON.stringify(failed));
+});
+
+test("streaming previews five lines plus the expand hint when the base has no result renderer", () => {
+	const loaded = loadExtension(emptyDir());
+	const wrapped = loaded.resolver("write", () => undefined);
+	const result = { content: [{ type: "text", text: "1\n2\n3\n4\n5\n6\n7" }] };
+	const lines = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: true }, theme, makeContext()));
+	assert.equal(lines.length, 6, JSON.stringify(lines));
+	assert.ok(lines[0].includes("\u27e8toolOutput\u27e91"), JSON.stringify(lines));
+	assert.ok(lines[4].includes("\u27e8toolOutput\u27e95"), JSON.stringify(lines));
+	assert.ok(lines[5].includes("... (2 more lines,"), JSON.stringify(lines));
+	assert.ok(lines[5].includes("[app.tools.expand: to expand]"), JSON.stringify(lines));
+	assert.ok(!lines.some((line) => line.includes("\u27e8toolOutput\u27e96")), JSON.stringify(lines));
+});
+
+test("hide mode with no base renderer still shows the body when expanded", () => {
+	const loaded = loadExtension(configDir({ write: "hide" }));
+	const wrapped = loaded.resolver("write", () => undefined);
+	const result = { content: [{ type: "text", text: "body line" }] };
+	const collapsed = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: false }, theme, makeContext({ content: "a" })));
+	assert.ok(collapsed.some((line) => line.includes("\u27e8muted\u27e9[app.tools.expand: to expand]")), JSON.stringify(collapsed));
+	assert.ok(!collapsed.some((line) => line.includes("body line")), JSON.stringify(collapsed));
+	const expanded = renderLines(wrapped.renderResult(result, { expanded: true, isPartial: false }, theme, makeContext({ content: "a" })));
+	assert.ok(expanded.some((line) => line.includes("\u27e8toolOutput\u27e9body line")), JSON.stringify(expanded));
 });
 
 test("extra content blocks render as a second dimmed line under the gist", () => {

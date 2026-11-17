@@ -62,17 +62,62 @@ renderers, because only their collapsed result body is replaced.
 - Expanded or streaming result: delegate to the base renderer
   (`base.renderResult(...)`) when one exists. The wrap is collapsed-only; the
   gist renders on the final result.
-- No base renderer and the view is expanded or partial: a tool with no renderer
-  has no stock expanded view to preserve, so render the gist (or hint) anyway.
+- No base renderer and the view is expanded or partial: synthesize the body pi's
+  own fallback would have drawn (see "The synthesized fallback body" below).
+  Rendering the gist here instead would repeat the collapsed line and make
+  expanding a no-op, and installing any `renderResult` suppresses pi's fallback
+  path entirely, so there is nothing else to inherit. An empty result has no
+  body to synthesize and keeps the gist.
 - Failures (`context.isError`) always surface, ignoring `hide`.
 - `hide` mode with a base renderer: collapsed shows the hint, expanded delegates
   to the stock body. This is the general rule from the settled design (expanded
   always delegates to the base renderer when one exists), and it keeps the
-  expand hint truthful. Only a hidden tool with no base renderer shows the hint
-  in both states. The step-7 live-check note that "`Ctrl+O` expands nothing (no
-  stock body exists for hide mode)" is wrong for a tool that has a stock
-  renderer such as `read`; the observed behavior is that expanding a hidden tool
-  reveals its stock body.
+  expand hint truthful: for a tool with no base renderer the expansion renders
+  the synthesized body, so an expanded `hide` row shows that body too, and only
+  its collapsed final state is hidden. The step-7 live-check note that `Ctrl+O`
+  "expands nothing (no stock body exists for hide mode)" is wrong for a tool
+  that has a stock renderer such as `read`; the observed behavior is that
+  expanding a hidden tool reveals its stock body.
+
+## The synthesized fallback body
+
+pi renders a body for any tool definition without a `renderResult`
+(`createResultFallback` in `dist/modes/interactive/components/tool-execution.js`):
+the model-facing text blocks joined by newlines, styled `toolOutput`, all lines
+when expanded and `FALLBACK_PREVIEW_LINES = 10` lines plus a dimmed
+`... (N more lines, <key> to expand)` tail when collapsed. `compact-tool-view`
+installs a `renderResult` for every name in the mode table, which suppresses that
+path (pi only calls the fallback when no result renderer resolved), so for a tool
+whose base has none the extension synthesizes the same body:
+
+| State | Body |
+| --- | --- |
+| expanded | every line of the sanitized text, `toolOutput` |
+| streaming (`isPartial`) | the first **5** lines, then `... (N more lines, <key> to expand)` (dimmed tail, `app.tools.expand` hint) |
+| collapsed final | the gist, as always |
+| empty text | none: the gist still renders, so the row is never blank |
+
+- The 5-line streaming cap is a deliberate divergence from pi's 10: a live gist
+  row does not need pi's ten-line preview, and a shorter preview keeps the
+  streaming row compact. `PREVIEW_LINES` in `index.ts` is the single knob.
+- Text is sanitized with pi-tui's public `stripTerminalSequences` and
+  `replaceControlCharacters` (the latter per line, because it also blanks
+  newlines) plus CR removal, which is the effect pi's own fallback gets from
+  its internal `getTextOutput`. Tabs stay, as in pi's fallback.
+- pi's fallback also appends placeholder text for image blocks it cannot draw.
+  That is not reproduced: the tools that reach this path return text (the image
+  paths, `read` and MCP results, have renderers of their own), and an image-only
+  result keeps the gist's `image` line rather than a blank body.
+- Which table entries rely on it: pi supplies built-in renderers for only
+  `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`
+  (`dist/core/tools/renderers/index.js`, merged by `withBuiltInRenderers`), the
+  MCP tool renderers cover `mcp__*`, `ffgrep`/`fffind`, `codemode`, `tool_search`,
+  and `subagent` render themselves, and guard registers one for `bash`/
+  `host_bash` only. Every other default and config-only name (for example
+  `web_fetch`, `web_search`, `gh_read`, `git_read`, `jira_read`, `jira_update`,
+  `session_search`, `session_excerpt`, `subagent_list`, `request_read_access`,
+  `python`, `node`, the MCP resource tools, `gitlab_read`, `pup_*`, `memory_*`)
+  depends on this synthesized body to expand.
 
 ## Gist derivation order
 
@@ -316,10 +361,12 @@ Verified at the resolver level: pi's chain is `resolvers[0](name, () => resolver
 `tests/compact-tool-view.test.mts` covers the pure gist table, the config loader
 (defaults, overrides, `stock`, unknown names, invalid values, bad top level,
 prefix patterns, pattern precedence, and invalid keys), and the resolver wiring
-(collapsed gist replacement, expanded/streaming delegation, `hide`,
-failure-over-`hide`, extra dimmed lines, pattern wrapping, and unknown/`stock`
-pass-through). It also covers the line-set shape (per-line `dim` flags), the
-`codemode` success, failure, truncated, image-only, and no-error-block cases,
-`tool_search` with and without matches, the MCP resource tool fallback, and the
-five new shipped defaults. The file is listed in the explicit `test:ci` script in
-`package.json`; an unlisted file never runs.
+(collapsed gist replacement, expanded/streaming delegation, the synthesized
+fallback body for a tool with no base renderer: expanded lines, the 5-line
+streaming preview plus hint, an empty-result fallback to the gist, and `hide`
+expanded to the body, `hide`, failure-over-`hide`, extra dimmed lines, pattern
+wrapping, and unknown/`stock` pass-through). It also covers the line-set shape
+(per-line `dim` flags), the `codemode` success, failure, truncated, image-only,
+and no-error-block cases, `tool_search` with and without matches, the MCP
+resource tool fallback, and the five new shipped defaults. The file is listed in
+the explicit `test:ci` script in `package.json`; an unlisted file never runs.

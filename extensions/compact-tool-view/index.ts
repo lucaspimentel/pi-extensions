@@ -11,9 +11,10 @@
  * through unchanged. The table is resolved with `resolveMode`, where a file
  * exact entry beats a file prefix pattern and a file pattern beats a code
  * default. The wrap is collapsed-only: expanded and streaming views delegate
- * to the base renderer when one exists. Display-only: the model-facing content
- * and `structuredContent` are never changed, and neither guard policy nor the
- * call row is touched.
+ * to the base renderer when one exists, and otherwise synthesize the body pi's
+ * own fallback would have drawn (see `fallbackBodyText`), so expanding is never
+ * a no-op. Display-only: the model-facing content and `structuredContent` are
+ * never changed, and neither guard policy nor the call row is touched.
  *
  * timestamps registers its own resolver for every tool name and both delegate
  * through `next()`, so the two compose in either load order.
@@ -26,13 +27,15 @@ import {
 	type ToolRendererResolver,
 	type ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { replaceControlCharacters, stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { loadModes, resolveMode } from "./config.ts";
-import { gistFor, type GistLine } from "./gist.ts";
+import { gistFor, textBlocks, type GistLine } from "./gist.ts";
 
 const CONFIG_FILE = "compact-tool-view.json";
 const EXPAND_KEYBINDING = "app.tools.expand";
+/** Preview cap for the synthesized streaming body; pi's own fallback previews 10 lines. */
+const PREVIEW_LINES = 5;
 
 /** Structural view of the renderer context fields this extension reads. */
 interface RenderContextLike {
@@ -47,8 +50,49 @@ interface RenderContextLike {
 const gistText = (lines: GistLine[], theme: Theme): string =>
 	lines.map((line) => theme.fg(line.dim ? "muted" : "toolOutput", line.text)).join("\n");
 
-const hideText = (theme: Theme, context: RenderContextLike): string =>
-	theme.fg("muted", context.keyHint?.(EXPAND_KEYBINDING, "to expand") ?? "ctrl+o to expand");
+const expandHint = (theme: Theme, context: RenderContextLike): string =>
+	context.keyHint?.(EXPAND_KEYBINDING, "to expand") ?? "ctrl+o to expand";
+
+const hideText = (theme: Theme, context: RenderContextLike): string => theme.fg("muted", expandHint(theme, context));
+
+/**
+ * Sanitized body text of a result, the way pi's own fallback body reads it: the
+ * model-facing text blocks joined by newlines, terminal sequences removed and
+ * control characters blanked. `stripTerminalSequences` and
+ * `replaceControlCharacters` are pi-tui's public API; the latter also eats
+ * newlines, so it runs line by line. Tabs stay, as in pi's fallback.
+ */
+const bodyText = (content: unknown): string =>
+	stripTerminalSequences(textBlocks(content).join("\n"))
+		.replace(/\r/g, "")
+		.split("\n")
+		.map((line) => replaceControlCharacters(line))
+		.join("\n");
+
+/**
+ * The body for a tool whose base renderer has none. pi would have drawn its own
+ * fallback body there (`createResultFallback` in
+ * `dist/modes/interactive/components/tool-execution.js`), but installing any
+ * `renderResult` suppresses that path, so the gist repeats instead and
+ * expanding a row would be a no-op. This mirrors the fallback: every line when
+ * expanded, else the first `PREVIEW_LINES` lines plus the same dimmed
+ * `... (N more lines, <key> to expand)` tail pi appends. An empty result has no
+ * body (pi's fallback renders nothing at all), which the caller treats as "keep
+ * the gist". pi's fallback also appends placeholder text for image blocks that
+ * cannot be drawn; the tools that reach this path return text, and an image-only
+ * result keeps the gist's `image` line.
+ */
+const fallbackBodyText = (content: unknown, expanded: boolean, theme: Theme, context: RenderContextLike): string => {
+	const lines = bodyText(content).split("\n");
+	if (lines.length === 1 && lines[0] === "") return "";
+	const shown = expanded ? lines : lines.slice(0, PREVIEW_LINES);
+	let text = shown.map((line) => theme.fg("toolOutput", line)).join("\n");
+	const remaining = lines.length - shown.length;
+	if (remaining > 0) {
+		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${expandHint(theme, context)}${theme.fg("muted", ")")}`;
+	}
+	return text;
+};
 
 export default function compactToolViewExtension(pi: ExtensionAPI): void {
 	const { table, warning } = loadModes(join(getAgentDir(), CONFIG_FILE));
@@ -68,12 +112,14 @@ export default function compactToolViewExtension(pi: ExtensionAPI): void {
 		if (mode === undefined) return next();
 		const base = next();
 		const renderResult: NonNullable<ToolRenderers["renderResult"]> = (result, options, theme, context) => {
-			// Expanded and streaming views keep the stock rendering; the gist is
-			// collapsed-only and lands on the final result.
-			if ((options.expanded || options.isPartial) && base?.renderResult) {
-				return base.renderResult(result, options, theme, context);
-			}
 			const view = context as RenderContextLike;
+			// Expanded and streaming views keep the stock rendering when the base has
+			// one; the gist is collapsed-only and lands on the final result.
+			if (options.expanded || options.isPartial) {
+				if (base?.renderResult) return base.renderResult(result, options, theme, context);
+				const body = fallbackBodyText(result.content, options.expanded, theme, view);
+				if (body !== "") return new Text(body, 0, 0);
+			}
 			// pi forwards only { content, details } to a result renderer; the error flag
 			// is on the context, so seed it into the result shape the gist reads.
 			const isError = Boolean(view.isError || result.isError);

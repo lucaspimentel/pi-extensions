@@ -30,8 +30,8 @@ const one = (text: string): GistLine[] => [{ text }];
 const asObject = (value: unknown): Record<string, any> | undefined =>
 	value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, any>) : undefined;
 
-/** The `text` of every text content block, in order. */
-const textBlocks = (content: unknown): string[] => {
+/** The `text` of every text content block, in order. Exported for the renderer's synthesized fallback body. */
+export const textBlocks = (content: unknown): string[] => {
 	if (!Array.isArray(content)) return [];
 	const texts: string[] = [];
 	for (const block of content) {
