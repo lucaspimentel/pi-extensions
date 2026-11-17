@@ -25,10 +25,11 @@
  * handler so the behavior is testable via process.env mutation.
  */
 
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { boundedExec, type BoundedExecOptions } from "../shared/bounded-spawn.ts";
+import { HERDR_BINARY, herdrWorkspaceId, parseHerdrResult } from "../shared/herdr.ts";
 
 export const COMMAND_NAME = "herdr-fork-session";
 export const CUSTOM_TYPE = "herdr-fork-session";
@@ -48,6 +49,9 @@ export const SLUG_MAX = 40;
 export const USAGE =
 	"/herdr-fork-session [branch] - create a git worktree and open a forked pi session in a new herdr tab";
 
+/** Tail sentence for every path that refused or failed before creating anything. */
+const NOTHING_CREATED = "Nothing was created; existing checkouts are left untouched.";
+
 // ── Exec seam ────────────────────────────────────────────────────────────────
 
 export interface ExecResult {
@@ -55,7 +59,7 @@ export interface ExecResult {
 	code: number | null;
 	stdout: string;
 	stderr: string;
-	/** Spawn failure text (e.g. ENOENT), when the process never ran. */
+	/** Spawn failure text, or the timeout message when the process was killed; `code` is null for both. */
 	error?: string;
 }
 
@@ -68,26 +72,19 @@ export function setExecOverride(fn: ExecRunner | null): void {
 	runnerOverride = fn;
 }
 
+/** Per-child limits: the shared core's default is a 15 s / 50 KiB tool budget. */
+const CHILD_LIMITS: BoundedExecOptions = { timeoutMs: EXEC_TIMEOUT_MS, maxBytes: 4 * 1024 * 1024 };
+
 /** Cancellable, argument-array subprocess execution without a shell. */
-const defaultExec: ExecRunner = (command, args, cwd) =>
-	new Promise((resolve) => {
-		execFile(
-			command,
-			args,
-			{ cwd, windowsHide: true, timeout: EXEC_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
-			(error, stdout, stderr) => {
-				const code = error ? (typeof error.code === "number" ? error.code : null) : 0;
-				const failure =
-					error && typeof error.code !== "number" ? error.message : undefined;
-				resolve({
-					code,
-					stdout: String(stdout ?? ""),
-					stderr: String(stderr ?? ""),
-					error: failure,
-				});
-			},
-		);
-	});
+const defaultExec: ExecRunner = async (command, args, cwd) => {
+	const outcome = await boundedExec(command, args, process.env, cwd, CHILD_LIMITS);
+	return {
+		code: outcome.code,
+		stdout: outcome.stdout,
+		stderr: outcome.stderr,
+		error: outcome.spawnError ?? (outcome.timedOut ? `timed out after ${EXEC_TIMEOUT_MS} ms` : undefined),
+	};
+};
 
 /** First non-empty line of a multi-line command output. */
 const firstNonEmptyLine = (text: string): string =>
@@ -201,19 +198,21 @@ export async function resolveMainClone(
 
 /** Read HEAD's sha, display ref, short sha, and subject in a directory. */
 export async function readHead(run: ExecRunner, dir: string): Promise<({ ok: true } & Head) | Fail> {
-	const shaResult = await run("git", ["rev-parse", "HEAD"], dir);
+	const [shaResult, refResult, shortResult, logResult] = await Promise.all([
+		run("git", ["rev-parse", "HEAD"], dir),
+		run("git", ["rev-parse", "--abbrev-ref", "HEAD"], dir),
+		run("git", ["rev-parse", "--short", "HEAD"], dir),
+		run("git", ["log", "-1", "--format=%s"], dir),
+	]);
 	if (shaResult.code !== 0) {
 		return { ok: false, message: failureText(shaResult, `git rev-parse HEAD failed in ${dir}`) };
 	}
-	const refResult = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], dir);
 	if (refResult.code !== 0) {
 		return { ok: false, message: failureText(refResult, `git rev-parse --abbrev-ref HEAD failed in ${dir}`) };
 	}
-	const shortResult = await run("git", ["rev-parse", "--short", "HEAD"], dir);
 	if (shortResult.code !== 0) {
 		return { ok: false, message: failureText(shortResult, `git rev-parse --short HEAD failed in ${dir}`) };
 	}
-	const logResult = await run("git", ["log", "-1", "--format=%s"], dir);
 	if (logResult.code !== 0) {
 		return { ok: false, message: failureText(logResult, `git log failed in ${dir}`) };
 	}
@@ -278,21 +277,16 @@ export async function worktreeForBranch(
 
 /** Existing herdr agent names from "herdr agent list"; unnamed agents carry no name. */
 export async function herdrAgentNames(run: ExecRunner, cwd: string): Promise<string[]> {
-	const result = await run("herdr", ["agent", "list"], cwd);
+	const result = await run(HERDR_BINARY, ["agent", "list"], cwd);
 	if (result.code !== 0) return [];
-	try {
-		const parsed = JSON.parse(result.stdout) as { result?: { agents?: unknown } };
-		const agents = parsed.result?.agents;
-		if (!Array.isArray(agents)) return [];
-		const names: string[] = [];
-		for (const agent of agents) {
-			const name = (agent as { name?: unknown } | null)?.name;
-			if (typeof name === "string" && name !== "") names.push(name);
-		}
-		return names;
-	} catch {
-		return [];
+	const agents = parseHerdrResult<{ agents?: unknown }>(result.stdout)?.agents;
+	if (!Array.isArray(agents)) return [];
+	const names: string[] = [];
+	for (const agent of agents) {
+		const name = (agent as { name?: unknown } | null)?.name;
+		if (typeof name === "string" && name !== "") names.push(name);
 	}
+	return names;
 }
 
 /** Create an unfocused herdr tab rooted at the worktree. */
@@ -304,26 +298,20 @@ export async function herdrTabCreate(
 	label: string,
 ): Promise<{ ok: true; tabId: string; paneId: string } | Fail> {
 	const result = await run(
-		"herdr",
+		HERDR_BINARY,
 		["tab", "create", "--workspace", workspaceId, "--cwd", worktree, "--label", label, "--no-focus"],
 		cwd,
 	);
 	if (result.code !== 0) {
 		return { ok: false, message: failureText(result, "herdr tab create failed") };
 	}
-	try {
-		const parsed = JSON.parse(result.stdout) as {
-			result?: { tab?: { tab_id?: unknown }; root_pane?: { pane_id?: unknown } };
-		};
-		const tabId = parsed.result?.tab?.tab_id;
-		const paneId = parsed.result?.root_pane?.pane_id;
-		if (typeof tabId !== "string" || typeof paneId !== "string") {
-			return { ok: false, message: "herdr tab create returned an unexpected response" };
-		}
-		return { ok: true, tabId, paneId };
-	} catch {
+	const body = parseHerdrResult<{ tab?: { tab_id?: unknown }; root_pane?: { pane_id?: unknown } }>(result.stdout);
+	const tabId = body?.tab?.tab_id;
+	const paneId = body?.root_pane?.pane_id;
+	if (typeof tabId !== "string" || typeof paneId !== "string") {
 		return { ok: false, message: "herdr tab create returned an unexpected response" };
 	}
+	return { ok: true, tabId, paneId };
 }
 
 /** Start a pi agent in the tab's root pane, forked from the current session. */
@@ -335,7 +323,7 @@ export async function herdrAgentStart(
 	forkRef: string,
 ): Promise<{ ok: true } | Fail> {
 	const result = await run(
-		"herdr",
+		HERDR_BINARY,
 		[
 			"agent",
 			"start",
@@ -427,29 +415,18 @@ export default function herdrForkSessionExtension(pi: ExtensionAPI): void {
 		description: USAGE,
 		handler: async (args, ctx) => {
 			const run = runnerOverride ?? defaultExec;
+			// Pre-flight refusals share one tail sentence, so only the cause varies.
+			const refuse = (detail: string, fields: ReportFields = {}): void =>
+				report(pi, ctx, "refused", `${detail} ${NOTHING_CREATED}`, fields, "warning");
 
 			if (!ctx.hasUI) {
-				report(
-					pi,
-					ctx,
-					"refused",
-					`${USAGE}. This command needs an interactive confirmation; nothing was created and the existing checkouts are left untouched.`,
-					{ error: "no interactive UI" },
-					"warning",
-				);
+				refuse(`${USAGE}. This command needs an interactive confirmation.`, { error: "no interactive UI" });
 				return;
 			}
 
 			const parsed = parseBranchArg(args);
 			if (!parsed.ok) {
-				report(
-					pi,
-					ctx,
-					"refused",
-					`${USAGE}. ${parsed.message}. Nothing was created; existing checkouts are left untouched.`,
-					{ error: parsed.message },
-					"warning",
-				);
+				refuse(`${USAGE}. ${parsed.message}.`, { error: parsed.message });
 				return;
 			}
 
@@ -457,68 +434,35 @@ export default function herdrForkSessionExtension(pi: ExtensionAPI): void {
 
 			const main = await resolveMainClone(run, cwd);
 			if (!main.ok) {
-				report(
-					pi,
-					ctx,
-					"refused",
-					`Not a git repository: ${main.message}. Nothing was created; existing checkouts are left untouched.`,
-					{ error: main.message },
-					"warning",
-				);
+				refuse(`Not a git repository: ${main.message}.`, { error: main.message });
 				return;
 			}
 			const mainDir = main.mainDir;
 
 			const branch = parsed.branch ?? slugFromSessionName(ctx.sessionManager.getSessionName());
 			if (branch === "") {
-				report(
-					pi,
-					ctx,
-					"refused",
-					`${USAGE}. This session has no name; pass a branch. Nothing was created; existing checkouts are left untouched.`,
-					{ error: "no branch" },
-					"warning",
-				);
+				refuse(`${USAGE}. This session has no name; pass a branch.`, { error: "no branch" });
 				return;
 			}
 
 			const checked = await checkBranch(run, cwd, branch);
 			if (!checked.ok) {
-				report(
-					pi,
-					ctx,
-					"refused",
-					`Cannot use "${branch}" as a branch name: ${checked.message}. Nothing was created; existing checkouts are left untouched.`,
-					{ branch, error: checked.message },
-					"warning",
-				);
+				refuse(`Cannot use "${branch}" as a branch name: ${checked.message}.`, { branch, error: checked.message });
 				return;
 			}
 
+			// The session checkout first, then the main clone when they differ; the
+			// message names the directory whose HEAD could not be read.
 			const sessionHead = await readHead(run, cwd);
 			if (!sessionHead.ok) {
-				report(
-					pi,
-					ctx,
-					"refused",
-					`Cannot read HEAD in ${cwd}: ${sessionHead.message}. Nothing was created; existing checkouts are left untouched.`,
-					{ branch, error: sessionHead.message },
-					"warning",
-				);
+				refuse(`Cannot read HEAD in ${cwd}: ${sessionHead.message}.`, { branch, error: sessionHead.message });
 				return;
 			}
-			let mainHead: Head = sessionHead;
+			let mainHead = sessionHead;
 			if (cwd !== mainDir) {
 				const fetched = await readHead(run, mainDir);
 				if (!fetched.ok) {
-					report(
-						pi,
-						ctx,
-						"refused",
-						`Cannot read HEAD in ${mainDir}: ${fetched.message}. Nothing was created; existing checkouts are left untouched.`,
-						{ branch, error: fetched.message },
-						"warning",
-					);
+					refuse(`Cannot read HEAD in ${mainDir}: ${fetched.message}.`, { branch, error: fetched.message });
 					return;
 				}
 				mainHead = fetched;
@@ -526,8 +470,8 @@ export default function herdrForkSessionExtension(pi: ExtensionAPI): void {
 
 			const path = worktreePath(mainDir, branch);
 			const label = sanitizeBranch(branch);
-			const inHerdr = process.env.HERDR_ENV === "1" && !!process.env.HERDR_WORKSPACE_ID;
-			const taken = new Set<string>(inHerdr ? await herdrAgentNames(run, cwd) : []);
+			const workspaceId = herdrWorkspaceId();
+			const taken = new Set<string>(workspaceId !== undefined ? await herdrAgentNames(run, cwd) : []);
 			const agentName = uniqueAgentName(toAgentName(branch), taken);
 			const sessionFile = ctx.sessionManager.getSessionFile();
 
@@ -591,6 +535,9 @@ export default function herdrForkSessionExtension(pi: ExtensionAPI): void {
 				base = choice === options[0] ? sessionHead : mainHead;
 			}
 			const baseLabel = formatHead(base);
+			// Entry fields shared by every reporting path that runs after the worktree
+			// exists; each site adds only what is specific to it (error text, tab ids).
+			const baseFields: ReportFields = { branch, path, base: baseLabel, baseSha: base.sha, label, agentName, sessionFile };
 
 			const added = await run("git", ["worktree", "add", "-b", branch, path, base.sha], cwd);
 			if (added.code !== 0) {
@@ -599,14 +546,14 @@ export default function herdrForkSessionExtension(pi: ExtensionAPI): void {
 					pi,
 					ctx,
 					"failed",
-					`git worktree add failed: ${detail}. Nothing was created; existing checkouts are left untouched.`,
-					{ branch, path, base: baseLabel, baseSha: base.sha, label, agentName, sessionFile, error: detail },
+					`git worktree add failed: ${detail}. ${NOTHING_CREATED}`,
+					{ ...baseFields, error: detail },
 					"error",
 				);
 				return;
 			}
 
-			if (!inHerdr) {
+			if (workspaceId === undefined) {
 				let line = `worktree-only: Created worktree ${path} on branch ${branch} based on ${baseLabel}. Nothing was sent to the forked session. The current checkout is left untouched.`;
 				if (sessionFile) {
 					line += ` Start the forked pi session with: cd ${path} && pi --fork ${sessionFile}`;
@@ -618,13 +565,12 @@ export default function herdrForkSessionExtension(pi: ExtensionAPI): void {
 					ctx,
 					"worktree-only",
 					line,
-					{ branch, path, base: baseLabel, baseSha: base.sha, label, agentName, sessionFile },
+					baseFields,
 					"info",
 				);
 				return;
 			}
 
-			const workspaceId = process.env.HERDR_WORKSPACE_ID as string;
 			const forkRef = sessionFile ?? ctx.sessionManager.getSessionId();
 
 			const tab = await herdrTabCreate(run, cwd, workspaceId, path, label);
@@ -634,7 +580,7 @@ export default function herdrForkSessionExtension(pi: ExtensionAPI): void {
 					ctx,
 					"tab-failed",
 					`tab-failed: Created worktree ${path} on branch ${branch} based on ${baseLabel}, but herdr could not open a tab: ${tab.message}. Nothing was sent to the forked session. The worktree is left untouched; retry with: cd ${path} && pi --fork ${forkRef}`,
-					{ branch, path, base: baseLabel, baseSha: base.sha, label, agentName, sessionFile },
+					baseFields,
 					"error",
 				);
 				return;
@@ -647,17 +593,7 @@ export default function herdrForkSessionExtension(pi: ExtensionAPI): void {
 					ctx,
 					"tab-failed",
 					`tab-failed: Created worktree ${path} on branch ${branch} based on ${baseLabel} and opened herdr tab ${tab.tabId} (pane ${tab.paneId}), but pi did not start: ${started.message}. Nothing was sent to the forked session. The worktree and tab are left untouched; retry with: herdr agent start ${agentName} --kind pi --pane ${tab.paneId} --timeout ${AGENT_START_TIMEOUT_MS} -- --fork ${forkRef}; open the tab with: herdr tab focus ${tab.tabId}`,
-					{
-						branch,
-						path,
-						base: baseLabel,
-						baseSha: base.sha,
-						label,
-						agentName,
-						tabId: tab.tabId,
-						paneId: tab.paneId,
-						sessionFile,
-					},
+					{ ...baseFields, tabId: tab.tabId, paneId: tab.paneId },
 					"error",
 				);
 				return;
@@ -668,17 +604,7 @@ export default function herdrForkSessionExtension(pi: ExtensionAPI): void {
 				ctx,
 				"ok",
 				`ok: Created worktree ${path} on branch ${branch} based on ${baseLabel} and started pi in herdr tab ${tab.tabId} (pane ${tab.paneId}). Nothing was sent to the forked session. The current checkout is left untouched. Open it with: herdr tab focus ${tab.tabId}`,
-				{
-					branch,
-					path,
-					base: baseLabel,
-					baseSha: base.sha,
-					label,
-					agentName,
-					tabId: tab.tabId,
-					paneId: tab.paneId,
-					sessionFile,
-				},
+				{ ...baseFields, tabId: tab.tabId, paneId: tab.paneId },
 				"info",
 			);
 		},

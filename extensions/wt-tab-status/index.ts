@@ -59,6 +59,7 @@
 
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isHerdrSession } from "../shared/herdr.ts";
 import {
 	initialLifecycleState,
 	reduceLifecycle,
@@ -118,12 +119,10 @@ export function isWindowsTerminal(env: NodeJS.ProcessEnv = process.env): boolean
 /**
  * True when pi runs inside a herdr pane. herdr owns the Windows Terminal tab
  * title and reports its own per-pane working/blocked state, so the title and
- * OSC 9;4 writes below would fight it. Same marker extensions/herdr-tab-name.ts
- * gates on; other truthy values ("true", "yes") do not count.
+ * OSC 9;4 writes below would fight it. Re-exported from the shared herdr module
+ * so every caller tests the one marker; other truthy values do not count.
  */
-export function isHerdrSession(env: NodeJS.ProcessEnv = process.env): boolean {
-	return env.HERDR_ENV === "1";
-}
+export { isHerdrSession };
 
 export function formatTitle(state: AgentLifecycleState, sessionName: string | null, cwdBase: string): string {
 	const glyph = STATE_GLYPHS[state];

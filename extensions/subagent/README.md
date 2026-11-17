@@ -21,7 +21,9 @@ where this fork diverges.
   names the real error (`Failed to spawn subagent: <message>`). An expanded
   result row prints the error, the termination signal, and at most the first
   2 KiB of stderr; collapsed rows show a one-line failure summary, and the
-  tool details keep the full stderr.
+  tool details keep the full stderr. Parallel mode reports its tool result as an
+  error whenever any child failed (`isError`), instead of only when the call
+  itself could not run.
 - **Output limits**: single and chain model-visible text is capped at pi's read
   limits (2000 lines / 50 KB) with an omitted-bytes notice, and the untruncated
   result stays in the tool details. The chain's `{previous}` handoff is not

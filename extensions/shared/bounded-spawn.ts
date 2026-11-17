@@ -26,6 +26,14 @@ export const TIMEOUT_MS = 15_000;
 /** Delay before escalating SIGTERM to SIGKILL after a timeout. */
 export const KILL_ESCALATION_MS = 5_000;
 
+/** Per-call overrides; both default to the tool budget above. */
+export interface BoundedExecOptions {
+	/** Wall-clock budget before SIGTERM; defaults to TIMEOUT_MS. */
+	timeoutMs?: number;
+	/** Combined stdout+stderr bytes retained; defaults to OUTPUT_CAP. */
+	maxBytes?: number;
+}
+
 type SpawnFunction = typeof spawn;
 let spawnOverride: SpawnFunction | null = null;
 
@@ -62,7 +70,10 @@ export function boundedExec(
 	argv: readonly string[],
 	env: Record<string, string | undefined>,
 	cwd: string,
+	options: BoundedExecOptions = {},
 ): Promise<ExecOutcome> {
+	const maxBytes = options.maxBytes ?? OUTPUT_CAP;
+	const timeoutMs = options.timeoutMs ?? TIMEOUT_MS;
 	return new Promise((resolvePromise) => {
 		const spawnFn = spawnOverride ?? spawn;
 		let child: ReturnType<typeof spawn>;
@@ -101,11 +112,11 @@ export function boundedExec(
 		let truncated = false;
 		const drainInto = (target: Buffer[]) => (chunk: Buffer): void => {
 			totalBytes += chunk.length;
-			if (retainedBytes >= OUTPUT_CAP) {
+			if (retainedBytes >= maxBytes) {
 				truncated = true;
 				return;
 			}
-			const keep = chunk.subarray(0, OUTPUT_CAP - retainedBytes);
+			const keep = chunk.subarray(0, maxBytes - retainedBytes);
 			target.push(keep);
 			retainedBytes += keep.length;
 			if (keep.length < chunk.length) truncated = true;
@@ -129,7 +140,7 @@ export function boundedExec(
 					// ESRCH tolerated for the same reason.
 				}
 			}, KILL_ESCALATION_MS);
-		}, TIMEOUT_MS);
+		}, timeoutMs);
 
 		// `error` and `close` can both fire (e.g. after a kill); resolve once.
 		let settled = false;

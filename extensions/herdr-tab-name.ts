@@ -28,6 +28,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
+import { HERDR_BINARY, isHerdrSession } from "./shared/herdr.ts";
 
 /** Label a single-pane tab gets while its session has no name. */
 export const UNNAMED_TAB_LABEL = "pi";
@@ -114,7 +115,7 @@ export type HerdrRun = (args: string[]) => Promise<string>;
 
 const defaultRun: HerdrRun = (args) =>
 	new Promise<string>((resolve, reject) => {
-		execFile("herdr", args, (error, stdout) => {
+		execFile(HERDR_BINARY, args, (error, stdout) => {
 			if (error) reject(error);
 			else resolve(stdout);
 		});
@@ -127,7 +128,7 @@ export default function (pi: ExtensionAPI, deps?: { run?: HerdrRun }) {
 	// scope) keeps the extension testable via process.env mutation.
 	const tabId = process.env.HERDR_TAB_ID;
 	const paneId = process.env.HERDR_PANE_ID;
-	if (process.env.HERDR_ENV !== "1" || !tabId || !paneId) {
+	if (!isHerdrSession() || !tabId || !paneId) {
 		return;
 	}
 

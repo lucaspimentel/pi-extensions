@@ -30,7 +30,7 @@
 
 ## Outcomes
 
-Every outcome notifies the user and records a `herdr-fork-session` custom session entry; the four creation outcomes also deliver a one-line next-turn message to the model. Each messaged line starts with its outcome token (`ok: `, `worktree-only: `, `tab-failed: `, `refused-collision: `), and the three outcomes where a forked session could exist (`ok`, `worktree-only`, `tab-failed`) also state that nothing was sent to it. Unknown fields are left undefined in the entry.
+Every outcome notifies the user; every outcome except a decline also records a `herdr-fork-session` custom session entry, and the four messaged outcomes in the table deliver a one-line next-turn message to the model. Each messaged line starts with its outcome token (`ok: `, `worktree-only: `, `tab-failed: `, `refused-collision: `), and the three outcomes where a forked session could exist (`ok`, `worktree-only`, `tab-failed`) also state that nothing was sent to it. Unknown fields are left undefined in the entry.
 
 | outcome | notify | entry | message | what happened |
 | --- | --- | --- | --- | --- |

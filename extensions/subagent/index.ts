@@ -45,6 +45,7 @@ import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	type AgentConfig,
+	type AgentDiscoveryResult,
 	type AgentScope,
 	type AgentSource,
 	discoverAgents,
@@ -60,6 +61,7 @@ import {
 	buildPanelJudgeInput,
 	buildToolCallSummary,
 	truncateTaskOutput,
+	truncationNotice,
 	type PanelReviewInput,
 } from "./panel.ts";
 
@@ -310,6 +312,16 @@ function isUnsettled(result: SingleResult | undefined): boolean {
 	return result?.status === "pending" || result?.status === "running";
 }
 
+/**
+ * Status shown next to a child. A failure's stop reason is appended when it adds
+ * detail: "end" says nothing, and a reason equal to the status repeats it.
+ */
+function statusLabel(result: SingleResult): string {
+	const reason = result.stopReason;
+	if (!isFailedResult(result) || !reason || reason === "end" || reason === result.status) return result.status;
+	return `${result.status} (${reason})`;
+}
+
 function getResultOutput(result: SingleResult): string {
 	return isFailedResult(result) ? getFailureEvidence(result) : getFinalOutput(result.messages) || "(no output)";
 }
@@ -352,15 +364,15 @@ export function getFailureSummary(result: SingleResult): string {
  * and point at the tool details that keep the untruncated result.
  */
 export function truncateModelOutput(output: string): string {
-	const initial = truncateHead(output);
-	if (!initial.truncated) return output;
-
+	// One pass: the notice describes the tighter limits below, and the totals it
+	// reports describe the whole input, so they also answer "was anything dropped?".
 	const body = truncateHead(output, {
 		maxLines: DEFAULT_MAX_LINES - 2,
 		maxBytes: DEFAULT_MAX_BYTES - TRUNCATION_NOTICE_RESERVE,
 	});
-	const omittedBytes = initial.totalBytes - body.outputBytes;
-	const notice = `[Output truncated: ${omittedBytes} bytes omitted. Full output preserved in tool details.]`;
+	if (body.totalLines <= DEFAULT_MAX_LINES && body.totalBytes <= DEFAULT_MAX_BYTES) return output;
+	const omittedBytes = body.totalBytes - body.outputBytes;
+	const notice = truncationNotice(omittedBytes);
 	return body.content ? `${body.content}\n\n${notice}` : notice;
 }
 
@@ -390,13 +402,18 @@ function boundedLine(text: string, cap = ERROR_REASON_CAP): string {
 	return normalized.length > cap ? `${normalized.slice(0, cap)}...` : normalized;
 }
 
-/** First bytes of stderr for an expanded row, never a whole chatty child's output. */
+/**
+ * First bytes of stderr for an expanded row, never a whole chatty child's
+ * output. One encode plus one backward scan over continuation bytes keeps the
+ * cut on a character boundary without re-encoding the prefix per character.
+ */
 function boundedStderr(stderr: string): string {
-	const total = Buffer.byteLength(stderr, "utf8");
-	if (total <= STDERR_RENDER_CAP) return stderr;
-	let truncated = stderr.slice(0, STDERR_RENDER_CAP);
-	while (Buffer.byteLength(truncated, "utf8") > STDERR_RENDER_CAP) truncated = truncated.slice(0, -1);
-	return `${truncated}… (${total - Buffer.byteLength(truncated, "utf8")} bytes omitted)`;
+	const bytes = Buffer.from(stderr, "utf8");
+	if (bytes.byteLength <= STDERR_RENDER_CAP) return stderr;
+	let end = STDERR_RENDER_CAP;
+	while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end--;
+	const truncated = bytes.subarray(0, end).toString("utf8");
+	return `${truncated}… (${bytes.byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted)`;
 }
 
 /** Short, actionable failure reason for content and the judge input. */
@@ -503,10 +520,7 @@ function buildPanelNotices(
 function formatLabeledPanelReviews(results: readonly PanelistResult[]): string {
 	return results
 		.map((result) => {
-			const status =
-				isFailedResult(result) && result.stopReason && result.stopReason !== "end" && result.stopReason !== result.status
-					? `${result.status} (${result.stopReason})`
-					: result.status;
+			const status = statusLabel(result);
 			const body = isFailedResult(result) ? getFailureEvidence(result) : result.output || "(no output)";
 			return `### [${result.model}] ${status}\n\n${truncateTaskOutput(body)}`;
 		})
@@ -626,9 +640,22 @@ interface ResolvedAgent {
 	cwd: string;
 }
 
-function resolveAgent(defaultCwd: string, scope: AgentScope, name: string, cwd?: string): ResolvedAgent {
+function resolveAgent(
+	defaultCwd: string,
+	scope: AgentScope,
+	name: string,
+	cwd?: string,
+	cache?: Map<string, AgentDiscoveryResult>,
+): ResolvedAgent {
 	const effectiveCwd = path.resolve(defaultCwd, cwd ?? ".");
-	const discovery = discoverAgents(effectiveCwd, scope);
+	// A discovery is frozen for one dispatch, keyed by cwd and scope: tasks sharing
+	// a directory must not each re-read the bundled, user, and project agent dirs.
+	const key = `${effectiveCwd}\0${scope}`;
+	let discovery = cache?.get(key);
+	if (!discovery) {
+		discovery = discoverAgents(effectiveCwd, scope);
+		cache?.set(key, discovery);
+	}
 	return {
 		agent: discovery.agents.find((candidate) => candidate.name === name),
 		available: discovery.agents,
@@ -1350,9 +1377,17 @@ export default function (pi: ExtensionAPI) {
 			let judgeResolved: ResolvedAgent | undefined;
 			// Each task resolves its agents from its own effective cwd, before any
 			// validation, so an unknown name is reported against that cwd's agents.
-			const resolvedChain = (params.chain ?? []).map((step) => resolveAgent(ctx.cwd, agentScope, step.agent, step.cwd));
-			const resolvedTasks = (params.tasks ?? []).map((task) => resolveAgent(ctx.cwd, agentScope, task.agent, task.cwd));
-			const resolvedSingle = params.agent ? resolveAgent(ctx.cwd, agentScope, params.agent, params.cwd) : undefined;
+			// The cache keeps that per-directory discovery to one read per directory.
+			const discoveryCache = new Map<string, AgentDiscoveryResult>();
+			const resolvedChain = (params.chain ?? []).map((step) =>
+				resolveAgent(ctx.cwd, agentScope, step.agent, step.cwd, discoveryCache),
+			);
+			const resolvedTasks = (params.tasks ?? []).map((task) =>
+				resolveAgent(ctx.cwd, agentScope, task.agent, task.cwd, discoveryCache),
+			);
+			const resolvedSingle = params.agent
+				? resolveAgent(ctx.cwd, agentScope, params.agent, params.cwd, discoveryCache)
+				: undefined;
 			const namesOf = (candidates: readonly AgentConfig[]): string =>
 				formatAgentNames(sortAgentsByName(candidates.filter((a) => a.role !== "internal")));
 			const available = namesOf(agents);
@@ -1415,7 +1450,7 @@ export default function (pi: ExtensionAPI) {
 				if (!rawModels.length || rawModels.length > 4 || rawModels.some((m) => !m.trim())) return invalid("Parameter models must contain 1 to 4 nonblank model IDs.");
 				const models = [...new Set(rawModels.map((m) => m.trim()))];
 				const agentName = params.agent ?? preset.agent;
-				panelistResolved = resolveAgent(ctx.cwd, agentScope, agentName, params.cwd);
+				panelistResolved = resolveAgent(ctx.cwd, agentScope, agentName, params.cwd, discoveryCache);
 				const error = agentError(agentName, "panel.agent", panelistResolved);
 				if (error) return invalid(error, namesOf(panelistResolved.available));
 				const panelist = panelistResolved.agent!;
@@ -1432,7 +1467,7 @@ export default function (pi: ExtensionAPI) {
 				if (selectedJudge !== null && selectedJudge?.trim() !== "none") {
 					// The judge is internal: it resolves from bundled and user scope only, so
 					// a project agent can never shadow the bundled judge.
-					judgeResolved = resolveAgent(ctx.cwd, "user", "judge", params.cwd);
+					judgeResolved = resolveAgent(ctx.cwd, "user", "judge", params.cwd, discoveryCache);
 					const error = agentError("judge", "panel.judge", judgeResolved, true);
 					if (error) return invalid(error, namesOf(judgeResolved.available));
 					const model = selectedJudge?.trim() ?? discovery.configuredModels.judge ?? dispatchDefaults.model;
@@ -1809,11 +1844,7 @@ export default function (pi: ExtensionAPI) {
 				const successCount = results.filter((r) => !isFailedResult(r)).length;
 				const summaries = results.map((r) => {
 					const output = truncateParallelOutput(getResultOutput(r));
-					const status =
-						isFailedResult(r) && r.stopReason && r.stopReason !== "end" && r.stopReason !== r.status
-							? `${r.status} (${r.stopReason})`
-							: r.status;
-					return `### [${r.agent}] ${status}\n\n${output}`;
+					return `### [${r.agent}] ${statusLabel(r)}\n\n${output}`;
 				});
 				return {
 					content: [
@@ -1949,12 +1980,17 @@ export default function (pi: ExtensionAPI) {
 					container.addChild(new Text(theme.fg("error", `stderr: ${boundedStderr(child.stderr.trim())}`), 0, 0));
 			};
 
-			/** One-line outcome for a collapsed child section with no assistant text. */
-			const collapsedSummary = (child: SingleResult): { text: string; color: "muted" | "error" } => {
-				if (child.status === "pending") return { text: "(pending...)", color: "muted" };
-				if (child.status === "running") return { text: "(running...)", color: "muted" };
-				if (isFailedResult(child)) return { text: getFailureSummary(child), color: "error" };
-				return { text: "(no output)", color: "muted" };
+			/**
+			 * Collapsed child body: its display items, or a one-line outcome when it has
+			 * none (pending, running, failed without text, or empty).
+			 */
+			const collapsedBody = (child: SingleResult): string => {
+				const displayItems = getDisplayItems(child.messages);
+				if (displayItems.length > 0) return renderDisplayItems(displayItems, 5);
+				if (child.status === "pending") return theme.fg("muted", "(pending...)");
+				if (child.status === "running") return theme.fg("muted", "(running...)");
+				if (isFailedResult(child)) return theme.fg("error", getFailureSummary(child));
+				return theme.fg("muted", "(no output)");
 			};
 
 			if (details.mode === "panel") {
@@ -2047,7 +2083,7 @@ export default function (pi: ExtensionAPI) {
 								new Text(theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0),
 							);
 					}
-					if (failed) container.addChild(new Text(theme.fg("dim", `Error: ${failureReason(result)}`), 0, 0));
+					if (failed) addDiagnostics(container, result);
 					if (result.output) {
 						container.addChild(new Spacer(1));
 						if (failed) container.addChild(new Text(theme.fg("dim", "[Incomplete partial answer:]"), 0, 0));
@@ -2147,8 +2183,13 @@ export default function (pi: ExtensionAPI) {
 				if (isRunning) text += ` ${theme.fg("warning", `[${r.status}]`)}`;
 				else if (isError) text += ` ${theme.fg("error", `[${r.stopReason ?? r.status}]`)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
-				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
-				else {
+				else if (displayItems.length === 0) {
+					// A failed child with no error text still gets its one-line diagnosis
+					// instead of the misleading "(no output)".
+					text += isError
+						? `\n${theme.fg("error", getFailureSummary(r))}`
+						: `\n${theme.fg("muted", "(no output)")}`;
+				} else {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
 					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				}
@@ -2235,12 +2276,8 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("accent", `${successCount}/${details.results.length} steps`);
 				for (const r of details.results) {
 					const rIcon = resultIcon(r);
-					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
-					if (displayItems.length === 0) {
-						const summary = collapsedSummary(r);
-						text += `\n${theme.fg(summary.color, summary.text)}`;
-					} else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					text += `\n${collapsedBody(r)}`;
 				}
 				const usageStr = formatUsageStats(aggregateUsage(details.results.map((r) => r.usage)));
 				if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
@@ -2320,12 +2357,8 @@ export default function (pi: ExtensionAPI) {
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
 				for (const r of details.results) {
 					const rIcon = resultIcon(r);
-					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
-					if (displayItems.length === 0) {
-						const summary = collapsedSummary(r);
-						text += `\n${theme.fg(summary.color, summary.text)}`;
-					} else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					text += `\n${collapsedBody(r)}`;
 				}
 				if (!isRunning) {
 					const usageStr = formatUsageStats(aggregateUsage(details.results.map((r) => r.usage)));

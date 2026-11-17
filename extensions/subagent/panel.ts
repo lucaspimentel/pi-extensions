@@ -164,6 +164,11 @@ export function buildToolCallSummary(messages: readonly Message[]): string {
  * points so a multi-byte character is never split, and annotate the omission
  * exactly as the legacy parallel renderer does.
  */
+/** The one truncation notice both model-text engines append. */
+export function truncationNotice(omittedBytes: number): string {
+	return `[Output truncated: ${omittedBytes} bytes omitted. Full output preserved in tool details.]`;
+}
+
 export function truncateTaskOutput(output: string): string {
 	const byteLength = Buffer.byteLength(output, "utf8");
 	if (byteLength <= PER_TASK_OUTPUT_CAP) return output;
@@ -176,7 +181,7 @@ export function truncateTaskOutput(output: string): string {
 		kept += character;
 		keptBytes += size;
 	}
-	return `${kept}\n\n[Output truncated: ${byteLength - keptBytes} bytes omitted. Full output preserved in tool details.]`;
+	return `${kept}\n\n${truncationNotice(byteLength - keptBytes)}`;
 }
 
 /**

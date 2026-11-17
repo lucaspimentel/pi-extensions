@@ -173,13 +173,11 @@ const makeHarness = (options = {}) => {
 const runScenario = async (options, fn) => {
 	const harness = makeHarness(options);
 	const responses = options.responses ?? {};
+	// Recording only: the pinned responses and the loud unexpected-argv failure
+	// are shared with the direct helper tests through stubRunner.
 	const runner = async (command, args, cwd) => {
 		harness.calls.push({ command, args: [...args], cwd });
-		const entry = responses[key(command, args)];
-		if (entry === undefined) {
-			throw new Error(`unexpected exec call: ${command} ${args.join(" ")} (cwd ${cwd})`);
-		}
-		return typeof entry === "function" ? entry(cwd) : entry;
+		return stubRunner(responses)(command, args, cwd);
 	};
 	mod.setExecOverride(runner);
 	const savedEnv = {
@@ -249,13 +247,15 @@ const standard = ({ mainDir = MAIN, branch = BRANCH, sha = SHA, shortSha = SHORT
 
 // ── Main-clone and worktree resolution ───────────────────────────────────────
 
-/** Runner stub for the direct helper tests: unexpected argv is a failure. */
+/** Pinned responses for an exact argv array; an unexpected one is a loud failure. */
 const stubRunner =
 	(responses) =>
-	async (command, args) => {
+	async (command, args, cwd) => {
 		const entry = responses[key(command, args)];
-		if (entry === undefined) throw new Error(`unexpected exec call: ${command} ${args.join(" ")}`);
-		return entry;
+		if (entry === undefined) {
+			throw new Error(`unexpected exec call: ${command} ${args.join(" ")} (cwd ${cwd})`);
+		}
+		return typeof entry === "function" ? entry(cwd) : entry;
 	};
 
 // A normal clone and a linked worktree both report <root>/.git, so the parent
@@ -949,10 +949,9 @@ await runScenario(
 
 // ── Shape checks ─────────────────────────────────────────────────────────────
 
-// Every recorded entry carries the stable field set; unknown fields are left
-// undefined rather than omitted inconsistently.
-assert.ok(AGENT_NAME_MAX === 32);
-assert.ok(AGENT_START_TIMEOUT_MS === 120_000);
+// The command's identity, usage line, and the two limits the tests pin by value.
+assert.equal(AGENT_NAME_MAX, 32);
+assert.equal(AGENT_START_TIMEOUT_MS, 120_000);
 assert.equal(COMMAND_NAME, "herdr-fork-session");
 assert.ok(USAGE.startsWith("/herdr-fork-session"));
 
