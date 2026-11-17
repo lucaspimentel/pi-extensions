@@ -1169,7 +1169,10 @@ test("an already-aborted dispatch never spawns or queries", async () => {
 		const controller = new AbortController();
 		controller.abort();
 		const tool = sub.registeredTools.get("subagent")!;
-		await assert.rejects(tool.execute("id", { agent: "scout", task: "x" }, controller.signal, undefined, subagentCtx(sub, cwd)), /aborted/);
+		const result = (await tool.execute("id", { agent: "scout", task: "x" }, controller.signal, undefined, subagentCtx(sub, cwd))) as any;
+		assert.equal(result.isError, true, "an aborted dispatch is an error result");
+		assert.equal(result.details.results[0].status, "aborted");
+		assert.equal(result.details.results[0].exitCode, null);
 		assert.equal(sub.spawns.length, 0);
 	});
 });

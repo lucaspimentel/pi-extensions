@@ -1060,8 +1060,10 @@ test("a judge timeout is terminal, keeps partial output, and never retries", asy
 			const result = (await promise) as any;
 			assert.equal(recording.spawns.length, 2, "a timeout never retries");
 			assert.equal(result.details.judge.attempts.length, 1);
+			assert.equal(result.details.judge.attempts[0].status, "failed");
 			assert.equal(result.details.judge.attempts[0].terminationReason, "timeout");
-			assert.equal(result.details.judge.attempts[0].exitCode, 1);
+			assert.equal(result.details.judge.attempts[0].exitCode, null);
+			assert.equal(result.details.judge.attempts[0].terminationSignal, "SIGKILL");
 			assert.equal(result.details.judge.attempts[0].errorMessage, "timed out after 10 minutes");
 			assert.equal(result.details.judge.attempts[0].output, "partial judge text", "partial output is kept");
 			assert.equal(result.details.judge.attempts[0].usage.input, 5);
@@ -1349,7 +1351,7 @@ test("a running panel derives progress from details, marking pending models and 
 			await waitFor(() => updates.length > 0, "no streamed update");
 			const update = updates[updates.length - 1];
 			assert.deepEqual(renderPanel(h, update, { expanded: false, isPartial: true }), [
-				"[warning]⏳ [toolTitle][bold]Panel pair[muted] (2 models; judge: p/judge)[accent] 0/2 done, 2 running",
+				"[warning]⏳ [toolTitle][bold]Panel pair[muted] (2 models; judge: p/judge)[accent] 0/2 done, 1 running, 1 pending",
 				"[warning]⏳ [accent]p/a",
 				"[warning]⏳ [accent]p/org/b",
 			]);
@@ -1369,6 +1371,36 @@ test("a running panel derives progress from details, marking pending models and 
 			for (const spawn of recording.spawns) emitAnswer(spawn, `${flag(spawn.args, "--model")} answer`);
 			await waitFor(() => recording.spawns.length === 3, "judge never spawned");
 			emitAnswer(recording.spawns[2], "merged review");
+			await promise;
+		} finally { recording.restore(); }
+	});
+});
+
+test("a streaming parallel update counts a running task as running, never as done", async () => {
+	await withIsolatedAgents(async (cwd) => {
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const recording = installControlledSpawn();
+		const updates: any[] = [];
+		try {
+			const tasks = Array.from({ length: 5 }, (_, i) => ({ agent: "scout", task: `t${i}` }));
+			const promise = h.tools.get("subagent")!.execute(
+				"id",
+				{ tasks },
+				undefined,
+				(partial: any) => updates.push(partial),
+				toolCtx(cwd),
+			) as Promise<any>;
+			await waitFor(() => recording.spawns.length === 4, "four tasks spawn under the concurrency limit");
+			recording.spawns[0].child.stdout.emit("data", assistantLine("partial answer"));
+			await waitFor(() => updates.length > 0, "no streamed update");
+			const update = updates[updates.length - 1];
+			const statuses = update.details.results.map((r: any) => r.status);
+			assert.equal(statuses.filter((s: string) => s === "running").length, 1, "the streamed task is running");
+			assert.equal(statuses.filter((s: string) => s === "pending").length, 4, "the others stay pending");
+			assert.match(update.content[0].text, /^Parallel: 0\/5 done, 1 running, 4 pending/);
+			for (const spawn of recording.spawns) emitAnswer(spawn, "answer");
+			await waitFor(() => recording.spawns.length === 5, "the fifth task never spawned");
+			emitAnswer(recording.spawns[4], "answer");
 			await promise;
 		} finally { recording.restore(); }
 	});
@@ -1488,14 +1520,14 @@ test("streaming panel emits carry no notices; the finished result carries the re
 			try {
 				await waitFor(() => recording.spawns.length === 2, "both panelists spawn");
 				const panelistA = recording.spawns.find((spawn) => flag(spawn.args, "--model") === "p/a")!;
-				// A streamed child reports exit code 0 of its own, so the slot must stay
-				// pending until its final result; otherwise a mid-run row counts it done.
+				// A streamed child is still running: the slot keeps that status until the
+				// final result lands, so a mid-run row never counts it done.
 				panelistA.child.stdout.emit("data", assistantLine("partial a"));
 				await waitFor(() => updates.length > 0, "no streamed update");
 				assert.equal(
-					updates[updates.length - 1].details.results[0].exitCode,
-					-1,
-					"a panelist that has only streamed stays pending",
+					updates[updates.length - 1].details.results[0].status,
+					"running",
+					"a panelist that has only streamed stays running",
 				);
 				emitAnswer(panelistA, "answer A");
 				failAnswer(recording.spawns.find((spawn) => flag(spawn.args, "--model") === "p/org/b")!, "b exploded");
@@ -1546,10 +1578,11 @@ test("the ten-minute timeout sends SIGTERM then SIGKILL five seconds later while
 			child.emit("close", null, "SIGKILL");
 			const result = (await promise) as any;
 			assert.equal(result.isError, true);
+			assert.equal(result.details.results[0].status, "failed");
 			assert.equal(result.details.results[0].terminationReason, "timeout");
-			assert.equal(result.details.results[0].exitCode, 1);
+			assert.equal(result.details.results[0].exitCode, null);
 			assert.equal(result.details.results[0].errorMessage, "timed out after 10 minutes");
-			assert.equal(result.details.results[0].exitSignal, "SIGKILL");
+			assert.equal(result.details.results[0].terminationSignal, "SIGKILL");
 			assert.deepEqual(result.details.notices.map((n: any) => n.kind), ["no-survivors"]);
 			assert.ok(result.content[0].text.includes("timed out after 10 minutes"));
 		} finally { recording.restore(); }
@@ -1573,13 +1606,14 @@ test("a real exit during the grace period prevents SIGKILL", async (t) => {
 			assert.deepEqual(child.killedWith, ["SIGTERM"], "an actual exit cancels the escalation");
 			child.emit("close", null, "SIGTERM");
 			const result = (await promise) as any;
+			assert.equal(result.details.results[0].status, "failed");
 			assert.equal(result.details.results[0].terminationReason, "timeout");
-			assert.equal(result.details.results[0].exitCode, 1);
+			assert.equal(result.details.results[0].exitCode, null);
 		} finally { recording.restore(); }
 	});
 });
 
-test("a null-code signal close is a nonzero failure, never a success", async () => {
+test("a null-code signal close is a failed result, never a success", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
 		panelConfig(agentDir, { judge: null });
 		const h = makeHarness({ guard: true, tools: ["read"] });
@@ -1590,8 +1624,9 @@ test("a null-code signal close is a nonzero failure, never a success", async () 
 			recording.spawns[0].child.emit("close", null, "SIGKILL");
 			const result = (await promise) as any;
 			assert.equal(result.isError, true);
-			assert.equal(result.details.results[0].exitCode, 1);
-			assert.equal(result.details.results[0].exitSignal, "SIGKILL");
+			assert.equal(result.details.results[0].status, "failed");
+			assert.equal(result.details.results[0].exitCode, null);
+			assert.equal(result.details.results[0].terminationSignal, "SIGKILL");
 			assert.equal(result.details.results[0].terminationReason, undefined);
 		} finally { recording.restore(); }
 	});
@@ -1657,7 +1692,11 @@ test("abort uses the same functioning escalation path", async (t) => {
 			t.mock.timers.tick(KILL_GRACE_MS);
 			assert.deepEqual(child.killedWith, ["SIGTERM", "SIGKILL"]);
 			child.emit("close", null, "SIGTERM");
-			await assert.rejects(promise, /aborted/);
+			const result = (await promise) as any;
+			assert.equal(result.isError, true, "an aborted dispatch is an error result");
+			assert.equal(result.details.results[0].status, "aborted");
+			assert.equal(result.details.results[0].terminationReason, "aborted");
+			assert.deepEqual(result.details.notices.map((n: any) => n.kind), ["no-survivors"]);
 		} finally { recording.restore(); }
 	});
 });

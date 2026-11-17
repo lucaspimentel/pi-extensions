@@ -198,11 +198,16 @@ interface UsageStats {
 /** Usage without `contextTokens`: never summed across children. */
 type UsageTotals = Pick<UsageStats, "input" | "output" | "cacheRead" | "cacheWrite" | "cost" | "turns">;
 
+/** Lifecycle state of one child, settled once when its process settles. */
+type ChildStatus = "pending" | "running" | "completed" | "failed" | "aborted";
+
 interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "bundled" | "unknown";
 	task: string;
-	exitCode: number;
+	status: ChildStatus;
+	/** Real exit code, or null when no process exit was observed (never a running sentinel). */
+	exitCode: number | null;
 	messages: Message[];
 	stderr: string;
 	usage: UsageStats;
@@ -211,7 +216,7 @@ interface SingleResult {
 	errorMessage?: string;
 	step?: number;
 	terminationReason?: "timeout" | "aborted";
-	exitSignal?: NodeJS.Signals;
+	terminationSignal?: NodeJS.Signals;
 }
 
 interface EffectivePanel {
@@ -290,7 +295,12 @@ function getFinalOutput(messages: Message[]): string {
 }
 
 function isFailedResult(result: SingleResult): boolean {
-	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+	return result.status === "failed" || result.status === "aborted";
+}
+
+/** True while a child has not settled: never dispatched, or its process still runs. */
+function isUnsettled(result: SingleResult | undefined): boolean {
+	return result?.status === "pending" || result?.status === "running";
 }
 
 function getResultOutput(result: SingleResult): string {
@@ -428,9 +438,10 @@ function buildPanelNotices(
 function formatLabeledPanelReviews(results: readonly PanelistResult[]): string {
 	return results
 		.map((result) => {
-			const status = isFailedResult(result)
-				? `failed${result.stopReason && result.stopReason !== "end" ? ` (${result.stopReason})` : ""}`
-				: "completed";
+			const status =
+				isFailedResult(result) && result.stopReason && result.stopReason !== "end" && result.stopReason !== result.status
+					? `${result.status} (${result.stopReason})`
+					: result.status;
 			const body = isFailedResult(result)
 				? result.errorMessage || result.stderr || result.output || "(no output)"
 				: result.output || "(no output)";
@@ -654,18 +665,43 @@ export function setAgentListCwd(cwd: string | null): void {
 	agentListCwd = cwd;
 }
 
-function refusedResult(agentName: string, agentSource: SingleResult["agentSource"], task: string, step: number | undefined, reason: string): SingleResult {
+/**
+ * A result for a child that never ran: an unknown agent, a guard refusal, a
+ * missing startup gate, or an abort before spawn. No exit code was observed.
+ */
+function createUnstartedResult(
+	agentName: string,
+	agentSource: SingleResult["agentSource"],
+	task: string,
+	step: number | undefined,
+	status: "failed" | "aborted",
+	errorMessage: string,
+	stderr = "",
+): SingleResult {
 	return {
 		agent: agentName,
 		agentSource,
 		task,
-		exitCode: 1,
+		status,
+		exitCode: null,
 		messages: [],
-		stderr: `guard: ${reason}`,
+		stderr,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		errorMessage: `guard refused subagent dispatch: ${reason}`,
+		errorMessage,
 		step,
 	};
+}
+
+function refusedResult(agentName: string, agentSource: SingleResult["agentSource"], task: string, step: number | undefined, reason: string): SingleResult {
+	return createUnstartedResult(
+		agentName,
+		agentSource,
+		task,
+		step,
+		"failed",
+		`guard refused subagent dispatch: ${reason}`,
+		`guard: ${reason}`,
+	);
 }
 
 interface DispatchDefaults {
@@ -682,10 +718,13 @@ interface ChildOptions {
 	timeoutMs?: number;
 	/** `verbatim` passes the task as the whole final argv entry (judge input). */
 	promptMode?: "task" | "verbatim";
-	/** `result` converts spawn/prompt failures into failed results. */
-	failureMode?: "throw" | "result";
-	/** `result` returns a failed aborted result instead of throwing. */
-	abortMode?: "throw" | "result";
+}
+
+/** How one child process settled: exit code, termination signal, or a spawn failure. */
+interface ProcessOutcome {
+	code: number | null;
+	signal: NodeJS.Signals | null;
+	spawnError?: Error;
 }
 
 interface ChildKillController {
@@ -754,16 +793,14 @@ async function runSingleAgent(
 
 	if (!agent) {
 		const available = formatAgentNames(sortAgentsByName(agents.filter((a) => a.role !== "internal")));
-		return {
-			agent: agentName,
-			agentSource: "unknown",
+		return createUnstartedResult(
+			agentName,
+			"unknown",
 			task,
-			exitCode: 1,
-			messages: [],
-			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 			step,
-		};
+			"failed",
+			`Unknown agent: "${agentName}". Available agents: ${available}.`,
+		);
 	}
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
@@ -787,7 +824,8 @@ async function runSingleAgent(
 		agent: agentName,
 		agentSource: agent.source,
 		task,
-		exitCode: 0,
+		status: "running",
+		exitCode: null,
 		messages: [],
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
@@ -828,8 +866,7 @@ async function runSingleAgent(
 		// refuses instead of defaulting to an unguarded or default-profile run.
 		if (signal?.aborted) {
 			wasAborted = true;
-			if (child.abortMode !== "result") throw new Error("Subagent was aborted");
-			currentResult.exitCode = 1;
+			currentResult.status = "aborted";
 			currentResult.terminationReason = "aborted";
 			currentResult.errorMessage = "Subagent was aborted";
 			return currentResult;
@@ -869,26 +906,20 @@ async function runSingleAgent(
 			childEnv = { ...process.env };
 		}
 
-		const exitCode = await new Promise<number>((resolve) => {
+		const outcome = await new Promise<ProcessOutcome>((resolve) => {
 			const invocation = getPiInvocation(args);
 			const spawnFn = spawnOverride ?? spawn;
-			const proc = spawnFn(invocation.command, invocation.args, {
-				cwd: cwd ?? defaultCwd,
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-				env: childEnv,
-			});
 			let buffer = "";
 			let settled = false;
 			let timeoutTimer: NodeJS.Timeout | undefined;
-			const killController = createChildKillController(proc);
+			let killController: ChildKillController | undefined;
 
 			const killProc = () => {
 				wasAborted = true;
-				killController.terminate();
+				killController?.terminate();
 			};
 
-			const settle = (code: number) => {
+			const settle = (result: ProcessOutcome) => {
 				if (settled) return;
 				settled = true;
 				if (timeoutTimer) {
@@ -896,9 +927,25 @@ async function runSingleAgent(
 					timeoutTimer = undefined;
 				}
 				signal?.removeEventListener("abort", killProc);
-				killController.dispose();
-				resolve(code);
+				killController?.dispose();
+				resolve(result);
 			};
+
+			let proc: ReturnType<typeof spawn>;
+			try {
+				proc = spawnFn(invocation.command, invocation.args, {
+					cwd: cwd ?? defaultCwd,
+					shell: false,
+					stdio: ["ignore", "pipe", "pipe"],
+					env: childEnv,
+				});
+			} catch (error) {
+				// A synchronous spawn failure (a missing binary, for example) is this
+				// child's failed result, never a rejected dispatch.
+				settle({ code: null, signal: null, spawnError: error instanceof Error ? error : new Error(String(error)) });
+				return;
+			}
+			killController = createChildKillController(proc);
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -937,29 +984,24 @@ async function runSingleAgent(
 				}
 			};
 
-			proc.stdout.on("data", (data) => {
+			proc.stdout?.on("data", (data) => {
 				buffer += data.toString();
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
 				for (const line of lines) processLine(line);
 			});
 
-			proc.stderr.on("data", (data) => {
+			proc.stderr?.on("data", (data) => {
 				currentResult.stderr += data.toString();
 			});
 
-			proc.on("close", (code, exitSignal) => {
+			proc.on("close", (code, terminationSignal) => {
 				if (buffer.trim()) processLine(buffer);
-				if (exitSignal) currentResult.exitSignal = exitSignal;
-				settle(code ?? (exitSignal ? 1 : 0));
+				settle({ code, signal: terminationSignal });
 			});
 
 			proc.on("error", (error) => {
-				currentResult.exitCode = 1;
-				if (!currentResult.errorMessage) {
-					currentResult.errorMessage = error instanceof Error ? error.message : String(error);
-				}
-				settle(1);
+				settle({ code: null, signal: null, spawnError: error instanceof Error ? error : new Error(String(error)) });
 			});
 
 			if (signal) {
@@ -976,23 +1018,37 @@ async function runSingleAgent(
 			}
 		});
 
-		currentResult.exitCode = exitCode;
+		currentResult.exitCode = outcome.code;
+		currentResult.terminationSignal = outcome.signal ?? undefined;
+		// One settlement classification, in precedence order. A timeout or abort
+		// outranks the process outcome, and a spawn failure has no exit code.
 		if (timedOut) {
+			currentResult.status = "failed";
 			currentResult.terminationReason = "timeout";
 			currentResult.errorMessage = "timed out after 10 minutes";
-			if (currentResult.exitCode === 0) currentResult.exitCode = 1;
-		}
-		if (wasAborted) {
+		} else if (wasAborted) {
+			currentResult.status = "aborted";
 			currentResult.terminationReason = "aborted";
-			if (currentResult.exitCode === 0) currentResult.exitCode = 1;
-			if (!currentResult.errorMessage) currentResult.errorMessage = "Subagent was aborted";
+			currentResult.errorMessage ||= "Subagent was aborted";
+		} else if (outcome.spawnError) {
+			currentResult.status = "failed";
+			currentResult.errorMessage ||= outcome.spawnError.message;
+		} else if (outcome.signal) {
+			currentResult.status = "failed";
+		} else if (outcome.code !== 0) {
+			currentResult.status = "failed";
+		} else if (currentResult.stopReason === "error") {
+			currentResult.status = "failed";
+		} else if (currentResult.stopReason === "aborted") {
+			currentResult.status = "aborted";
+		} else {
+			currentResult.status = "completed";
 		}
-		if (wasAborted && child.abortMode !== "result") throw new Error("Subagent was aborted");
-		if (timedOut && child.failureMode !== "result") throw new Error("timed out after 10 minutes");
 		return currentResult;
 	} catch (error) {
-		if (child.failureMode !== "result" || wasAborted || timedOut) throw error;
-		currentResult.exitCode = currentResult.exitCode === 0 ? 1 : currentResult.exitCode;
+		// Prompt preparation failed before any child existed: a failed result, never
+		// a rejected dispatch.
+		currentResult.status = "failed";
 		if (!currentResult.errorMessage) {
 			currentResult.errorMessage = error instanceof Error ? error.message : String(error);
 		}
@@ -1324,20 +1380,19 @@ export default function (pi: ExtensionAPI) {
 					agent: effective.agent,
 					agentSource: panelistSource,
 					task: params.task!,
-					exitCode: -1,
+					status: "pending",
+					exitCode: null,
 					messages: [],
 					stderr: "",
 					model,
 					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 				}));
-				// A streamed result already reports exit code 0, so completion is tracked
-				// separately from the result's own fields.
-				const settled = new Set<number>();
 				const judgeAttempts: JudgeAttempt[] = [];
 				let currentJudge: PanelJudgeResult | null = null;
-				// The judge phase is complete only after its attempts settle; until then
-				// every streamed emit keeps notices empty.
-				let judgeSettled = false;
+				// The judge phase is one unit: from the first attempt until the retry
+				// decision is final. Until then every streamed emit keeps notices empty,
+				// even while a settled failed attempt is already visible in `judge`.
+				let judgePhaseDone = false;
 
 				const toPanelistResult = (result: SingleResult): PanelistResult => {
 					const { step: _step, ...rest } = result;
@@ -1350,7 +1405,7 @@ export default function (pi: ExtensionAPI) {
 				};
 				const makePanelDetails = (results: SingleResult[], judge: PanelJudgeResult | null = currentJudge): PanelDetails => {
 					const panelists = results.map(toPanelistResult);
-					const running = settled.size < allResults.length || (effective.judge !== null && !judgeSettled);
+					const running = results.some(isUnsettled) || (effective.judge !== null && !judgePhaseDone);
 					return {
 						mode: "panel",
 						agentScope,
@@ -1364,7 +1419,12 @@ export default function (pi: ExtensionAPI) {
 				};
 				const emit = () =>
 					onUpdate?.({
-						content: [{ type: "text" as const, text: `Panel ${effective.name}: ${settled.size}/${allResults.length} done` }],
+						content: [
+							{
+								type: "text" as const,
+								text: `Panel ${effective.name}: ${allResults.filter((result) => !isUnsettled(result)).length}/${allResults.length} done`,
+							},
+						],
 						details: makePanelDetails(allResults),
 					});
 
@@ -1381,11 +1441,9 @@ export default function (pi: ExtensionAPI) {
 						signal,
 						(partial) => {
 							const streamed = partial.details?.results[0];
-							if (streamed && !settled.has(index)) {
-								// A streamed child already reports exit code 0, so the slot stays
-								// pending until the final result lands; otherwise a mid-run render
-								// counts a still-running panelist as done.
-								allResults[index] = { ...streamed, exitCode: -1 };
+							// A streamed child is still running: only its final result settles the slot.
+							if (streamed && isUnsettled(allResults[index])) {
+								allResults[index] = streamed;
 								emit();
 							}
 						},
@@ -1396,11 +1454,9 @@ export default function (pi: ExtensionAPI) {
 							thinkingLevel: settings.modelThinkingLevels?.[model] ?? ctx.thinkingLevel,
 							tools: panelTools,
 							timeoutMs: PANEL_CHILD_TIMEOUT_MS,
-							failureMode: "result",
 						},
 					);
 					allResults[index] = result;
-					settled.add(index);
 					emit();
 					return result;
 				});
@@ -1460,8 +1516,6 @@ export default function (pi: ExtensionAPI) {
 								tools: judgeTools,
 								timeoutMs: PANEL_CHILD_TIMEOUT_MS,
 								promptMode: "verbatim",
-								failureMode: "result",
-								abortMode: "result",
 							},
 						);
 
@@ -1486,7 +1540,7 @@ export default function (pi: ExtensionAPI) {
 					if (judgeAttempts.some((attempt) => attempt.terminationReason === "aborted")) aborted = true;
 					if (finalAttempt && !judgeAttemptFailed(finalAttempt)) mergedOutput = getFinalOutput(finalAttempt.messages);
 					judge = buildJudgeResult(finalAttempt ? getFinalOutput(finalAttempt.messages) : "", judgeModel, judgeAttempts);
-					judgeSettled = true;
+					judgePhaseDone = true;
 				}
 
 				const details: PanelDetails = {
@@ -1573,20 +1627,25 @@ export default function (pi: ExtensionAPI) {
 						agent: params.tasks[i].agent,
 						agentSource: "unknown",
 						task: params.tasks[i].task,
-						exitCode: -1, // -1 = still running
-						messages: [],
-						stderr: "",
-						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-					};
+								status: "pending",
+								exitCode: null,
+								messages: [],
+								stderr: "",
+								usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+						};
 				}
 
 				const emitParallelUpdate = () => {
 					if (onUpdate) {
-						const running = allResults.filter((r) => r.exitCode === -1).length;
-						const done = allResults.filter((r) => r.exitCode !== -1).length;
+						const running = allResults.filter((r) => r.status === "running").length;
+						const pending = allResults.filter((r) => r.status === "pending").length;
+						const done = allResults.length - running - pending;
 						onUpdate({
 							content: [
-								{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` },
+								{
+									type: "text",
+									text: `Parallel: ${done}/${allResults.length} done, ${running} running, ${pending} pending...`,
+								},
 							],
 							details: makeDetails("parallel")([...allResults]),
 						});
@@ -1623,9 +1682,10 @@ export default function (pi: ExtensionAPI) {
 				const successCount = results.filter((r) => !isFailedResult(r)).length;
 				const summaries = results.map((r) => {
 					const output = truncateParallelOutput(getResultOutput(r));
-					const status = isFailedResult(r)
-						? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
-						: "completed";
+					const status =
+						isFailedResult(r) && r.stopReason && r.stopReason !== "end" && r.stopReason !== r.status
+							? `${r.status} (${r.stopReason})`
+							: r.status;
 					return `### [${r.agent}] ${status}\n\n${output}`;
 				});
 				return {
@@ -1659,7 +1719,7 @@ export default function (pi: ExtensionAPI) {
 				if (isError) {
 					const errorMsg = getResultOutput(result);
 					return {
-						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` }],
+						content: [{ type: "text", text: `Agent ${result.status}: ${errorMsg}` }],
 						details: makeDetails("single")([result]),
 						isError: true,
 					};
@@ -1745,6 +1805,13 @@ export default function (pi: ExtensionAPI) {
 				return text.trimEnd();
 			};
 
+			/** Lifecycle mark: a pending or running child is never rendered as finished. */
+			const resultIcon = (child: SingleResult): string => {
+				if (isUnsettled(child)) return theme.fg("warning", "⏳");
+				if (isFailedResult(child)) return theme.fg("error", "✗");
+				return theme.fg("success", "✓");
+			};
+
 			if (details.mode === "panel") {
 				const panel = details.panel;
 				const judge = details.judge;
@@ -1757,11 +1824,11 @@ export default function (pi: ExtensionAPI) {
 				const plural = modelCount === 1 ? "" : "s";
 				const name = panel?.name ?? "(unknown)";
 				const header = `${theme.fg("toolTitle", theme.bold(`Panel ${name}`))}${theme.fg("muted", ` (${modelCount} model${plural}; judge: ${judgeLabel})`)}`;
-				const running = isPartial || details.results.some((result) => result.exitCode === -1);
-				const settledCount = details.results.filter((result) => result.exitCode !== -1).length;
-				const survivorCount = details.results.filter(
-					(result) => result.exitCode !== -1 && !isFailedResult(result),
-				).length;
+				const runningCount = details.results.filter((result) => result.status === "running").length;
+				const pendingCount = details.results.filter((result) => result.status === "pending").length;
+				const running = isPartial || runningCount > 0 || pendingCount > 0;
+				const settledCount = modelCount - runningCount - pendingCount;
+				const survivorCount = details.results.filter((result) => result.status === "completed").length;
 				const merged = details.mergedOutput !== null;
 				const noSurvivors = survivorCount === 0 && settledCount === modelCount;
 				const statusIcon = running
@@ -1771,18 +1838,12 @@ export default function (pi: ExtensionAPI) {
 						: noSurvivors
 							? theme.fg("error", "✗")
 							: theme.fg("warning", "◐");
-				const panelistMark = (result: PanelistResult) =>
-					result.exitCode === -1
-						? theme.fg("warning", "⏳")
-						: isFailedResult(result)
-							? theme.fg("error", "✗")
-							: theme.fg("success", "✓");
 
 				if (!expanded) {
 					// Running: derived from details, never from the model-facing content.
 					if (running) {
-						let text = `${theme.fg("warning", "⏳")} ${header}${theme.fg("accent", ` ${settledCount}/${modelCount} done, ${modelCount - settledCount} running`)}`;
-						for (const result of details.results) text += `\n${panelistMark(result)} ${theme.fg("accent", result.model)}`;
+						let text = `${theme.fg("warning", "⏳")} ${header}${theme.fg("accent", ` ${settledCount}/${modelCount} done, ${runningCount} running, ${pendingCount} pending`)}`;
+						for (const result of details.results) text += `\n${resultIcon(result)} ${theme.fg("accent", result.model)}`;
 						if (judge) {
 							const attempt = judge.attempts.length > 1 ? theme.fg("dim", ` (attempt ${judge.attempts.length})`) : "";
 							text += `\n${theme.fg("warning", "⏳")} ${theme.fg("accent", `judge ${judgeLabel}`)}${theme.fg("dim", " merging…")}${attempt}`;
@@ -1829,11 +1890,11 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				for (const result of details.results) {
-					const pending = result.exitCode === -1;
-					const failed = !pending && isFailedResult(result);
+					const unsettled = isUnsettled(result);
+					const failed = !unsettled && isFailedResult(result);
 					container.addChild(new Spacer(1));
 					container.addChild(
-						new Text(`${theme.fg("muted", "─── ")}${theme.fg("accent", result.model)} ${panelistMark(result)}`, 0, 0),
+						new Text(`${theme.fg("muted", "─── ")}${theme.fg("accent", result.model)} ${resultIcon(result)}`, 0, 0),
 					);
 					for (const item of getDisplayItems(result.messages)) {
 						if (item.type === "toolCall")
@@ -1847,9 +1908,9 @@ export default function (pi: ExtensionAPI) {
 						if (failed) container.addChild(new Text(theme.fg("dim", "[Incomplete partial answer:]"), 0, 0));
 						container.addChild(new Markdown(result.output.trim(), 0, 0, mdTheme));
 					}
-					// A pending panelist has no usage to report yet; "no usage" would be a
+					// An unsettled panelist has no usage to report yet; "no usage" would be a
 					// statement about a run that has not finished.
-					if (!pending) container.addChild(new Text(theme.fg("dim", usageText(result.usage)), 0, 0));
+					if (!unsettled) container.addChild(new Text(theme.fg("dim", usageText(result.usage)), 0, 0));
 				}
 
 				if (judge) {
@@ -1894,14 +1955,16 @@ export default function (pi: ExtensionAPI) {
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
 				const isError = isFailedResult(r);
-				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				const isRunning = isUnsettled(r);
+				const icon = resultIcon(r);
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
 
 				if (expanded) {
 					const container = new Container();
 					let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+					if (isRunning) header += ` ${theme.fg("warning", `[${r.status}]`)}`;
+					else if (isError) header += ` ${theme.fg("error", `[${r.stopReason ?? r.status}]`)}`;
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
 						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
@@ -1937,7 +2000,8 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+				if (isRunning) text += ` ${theme.fg("warning", `[${r.status}]`)}`;
+				else if (isError) text += ` ${theme.fg("error", `[${r.stopReason ?? r.status}]`)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
@@ -1951,8 +2015,13 @@ export default function (pi: ExtensionAPI) {
 
 
 			if (details.mode === "chain") {
-				const successCount = details.results.filter((r) => r.exitCode === 0).length;
-				const icon = successCount === details.results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
+				const successCount = details.results.filter((r) => r.status === "completed").length;
+				const hasActive = details.results.some(isUnsettled);
+				const icon = hasActive
+					? theme.fg("warning", "⏳")
+					: successCount === details.results.length
+						? theme.fg("success", "✓")
+						: theme.fg("error", "✗");
 
 				if (expanded) {
 					const container = new Container();
@@ -1968,7 +2037,7 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const rIcon = resultIcon(r);
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
 
@@ -2020,7 +2089,7 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("toolTitle", theme.bold("chain ")) +
 					theme.fg("accent", `${successCount}/${details.results.length} steps`);
 				for (const r of details.results) {
-					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+					const rIcon = resultIcon(r);
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
@@ -2033,17 +2102,18 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (details.mode === "parallel") {
-				const running = details.results.filter((r) => r.exitCode === -1).length;
-				const successCount = details.results.filter((r) => r.exitCode !== -1 && !isFailedResult(r)).length;
-				const failCount = details.results.filter((r) => r.exitCode !== -1 && isFailedResult(r)).length;
-				const isRunning = running > 0;
+				const running = details.results.filter((r) => r.status === "running").length;
+				const pending = details.results.filter((r) => r.status === "pending").length;
+				const successCount = details.results.filter((r) => r.status === "completed").length;
+				const failCount = details.results.filter(isFailedResult).length;
+				const isRunning = running > 0 || pending > 0;
 				const icon = isRunning
 					? theme.fg("warning", "⏳")
 					: failCount > 0
 						? theme.fg("warning", "◐")
 						: theme.fg("success", "✓");
 				const status = isRunning
-					? `${successCount + failCount}/${details.results.length} done, ${running} running`
+					? `${successCount + failCount}/${details.results.length} done, ${running} running, ${pending} pending`
 					: `${successCount}/${details.results.length} tasks`;
 
 				if (expanded && !isRunning) {
@@ -2057,7 +2127,7 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
+						const rIcon = resultIcon(r);
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
 
@@ -2101,16 +2171,11 @@ export default function (pi: ExtensionAPI) {
 				// Collapsed view (or still running)
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
 				for (const r of details.results) {
-					const rIcon =
-						r.exitCode === -1
-							? theme.fg("warning", "⏳")
-							: isFailedResult(r)
-								? theme.fg("error", "✗")
-								: theme.fg("success", "✓");
+					const rIcon = resultIcon(r);
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
 					if (displayItems.length === 0)
-						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+						text += `\n${theme.fg("muted", isUnsettled(r) ? "(running...)" : "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
 				if (!isRunning) {

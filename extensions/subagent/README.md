@@ -2,10 +2,18 @@
 
 Delegate tasks to specialized subagents with isolated context windows. Forked from
 pi's example extension (`examples/extensions/subagent` in the pi-coding-agent npm
-package); the example's README is authoritative for shared behavior (modes,
-streaming, usage display, security model).
+package); the example's README stays the reference for genuinely shared behavior
+(modes, streaming, usage display, security model), while the list below governs
+where this fork diverges.
 
 ## Changes vs the upstream example
+
+- **Child lifecycle**: every child reports `status` (`pending`, `running`,
+  `completed`, `failed`, `aborted`), its real `exitCode` (`null` when no process
+  exit was observed; there is no running sentinel), and the terminating
+  `terminationSignal`. A 10-minute panel timeout is `status: "failed"` with
+  `terminationReason: "timeout"`. An abort or a spawn failure settles as that
+  child's result instead of throwing, so a dispatch always returns its details.
 
 - **Bundled agents**: `agents/*.md` ship with the extension and are discovered
   next to `agents.ts` (via `import.meta.url`), so no `~/.pi/agent/agents` setup is

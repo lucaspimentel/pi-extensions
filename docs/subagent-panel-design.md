@@ -309,7 +309,8 @@ Panelists reuse `runSingleAgent`'s path with explicit models:
   It fires one shared, idempotent kill controller that the abort path uses too:
   SIGTERM immediately, then SIGKILL after 5 s only if the child has not actually
   exited (tracked through `exit`/`close`, never `proc.killed`, which SIGTERM
-  already sets). A timed-out child is a failed result with a nonzero exit,
+  already sets). A timed-out child is a `status: "failed"` result with
+  `exitCode: null`, `terminationSignal` set,
   `terminationReason: "timeout"`, the error `timed out after 10 minutes`, and
   its collected messages and usage intact, not a thrown error.
 - Each panelist's final answer is capped at `PER_TASK_OUTPUT_CAP` before it
@@ -489,15 +490,15 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
 
 The panel tool row mirrors the other modes. While the panel runs, the
 collapsed row is derived from `details`, never from the model-facing content: a
-`⏳` header carrying `<n>/<total> done, <k> running`, one line per model with
-only a mark (`✓`, `✗`, `⏳`), and, once `details.judge` exists, a
+`⏳` header carrying `<n>/<total> done, <k> running, <p> pending`, one line per
+model with only a mark (`✓`, `✗`, `⏳`), and, once `details.judge` exists, a
 `⏳ judge <model> merging…` line that notes the attempt when a retry is under
 way. There is no expand hint until the run finishes. A panelist that has only
-streamed still counts as running: its slot in `details` keeps `exitCode: -1`
-until its final result lands, even though the child process itself already
-reports exit code 0, so the row and the notice gate never mistake a streaming
-panelist for a finished one. `isPartial` marks a streaming emit as well, which
-keeps the row in progress while the judge alone is still working.
+streamed still counts as running: its slot in `details` keeps `status:
+"running"` until its final result lands, and a panelist that has not been
+dispatched yet stays `"pending"`, so the row and the notice gate never mistake a
+streaming panelist for a finished one. `isPartial` marks a streaming emit as
+well, which keeps the row in progress while the judge alone is still working.
 
 When it finishes, the collapsed row is a status icon (`✓` merged, `◐` unmerged
 with survivors, `✗` zero survivors) followed by the model-facing content
