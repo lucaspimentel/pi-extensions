@@ -1799,6 +1799,20 @@ test("scout-grill-plan-implement template delegates only recon and planning and 
 	assert.ok(template.includes("wait for my explicit confirmation"), "gates planning and implementing on design confirmation");
 });
 
+test("review-panel template targets the review preset, resolves the current PR, and stops at the review", () => {
+	const template = fs.readFileSync(new URL("../extensions/subagent/prompts/review-panel.md", import.meta.url), "utf8");
+	assert.ok(template.includes('argument-hint: "[<PR number or URL>] [focus]"'));
+	assert.ok(template.includes("Requested: $@"), "expands the whole argument list");
+	assert.ok(template.includes('subagent({panel: "review", task})'), "names the review preset");
+	assert.ok(template.includes("never substitute one silently"), "a missing review preset is reported, not replaced");
+	assert.ok(template.includes("no positional argument reads the current branch's PR"), "resolves the current branch's PR when no argument names one");
+	assert.ok(template.includes("Never run the panel against a guessed target"));
+	assert.ok(template.includes("`pr diff` for the change set"), "each panelist fetches the diff itself");
+	assert.ok(template.includes("Stay read-only"), "panelists cannot build or test");
+	assert.ok(template.includes("Verdict:"), "each reviewer reports an explicit verdict");
+	assert.ok(template.includes("Do not start fixing anything"), "the command stops at the review");
+});
+
 test("failure evidence lists every distinct diagnosis, and nothing when there is none", () => {
 	const base = {
 		agent: "scout",

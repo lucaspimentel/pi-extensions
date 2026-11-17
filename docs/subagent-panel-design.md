@@ -418,7 +418,7 @@ diagnostics stay in `details`. A produced merge of one survivor is labeled
 `single-model-merge`, and any failure among the panelists adds `partial-merge`
 naming each failing model with a short error.
 
-## `/panel` command
+## `/panel` and `/review-panel` prompt templates
 
 Step 1 is resolved (2026-10-29, pi 1.5.0): a command handler cannot execute a
 tool or produce a tool result, so `/panel` ships as a prompt template.
@@ -437,6 +437,18 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
   arguments lists the presets" behavior is not available on this path.
 - Any injected result is labeled as panel output rather than appearing as the
   user's own message.
+- `/review-panel [<PR number or URL>] [focus]`
+  (`extensions/subagent/prompts/review-panel.md`, added 2026-11-17) is a second
+  template on the same surface, scoped to one pull request. It resolves the
+  target, prints the repository, number, title, and head SHA in one line, makes one
+  `subagent({panel: "review", task})` call, and stops at the result: the template
+  tells the main session to reproduce the panel output as returned and ask which
+  findings to act on, never to start fixing. Unlike `/panel` it names its preset
+  in the template instead of taking one as an argument, so the required-preset
+  rule above is satisfied by the template rather than by the user. The panelists
+  fetch the PR themselves, so the diff is read once per panelist instead of being
+  inlined by the main session; a missing `review` preset is reported, never
+  substituted.
 
 ## Read-only guarantees
 
