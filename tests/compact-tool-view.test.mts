@@ -73,6 +73,9 @@ function renderLines(component: any): string[] {
 
 const emptyDir = () => mkdtempSync(join(tmpdir(), "ctv-empty-"));
 
+/** The wrapped resolver for `write`, a tool whose base has no result renderer. */
+const noBaseWrite = (agentDir = emptyDir()) => loadExtension(agentDir).resolver("write", () => undefined);
+
 function configDir(config: Record<string, unknown>): string {
 	const dir = mkdtempSync(join(tmpdir(), "ctv-config-"));
 	writeFileSync(join(dir, "compact-tool-view.json"), JSON.stringify(config));
@@ -680,8 +683,7 @@ test("a failure carried on the render context overrides hide mode", () => {
 });
 
 test("a tool with no base renderer still gists when collapsed", () => {
-	const loaded = loadExtension(emptyDir());
-	const wrapped = loaded.resolver("write", () => undefined);
+	const wrapped = noBaseWrite();
 	const result = { content: [{ type: "text", text: "Successfully wrote to /x" }] };
 	const collapsed = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: false }, theme, makeContext({ content: "a\nb\nc" })));
 	assert.ok(collapsed.some((line) => line.includes("3 lines written")), JSON.stringify(collapsed));
@@ -691,8 +693,7 @@ test("a tool with no base renderer still gists when collapsed", () => {
 });
 
 test("expanded renders the synthesized fallback body when the base has no result renderer", () => {
-	const loaded = loadExtension(emptyDir());
-	const wrapped = loaded.resolver("write", () => undefined);
+	const wrapped = noBaseWrite();
 	const result = { content: [{ type: "text", text: "line one\nline two" }] };
 	const lines = renderLines(wrapped.renderResult(result, { expanded: true, isPartial: false }, theme, makeContext({ content: "a\nb" })));
 	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e9line one")), JSON.stringify(lines));
@@ -707,8 +708,7 @@ test("expanded renders the synthesized fallback body when the base has no result
 });
 
 test("streaming previews five lines plus the expand hint when the base has no result renderer", () => {
-	const loaded = loadExtension(emptyDir());
-	const wrapped = loaded.resolver("write", () => undefined);
+	const wrapped = noBaseWrite();
 	const result = { content: [{ type: "text", text: "1\n2\n3\n4\n5\n6\n7" }] };
 	const lines = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: true }, theme, makeContext()));
 	assert.equal(lines.length, 6, JSON.stringify(lines));
@@ -720,8 +720,7 @@ test("streaming previews five lines plus the expand hint when the base has no re
 });
 
 test("hide mode with no base renderer still shows the body when expanded", () => {
-	const loaded = loadExtension(configDir({ write: "hide" }));
-	const wrapped = loaded.resolver("write", () => undefined);
+	const wrapped = noBaseWrite(configDir({ write: "hide" }));
 	const result = { content: [{ type: "text", text: "body line" }] };
 	const collapsed = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: false }, theme, makeContext({ content: "a" })));
 	assert.ok(collapsed.some((line) => line.includes("\u27e8muted\u27e9[app.tools.expand: to expand]")), JSON.stringify(collapsed));

@@ -50,46 +50,40 @@ interface RenderContextLike {
 const gistText = (lines: GistLine[], theme: Theme): string =>
 	lines.map((line) => theme.fg(line.dim ? "muted" : "toolOutput", line.text)).join("\n");
 
-const expandHint = (theme: Theme, context: RenderContextLike): string =>
+const expandHint = (context: RenderContextLike): string =>
 	context.keyHint?.(EXPAND_KEYBINDING, "to expand") ?? "ctrl+o to expand";
 
-const hideText = (theme: Theme, context: RenderContextLike): string => theme.fg("muted", expandHint(theme, context));
+const hideText = (theme: Theme, context: RenderContextLike): string => theme.fg("muted", expandHint(context));
 
 /**
- * Sanitized body text of a result, the way pi's own fallback body reads it: the
- * model-facing text blocks joined by newlines, terminal sequences removed and
- * control characters blanked. `stripTerminalSequences` and
+ * Sanitized result body as lines, the way pi's own fallback body reads it: the
+ * model-facing text blocks joined by newlines, then terminal sequences removed
+ * and control characters blanked. `stripTerminalSequences` and
  * `replaceControlCharacters` are pi-tui's public API; the latter also eats
- * newlines, so it runs line by line. Tabs stay, as in pi's fallback.
+ * newlines, so it runs line by line. Tabs stay, as in pi's fallback. An empty
+ * result is no lines, not one empty line.
  */
-const bodyText = (content: unknown): string =>
-	stripTerminalSequences(textBlocks(content).join("\n"))
-		.replace(/\r/g, "")
-		.split("\n")
-		.map((line) => replaceControlCharacters(line))
-		.join("\n");
+const bodyLines = (content: unknown): string[] => {
+	const text = stripTerminalSequences(textBlocks(content).join("\n")).replace(/\r/g, "");
+	return text === "" ? [] : text.split("\n").map((line) => replaceControlCharacters(line));
+};
 
 /**
- * The body for a tool whose base renderer has none. pi would have drawn its own
- * fallback body there (`createResultFallback` in
- * `dist/modes/interactive/components/tool-execution.js`), but installing any
- * `renderResult` suppresses that path, so the gist repeats instead and
- * expanding a row would be a no-op. This mirrors the fallback: every line when
- * expanded, else the first `PREVIEW_LINES` lines plus the same dimmed
- * `... (N more lines, <key> to expand)` tail pi appends. An empty result has no
- * body (pi's fallback renders nothing at all), which the caller treats as "keep
- * the gist". pi's fallback also appends placeholder text for image blocks that
- * cannot be drawn; the tools that reach this path return text, and an image-only
- * result keeps the gist's `image` line.
+ * The body pi would have drawn for a tool whose base renderer has none
+ * (`createResultFallback` in `tool-execution.js`), which installing any
+ * `renderResult` suppresses: every line when expanded, else the first
+ * `PREVIEW_LINES` lines plus the same dimmed `... (N more lines, <key> to
+ * expand)` tail pi appends. No lines means no body, and the caller keeps the
+ * gist; the design doc covers the image placeholders this does not reproduce.
  */
 const fallbackBodyText = (content: unknown, expanded: boolean, theme: Theme, context: RenderContextLike): string => {
-	const lines = bodyText(content).split("\n");
-	if (lines.length === 1 && lines[0] === "") return "";
+	const lines = bodyLines(content);
+	if (lines.length === 0) return "";
 	const shown = expanded ? lines : lines.slice(0, PREVIEW_LINES);
 	let text = shown.map((line) => theme.fg("toolOutput", line)).join("\n");
 	const remaining = lines.length - shown.length;
 	if (remaining > 0) {
-		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${expandHint(theme, context)}${theme.fg("muted", ")")}`;
+		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${expandHint(context)}${theme.fg("muted", ")")}`;
 	}
 	return text;
 };
