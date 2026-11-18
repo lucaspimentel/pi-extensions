@@ -1813,6 +1813,7 @@ test("review-panel template targets the review preset, resolves the current PR, 
 	assert.ok(template.includes("never substitute one silently"), "a missing review preset is reported, not replaced");
 	assert.ok(template.includes("no positional argument reads the current branch's PR"), "resolves the current branch's PR when no argument names one");
 	assert.ok(template.includes("Never run the panel against a guessed target"));
+	assert.ok(template.includes("pr view --json number,title,url,headRefOid"), "one call resolves the repository, number, title, and head SHA");
 	assert.ok(template.includes('subcommand `log` and args `["-n", "1"]`'), "the local commit comes from git log");
 	assert.ok(!template.includes("subcommand `status`"), "git status never prints a commit sha");
 	assert.ok(template.includes("if the `log` call fails"), "an unreadable local HEAD sends panelists to GitHub");
