@@ -6,7 +6,7 @@ Requested: $@
 
 Resolve the target before calling anything.
 
-- If the text above begins with a PR number or a pull-request URL, that is the target and any remaining text is extra review focus.
+- If the argument text after `Requested:` begins with a PR number or a pull-request URL, that is the target and any remaining text is extra review focus.
 - Otherwise treat all of the text above as extra review focus and resolve the PR from the working directory: `gh_read` with subcommand `pr view` and no positional argument reads the current branch's PR, and `-R OWNER/REPO` names the repository when the cwd is not it. If no PR resolves, ask me for the number or URL. Never run the panel against a guessed target.
 - Say the resolved PR in one line (repository, number, title, head SHA) before starting. Get the head SHA with `gh_read` (`pr view --json headRefOid`) and the local commit with `git_read` subcommand `log` and args `["-n", "1"]`, whose first line begins with `commit <full sha>`, then hand both to the panel so a panelist can tell whether the working tree is the revision under review. Do not add `--oneline`: it abbreviates the sha, so it cannot be compared reliably with `headRefOid`.
 

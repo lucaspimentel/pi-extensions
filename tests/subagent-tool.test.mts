@@ -1808,6 +1808,7 @@ test("review-panel template targets the review preset, resolves the current PR, 
 	const template = readPromptTemplate("review-panel.md");
 	assert.ok(template.includes('argument-hint: "[<PR number or URL>] [focus]"'));
 	assert.ok(template.includes("Requested: $@"), "expands the whole argument list");
+	assert.ok(template.includes("argument text after `Requested:`"), "reads the leading token from the argument text, not its label");
 	assert.ok(template.includes('subagent({panel: "review", task})'), "names the review preset");
 	assert.ok(template.includes("never substitute one silently"), "a missing review preset is reported, not replaced");
 	assert.ok(template.includes("no positional argument reads the current branch's PR"), "resolves the current branch's PR when no argument names one");
