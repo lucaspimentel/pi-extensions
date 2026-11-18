@@ -56,19 +56,24 @@ const expandHint = (context: RenderContextLike): string =>
 const hideText = (theme: Theme, context: RenderContextLike): string => theme.fg("muted", expandHint(context));
 
 /**
+ * One result line with its control characters blanked. `replaceControlCharacters`
+ * is pi-tui's public API, but it would collapse a tab run to a single space, so
+ * the line is split on tabs and rejoined with a real tab, which pi-tui's `Text`
+ * expands to three spaces the way pi's fallback body does.
+ */
+const sanitizeLine = (line: string): string =>
+	line.split("\t").map((segment) => replaceControlCharacters(segment)).join("\t");
+
+/**
  * Sanitized result body as lines: the model-facing text blocks joined by
- * newlines, then terminal sequences removed and control characters blanked.
- * `stripTerminalSequences` and `replaceControlCharacters` are pi-tui's public
- * API; the latter also eats newlines, so it runs line by line, and it would
- * collapse a tab run to a single space, so each line is split on tabs and
- * rejoined with a real tab, which pi-tui's `Text` then expands to three
- * spaces the way pi's fallback body does. An empty result is no lines, not
- * one empty line.
+ * newlines, then terminal sequences removed, CRs dropped, and every line run
+ * through `sanitizeLine` (per line, because `replaceControlCharacters` also
+ * matches newlines). An empty result is no lines, not one empty line.
  */
 const bodyLines = (content: unknown): string[] => {
 	const text = stripTerminalSequences(textBlocks(content).join("\n")).replace(/\r/g, "");
 	if (text === "") return [];
-	return text.split("\n").map((line) => line.split("\t").map(replaceControlCharacters).join("\t"));
+	return text.split("\n").map(sanitizeLine);
 };
 
 /**

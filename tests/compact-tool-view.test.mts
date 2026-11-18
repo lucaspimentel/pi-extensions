@@ -76,12 +76,23 @@ const emptyDir = () => mkdtempSync(join(tmpdir(), "ctv-empty-"));
 /** The wrapped resolver for `write`, a tool whose base has no result renderer. */
 const noBaseWrite = (agentDir = emptyDir()) => loadExtension(agentDir).resolver("write", () => undefined);
 
+/** Asserts the streaming preview of a 7-line body: five lines, then the count and hint. */
+function assertStreamingPreview(lines: string[]): void {
+	assert.equal(lines.length, 6, JSON.stringify(lines));
+	assert.ok(lines[0].includes("\u27e8toolOutput\u27e91"), JSON.stringify(lines));
+	assert.ok(lines[4].includes("\u27e8toolOutput\u27e95"), JSON.stringify(lines));
+	assert.ok(lines[5].includes("... (2 more lines,"), JSON.stringify(lines));
+	assert.ok(lines[5].includes("[app.tools.expand: to expand]"), JSON.stringify(lines));
+	assert.ok(!lines.some((line) => line.includes("\u27e8toolOutput\u27e96")), JSON.stringify(lines));
+}
+
 function configDir(config: Record<string, unknown>): string {
 	const dir = mkdtempSync(join(tmpdir(), "ctv-config-"));
 	writeFileSync(join(dir, "compact-tool-view.json"), JSON.stringify(config));
 	return dir;
 }
 
+/** A result that is exactly one text block; results carrying anything else stay written out. */
 const textResult = (text: string) => ({ content: [{ type: "text", text }] });
 
 // The gist contract returns line objects; these helpers keep expectations
@@ -622,7 +633,7 @@ test("resolver replaces the collapsed base result with the gist", () => {
 	const loaded = loadExtension(emptyDir());
 	const wrapped = loaded.resolver("read", () => makeBase());
 	const lines = renderLines(
-		wrapped.renderResult({ content: [{ type: "text", text: "a\nb\nc" }] }, { expanded: false, isPartial: false }, theme, makeContext()),
+		wrapped.renderResult(textResult("a\nb\nc"), { expanded: false, isPartial: false }, theme, makeContext()),
 	);
 	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e93 lines")), JSON.stringify(lines));
 	assert.ok(!lines.some((line) => line.includes("base body")), JSON.stringify(lines));
@@ -647,7 +658,7 @@ test("a config pattern wraps every matching tool name", () => {
 	const loaded = loadExtension(configDir({ "mcp__*": "gist" }));
 	const wrapped = loaded.resolver("mcp__atlassian__search", () => makeBase());
 	const lines = renderLines(
-		wrapped.renderResult({ content: [{ type: "text", text: "a\nb" }] }, { expanded: false, isPartial: false }, theme, makeContext()),
+		wrapped.renderResult(textResult("a\nb"), { expanded: false, isPartial: false }, theme, makeContext()),
 	);
 	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e92 lines")), JSON.stringify(lines));
 	const base = makeBase();
@@ -658,7 +669,7 @@ test("hide mode shows only the dimmed expand hint when collapsed", () => {
 	const loaded = loadExtension(configDir({ read: "hide" }));
 	const wrapped = loaded.resolver("read", () => makeBase());
 	const lines = renderLines(
-		wrapped.renderResult({ content: [{ type: "text", text: "secret body" }] }, { expanded: false, isPartial: false }, theme, makeContext()),
+		wrapped.renderResult(textResult("secret body"), { expanded: false, isPartial: false }, theme, makeContext()),
 	);
 	assert.ok(lines.some((line) => line.includes("\u27e8muted\u27e9[app.tools.expand: to expand]")), JSON.stringify(lines));
 	assert.ok(!lines.some((line) => line.includes("secret body")), JSON.stringify(lines));
@@ -676,7 +687,7 @@ test("a failure carried on the render context overrides hide mode", () => {
 	const loaded = loadExtension(configDir({ read: "hide" }));
 	const wrapped = loaded.resolver("read", () => makeBase());
 	// pi forwards only content/details; isError arrives on the render context.
-	const result = { content: [{ type: "text", text: "boom" }] };
+	const result = textResult("boom");
 	const lines = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: false }, theme, makeContext({}, true)));
 	assert.ok(lines.some((line) => line.includes("error: boom")), JSON.stringify(lines));
 	assert.ok(!lines.some((line) => line.includes("app.tools.expand")), JSON.stringify(lines));
@@ -684,7 +695,7 @@ test("a failure carried on the render context overrides hide mode", () => {
 
 test("a tool with no base renderer still gists when collapsed", () => {
 	const wrapped = noBaseWrite();
-	const result = { content: [{ type: "text", text: "Successfully wrote to /x" }] };
+	const result = textResult("Successfully wrote to /x");
 	const collapsed = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: false }, theme, makeContext({ content: "a\nb\nc" })));
 	assert.ok(collapsed.some((line) => line.includes("3 lines written")), JSON.stringify(collapsed));
 	// An empty result has no fallback body to synthesize, so the gist stands in.
@@ -694,7 +705,7 @@ test("a tool with no base renderer still gists when collapsed", () => {
 
 test("expanded renders the synthesized fallback body when the base has no result renderer", () => {
 	const wrapped = noBaseWrite();
-	const result = { content: [{ type: "text", text: "line one\nline two" }] };
+	const result = textResult("line one\nline two");
 	const lines = renderLines(wrapped.renderResult(result, { expanded: true, isPartial: false }, theme, makeContext({ content: "a\nb" })));
 	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e9line one")), JSON.stringify(lines));
 	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e9line two")), JSON.stringify(lines));
@@ -702,26 +713,22 @@ test("expanded renders the synthesized fallback body when the base has no result
 	assert.ok(!lines.some((line) => line.includes("app.tools.expand")), JSON.stringify(lines));
 	// An error result is styled the same way: pi's fallback body never switches role.
 	const failed = renderLines(
-		wrapped.renderResult({ content: [{ type: "text", text: "boom" }] }, { expanded: true, isPartial: false }, theme, makeContext({}, true)),
+		wrapped.renderResult(textResult("boom"), { expanded: true, isPartial: false }, theme, makeContext({}, true)),
 	);
 	assert.ok(failed.some((line) => line.includes("\u27e8toolOutput\u27e9boom")), JSON.stringify(failed));
 });
 
 test("streaming previews five lines plus the expand hint when the base has no result renderer", () => {
 	const wrapped = noBaseWrite();
-	const result = { content: [{ type: "text", text: "1\n2\n3\n4\n5\n6\n7" }] };
-	const lines = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: true }, theme, makeContext()));
-	assert.equal(lines.length, 6, JSON.stringify(lines));
-	assert.ok(lines[0].includes("\u27e8toolOutput\u27e91"), JSON.stringify(lines));
-	assert.ok(lines[4].includes("\u27e8toolOutput\u27e95"), JSON.stringify(lines));
-	assert.ok(lines[5].includes("... (2 more lines,"), JSON.stringify(lines));
-	assert.ok(lines[5].includes("[app.tools.expand: to expand]"), JSON.stringify(lines));
-	assert.ok(!lines.some((line) => line.includes("\u27e8toolOutput\u27e96")), JSON.stringify(lines));
+	const lines = renderLines(
+		wrapped.renderResult(textResult("1\n2\n3\n4\n5\n6\n7"), { expanded: false, isPartial: true }, theme, makeContext()),
+	);
+	assertStreamingPreview(lines);
 });
 
 test("hide mode with no base renderer still shows the body when expanded", () => {
 	const wrapped = noBaseWrite(configDir({ write: "hide" }));
-	const result = { content: [{ type: "text", text: "body line" }] };
+	const result = textResult("body line");
 	const collapsed = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: false }, theme, makeContext({ content: "a" })));
 	assert.ok(collapsed.some((line) => line.includes("\u27e8muted\u27e9[app.tools.expand: to expand]")), JSON.stringify(collapsed));
 	assert.ok(!collapsed.some((line) => line.includes("body line")), JSON.stringify(collapsed));
@@ -731,14 +738,11 @@ test("hide mode with no base renderer still shows the body when expanded", () =>
 
 test("hide mode with no base renderer streams the synthesized body", () => {
 	const wrapped = noBaseWrite(configDir({ write: "hide" }));
-	const result = { content: [{ type: "text", text: "1\n2\n3\n4\n5\n6\n7" }] };
-	const lines = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: true }, theme, makeContext()));
-	assert.equal(lines.length, 6, JSON.stringify(lines));
-	assert.ok(lines[0].includes("\u27e8toolOutput\u27e91"), JSON.stringify(lines));
-	assert.ok(lines[4].includes("\u27e8toolOutput\u27e95"), JSON.stringify(lines));
-	assert.ok(lines[5].includes("... (2 more lines,"), JSON.stringify(lines));
-	assert.ok(lines[5].includes("[app.tools.expand: to expand]"), JSON.stringify(lines));
-	assert.ok(!lines.some((line) => line.includes("\u27e8toolOutput\u27e96")), JSON.stringify(lines));
+	const lines = renderLines(
+		wrapped.renderResult(textResult("1\n2\n3\n4\n5\n6\n7"), { expanded: false, isPartial: true }, theme, makeContext()),
+	);
+	assertStreamingPreview(lines);
+	// The streamed body replaces hide's collapsed hint rather than sitting under it.
 	assert.ok(!lines.some((line) => line === theme.fg("muted", "[app.tools.expand: to expand]")), JSON.stringify(lines));
 	// An empty streaming body has nothing to synthesize, so hide's hint stands in.
 	const empty = renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: true }, theme, makeContext()));
@@ -747,7 +751,7 @@ test("hide mode with no base renderer streams the synthesized body", () => {
 
 test("the synthesized body keeps tabs and strips escapes and control characters", () => {
 	const wrapped = noBaseWrite();
-	const result = { content: [{ type: "text", text: "col1\tcol2\n\u001b[31mred\u001b[0m\nx\u0001y" }] };
+	const result = textResult("col1\tcol2\n\u001b[31mred\u001b[0m\nx\u0001y");
 	const lines = renderLines(wrapped.renderResult(result, { expanded: true, isPartial: false }, theme, makeContext()));
 	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e9col1   col2")), JSON.stringify(lines));
 	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e9red")), JSON.stringify(lines));
@@ -809,7 +813,7 @@ test("composition: timestamps wraps the collapsed gist when it loads first", () 
 	handlers.get("tool_execution_start")!({ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: {} });
 	handlers.get("tool_execution_end")!({ type: "tool_execution_end", toolCallId: "t1", toolName: "read", result: {}, isError: false, durationMs: 2000 });
 	const lines = renderLines(
-		wrapped.renderResult({ content: [{ type: "text", text: "a\nb\nc" }] }, { expanded: false, isPartial: false }, theme, makeContext()),
+		wrapped.renderResult(textResult("a\nb\nc"), { expanded: false, isPartial: false }, theme, makeContext()),
 	);
 	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e93 lines")), JSON.stringify(lines));
 	assert.ok(lines.some((line) => line.includes("\u27e8dim\u27e9ran ")), JSON.stringify(lines));
