@@ -56,16 +56,19 @@ const expandHint = (context: RenderContextLike): string =>
 const hideText = (theme: Theme, context: RenderContextLike): string => theme.fg("muted", expandHint(context));
 
 /**
- * Sanitized result body as lines, the way pi's own fallback body reads it: the
- * model-facing text blocks joined by newlines, then terminal sequences removed
- * and control characters blanked. `stripTerminalSequences` and
- * `replaceControlCharacters` are pi-tui's public API; the latter also eats
- * newlines, so it runs line by line. Tabs stay, as in pi's fallback. An empty
- * result is no lines, not one empty line.
+ * Sanitized result body as lines: the model-facing text blocks joined by
+ * newlines, then terminal sequences removed and control characters blanked.
+ * `stripTerminalSequences` and `replaceControlCharacters` are pi-tui's public
+ * API; the latter also eats newlines, so it runs line by line, and it would
+ * collapse a tab run to a single space, so each line is split on tabs and
+ * rejoined with a real tab, which pi-tui's `Text` then expands to three
+ * spaces the way pi's fallback body does. An empty result is no lines, not
+ * one empty line.
  */
 const bodyLines = (content: unknown): string[] => {
 	const text = stripTerminalSequences(textBlocks(content).join("\n")).replace(/\r/g, "");
-	return text === "" ? [] : text.split("\n").map((line) => replaceControlCharacters(line));
+	if (text === "") return [];
+	return text.split("\n").map((line) => line.split("\t").map(replaceControlCharacters).join("\t"));
 };
 
 /**
