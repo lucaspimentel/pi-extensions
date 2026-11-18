@@ -448,8 +448,9 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
   rule above is satisfied by the template rather than by the user. The panelists
   fetch the PR themselves, so the diff is read once per panelist instead of being
   inlined by the main session; a missing `review` preset is reported, never
-  substituted. The local `HEAD` is read with `git_read` `log` and `-n 1`, and the
-  optional `[focus]` text replaces the contract's `<extra review focus>` line,
+  substituted silently. The local `HEAD` is read with `git_read` `log` and
+  `-n 1`, and the optional `[focus]` text replaces the contract's `<extra
+  review focus>` line,
   which is deleted when the request carries no focus.
 
 ## Read-only guarantees
