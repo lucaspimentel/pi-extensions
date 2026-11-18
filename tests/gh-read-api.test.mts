@@ -2299,6 +2299,13 @@ const statusFor = (logins: string[]): (() => GhPlainResult) => () => ({
 	stderr: "",
 });
 
+/** A `gh auth status --json hosts` payload preserving each entry's `state`. */
+const statusEntriesFor = (entries: Array<{ login: string; state?: string }>): (() => GhPlainResult) => () => ({
+	exitCode: 0,
+	stdout: JSON.stringify({ hosts: { "github.com": entries.map((entry) => ({ active: false, ...entry })) } }),
+	stderr: "",
+});
+
 /** A `gh auth token --user <login>` payload. */
 const tokenFor = (token: string): (() => GhPlainResult) => () => ({ exitCode: 0, stdout: `${token}\n`, stderr: "" });
 
@@ -2417,6 +2424,9 @@ test("pr batch: a named account is resolved for its targets, which carry the tok
 	assert.equal(result.details["account"], "lucaspimentel");
 	assert.ok(!result.content[0].text.includes(secret), "the token never reaches the rendered result");
 	assert.match(result.content[0].text, /\[redacted\]/);
+	// No value in `details` carries the token today, so this pins the invariant
+	// rather than exercising the redaction branch.
+	assert.ok(!JSON.stringify(result.details).includes(secret), "the token never reaches the details");
 });
 
 // ── account on every API operation (one shared resolution) ──────────────────
@@ -2439,6 +2449,7 @@ test("account: any operation resolves it once and its children carry the token",
 	assert.deepEqual(api.attachedEnv, { GH_TOKEN: secret });
 	assert.equal(result.details["account"], "lucaspimentel");
 	assert.ok(!result.content[0].text.includes(secret), "the token never reaches the rendered result");
+	assert.ok(!JSON.stringify(result.details).includes(secret), "the token never reaches the details");
 });
 
 test("account: an EMU login validates, resolves, and reports gh's canonical spelling", async () => {
@@ -2484,6 +2495,126 @@ test("account: gh auth status failing passes its diagnostic through", async () =
 	const result = await run({ subcommand: "pr threads", repo: "o/r", pr: 1, account: "lucaspimentel" }, api);
 	assert.equal(result.isError, true);
 	assert.match(result.content[0].text, /gh auth status failed for account 'lucaspimentel': auth status exploded/);
+});
+
+test("account: a login gh marks state error is matchable but not listed as authenticated", async () => {
+	const api = requester([]);
+	api.plainScript = [statusEntriesFor([{ login: "lucaspimentel", state: "success" }, { login: "broken", state: "error" }])];
+	const result = await run({ subcommand: "pr threads", repo: "o/r", pr: 1, account: "someone" }, api);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /authenticated: lucaspimentel\)/);
+	assert.ok(!result.content[0].text.includes("broken"), "the error-state login is not offered as authenticated");
+});
+
+test("account: token resolution failure surfaces gh's bounded diagnostic", async () => {
+	const api = requester([]);
+	api.plainScript = [statusFor(["lucaspimentel"]), plainFail(1, "no oauth token found for github.com account lucaspimentel")];
+	const result = await run({ subcommand: "repo metadata", repo: "o/r", account: "lucaspimentel" }, api);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /could not resolve a token for account 'lucaspimentel': no oauth token found/);
+	assert.equal(api.plainCalls.length, 2, "the token-resolution child runs");
+	assert.deepEqual(api.requests, [], "no operation child runs");
+});
+
+test("account: an oversized resolution diagnostic is truncated", async () => {
+	const api = requester([]);
+	api.plainScript = [statusFor(["lucaspimentel"]), plainFail(1, "e".repeat(600))];
+	const result = await run({ subcommand: "repo metadata", repo: "o/r", account: "lucaspimentel" }, api);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /diagnostic truncated/);
+	assert.ok(!result.content[0].text.includes("e".repeat(513)), "the diagnostic is bounded");
+	assert.deepEqual(api.requests, [], "no operation child runs");
+});
+
+test("account: an error-state login gh still holds a token for proceeds to the operation", async () => {
+	const stale = `gho_${"b".repeat(36)}`;
+	const api = requester([() => response(JSON.stringify({ full_name: "o/r" }))]);
+	api.plainScript = [statusEntriesFor([{ login: "lucaspimentel", state: "error" }]), tokenFor(stale)];
+	const result = await run({ subcommand: "repo metadata", repo: "o/r", account: "lucaspimentel" }, api);
+	assert.equal(result.isError, undefined, result.content[0].text);
+	assert.equal(api.requests.length, 1, "resolution succeeds and the operation's own request runs");
+	assert.ok(!result.content[0].text.includes(stale), "the token never reaches the rendered result");
+});
+
+test("account: a failing resolution diagnostic is redacted by shape and by ambient token", async () => {
+	const shape = `gho_${"a".repeat(36)}`;
+	const ambient = "ambient-secret-token-value";
+	const previous = process.env["GH_TOKEN"];
+	process.env["GH_TOKEN"] = ambient;
+	try {
+		const api = requester([]);
+		api.plainScript = [plainFail(1, `auth status is unhappy with ${shape} and ${ambient}`)];
+		const result = await run({ subcommand: "repo metadata", repo: "o/r", account: "lucaspimentel" }, api);
+		assert.equal(result.isError, true);
+		assert.match(result.content[0].text, /\[redacted\]/);
+		assert.ok(!result.content[0].text.includes(shape), "the token shape is redacted");
+		assert.ok(!result.content[0].text.includes(ambient), "an ambient token is redacted");
+		assert.ok(!JSON.stringify(result.details).includes(ambient), "the token never reaches the details");
+	} finally {
+		if (previous === undefined) delete process.env["GH_TOKEN"];
+		else process.env["GH_TOKEN"] = previous;
+	}
+});
+
+test("account: a non-string account in a continuation payload is rejected by every operation", async () => {
+	const source = { page: 11, done: false };
+	const crafted: Array<[Record<string, unknown>, Record<string, unknown>]> = [
+		[{ subcommand: "issue comments", repo: "OWNER/REPO", issue: 123 }, { v: 1, op: "issue comments", repo: "OWNER/REPO", issue: 123, perPage: PAGE_SIZE, source, account: 123 }],
+		[{ subcommand: "issue timeline", repo: "OWNER/REPO", issue: 123 }, { v: 1, op: "issue timeline", repo: "OWNER/REPO", issue: 123, perPage: PAGE_SIZE, source, account: 123 }],
+		[{ subcommand: "pr comments", repo: "OWNER/REPO", pr: 123 }, { v: 1, op: "pr comments", repo: "OWNER/REPO", pr: 123, perPage: PAGE_SIZE, source, account: 123 }],
+		[{ subcommand: "pr threads", repo: "OWNER/REPO", pr: 123 }, { v: 1, op: "pr threads", repo: "OWNER/REPO", pr: 123, first: PAGE_SIZE, cursor: null, account: 123 }],
+		[{ subcommand: "commit checks", repo: "o/r", ref: "main" }, { v: 1, op: "commit checks", repo: "o/r", ref: "main", sha: "a".repeat(40), checks: source, statuses: source, account: 123 }],
+		[{ subcommand: "advisory view", id: "CVE-2026-111943" }, { v: 1, op: "advisory view", id: "CVE-2026-111943", type: "reviewed", advisories: source, account: 123 }],
+	];
+	for (const [params, payload] of crafted) {
+		const api = requester([]);
+		const continuation = Buffer.from(JSON.stringify(payload)).toString("base64url");
+		const result = await run({ ...params, continuation }, api);
+		assert.equal(result.isError, true, `${String(params["subcommand"])} must reject a non-string account`);
+		assert.match(result.content[0].text, /continuation/, `${String(params["subcommand"])} reports a continuation mismatch`);
+		assert.deepEqual(api.requests, [], `${String(params["subcommand"])} must not spawn a request`);
+	}
+});
+
+test("account: a continuation binds the account it was started under", async () => {
+	const secret = "ghp_secrettokenvalue";
+	// (a) A ten-page run under an account records that account in its token.
+	const api = requester(Array.from({ length: MAX_PAGES_PER_SOURCE }, (_, i) => () => response(JSON.stringify([{ id: i + 1 }]), linkHeader(i + 2, ISSUE_ENDPOINT, "per_page=100"))));
+	api.plainScript = [statusFor(["lucaspimentel"]), tokenFor(secret)];
+	const first = await run({ ...issueParams, account: "lucaspimentel" }, api);
+	assert.equal(first.isError, undefined, first.content[0].text);
+	assert.equal(first.details.account, "lucaspimentel");
+	assert.equal(issuePosition(first).account, "lucaspimentel");
+
+	// (b) The same token resumes under a case-different spelling of that account.
+	const sameAccount = requester([() => response('[{"id":11}]')]);
+	sameAccount.plainScript = [statusFor(["lucaspimentel"]), tokenFor(secret)];
+	const resumed = await run({ ...issueParams, account: "LucasPimentel", continuation: first.details.continuation }, sameAccount);
+	assert.equal(resumed.isError, undefined, resumed.content[0].text);
+	assert.deepEqual(sameAccount.requests, [`${ISSUE_ENDPOINT}?per_page=100&page=11`]);
+
+	// (c) A different account is rejected before any operation request.
+	const otherAccount = requester([]);
+	otherAccount.plainScript = [statusFor(["lucas-pimentel_ddog"]), tokenFor(secret)];
+	const mismatch = await run({ ...issueParams, account: "lucas-pimentel_ddog", continuation: first.details.continuation }, otherAccount);
+	assert.equal(mismatch.isError, true);
+	assert.match(mismatch.content[0].text, /continuation does not match this invocation/);
+	assert.deepEqual(otherAccount.requests, [], "no operation request runs");
+
+	// (d) Absent binds absent: an account-less token rejects an account, and an
+	// account-scoped token rejects an account-less call.
+	const literalWithAccount = requester([]);
+	literalWithAccount.plainScript = [statusFor(["lucaspimentel"]), tokenFor(secret)];
+	const literalRejected = await run({ ...issueParams, account: "lucaspimentel", continuation: LITERAL_ISSUE_TOKEN }, literalWithAccount);
+	assert.equal(literalRejected.isError, true);
+	assert.match(literalRejected.content[0].text, /continuation does not match this invocation/);
+	assert.deepEqual(literalWithAccount.requests, [], "no operation request runs");
+
+	const scopedWithoutAccount = requester([]);
+	const scopedRejected = await run({ ...issueParams, continuation: first.details.continuation }, scopedWithoutAccount);
+	assert.equal(scopedRejected.isError, true);
+	assert.match(scopedRejected.content[0].text, /continuation does not match this invocation/);
+	assert.deepEqual(scopedWithoutAccount.requests, [], "no operation request runs");
 });
 
 // ── Structured failure reasons (compact result rows) ─────────────────────────

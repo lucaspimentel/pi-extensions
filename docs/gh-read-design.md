@@ -67,9 +67,10 @@ the main session. Deliberately not tied to any one agent; agents opt in via
 - Tags follow in a fixed order, all `muted`: `@ref`, `[account]`, then the
   narrowing markers, at most one of each kind — a line range as `:12-40`,
   `:12-`, or `:1-40` (an explicit trail for a one-sided range), `(narrowed)`
-  for a `jq` filter, `(continuation)` for a paged follow-up. A tag never
-  carries a raw value: a jq expression or continuation token would swamp the
-  row.
+  for a `jq` filter, `(continuation)` for a paged follow-up. `[account]`
+  carries the caller's raw argument; the canonical login gh resolved for it
+  appears in `details.account`. A tag never carries a raw value: a jq
+  expression or continuation token would swamp the row.
 - Off the row entirely (expanded-only): the switches that do not change what
   you are looking at (`recursive`, `fields`, an advisory `type`) and every
   value the tags summarize.
@@ -436,9 +437,10 @@ per-source errors. The legacy combined-status source renames its tail:
 is declared for the statuses source only. Stops between complete
 responses (page or budget limits) are nonerror incompleteness;
 interrupted/truncated responses are errors. A versioned, size-bounded
-continuation token carries the operation, target/query, pinned SHA, and
-independent per-source page/done states; it is matched against the
-invocation (repo + ref, or id + type), resumed refs are never re-resolved,
+continuation token carries the operation, target/query, pinned SHA, the
+optional account the traversal was started under, and independent per-source
+page/done states; it is matched against the invocation (repo + ref, or id +
+type, plus the account), resumed refs are never re-resolved,
 completed-source data is preserved when the other source fails, and retry
 positions are retained. Note: check results are mutable CI state, not a
 transactional snapshot; GitHub also bounds which check suites it returns
@@ -606,20 +608,47 @@ JSON field" message, the remaining targets are filled with `exitCode: null`
 envelopes rather than run. If gh ever changes that wording, targets simply
 fail individually, so correctness is unaffected.
 
-Account selection (every API operation, before the operation runs): when
-`account` is omitted the ambient active `gh` account is used with NO
-pre-check. When it is named, the call first runs `gh auth status --json hosts`
-and requires the login to appear on github.com (gh's JSON mode exits 0 when
-logged out, so an empty payload means not found, and the refusal lists the
-logins gh does hold). Matching is case-insensitive because GitHub logins are,
-while `gh auth token --user` is case-sensitive on gh 2.104.0: gh's canonical
-spelling is what the token is resolved for. A login gh does not hold fails
-here, before the operation spends its deadline. The resolved token is attached
-to every child the operation spawns, through the runner's `useEnv`. The token
-never enters the data block, the metadata head, notices, or `details`: the
-rendered text and every string value in `details` pass through a scrub that
-replaces it with `[redacted]`, and the result reports the canonical login as
-`details.account`.
+Cap rationale: measured on the host with gh 2.103.3, per target: scalars
+0.46 s; scalars plus `files` and `commits` 0.96 s; `files`, `reviews`,
+`comments`, and `statusCheckRollup` 1.14 s. Fifteen targets is roughly 7 s
+to 17 s against the shared 30 s deadline, so the cap is 15; a larger batch
+would need concurrency the runner does not have.
+
+### Account selection
+
+Every API operation accepts an optional `account`, resolved before the
+operation runs: when it is omitted the ambient active `gh` account is used
+with NO pre-check. When it is named, the call first runs `gh auth status
+--json hosts` and requires the login to appear on github.com (gh's JSON mode
+exits 0 when logged out, so an empty payload means not found, and the refusal
+lists the logins gh does hold; a login gh marks `state: "error"` is still
+matchable but stays out of that list, and naming one fails either here, when
+gh holds no token for it, or later at the operation's own request, when gh's
+store still holds a stale one). Matching is case-insensitive because GitHub
+logins are, while `gh auth token --user` is case-sensitive on gh 2.104.0: gh's
+canonical spelling is what the token is resolved for. An entry whose token came
+from an environment variable appears with its login filled (verified on gh
+2.104.0), so naming a login gh's credential store does not hold passes
+membership and then fails at token resolution; the ambient token already
+authenticates that account, so `account` is unnecessary for it.
+Resolution shares the operation's requester, its 30 s deadline, and the
+captured-output budget, and `gh auth status --json hosts` is itself an API
+call; an unknown login still fails before any operation child spawns. The
+resolved token is attached to every child the operation spawns, through the
+runner's `useEnv`. The token never enters the data block, the metadata head,
+notices, or `details`: the rendered text and every string value in `details`
+pass through a scrub that replaces it with `[redacted]`, and the result
+reports the canonical login as `details.account`. When resolution fails there
+is no resolved token to match, so the refusal is gh's own diagnostic, redacted
+against token shapes and against whatever token this process's environment
+holds, then bounded by the shared cap.
+
+The account is also part of the traversal identity: a continuation records
+the account the traversal was started under, and resuming requires the same
+account (compared case-insensitively, GitHub logins being case-insensitive).
+An account-less token resumes only an account-less call. The field is omitted
+for account-less calls, so their tokens stay byte-identical to the
+pre-account format and the version is unchanged.
 
 Verified on gh 2.104.0 that `gh auth token --user <login>` reads hosts.yml even
 when `GH_TOKEN` or `GITHUB_TOKEN` is set, so resolution needs no environment
@@ -627,12 +656,6 @@ stripping, and the injected `GH_TOKEN` overrides whatever the child would have
 inherited. Resolution costs two extra `gh` spawns before the operation's own
 requests, and the token is held only for that call: no caching, so a rotated or
 revoked credential surfaces as a passthrough error rather than a stale token.
-
-Cap rationale: measured on the host with gh 2.103.3, per target: scalars
-0.46 s; scalars plus `files` and `commits` 0.96 s; `files`, `reviews`,
-`comments`, and `statusCheckRollup` 1.14 s. Fifteen targets is roughly 7 s
-to 17 s against the shared 30 s deadline, so the cap is 15; a larger batch
-would need concurrency the runner does not have.
 
 ### pr comments and pr reviews
 
@@ -669,8 +692,9 @@ items per invocation, reusing the strict Link validation and tool-owned
 request reconstruction of commit checks. No combined result object,
 combined comments/reviews token, or automatic cross-operation fetch exists.
 A versioned, size-bounded continuation binds the operation, repo, PR number,
-and next-page state; it must be returned unchanged with the same
-`subcommand` + `repo` + `pr`. Tokens cannot cross operations or targets.
+next-page state, and the optional `account` the call was made under; it must
+be returned unchanged with the same `subcommand` + `repo` + `pr` + `account`.
+Tokens cannot cross operations, targets, or accounts.
 Resumes fetch only the next batch, not earlier batches. Completed pages
 are retained if a later page fails, with the failed page kept as the retry
 position; page/budget stops between complete responses are nonerror
@@ -754,14 +778,16 @@ are counted in `threads_with_truncated_comments`, and comments restart at
 their first page on resume.
 
 The continuation payload is `{v:1, op:"pr threads", repo, pr, first:100,
-cursor}`, where `cursor` is the last observed `endCursor`, or null for a
-first-page retry. Decoding requires `op === "pr threads"`, a string `repo`, a
-positive safe-integer `pr`, `first === 100`, and a `cursor` that is exactly
-null or a 1..512-character printable-ASCII string; the token is then matched
-against repo and pr before any request runs. A continuation is emitted
-whenever the traversal is not done, including on the error path, where the
-retry cursor is the cursor used for the failed request (null for a
-first-page failure); page-limit and between-response budget/deadline stops
+cursor}`, plus the optional `account` when the call named one, where `cursor`
+is the last observed `endCursor`, or null for a first-page retry. Decoding
+requires `op === "pr threads"`, a string `repo`, a positive safe-integer `pr`,
+`first === 100`, a `cursor` that is exactly null or a 1..512-character
+printable-ASCII string, and (when present) a string `account`; the token is
+then matched against repo, pr, and account before any request runs. A
+continuation is emitted whenever the traversal is not done, including on the
+error path, where the retry cursor is the cursor used for the failed request
+(null for a first-page failure); page-limit and between-response
+budget/deadline stops
 are nonerror incompleteness, and only the non-continuable incomplete stop
 above suppresses the token.
 
@@ -1001,8 +1027,8 @@ mode, `plain`, runs a native `gh` command with no `--include`, so stdout is
 captured verbatim with no header or HTTP-status parsing; `pr batch` uses it,
 and every transport honors environment overrides attached with `useEnv`,
 which is how a resolved account token reaches each child. One monotonic
-30-second deadline is shared across ref resolution, all paged children, and
-jq. The captured-output budget is 8
+30-second deadline is shared across account resolution, ref resolution, all
+paged children, and jq. The captured-output budget is 8
 MiB of gh response stdout CUMULATIVELY (resolution requests and response
 headers included). Honest scope: this bounds what the tool CAPTURES, not
 network transfer or gh's internal memory use. Header blocks are bounded
@@ -1060,19 +1086,22 @@ continuation stay outside filtered output.
 ### API result shape and display cap
 
 PR continuation payloads carry `v: 1`, `op` (`pr comments` or `pr reviews`),
-`repo`, numeric `pr`, `perPage: 100`, and `source: {page, done: false}`.
-issue-comments and issue-timeline payloads are the same shape with
-`op: "issue comments"` and `op: "issue timeline"` and a numeric `issue`
-instead of `pr`. The `pr threads` payload is cursor-based,
-not offset-based: `{v:1, op:"pr threads", repo, pr, first:100, cursor}` (see
+`repo`, numeric `pr`, `perPage: 100`, `source: {page, done: false}`, and,
+when the call named an account, `account`. issue-comments and
+issue-timeline payloads are the same shape with `op: "issue comments"` and
+`op: "issue timeline"` and a numeric `issue` instead of `pr`. The
+`pr threads` payload is cursor-based, not offset-based:
+`{v:1, op:"pr threads", repo, pr, first:100, cursor, account?}` (see
 "pr threads"). Before any request, the decoder requires a
 non-array source object and a positive safe-integer page, then the handler
-matches operation/repo/target exactly (issue comment tokens also require a
-positive safe-integer issue; a legacy-v1 PR token never satisfies an issue
-invocation and vice versa). Tokens are opaque bounded payloads, not signed
+matches operation/repo/target/account exactly (issue comment tokens also
+require a positive safe-integer issue; a legacy-v1 PR token never satisfies
+an issue invocation and vice versa; an account-less token matches only an
+account-less call). Tokens are opaque bounded payloads, not signed
 credentials. They are not bound to jq, so a resumed batch may use a
-different filter. Existing commit-checks, CVE, and PR token formats remain
-unchanged; the version is not bumped.
+different filter. The account field is omitted when no account was named, so
+account-less tokens are byte-identical to the pre-account format and the
+version is not bumped.
 
 PR metadata includes `repo`, `pr`, `source_complete`, `items_returned`
 (before jq), `pages_fetched`, and `resumed: true` on resumption. `pr batch`
@@ -1367,7 +1396,14 @@ Settled in the grill-me review:
   subcommand), the same account path orchestration (one resolution for any
   operation, the token reaching the child env, gh's canonical spelling used
   for a case-different login, an unknown login failing before any operation
-  child with the held logins listed, and the token scrubbed from the result),
+  child with the held logins listed, an error-state login still matchable but
+  excluded from the authenticated hint (and proceeding to the operation's own
+  request when gh's store holds its token), a token-resolution failure
+  surfacing gh's redacted, bounded diagnostic, a non-string `account` inside a
+  continuation payload rejected by every operation that mints one,
+  account-bound continuations (case-insensitive match, and
+  absent-binds-absent rejection in both directions), and the token scrubbed
+  from the result and from every string in `details`),
   and the runner's `useEnv` seam (overrides on every transport, a per-call env
   still winning, and no `GH_TOKEN` key added when no account is named). Run
   coverage: the `run list` argv matrix (flags in input order, `--limit` bounds
@@ -1618,9 +1654,10 @@ Settled in the grill-me review:
   one `pr batch` call, using explicit `OWNER/REPO#N` targets, receiving
   per-target envelopes in input order, a default or caller-chosen gh `--json`
   field set, and an optional named account whose token never appears in the
-  result; a single failed target does not fail the call, no worktree gate
-  applies, and the operation removes the need for a prompting `gh pr view`
-  loop in `host_bash`.
+  result and whose continuations bind that account (returned unchanged and
+  resumed only under the same account, case-insensitively); a single failed
+  target does not fail the call, no worktree gate applies, and the operation
+  removes the need for a prompting `gh pr view` loop in `host_bash`.
 - Non-allowlisted subcommands (including every write verb: `pr create`,
   `pr merge`, `issue close`, `gh api`), unknown flags, and unsafe values are
   rejected with clear errors naming the allowed set, verified by tests.
@@ -1662,7 +1699,9 @@ Settled in the grill-me review:
 - No token handling, masking, or account switching inside the tool, with one
   exception: the optional `account` selector every API operation accepts, which
   resolves that account's token through `gh auth token --user` and attaches it
-  to that call's children, never to output. Native subcommands keep the
+  to that call's children, never to output; a resolution failure has no
+  resolved token to match, so its diagnostic is redacted against token shapes
+  and the token variables this process holds. Native subcommands keep the
   non-goal, and keeping `--show-token` off the `auth status` allowlist is what
   guarantees token values never enter tool output through any allowlisted
   path.

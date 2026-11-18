@@ -301,6 +301,12 @@ function validateNextPage(
 
 // ── Continuations ────────────────────────────────────────────────────────────
 
+// Each continuation payload may carry an optional `account`: the account the
+// traversal was started under, omitted for an account-less call. A token is
+// bound to its account, and the comparison is case-insensitive because GitHub
+// logins are: an account-scoped token resumes only under the same account, and
+// an account-less token resumes only account-less.
+
 interface SourceState {
 	page: number;
 	done: boolean;
@@ -314,6 +320,7 @@ interface CommitChecksContinuation {
 	sha: string;
 	checks: SourceState;
 	statuses: SourceState;
+	account?: string;
 }
 
 interface AdvisoryContinuation {
@@ -322,6 +329,7 @@ interface AdvisoryContinuation {
 	id: string;
 	type: AdvisoryType;
 	advisories: SourceState;
+	account?: string;
 }
 
 type PrReadOperation = "pr comments" | "pr reviews";
@@ -333,6 +341,7 @@ interface PrReadContinuation {
 	pr: number;
 	perPage: number;
 	source: SourceState;
+	account?: string;
 }
 
 function decodePrReadContinuation(record: Record<string, unknown>): PrReadContinuation | null {
@@ -343,6 +352,7 @@ function decodePrReadContinuation(record: Record<string, unknown>): PrReadContin
 	if (typeof source !== "object" || source === null || Array.isArray(source)) return null;
 	const state = source as Record<string, unknown>;
 	if (typeof state["page"] !== "number" || !Number.isSafeInteger(state["page"]) || state["page"] < 1 || state["done"] !== false) return null;
+	if (record["account"] !== undefined && typeof record["account"] !== "string") return null;
 	return record as unknown as PrReadContinuation;
 }
 
@@ -358,6 +368,7 @@ interface PrThreadsContinuation {
 	pr: number;
 	first: 100;
 	cursor: string | null;
+	account?: string;
 }
 
 /** Opaque GitHub cursors, bounded to printable ASCII. */
@@ -370,6 +381,7 @@ function decodePrThreadsContinuation(record: Record<string, unknown>): PrThreads
 	if (record["first"] !== PAGE_SIZE) return null;
 	const cursor = record["cursor"];
 	if (cursor !== null && (typeof cursor !== "string" || !GRAPHQL_CURSOR_RE.test(cursor))) return null;
+	if (record["account"] !== undefined && typeof record["account"] !== "string") return null;
 	return record as unknown as PrThreadsContinuation;
 }
 
@@ -380,6 +392,7 @@ interface IssueCommentsContinuation {
 	issue: number;
 	perPage: number;
 	source: SourceState;
+	account?: string;
 }
 
 function decodeIssueCommentsContinuation(record: Record<string, unknown>): IssueCommentsContinuation | null {
@@ -390,6 +403,7 @@ function decodeIssueCommentsContinuation(record: Record<string, unknown>): Issue
 	if (typeof source !== "object" || source === null || Array.isArray(source)) return null;
 	const state = source as Record<string, unknown>;
 	if (typeof state["page"] !== "number" || !Number.isSafeInteger(state["page"]) || state["page"] < 1 || state["done"] !== false) return null;
+	if (record["account"] !== undefined && typeof record["account"] !== "string") return null;
 	return record as unknown as IssueCommentsContinuation;
 }
 
@@ -400,6 +414,7 @@ interface IssueTimelineContinuation {
 	issue: number;
 	perPage: number;
 	source: SourceState;
+	account?: string;
 }
 
 function decodeIssueTimelineContinuation(record: Record<string, unknown>): IssueTimelineContinuation | null {
@@ -410,6 +425,7 @@ function decodeIssueTimelineContinuation(record: Record<string, unknown>): Issue
 	if (typeof source !== "object" || source === null || Array.isArray(source)) return null;
 	const state = source as Record<string, unknown>;
 	if (typeof state["page"] !== "number" || !Number.isSafeInteger(state["page"]) || state["page"] < 1 || state["done"] !== false) return null;
+	if (record["account"] !== undefined && typeof record["account"] !== "string") return null;
 	return record as unknown as IssueTimelineContinuation;
 }
 
@@ -420,6 +436,29 @@ type ContinuationPayload =
 	| IssueCommentsContinuation
 	| IssueTimelineContinuation
 	| PrThreadsContinuation;
+
+/**
+ * The continuation's account binding, present only when the caller named an
+ * account. Omitting it for account-less calls keeps the pre-account token
+ * bytes, so existing tokens still decode and match.
+ */
+function accountContinuationField(account: string | undefined): { account?: string } {
+	return account === undefined ? {} : { account };
+}
+
+/**
+ * Whether a continuation's recorded account permits resuming this
+ * invocation: a token that named an account is bound to it (compared
+ * case-insensitively, GitHub logins being case-insensitive), and an
+ * account-less token only matches an account-less call. A non-string
+ * recorded value never matches; only the unvalidated commit-checks/CVE
+ * pass-through can produce one.
+ */
+function continuationAccountMatches(recorded: unknown, account: string | undefined): boolean {
+	if (recorded === undefined) return account === undefined;
+	if (typeof recorded !== "string") return false;
+	return account !== undefined && recorded.toLowerCase() === account.toLowerCase();
+}
 
 function encodeContinuation(payload: ContinuationPayload): { ok: true; token: string } | { ok: false; reason: string } {
 	const token = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
@@ -1125,8 +1164,8 @@ async function opCommitChecks(invocation: ValidApiInvocation, requester: ApiRequ
 	let statusesState: SourceState;
 	if (invocation.continuation !== undefined) {
 		const payload = decodeContinuation(invocation.continuation);
-		if (payload === null || payload.op !== "commit checks" || payload.repo !== repo || payload.ref !== ref) {
-			return failedResult(summary, metadata, "continuation does not match this invocation (operation, repo, or ref differ)");
+		if (payload === null || payload.op !== "commit checks" || payload.repo !== repo || payload.ref !== ref || !continuationAccountMatches(payload.account, invocation.account)) {
+			return failedResult(summary, metadata, "continuation does not match this invocation (operation, repo, ref, or account differ)");
 		}
 		sha = payload.sha;
 		checksState = { ...payload.checks };
@@ -1236,6 +1275,7 @@ async function opCommitChecks(invocation: ValidApiInvocation, requester: ApiRequ
 			sha,
 			checks: { page: checks.page, done: checks.done },
 			statuses: { page: statuses.page, done: statuses.done },
+			...accountContinuationField(invocation.account),
 		});
 		if (encoded.ok) {
 			continuationToken = encoded.token;
@@ -1285,8 +1325,8 @@ async function opAdvisoryView(invocation: ValidApiInvocation, requester: ApiRequ
 	let page = 1;
 	if (invocation.continuation !== undefined) {
 		const payload = decodeContinuation(invocation.continuation);
-		if (payload === null || payload.op !== "advisory view" || payload.id !== id || payload.type !== type) {
-			return failedResult(summary, metadata, "continuation does not match this invocation (id or type differ)");
+		if (payload === null || payload.op !== "advisory view" || payload.id !== id || payload.type !== type || !continuationAccountMatches(payload.account, invocation.account)) {
+			return failedResult(summary, metadata, "continuation does not match this invocation (id, type, or account differ)");
 		}
 		page = payload.advisories.page;
 		if (payload.advisories.done) {
@@ -1322,7 +1362,7 @@ async function opAdvisoryView(invocation: ValidApiInvocation, requester: ApiRequ
 	}
 	const done = result.done;
 	if (!done) {
-		const encoded = encodeContinuation({ v: 1, op: "advisory view", id, type, advisories: { page: result.page, done: false } });
+		const encoded = encodeContinuation({ v: 1, op: "advisory view", id, type, advisories: { page: result.page, done: false }, ...accountContinuationField(invocation.account) });
 		if (encoded.ok) metadata.push(["continuation", encoded.token]);
 		else {
 			notices.push(`continuation could not be encoded: ${encoded.reason}`);
@@ -1398,7 +1438,7 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 	if (invocation.continuation !== undefined) {
 		const payload = decodeContinuation(invocation.continuation);
 		let matchedPage: number | null = null;
-		if (payload !== null && payload.op === op && payload.repo === repo) {
+		if (payload !== null && payload.op === op && payload.repo === repo && continuationAccountMatches(payload.account, invocation.account)) {
 			if (payload.op === "issue comments") {
 				if (payload.issue === number) matchedPage = payload.source.page;
 			} else if (payload.pr === number) {
@@ -1406,7 +1446,7 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 			}
 		}
 		if (matchedPage === null) {
-			return failedResult(summary, metadata, `continuation does not match this invocation (operation, repo, ${targetLabel}, or page invariants differ)`, { notices });
+			return failedResult(summary, metadata, `continuation does not match this invocation (operation, repo, ${targetLabel}, account, or page invariants differ)`, { notices });
 		}
 		page = matchedPage;
 		metadata.push(["resumed", true]);
@@ -1428,8 +1468,8 @@ async function opDiscussionRead(invocation: ValidApiInvocation, requester: ApiRe
 	if (result.stopReason !== undefined) metadata.push(["incomplete_reason", result.stopReason]);
 	if (!result.done) {
 		const encoded = isIssue
-			? encodeContinuation({ v: 1, op: "issue comments", repo, issue: number, perPage: PAGE_SIZE, source: { page: result.page, done: false } })
-			: encodeContinuation({ v: 1, op: op as PrReadOperation, repo, pr: number, perPage: PAGE_SIZE, source: { page: result.page, done: false } });
+			? encodeContinuation({ v: 1, op: "issue comments", repo, issue: number, perPage: PAGE_SIZE, source: { page: result.page, done: false }, ...accountContinuationField(invocation.account) })
+			: encodeContinuation({ v: 1, op: op as PrReadOperation, repo, pr: number, perPage: PAGE_SIZE, source: { page: result.page, done: false }, ...accountContinuationField(invocation.account) });
 		if (encoded.ok) metadata.push(["continuation", encoded.token]);
 		else {
 			isError = true;
@@ -1485,8 +1525,8 @@ async function opIssueTimeline(invocation: ValidApiInvocation, requester: ApiReq
 	let page = 1;
 	if (invocation.continuation !== undefined) {
 		const payload = decodeContinuation(invocation.continuation);
-		if (payload === null || payload.op !== "issue timeline" || payload.repo !== repo || payload.issue !== issue) {
-			return failedResult(summary, metadata, "continuation does not match this invocation (operation, repo, issue, or page invariants differ)", { notices });
+		if (payload === null || payload.op !== "issue timeline" || payload.repo !== repo || payload.issue !== issue || !continuationAccountMatches(payload.account, invocation.account)) {
+			return failedResult(summary, metadata, "continuation does not match this invocation (operation, repo, issue, account, or page invariants differ)", { notices });
 		}
 		page = payload.source.page;
 		metadata.push(["resumed", true]);
@@ -1511,7 +1551,7 @@ async function opIssueTimeline(invocation: ValidApiInvocation, requester: ApiReq
 	const events = eventInventory(result.items);
 	if (events !== null) metadata.push(["events", events]);
 	if (!result.done) {
-		const encoded = encodeContinuation({ v: 1, op: "issue timeline", repo, issue, perPage: PAGE_SIZE, source: { page: result.page, done: false } });
+		const encoded = encodeContinuation({ v: 1, op: "issue timeline", repo, issue, perPage: PAGE_SIZE, source: { page: result.page, done: false }, ...accountContinuationField(invocation.account) });
 		if (encoded.ok) metadata.push(["continuation", encoded.token]);
 		else {
 			isError = true;
@@ -1613,7 +1653,7 @@ async function opPrThreads(invocation: ValidApiInvocation, requester: ApiRequest
 	let cursor: string | null = null;
 	if (invocation.continuation !== undefined) {
 		const payload = decodeContinuation(invocation.continuation);
-		if (payload === null || payload.op !== "pr threads" || payload.repo !== repo || payload.pr !== pr) {
+		if (payload === null || payload.op !== "pr threads" || payload.repo !== repo || payload.pr !== pr || !continuationAccountMatches(payload.account, invocation.account)) {
 			const field =
 				payload === null
 					? "continuation token"
@@ -1621,7 +1661,9 @@ async function opPrThreads(invocation: ValidApiInvocation, requester: ApiRequest
 						? "operation"
 						: payload.repo !== repo
 							? "repo"
-							: "pr";
+							: payload.pr !== pr
+								? "pr"
+								: "account";
 			return failedResult(summary, metadata, `continuation does not match this invocation (${field} differs)`, { notices });
 		}
 		cursor = payload.cursor;
@@ -1716,7 +1758,7 @@ async function opPrThreads(invocation: ValidApiInvocation, requester: ApiRequest
 	if (error !== undefined) metadata.push(["source_error", error]);
 	if (stopReason !== undefined) metadata.push(["incomplete_reason", stopReason]);
 	if (!done && !nonContinuable) {
-		const encoded = encodeContinuation({ v: 1, op: "pr threads", repo, pr, first: PAGE_SIZE, cursor: continuationCursor });
+		const encoded = encodeContinuation({ v: 1, op: "pr threads", repo, pr, first: PAGE_SIZE, cursor: continuationCursor, ...accountContinuationField(invocation.account) });
 		if (encoded.ok) metadata.push(["continuation", encoded.token]);
 		else {
 			isError = true;
@@ -1834,14 +1876,53 @@ function scrubSecret(text: string, secret: string | undefined): string {
 	return text.split(secret).join("[redacted]");
 }
 
+/** Bound on a gh diagnostic folded into a failure reason, so it cannot dominate the head. */
+const ACCOUNT_DIAGNOSTIC_MAX_CHARS = 512;
+
+/** Token shapes gh prints in its own output, redacted here by shape. */
+const TOKEN_SHAPE_RE = /(?:gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g;
+
+/** Environment variables this process may hold a token in. */
+const TOKEN_ENV_VARS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"] as const;
+
 /**
- * The github.com logins `gh auth status --json hosts` reports, in gh's own
- * order. gh's JSON mode exits 0 even when logged out, so an empty or malformed
- * hosts map is "no logins" rather than a child failure. An environment token
- * appears as an entry with an empty login (its `tokenSource` is GH_TOKEN or
- * GITHUB_TOKEN), which a caller-supplied login can never match.
+ * gh's stderr for one resolution child, trimmed, scrubbed, and bounded; a
+ * placeholder when empty. Resolution failed, so there is no resolved token for
+ * `hideAccountToken` to match: token shapes gh prints and any token this
+ * process's own environment holds are redacted here instead. Redaction runs
+ * before the trim and the bound, so a token cannot survive as a truncated
+ * remnant that no longer matches.
  */
-function parseGithubLogins(stdout: string): string[] {
+function accountDiagnostic(stderr: string): string {
+	let text = stderr.replace(TOKEN_SHAPE_RE, "[redacted]");
+	for (const name of TOKEN_ENV_VARS) text = scrubSecret(text, process.env[name]);
+	text = text.trim();
+	if (text.length === 0) return "no diagnostic";
+	if (text.length <= ACCOUNT_DIAGNOSTIC_MAX_CHARS) return text;
+	return `${text.slice(0, ACCOUNT_DIAGNOSTIC_MAX_CHARS)}... (diagnostic truncated)`;
+}
+
+/** One github.com host entry from `gh auth status --json hosts`. */
+interface GithubHostEntry {
+	login: string;
+	/** gh's per-entry state; "error" marks an unusable credential. */
+	state: string | undefined;
+}
+
+/**
+ * The github.com host entries `gh auth status --json hosts` reports, in gh's
+ * own order, each carrying its login and gh's per-entry state. gh's JSON mode
+ * exits 0 even when logged out, so an empty or malformed hosts map is "no
+ * entries" rather than a child failure. An entry gh marks `state: "error"` is
+ * returned like any other and callers decide whether it counts as
+ * authenticated. A valid environment token appears with its `login` filled and
+ * `tokenSource` GH_TOKEN or GITHUB_TOKEN (verified on gh 2.104.0), while an
+ * unusable one has an empty `login` and is skipped here. A nonempty login from
+ * an environment token can therefore pass membership for an account gh's
+ * credential store does not hold, and the following token resolution then
+ * fails with gh's diagnostic.
+ */
+function parseGithubLogins(stdout: string): GithubHostEntry[] {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(stdout);
@@ -1853,13 +1934,15 @@ function parseGithubLogins(stdout: string): string[] {
 	if (!isPlainObject(hosts)) return [];
 	const entries = hosts["github.com"];
 	if (!Array.isArray(entries)) return [];
-	const logins: string[] = [];
+	const found: GithubHostEntry[] = [];
 	for (const entry of entries) {
 		if (!isPlainObject(entry)) continue;
 		const login = entry["login"];
-		if (typeof login === "string" && login.length > 0) logins.push(login);
+		if (typeof login !== "string" || login.length === 0) continue;
+		const state = entry["state"];
+		found.push({ login, state: typeof state === "string" ? state : undefined });
 	}
-	return logins;
+	return found;
 }
 
 /**
@@ -1870,7 +1953,7 @@ function parseGithubLogins(stdout: string): string[] {
  */
 function canonicalAccountLogin(stdout: string, account: string): string | null {
 	const wanted = account.toLowerCase();
-	return parseGithubLogins(stdout).find((login) => login.toLowerCase() === wanted) ?? null;
+	return parseGithubLogins(stdout).find((entry) => entry.login.toLowerCase() === wanted)?.login ?? null;
 }
 
 /**
@@ -1889,17 +1972,16 @@ async function resolveAccountToken(
 ): Promise<{ ok: true; login: string; token: string } | { ok: false; reason: string }> {
 	const status = await requester.plain(["auth", "status", "--json", "hosts"]);
 	if (status.exitCode !== 0) {
-		const diagnostic = status.stderr !== "" ? status.stderr : "no diagnostic";
-		return { ok: false, reason: `gh auth status failed for account '${account}': ${diagnostic}` };
+		return { ok: false, reason: `gh auth status failed for account '${account}': ${accountDiagnostic(status.stderr)}` };
 	}
 	const login = canonicalAccountLogin(status.stdout, account);
 	if (login === null) {
-		const known = parseGithubLogins(status.stdout);
+		const known = parseGithubLogins(status.stdout).filter((entry) => entry.state !== "error").map((entry) => entry.login);
 		return { ok: false, reason: `account '${account}' is not an authenticated github.com login (authenticated: ${known.length > 0 ? known.join(", ") : "none"})` };
 	}
 	const attempt = await requester.plain(["auth", "token", "--user", login]);
 	if (attempt.exitCode !== 0 || attempt.stdout.trim().length === 0) {
-		return { ok: false, reason: `could not resolve a token for account '${login}'` };
+		return { ok: false, reason: `could not resolve a token for account '${login}': ${accountDiagnostic(attempt.stderr)}` };
 	}
 	return { ok: true, login, token: attempt.stdout.trim() };
 }
@@ -1984,11 +2066,20 @@ export async function runApiOperation(
 	const clock = deps?.clock ?? defaultClock;
 	const requester = deps?.requester ?? new GhApiRunner({ cwd, clock, signal });
 	if (invocation.account === undefined) return await dispatchOperation(invocation, requester, deps);
-	// The account is resolved before the operation runs: a login that gh does
-	// not hold fails here, without spending the operation's deadline, and every
-	// child the operation spawns then carries that account's token.
+	// The account is resolved before the operation runs. Resolution shares this
+	// requester: its 30 s deadline and the captured-output budget cover the
+	// `gh auth status --json hosts` child (itself an API call) and the
+	// `gh auth token --user` child, so an unknown login still fails before any
+	// operation child spawns. Every child the operation spawns then carries
+	// that account's token.
 	const resolved = await resolveAccountToken(requester, invocation.account);
 	if (!resolved.ok) {
+		// No token was resolved on this path, so the refusal is gh's own
+		// diagnostic: `accountDiagnostic` redacts token shapes and any token this
+		// process's environment holds, because there is no resolved token for
+		// `hideAccountToken` to match. The caller's account is shape-validated and
+		// non-secret. The resolved-token scrub runs on the success path below,
+		// where the tool itself injected a token into the child environment.
 		const summary = `gh_read api: ${invocation.op}`;
 		return failedResult(summary, [["operation", invocation.op], ["account", invocation.account]], resolved.reason);
 	}
@@ -1999,8 +2090,13 @@ export async function runApiOperation(
 /**
  * The last guard before rendering: no externally sourced text may echo the
  * token the tool injected into the child environment, and the result reports
- * the canonical login it actually used, which is also what the call row's
- * `[account]` tag shows. The token value itself never enters the result.
+ * the canonical login it actually used. The token value itself never enters
+ * the result. `details` is flat by construction (`renderResult` builds a
+ * scalar map and this adds the one `account` string), so this top-level string
+ * walk covers every value; there is no nested structure to descend into. The
+ * call row's `[account]` tag is rendered from the raw tool-call arguments
+ * before this result exists, so it shows the caller's spelling, not this
+ * canonical login.
  */
 function hideAccountToken(result: ApiToolResult, token: string, login: string): ApiToolResult {
 	const details: Record<string, unknown> = { ...result.details };
