@@ -450,8 +450,7 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
   inlined by the main session; a missing `review` preset is reported, never
   substituted silently. The local `HEAD` is read with `git_read` `log` and
   `-n 1`, and the optional `[focus]` text replaces the contract's `<extra
-  review focus>` line,
-  which is deleted when the request carries no focus.
+  review focus>` line, which is deleted when the request carries no focus.
 
 ## Read-only guarantees
 
