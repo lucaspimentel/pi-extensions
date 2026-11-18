@@ -95,7 +95,9 @@ own, expanded and streaming views delegate to it (that renderer is the stock
 body). When it has none, pi would have drawn its own fallback body, but any
 `renderResult` suppresses that path, so the extension synthesizes the equivalent
 itself: expanded shows every model-facing line, streaming shows the first five
-plus `... (N more lines, ctrl+o to expand)`, and an empty result keeps the gist
+plus `... (N more lines, <key> to expand)` (the `<key>` text comes from
+`context.keyHint("app.tools.expand", "to expand")`; `ctrl+o` is only the
+fallback when the host supplies no key hint), and an empty result keeps the gist
 line. `hide` mode only hides the collapsed final body; expanding it, or watching
 it stream, shows that body as it does for a tool whose own renderer pi delegates
 to.

@@ -729,6 +729,33 @@ test("hide mode with no base renderer still shows the body when expanded", () =>
 	assert.ok(expanded.some((line) => line.includes("\u27e8toolOutput\u27e9body line")), JSON.stringify(expanded));
 });
 
+test("hide mode with no base renderer streams the synthesized body", () => {
+	const wrapped = noBaseWrite(configDir({ write: "hide" }));
+	const result = { content: [{ type: "text", text: "1\n2\n3\n4\n5\n6\n7" }] };
+	const lines = renderLines(wrapped.renderResult(result, { expanded: false, isPartial: true }, theme, makeContext()));
+	assert.equal(lines.length, 6, JSON.stringify(lines));
+	assert.ok(lines[0].includes("\u27e8toolOutput\u27e91"), JSON.stringify(lines));
+	assert.ok(lines[4].includes("\u27e8toolOutput\u27e95"), JSON.stringify(lines));
+	assert.ok(lines[5].includes("... (2 more lines,"), JSON.stringify(lines));
+	assert.ok(lines[5].includes("[app.tools.expand: to expand]"), JSON.stringify(lines));
+	assert.ok(!lines.some((line) => line.includes("\u27e8toolOutput\u27e96")), JSON.stringify(lines));
+	assert.ok(!lines.some((line) => line === theme.fg("muted", "[app.tools.expand: to expand]")), JSON.stringify(lines));
+	// An empty streaming body has nothing to synthesize, so hide's hint stands in.
+	const empty = renderLines(wrapped.renderResult({ content: [] }, { expanded: false, isPartial: true }, theme, makeContext()));
+	assert.ok(empty.some((line) => line.includes("\u27e8muted\u27e9[app.tools.expand: to expand]")), JSON.stringify(empty));
+});
+
+test("the synthesized body keeps tabs and strips escapes and control characters", () => {
+	const wrapped = noBaseWrite();
+	const result = { content: [{ type: "text", text: "col1\tcol2\n\u001b[31mred\u001b[0m\nx\u0001y" }] };
+	const lines = renderLines(wrapped.renderResult(result, { expanded: true, isPartial: false }, theme, makeContext()));
+	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e9col1   col2")), JSON.stringify(lines));
+	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e9red")), JSON.stringify(lines));
+	assert.ok(lines.some((line) => line.includes("\u27e8toolOutput\u27e9x y")), JSON.stringify(lines));
+	assert.ok(!lines.some((line) => line.includes("\u001b")), JSON.stringify(lines));
+	assert.ok(!lines.some((line) => line.includes("col1 col2")), JSON.stringify(lines));
+});
+
 test("extra content blocks render as a second dimmed line under the gist", () => {
 	const loaded = loadExtension(emptyDir());
 	const wrapped = loaded.resolver("read", () => makeBase());

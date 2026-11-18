@@ -94,20 +94,26 @@ whose base has none the extension synthesizes the same body:
 | --- | --- |
 | expanded | every line of the sanitized text, `toolOutput` |
 | streaming (`isPartial`) | the first **5** lines, then `... (N more lines, <key> to expand)` (dimmed tail, `app.tools.expand` hint) |
-| collapsed final | the gist, as always |
-| empty text | none: the gist still renders, so the row is never blank |
+| collapsed final, `gist` mode | the gist |
+| collapsed final, `hide` mode | the dimmed expand hint, except a failure, which shows the gist because `hide` never suppresses a failure |
+| empty text (any state) | no body to synthesize, so the row falls through to the `gist`/`hide` outcome: the gist, or the hint in `hide` mode |
 
 - The 5-line streaming cap is a deliberate divergence from pi's 10: a live gist
   row does not need pi's ten-line preview, and a shorter preview keeps the
   streaming row compact. `PREVIEW_LINES` in `index.ts` is the single knob.
 - Text is sanitized with pi-tui's public `stripTerminalSequences` and
   `replaceControlCharacters` (the latter per line, because it also blanks
-  newlines) plus CR removal, which is the effect pi's own fallback gets from
-  its internal `getTextOutput`. Tabs stay, as in pi's fallback.
+  newlines) plus CR removal. Each line is split on tabs before that call and
+  rejoined with a real tab, because `replaceControlCharacters` would otherwise
+  collapse a tab run to a single space; a surviving tab is expanded to three
+  spaces by pi-tui's `Text`, as in pi's fallback. This is not identical to pi's
+  own sanitizer: pi's internal `getTextOutput` removes U+FFF9-FFFB and drops
+  control characters instead of blanking them with a space.
 - pi's fallback also appends placeholder text for image blocks it cannot draw.
-  That is not reproduced: the tools that reach this path return text (the image
-  paths, `read` and MCP results, have renderers of their own), and an image-only
-  result keeps the gist's `image` line rather than a blank body.
+  That is not reproduced. A tool on this path can still carry image blocks:
+  `read_mcp_resource` is a default `gist` entry with no renderer of its own, so
+  an image-only result keeps the gist's `image` line rather than a blank body
+  or a placeholder.
 - Which table entries rely on it: pi supplies built-in renderers for only
   `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`
   (`dist/core/tools/renderers/index.js`, merged by `withBuiltInRenderers`), the
@@ -363,9 +369,12 @@ Verified at the resolver level: pi's chain is `resolvers[0](name, () => resolver
 prefix patterns, pattern precedence, and invalid keys), and the resolver wiring
 (collapsed gist replacement, expanded/streaming delegation, the synthesized
 fallback body for a tool with no base renderer: expanded lines, the 5-line
-streaming preview plus hint, an empty-result fallback to the gist, and `hide`
-expanded to the body, `hide`, failure-over-`hide`, extra dimmed lines, pattern
-wrapping, and unknown/`stock` pass-through). It also covers the line-set shape
+streaming preview plus hint, a `hide` row streaming that body, an empty-result
+fallback to the gist, a body holding a tab, an ANSI escape, and a control
+character (the tab is kept for `Text` to expand, the escape is removed, the
+control character is blanked), and `hide` expanded to the body, `hide`,
+failure-over-`hide`, extra dimmed lines, pattern wrapping, and unknown/`stock`
+pass-through). It also covers the line-set shape
 (per-line `dim` flags), the `codemode` success, failure, truncated, image-only,
 and no-error-block cases, `tool_search` with and without matches, the MCP
 resource tool fallback, and the five new shipped defaults. The file is listed in
