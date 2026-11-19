@@ -20,6 +20,7 @@ import {
 	setBootstrapPathOverride,
 	truncateModelOutput,
 } from "../extensions/subagent/index.ts";
+import { setDiagnosticSink } from "../extensions/subagent/agents.ts";
 import { SUBAGENT_SNAPSHOT_REQUEST } from "../extensions/guard/policy/handshake.ts";
 import { INHERIT_ENV } from "../extensions/guard/policy/inheritance.ts";
 import {
@@ -319,6 +320,38 @@ test("mode, model, and agent preflight errors are actionable and spawn nothing w
 			}
 			assert.equal(h.emitted.length, 0, "validation precedes guard snapshots");
 		} finally { recording.restore(); }
+	});
+});
+
+test("session start routes every panel diagnostic to the UI once, never to the console", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		// A preset the parser refuses is the shortest path to a diagnostic.
+		configure(agentDir, { panels: { pair: { panelists: [] } } });
+		const notified: Array<[string, string | undefined]> = [];
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		for (const handler of h.handlers["session_start"] ?? []) {
+			await handler(
+				{ reason: "startup" },
+				toolCtx(cwd, { hasUI: true, ui: { confirm: async () => true, notify: (message, type) => notified.push([message, type]) } }),
+			);
+		}
+		const warnings: unknown[][] = [];
+		const originalWarn = console.warn;
+		console.warn = (...args: unknown[]) => {
+			warnings.push(args);
+		};
+		try {
+			// Two requests: the per-request catalog rebuild reports the same reason.
+			await runSubagent(h, cwd, { panel: "pair", task: "x" });
+			await runSubagent(h, cwd, { panel: "pair", task: "x" });
+		} finally {
+			console.warn = originalWarn;
+			setDiagnosticSink(null);
+		}
+		assert.equal(notified.length, 1, "one notification per reason per session");
+		assert.equal(notified[0][1], "warning");
+		assert.match(notified[0][0], /panelists" should contain 1 to 4 entries/);
+		assert.deepEqual(warnings, [], "nothing reaches the console while a UI sink is installed");
 	});
 });
 

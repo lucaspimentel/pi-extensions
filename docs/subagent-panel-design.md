@@ -238,10 +238,14 @@ per-agent `models` overrides:
   agent, and a `judge.agent` that is unknown or not internal, warn at load and
   fail at call time listing the valid agents. The panel catalog is rebuilt per
   request on the same path as the agent catalog (`prepareLoadout`), so a
-  malformed `panels` entry warns on every request rather than once. The request
-  path prints those warnings on stderr from the same `reason` strings that
-  `ignoredPanels` reports and that `subagent_list` returns (see "`subagent_list`
-  contract"), so the console warning and the tool result cannot drift.
+  malformed `panels` entry is rediscovered on every request rather than once.
+  Every diagnostic goes through one sink (`setDiagnosticSink`,
+  `reportDiagnostic`): `console.warn` when no sink is installed (print, json, rpc,
+  tests), and a session sink installed at `session_start` in a TUI session
+  (2026-11-18, see "Decisions made without asking"). The reason strings are the
+  same ones `ignoredPanels` reports and `subagent_list` returns (see
+  "`subagent_list` contract"), so the reported warning and the tool result cannot
+  drift.
 - Bundled `agents/panelist.md` (researcher-grade read-only tools),
   `agents/judge.md` (generic merge, code-reading tools only), and
   `agents/judge-review.md` (review findings merge, same tools) ship with the
@@ -325,8 +329,8 @@ Existing shape assertions change accordingly:
   recoverable from this field; a preset whose panelist agent does not resolve is
   still listed, with the name as written and a diagnostic reason.
 - `ignoredPanels: [{ name, reason }]` reports the presets dropped at parse time.
-  `reason` is the same string the load path writes to stderr, so the console
-  warning and the tool result cannot drift (see "Config").
+  `reason` is the same string the load path reports, so the user-visible warning
+  and the tool result cannot drift (see "Config").
 - The panel listing reuses the existing 100-entry cap and the `(+N more)` suffix
   discipline.
 - Agent entries gain a `role` field (`delegate` or `internal`), and the text
@@ -795,6 +799,14 @@ Called by the implementer, open to revision:
   each panelist's model id, and the coverage line is unconditional.
 - (2026-11-18) A configured `judge.agent` must be `internal`, and it resolves at
   user scope only, mirroring the bundled judge's rule.
+- (2026-11-18) Discovery diagnostics reach a TUI session through
+  `ui.notify(..., "warning")`, once per reason per session, instead of
+  `console.warn`. pi takes over stdout only in non-interactive modes
+  (`takeOverStdout`), so an extension's stderr write during a TUI session lands
+  on the terminal row the cursor occupies, which is the editor: it reads as if
+  the user had typed it, and the per-request catalog rebuild repeated it on every
+  request. Modes without a UI keep the console (and are not deduplicated), which
+  is also what pi's own extension runner does with its diagnostics.
 
 ## Deferred
 

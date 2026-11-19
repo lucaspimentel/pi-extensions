@@ -9,6 +9,7 @@ import {
 	formatPanelCatalog,
 	formatPanelList,
 	parsePanels,
+	setDiagnosticSink,
 } from "../extensions/subagent/agents.ts";
 import type { AgentScope } from "../extensions/subagent/agents.ts";
 import {
@@ -202,6 +203,26 @@ test("discovery without config or panels preserves models and emits no panel met
 	assert.equal(result.agents.find((a) => a.name === "scout")?.model, "pinned/model");
 	assert.deepEqual(result.panels, []);
 	assert.deepEqual(f.warnings, []);
+}));
+
+test("an installed diagnostic sink replaces the console for every discovery reason", { concurrency: false }, () => fixture((f) => {
+	f.config({ panels: { ask: { panelists: [{ model: "x" }], judge: { agent: "worker" } }, bad: false } });
+	const seen: string[] = [];
+	setDiagnosticSink((reason) => seen.push(reason));
+	let result: ReturnType<typeof discoverAgents>;
+	try {
+		result = f.discover();
+		assert.deepEqual(seen, [
+			...result.panels.flatMap((panel) => panel.diagnostics),
+			...result.ignoredPanels.map((panel) => panel.reason),
+		], "every reason reaches the sink, in discovery order");
+		assert.deepEqual(f.warnings, [], "the console stays untouched while a sink is installed");
+	} finally {
+		setDiagnosticSink(null);
+	}
+	f.warnings.length = 0;
+	assert.deepEqual(f.discover(), result, "discovery is unchanged by the sink");
+	assert.equal(f.warnings.length, seen.length, "the console reports the same reasons once no sink is installed");
 }));
 
 test("unknown agents and duplicates warn but retain the resolved preset", { concurrency: false }, () => fixture((f) => {

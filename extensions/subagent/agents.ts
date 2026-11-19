@@ -248,9 +248,9 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 				);
 			}
 		}
-		for (const diagnostic of panel.diagnostics) console.warn(diagnostic);
+		for (const diagnostic of panel.diagnostics) reportDiagnostic(diagnostic);
 	}
-	for (const ignored of result.ignoredPanels) console.warn(ignored.reason);
+	for (const ignored of result.ignoredPanels) reportDiagnostic(ignored.reason);
 
 	return { agents: Array.from(agentMap.values()), projectAgentsDir, configPath, configuredModels, ...result };
 }
@@ -272,7 +272,7 @@ function readConfiguration(configPath: string): unknown {
 		return JSON.parse(fs.readFileSync(configPath, "utf-8"));
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-			console.warn(`[subagent] could not read ${configPath}; configuration ignored`);
+			reportDiagnostic(`[subagent] could not read ${configPath}; configuration ignored`);
 		}
 		return undefined;
 	}
@@ -289,7 +289,7 @@ function applyModelOverrides(agentMap: Map<string, AgentConfig>, raw: unknown, c
 	const models = (raw as { models?: unknown } | null)?.models;
 	if (typeof models !== "object" || models === null) {
 		if (models !== undefined) {
-			console.warn(`[subagent] ${configPath}: "models" should be an object of agent name -> model`);
+			reportDiagnostic(`[subagent] ${configPath}: "models" should be an object of agent name -> model`);
 		}
 		return accepted;
 	}
@@ -297,11 +297,11 @@ function applyModelOverrides(agentMap: Map<string, AgentConfig>, raw: unknown, c
 	for (const [name, model] of Object.entries(models as Record<string, unknown>)) {
 		const agent = agentMap.get(name);
 		if (!agent) {
-			console.warn(`[subagent] ${configPath}: no agent named "${name}"; model override ignored`);
+			reportDiagnostic(`[subagent] ${configPath}: no agent named "${name}"; model override ignored`);
 			continue;
 		}
 		if (typeof model !== "string" || !model.trim()) {
-			console.warn(`[subagent] ${configPath}: models."${name}" should be a non-empty model string`);
+			reportDiagnostic(`[subagent] ${configPath}: models."${name}" should be a non-empty model string`);
 			continue;
 		}
 		agent.model = model.trim();
@@ -337,6 +337,29 @@ function normalizeJudge(value: unknown): JudgeConfig | null {
 	const agent = Object.hasOwn(entry, "agent") ? (entry.agent as string).trim() : "judge";
 	if (!Object.hasOwn(entry, "model")) return { agent };
 	return { agent, model: (entry.model as string).trim() };
+}
+
+/**
+ * Where agent-discovery diagnostics go.
+ *
+ * `console.warn` is only safe while pi runs a non-interactive mode: in a TUI
+ * session nothing takes over stdout, so an extension's stderr write lands on the
+ * terminal row the cursor sits on, which is the editor, and reads as if the user
+ * had typed it. The extension therefore installs a sink at `session_start` that
+ * reports each problem through `ui.notify`, and this default stays for the
+ * modes without a UI (print, json, rpc) and for tests.
+ */
+let diagnosticSink: ((reason: string) => void) | null = null;
+
+/** Replace the destination for discovery diagnostics; `null` restores the console. */
+export function setDiagnosticSink(sink: ((reason: string) => void) | null): void {
+	diagnosticSink = sink;
+}
+
+/** Report one diagnostic through the installed sink, or the console when there is none. */
+export function reportDiagnostic(reason: string): void {
+	if (diagnosticSink) diagnosticSink(reason);
+	else console.warn(reason);
 }
 
 /** Parse the panels value without I/O, availability checks, or input mutation. */

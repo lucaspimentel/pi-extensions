@@ -177,9 +177,12 @@ The model is given the discovered agents without a separate call:
   no timestamps), so prompt caching is not churned. The per-agent `tools` list
   is deliberately omitted here and available from `subagent_list`. Discovery
   runs synchronously per request; a throw, or no known cwd, leaves the static
-  description in place and never breaks the request. Because discovery now runs
-  per request, a malformed `subagent.json` or unknown model-override name warns
-  on every request instead of once.
+  description in place and never breaks the request. Because discovery runs per
+  request, a malformed `subagent.json` or unknown model-override name is
+  rediscovered on every request, but it is reported once per session: in a TUI
+  session through `ui.notify(..., "warning")`, and on the console in the modes
+  without a UI. Writing it to the console in a TUI session would put the text on
+  the editor row, where the cursor sits, so it has to go through the UI.
 - **`subagent_list` tool**: lists the agents for a single optional parameter,
   `agentScope` (`"user"` default, `"project"`, `"both"`), with source, model,
   and tools. It spawns nothing, asks for no confirmation, and never queries the

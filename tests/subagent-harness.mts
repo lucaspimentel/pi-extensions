@@ -31,7 +31,10 @@ export interface ToolResult {
 export interface TestCtx {
 	cwd: string;
 	scopedModels?: Array<{ model: { provider: string; id: string } }>;
-	ui?: { confirm(title: string, message: string): Promise<boolean> };
+	ui?: {
+		confirm(title: string, message: string): Promise<boolean>;
+		notify?: (message: string, type?: "info" | "warning" | "error") => void;
+	};
 	model?: unknown;
 	thinkingLevel?: unknown;
 	hasUI?: boolean;

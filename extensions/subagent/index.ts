@@ -55,6 +55,7 @@ import {
 	formatAgentList,
 	formatAgentNames,
 	formatPanelCatalog,
+	setDiagnosticSink,
 	sortAgentsByName,
 } from "./agents.ts";
 import { INHERIT_ENV, serializeInheritance } from "../guard/policy/inheritance.ts";
@@ -1332,6 +1333,25 @@ function buildSubagentDescription(): string | undefined {
 	return `${baseSubagentDescription()} Discovered agents for agentScope "user": ${catalog}.${projectNotice}${panels ? ` Panels: ${panels}.` : ""}`;
 }
 
+/** Panel and config diagnostics already reported through a session's UI. */
+const reportedDiagnostics = new Set<string>();
+
+/**
+ * Report one discovery diagnostic. A TUI session reports it once per reason in
+ * the transcript, because an extension's stderr write during the TUI lands where
+ * the cursor sits, which is the editor; modes without a UI keep the console,
+ * where nothing is deduplicated (see `setDiagnosticSink`).
+ */
+function reportDiagnosticToUI(ctx: { hasUI?: boolean; ui?: { notify?: (message: string, type?: "info" | "warning" | "error") => void } }, reason: string): void {
+	if (ctx.hasUI && typeof ctx.ui?.notify === "function") {
+		if (reportedDiagnostics.has(reason)) return;
+		reportedDiagnostics.add(reason);
+		ctx.ui.notify(reason, "warning");
+		return;
+	}
+	console.warn(reason);
+}
+
 export default function (pi: ExtensionAPI) {
 	// Guard step 5: every spawn asks the parent guard for a fresh profile
 	// snapshot over the synchronous bus handshake and passes the child startup
@@ -1349,6 +1369,7 @@ export default function (pi: ExtensionAPI) {
 	// carry one. Before the first event the static description is used.
 	pi.on("session_start", (_event, ctx) => {
 		setAgentListCwd(ctx.cwd);
+		setDiagnosticSink((reason) => reportDiagnosticToUI(ctx, reason));
 	});
 	pi.on("before_agent_start", (_event, ctx) => {
 		setAgentListCwd(ctx.cwd);
