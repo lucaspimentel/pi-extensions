@@ -44,8 +44,8 @@ import {
 const TEN_MINUTES_MS = 10 * 60 * 1000;
 const KILL_GRACE_MS = 5 * 1000;
 
-const BUNDLED = ["judge", "panelist", "planner", "researcher", "reviewer", "scout", "worker"];
-const DISPATCHABLE = BUNDLED.filter((name) => name !== "judge");
+const BUNDLED = ["judge", "judge-review", "panelist", "planner", "researcher", "reviewer", "scout", "worker"];
+const DISPATCHABLE = BUNDLED.filter((name) => name !== "judge" && name !== "judge-review");
 const BASE_OPENING = "Delegate tasks to specialized subagents with isolated context.";
 
 function assertSortedAppearance(text: string, names: string[]): void {
@@ -85,7 +85,7 @@ test("subagent_list lists the bundled agents sorted, with schema-shaped structur
 			const h = makeHarness();
 			const result = await runList(h, cwd);
 			const text = result.content.map((c) => c.text).join("\n");
-			assertSortedAppearance(text, BUNDLED);
+			assertSortedAppearance(text, BUNDLED.map((name) => `${name} (bundled)`));
 			for (const name of BUNDLED) assert.ok(text.includes(name), `text lists ${name}`);
 
 			const sc = result.structuredContent;
@@ -249,19 +249,24 @@ test("panel and per-child schemas, listing arrays, and panel guideline are decla
 	const h = makeHarness();
 	const subagent = h.tools.get("subagent")!;
 	const schema = subagent.parameters as any;
-	for (const key of ["panel", "models", "judge", "model"]) assert.ok(schema.properties[key], key);
+	for (const key of ["panel", "panelists", "judge", "model"]) assert.ok(schema.properties[key], key);
 	for (const key of ["tasks", "chain"]) assert.ok(schema.properties[key].items.properties.model, key);
+	assert.equal(schema.properties.panelists.items.required.includes("model"), true);
+	assert.ok(schema.properties.panelists.items.properties.agent);
 	assert.ok(schema.properties.judge.anyOf.some((s: any) => s.type === "null"));
+	assert.ok(schema.properties.judge.anyOf.some((s: any) => s.properties?.model));
 	assert.equal("outputSchema" in subagent, false);
 	assert.ok(subagent.promptGuidelines?.some((s) => s.includes("panel") && s.includes("tasks[]") && s.includes("model")));
 	const output = h.tools.get("subagent_list")!.outputSchema as any;
 	for (const key of ["panels", "ignoredPanels"]) assert.ok(output.required.includes(key));
 	assert.deepEqual(output.properties.agents.items.properties.role.enum, ["delegate", "internal"]);
+	assert.ok(output.properties.panels.items.properties.panelists.items.properties.model);
+	assert.deepEqual(output.properties.panels.items.properties.judge.anyOf.length, 2);
 });
 
 test("mode, model, and agent preflight errors are actionable and spawn nothing with a working guard", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"] }, internal: { models: ["p/a"], agent: "judge" } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }] }, internal: { panelists: [{ agent: "judge", model: "p/a" }] } } });
 		const h = makeHarness({ guard: true, tools: ["read"] });
 		const recording = installRecordingSpawn();
 		try {
@@ -272,16 +277,26 @@ test("mode, model, and agent preflight errors are actionable and spawn nothing w
 				[{ panel: "pair", task: "x", chain: [{ agent: "scout", task: "x" }] }, /panel.*tasks\/chain/, "panel"],
 				[{ agent: "scout", task: "x", tasks: [{ agent: "scout", task: "x" }] }, /exactly one mode/, "parallel"],
 				[{ tasks: [{ agent: "scout", task: "x" }], chain: [{ agent: "scout", task: "x" }] }, /exactly one mode/, "chain"],
-				[{ agent: "scout", task: "x", models: ["p/a"], judge: null }, /models, judge require panel/, "single"],
-				[{ agent: "scout", task: "x", judge: "none" }, /judge require panel/, "single"],
-				[{ panel: "pair", task: "x", model: "p/a" }, /use models for panel/, "panel"],
+				[{ agent: "scout", task: "x", panelists: [{ model: "p/a" }], judge: null }, /panelists, judge require panel/, "single"],
+				[{ agent: "scout", task: "x", judge: null }, /judge require panel/, "single"],
+				[{ agent: "scout", task: "x", models: ["p/a"] }, /Parameter models is no longer accepted\. Pass panelists/, "single"],
+				[{ panel: "pair", task: "x", models: ["p/a"] }, /Parameter models is no longer accepted\. Pass panelists/, "panel"],
+				[{ panel: "pair", task: "x", model: "p/a" }, /use panelists for panel/, "panel"],
 				[{ panel: "missing", task: "x" }, /Unknown panel.*Configured presets: internal, pair/, "panel"],
-				[{ panel: "pair", task: "x", models: [] }, /models.*1 to 4/, "panel"],
-				[{ panel: "pair", task: "x", models: [" "] }, /models.*nonblank/, "panel"],
-				[{ panel: "pair", task: "x", models: ["p/a", "p/a", "p/a", "p/a", "p/a"] }, /models.*1 to 4/, "panel"],
-				[{ panel: "pair", task: "x", models: ["p/unknown"] }, /models\[0\].*Usable models: p\/a, p\/judge, p\/org\/b/, "panel"],
-				[{ panel: "pair", task: "x", judge: "p/unknown" }, /judge.*Usable models:/, "panel"],
-				[{ panel: "pair", task: "x", agent: "missing" }, /Unknown agent: "missing" in panel.agent/, "panel"],
+				[{ panel: "pair", task: "x", panelists: [] }, /panelists must contain 1 to 4 entries/, "panel"],
+				[{ panel: "pair", task: "x", panelists: ["p/a"] }, /panelists\[0\] must be an object with a model/, "panel"],
+				[{ panel: "pair", task: "x", panelists: [{}] }, /panelists\[0\]\.model must be a nonblank model ID/, "panel"],
+				[{ panel: "pair", task: "x", panelists: [{ model: " " }] }, /panelists\[0\]\.model must be a nonblank model ID/, "panel"],
+				[{ panel: "pair", task: "x", panelists: [{ model: "p/a", agent: " " }] }, /panelists\[0\]\.agent must be a nonblank agent name/, "panel"],
+				[{ panel: "pair", task: "x", panelists: ["a", "b", "c", "d", "e"].map((model) => ({ model })) }, /panelists must contain 1 to 4 entries/, "panel"],
+				[{ panel: "pair", task: "x", panelists: [{ model: "p/a" }, { agent: "absent", model: "p/a" }] }, /Unknown agent: "absent" in panelists\[1\]\.agent/, "panel"],
+				[{ panel: "pair", task: "x", panelists: [{ model: "p/a" }, { model: "p/unknown" }] }, /panelists\[1\]\.model.*Usable models: p\/a, p\/judge, p\/org\/b/, "panel"],
+				[{ panel: "pair", task: "x", judge: "p/none" }, /judge must be an object with optional agent and model, or null/, "panel"],
+				[{ panel: "pair", task: "x", judge: { agent: "" } }, /judge\.agent must be a nonblank agent name/, "panel"],
+				[{ panel: "pair", task: "x", judge: { model: " " } }, /judge\.model must be a nonblank model ID/, "panel"],
+				[{ panel: "pair", task: "x", judge: { agent: "absent" } }, /Unknown agent: "absent" in judge\.agent/, "panel"],
+				[{ panel: "pair", task: "x", judge: { agent: "worker" } }, /"worker" in judge\.agent is not internal/, "panel"],
+				[{ panel: "pair", task: "x", judge: { model: "p/unknown" } }, /judge\.model.*Usable models:/, "panel"],
 				[{ panel: "internal", task: "x" }, /"judge".*internal.*subagent\(\{panel, task\}\)/, "panel"],
 				[{ agent: "judge", task: "x" }, /"judge".*internal.*subagent\(\{panel, task\}\)/, "single"],
 				[{ tasks: [{ agent: "scout", task: "x" }, { agent: "judge", task: "x" }] }, /tasks\[1\].agent.*internal/, "parallel"],
@@ -309,13 +324,13 @@ test("mode, model, and agent preflight errors are actionable and spawn nothing w
 
 test("panelist declarations refuse write, edit, bash, and implicit default tools before confirmation", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a"] } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }] } } });
 		const h = makeHarness({ guard: true, tools: ["read", "write", "edit", "bash"] });
 		const recording = installRecordingSpawn();
 		try {
 			for (const tools of ["read, write", "read, edit", "read, bash", "write, edit, bash", undefined, "[]"]) {
 				declaredAgent(path.join(cwd, ".pi", "agents"), "unsafe", tools);
-				const result = await runSubagent(h, cwd, { panel: "pair", task: "x", agent: "unsafe", agentScope: "both" }, {
+				const result = await runSubagent(h, cwd, { panel: "pair", task: "x", panelists: [{ agent: "unsafe", model: "p/a" }], agentScope: "both" }, {
 					hasUI: true, isProjectTrusted: () => false, ui: { confirm: async () => { assert.fail("must validate before confirmation"); } },
 				});
 				assert.equal(result.isError, true);
@@ -371,17 +386,26 @@ function failAnswer(spawn: CapturedSpawn, message = "panelist boom"): void {
 	spawn.child.emit("close", 1);
 }
 
-/** A one- or two-model preset, optionally with an explicit judge. */
-function panelConfig(agentDir: string, options: { models?: string[]; judge?: string | null } = {}): void {
+/**
+ * A one- or two-panelist preset, optionally with an explicit judge. A string
+ * judge is shorthand for `{ agent: "judge", model }`, the form most of these
+ * cases need.
+ */
+function panelConfig(
+	agentDir: string,
+	options: { panelists?: Array<{ agent?: string; model: string }>; judge?: string | { agent?: string; model?: string } | null } = {},
+): void {
+	const panelists = options.panelists ?? [{ model: "p/a" }];
+	const judge = typeof options.judge === "string" ? { agent: "judge", model: options.judge } : options.judge;
 	configure(agentDir, {
-		panels: { pair: { models: options.models ?? ["p/a"], ...(options.judge === undefined ? {} : { judge: options.judge }) } },
+		panels: { pair: { panelists, ...(judge === undefined ? {} : { judge }) } },
 	});
 }
 
 interface PanelResultDetails {
 	details: {
 		mode: string;
-		panel?: { name: string; agent: string; models: string[]; judge: { agent: string; model?: string } | null };
+		panel?: { name: string; panelists: Array<{ agent: string; model: string }>; judge: { agent: string; model?: string } | null };
 		results: any[];
 		judge: any;
 		notices: Array<{ kind: string; reason: string }>;
@@ -410,7 +434,7 @@ async function runAnsweredPanel(
 
 test("panel spawns N panelists then the judge with effective models, fixed tools, cwd, guard snapshots, and full results", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { models: { judge: "p/judge" }, panels: { pair: { models: ["p/a", "p/org/b"] } } });
+		configure(agentDir, { models: { judge: "p/judge" }, panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }] } } });
 		declaredAgent(path.join(agentDir, "agents"), "panelist", "read, ffgrep, fffind, subagent", "model: legacy/pin\n");
 		const h = makeHarness({ guard: true, tools: ["read", "grep", "find", "subagent"], settings: { modelThinkingLevels: { "p/a": "low" } } });
 		const longOutput = "A".repeat(60 * 1024);
@@ -449,7 +473,7 @@ test("panel spawns N panelists then the judge with effective models, fixed tools
 
 			assert.equal(result.details?.mode, "panel");
 			const details = result.details as any;
-			assert.deepEqual(details.panel, { name: "pair", agent: "panelist", models: ["p/a", "p/org/b"], judge: { agent: "judge", model: "p/judge" } });
+			assert.deepEqual(details.panel, { name: "pair", panelists: [{ agent: "panelist", model: "p/a" }, { agent: "panelist", model: "p/org/b" }], judge: { agent: "judge", model: "p/judge" } });
 			assert.equal(details.results.length, 2);
 			assert.equal(details.results[0].model, "p/a", "effective requested label wins over the reported model");
 			assert.equal(details.results[0].output, longOutput);
@@ -473,26 +497,35 @@ test("panel spawns N panelists then the judge with effective models, fixed tools
 	});
 });
 
-test("inline panel overrides normalize without mutating raw config and zero resolved tools use --no-tools", async () => {
+test("inline panel overrides normalize without mutating config and zero resolved tools use --no-tools", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		const config = { panels: { pair: { agent: "panelist", models: ["p/a"], judge: "p/judge" } } };
+		const config = { panels: { pair: { panelists: [{ agent: "panelist", model: "p/a" }], judge: { agent: "judge", model: "p/judge" } } } };
 		configure(agentDir, config);
 		declaredAgent(path.join(agentDir, "agents"), "empty", "unavailable, subagent");
 		const h = makeHarness({ guard: true, tools: ["subagent"] });
 		const recording = installRecordingSpawn();
 		try {
-			for (const judge of [null, "none"]) {
-				const result = await runSubagent(h, cwd, { panel: "pair", task: "x", agent: "empty", models: [" custom/org/id ", "custom/org/id", "any/id"], judge });
-				assert.equal(result.isError, false, "empty scope accepts any model ID");
-				assert.deepEqual(result.details?.panel, { name: "pair", agent: "empty", models: ["custom/org/id", "any/id"], judge: null });
-			}
-			assert.equal(recording.spawns.length, 4);
+			const panelists = [
+				{ agent: "empty", model: " custom/org/id " },
+				{ agent: "empty", model: "custom/org/id" },
+				{ agent: "empty", model: "any/id" },
+			];
+			const result = await runSubagent(h, cwd, { panel: "pair", task: "x", panelists, judge: null });
+			assert.equal(result.isError, false, "empty scope accepts any model ID");
+			assert.deepEqual(result.details?.panel, {
+				name: "pair",
+				panelists: [{ agent: "empty", model: "custom/org/id" }, { agent: "empty", model: "any/id" }],
+				judge: null,
+			});
+			assert.equal(recording.spawns.length, 2, "one spawn per deduplicated panelist, no judge");
 			for (const spawn of recording.spawns) {
 				assert.ok(spawn.args.includes("--no-tools"));
 				assert.equal(spawn.args.includes("--tools"), false);
 			}
 			assert.deepEqual(JSON.parse(fs.readFileSync(path.join(agentDir, "subagent.json"), "utf8")), config);
-			assert.deepEqual((await runList(h, cwd)).structuredContent?.panels, [{ name: "pair", ...config.panels.pair }]);
+			assert.deepEqual((await runList(h, cwd)).structuredContent?.panels, [
+				{ name: "pair", panelists: [{ agent: "panelist", model: "p/a" }], judge: { agent: "judge", model: "p/judge" } },
+			]);
 		} finally { recording.restore(); }
 	});
 });
@@ -505,12 +538,15 @@ test("judge metadata precedence is inline, preset, configured override, session 
 		});
 		try {
 			for (const [models, presetJudge, inline, expected] of [
-				[{ judge: "pin/id" }, "preset/id", "inline/id", "inline/id"],
-				[{ judge: "pin/id" }, "preset/id", undefined, "preset/id"],
+				[{ judge: "pin/id" }, { agent: "judge", model: "preset/id" }, { model: "inline/id" }, "inline/id"],
+				[{ judge: "pin/id" }, { agent: "judge", model: "preset/id" }, undefined, "preset/id"],
 				[{ judge: "pin/id" }, undefined, undefined, "pin/id"],
 				[{}, undefined, undefined, "session/id"],
 			] as const) {
-				configure(agentDir, { models, panels: { pair: { models: ["p/a"], judge: presetJudge } } });
+				configure(agentDir, {
+					models,
+					panels: { pair: { panelists: [{ model: "p/a" }], ...(presetJudge === undefined ? {} : { judge: presetJudge }) } },
+				});
 				const before = recording.spawns.length;
 				const result = await runSubagent(h, cwd, { panel: "pair", task: "x", judge: inline }, { model: { provider: "session", id: "id" } });
 				assert.equal(result.isError, false);
@@ -520,18 +556,111 @@ test("judge metadata precedence is inline, preset, configured override, session 
 				assert.equal(flag(judgeSpawn.args, "--model"), expected);
 			}
 			assert.equal(recording.spawns.length, 8, "one panelist plus one judge attempt per case");
-			configure(agentDir, { panels: { pair: { models: ["p/a"] } } });
+			// A named judge agent carries its own override key, exactly as the default
+			// `judge` agent is pinned through `models.judge`.
+			configure(agentDir, {
+				models: { "judge-review": "review/id" },
+				panels: { pair: { panelists: [{ model: "p/a" }], judge: { agent: "judge-review" } } },
+			});
+			const review = await runSubagent(h, cwd, { panel: "pair", task: "x" }, { model: { provider: "session", id: "id" } });
+			assert.equal(review.isError, false);
+			assert.deepEqual((review.details?.panel as any).judge, { agent: "judge-review", model: "review/id" });
+			assert.equal(flag(recording.spawns.slice(8).find(isJudgeSpawn)!.args, "--model"), "review/id");
+			assert.equal(recording.spawns.length, 10);
+			configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }] } } });
 			const rejected = await runSubagent(h, cwd, { panel: "pair", task: "x" }, { scopedModels, model: { provider: "unknown", id: "id" } });
 			assert.equal(rejected.isError, true);
-			assert.match(rejected.content[0].text, /judge.*Usable models/);
-			assert.equal(recording.spawns.length, 8);
+			assert.match(rejected.content[0].text, /judge\.model.*Usable models/);
+			assert.equal(recording.spawns.length, 10);
+		} finally { recording.restore(); }
+	});
+});
+
+	test("panelists may name different read-only agents, each with its own model and resolved tool list", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		configure(agentDir, { panels: { pair: { panelists: [{ agent: "alpha", model: "p/a" }, { agent: "beta", model: "p/org/b" }] } } });
+		declaredAgent(path.join(agentDir, "agents"), "alpha", "read, ffgrep");
+		declaredAgent(path.join(agentDir, "agents"), "beta", "read, fffind, ls");
+		const h = makeHarness({ guard: true, tools: ["read", "grep", "find", "ls"] });
+		const recording = installRecordingSpawn((spawn) => {
+			spawn.child.stdout.emit("data", assistantLine(isJudgeSpawn(spawn) ? "merged review" : "answer"));
+		});
+		try {
+			const result = await runSubagent(h, cwd, { panel: "pair", task: "x" }, { scopedModels });
+			assert.equal(result.isError, false);
+			assert.equal(recording.spawns.length, 3, "two panelists plus one judge attempt");
+			const panelistSpawns = recording.spawns.filter((spawn) => !isJudgeSpawn(spawn));
+			assert.equal(flag(panelistSpawns.find((spawn) => flag(spawn.args, "--model") === "p/a")!.args, "--tools"), "read,grep");
+			assert.equal(flag(panelistSpawns.find((spawn) => flag(spawn.args, "--model") === "p/org/b")!.args, "--tools"), "read,find,ls");
+			assert.deepEqual(result.details?.results.map((panelist: any) => panelist.agent), ["alpha", "beta"]);
+			assert.deepEqual(result.details?.results.map((panelist: any) => panelist.agentSource), ["user", "user"]);
+			assert.deepEqual((result.details?.panel as any).panelists, [
+				{ agent: "alpha", model: "p/a" },
+				{ agent: "beta", model: "p/org/b" },
+			]);
+		} finally { recording.restore(); }
+	});
+});
+
+test("a preset judge agent supplies the merge prompt and keeps the fixed judge tool list", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }], judge: { agent: "judge-review" } } } });
+		const h = makeHarness({ guard: true, tools: ["read", "grep", "find", "ls", "git_read", "gh_read", "bash", "write"] });
+		const bodies: string[] = [];
+		const recording = installRecordingSpawn((spawn) => {
+			if (!isJudgeSpawn(spawn)) { spawn.child.stdout.emit("data", assistantLine("answer")); return; }
+			const promptPath = flag(spawn.args, "--append-system-prompt");
+			if (promptPath) bodies.push(fs.readFileSync(promptPath, "utf8"));
+			spawn.child.stdout.emit("data", assistantLine("merged review"));
+		});
+		try {
+			const result = await runSubagent(h, cwd, { panel: "pair", task: "x" }, { model: { provider: "p", id: "judge" } });
+			assert.equal(result.isError, false);
+			const judgeSpawn = recording.spawns.find(isJudgeSpawn)!;
+			assert.equal(flag(judgeSpawn.args, "--tools"), "read,grep,find,ls,git_read,gh_read", "the judge tool list stays fixed");
+			assert.equal(flag(judgeSpawn.args, "--model"), "p/judge", "the judge agent's own model key supplies the model");
+			assert.deepEqual((result.details?.judge as any).agent, "judge-review");
+			assert.ok(bodies.some((body) => body.includes("## Findings") && body.includes("_2 of 2 panelists answered._")), "the bundled review merge prompt is the system prompt");
+		} finally { recording.restore(); }
+	});
+});
+
+test("a delegate agent cannot be the judge, and a project agent cannot shadow the bundled review judge", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }], judge: { agent: "judge-review" } } } });
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		const recording = installRecordingSpawn();
+		try {
+			declaredAgent(path.join(agentDir, "agents"), "judge-review", "read", "role: delegate\n");
+			const rejected = await runSubagent(h, cwd, { panel: "pair", task: "x" }, { scopedModels });
+			assert.equal(rejected.isError, true);
+			assert.match(rejected.content[0].text, /Agent "judge-review" in judge\.agent is not internal; declare "role: internal" in its frontmatter\./);
+			assert.equal(recording.spawns.length, 0, "validation precedes every spawn");
+
+			// A project agent of the same name is never consulted: the judge resolves at
+			// user scope only, so the bundled contract survives.
+			fs.rmSync(path.join(agentDir, "agents", "judge-review.md"));
+			distinctiveAgent(path.join(cwd, ".pi", "agents"), "judge-review", "PROJECT REVIEW JUDGE PROMPT");
+			const scoped = makeHarness({ guard: true, tools: ["read"] });
+			const scopedRecording = installControlledSpawn();
+			const promise = runSubagent(scoped, cwd, { panel: "pair", task: "t", agentScope: "both", confirmProjectAgents: false });
+			await waitFor(() => scopedRecording.spawns.length === 1, "the panelist never spawned");
+			emitAnswer(scopedRecording.spawns[0], "answer");
+			await waitFor(() => scopedRecording.spawns.length === 2, "the judge never spawned");
+			const judgePromptPath = flag(scopedRecording.spawns[1].args, "--append-system-prompt");
+			const judgeBody = judgePromptPath ? fs.readFileSync(judgePromptPath, "utf8") : "";
+			emitAnswer(scopedRecording.spawns[1], "merge");
+			await promise;
+			assert.ok(judgeBody.includes("## Findings"), "the bundled review judge supplies the prompt");
+			assert.equal(judgeBody.includes("PROJECT REVIEW JUDGE PROMPT"), false, "the project judge is never used");
+			scopedRecording.restore();
 		} finally { recording.restore(); }
 	});
 });
 
 test("partial panel failures preserve successful output and all-failed panels are errors; guard presence decides absent versus unresponsive", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: null } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }], judge: null } } });
 		let failAll = false;
 		const recording = installRecordingSpawn((spawn) => {
 			if (failAll || flag(spawn.args, "--model") === "p/org/b") { spawn.child.stderr.emit("data", "failed panelist"); return 1; }
@@ -578,7 +707,7 @@ test("partial panel failures preserve successful output and all-failed panels ar
 
 test("project panel participants respect scope, trust, UI, opt-out, and per-cwd confirmation", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { agent: "local", models: ["p/a"] } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ agent: "local", model: "p/a" }] } } });
 		declaredAgent(path.join(cwd, ".pi", "agents"), "local", "read");
 		declaredAgent(path.join(cwd, ".pi", "agents"), "judge", "read");
 		declaredAgent(path.join(cwd, "other", ".pi", "agents"), "local", "read");
@@ -622,16 +751,21 @@ test("project panel participants respect scope, trust, UI, opt-out, and per-cwd 
 	});
 });
 
-test("raw listing preserves whitespace, duplicates, nulls, unresolved agents, roles, and discovery ignored reasons", async () => {
+test("listing reports resolved panelists and judges, unresolved agents, roles, and discovery ignored reasons", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { z: { models: [" p/a ", "p/a"], agent: " missing ", judge: " none " }, a: { models: ["p/a"], judge: null }, inherited: { models: ["p/a"] }, bad: false } });
+		configure(agentDir, { panels: {
+			z: { panelists: [{ agent: " missing ", model: " p/a " }, { agent: " missing ", model: " p/a " }] },
+			a: { panelists: [{ model: "p/a" }], judge: null },
+			reviewish: { panelists: [{ agent: "judge-review", model: "p/a" }], judge: { agent: "judge-review", model: "p/judge" } },
+			bad: false,
+		} });
 		const h = makeHarness();
 		const result = await runList(h, cwd);
 		const sc = result.structuredContent!;
 		assert.deepEqual(sc.panels, [
-			{ name: "z", agent: " missing ", models: [" p/a ", "p/a"], judge: " none " },
-			{ name: "a", agent: null, models: ["p/a"], judge: null },
-			{ name: "inherited", agent: null, models: ["p/a"], judge: null },
+			{ name: "z", panelists: [{ agent: "missing", model: "p/a" }], judge: { agent: "judge", model: null } },
+			{ name: "a", panelists: [{ agent: "panelist", model: "p/a" }], judge: null },
+			{ name: "reviewish", panelists: [{ agent: "judge-review", model: "p/a" }], judge: { agent: "judge-review", model: "p/judge" } },
 		]);
 		assert.deepEqual(sc.ignoredPanels, [{ name: "bad", reason: '[subagent] panels."bad": preset should be an object' }]);
 		assert.deepEqual(result.details, sc);
@@ -640,7 +774,7 @@ test("raw listing preserves whitespace, duplicates, nulls, unresolved agents, ro
 		assert.match(text, /scout \(bundled\):/);
 		assert.equal(sc.agents.find((a) => a.name === "judge")?.role, "internal");
 		assert.equal(sc.agents.find((a) => a.name === "scout")?.role, "delegate");
-		assertSortedAppearance(text, ['{"name":"a"', '{"name":"inherited"', '{"name":"z"']);
+		assertSortedAppearance(text, ['{"name":"a"', '{"name":"reviewish"', '{"name":"z"']);
 		for (const entry of sc.panels) assert.ok(text.includes(JSON.stringify(entry)));
 		assert.ok(text.includes(sc.ignoredPanels[0].reason.replaceAll('"', '\\"')));
 		configure(agentDir, {});
@@ -656,7 +790,7 @@ test("each listing has its own deterministic text cap while structured arrays st
 		const panels: Record<string, unknown> = {};
 		for (let i = 104; i >= 0; i--) {
 			const n = i.toString().padStart(3, "0");
-			panels[`valid${n}`] = { models: ["p/a"] };
+			panels[`valid${n}`] = { panelists: [{ model: "p/a" }] };
 			panels[`invalid${n}`] = false;
 			writeAgent(path.join(agentDir, "agents"), `agent${n}`, "Test");
 		}
@@ -686,11 +820,16 @@ test("description catalog is conditional, dispatchable-only, ordered, and absent
 			assert.equal(description(), baseline, "exact dispatchable-only baseline equality");
 		}
 		writeAgent(path.join(cwd, ".pi", "agents"), "projectOnly", "Project");
-		configure(agentDir, { panels: { z: { models: ["p/a"] }, hidden: { agent: "judge", models: ["p/a"] }, missing: { agent: "absent", models: ["p/a"] }, project: { agent: "projectOnly", models: ["p/a"] }, a: { models: ["p/org/b"] } } });
+		configure(agentDir, { panels: {
+			z: { panelists: [{ model: "p/a" }] },
+			hidden: { panelists: [{ agent: "judge", model: "p/a" }] },
+			missing: { panelists: [{ agent: "absent", model: "p/a" }] },
+			project: { panelists: [{ agent: "projectOnly", model: "p/a" }] },
+			a: { panelists: [{ model: "p/org/b" }] },
+		} });
 		const catalog = description();
 		assert.ok(catalog.startsWith(baseline));
-		assert.match(catalog, /Panels: a: p\/org\/b; z: p\/a\./);
-		for (const name of ["hidden:", "missing:", "project:", "judge"]) assert.equal(catalog.includes(name), false);
+		assert.equal(catalog.slice(catalog.indexOf("Panels: ")), "Panels: a; z.", "the catalog lists usable preset names only");
 		assert.equal(description(), catalog);
 	});
 });
@@ -729,7 +868,7 @@ test("legacy modes retain model/thinking inheritance and support explicit child 
 
 test("the judge prompt is the verbatim panelist blocks, inspected during spawn before cleanup", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }], judge: { model: "p/judge" } } } });
 		const h = makeHarness({ guard: true, tools: ["read"] });
 		const inspected: string[][] = [];
 		const recording = installControlledSpawn((spawn) => {
@@ -834,7 +973,7 @@ test("a judge frontmatter pin is not an extra precedence level", async () => {
 
 test("failures are labeled as a partial merge and a one-answer merge as single-model", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }], judge: { model: "p/judge" } } } });
 		const h = makeHarness({ guard: true, tools: ["read"] });
 		const recording = installControlledSpawn();
 		try {
@@ -870,7 +1009,7 @@ test("failures are labeled as a partial merge and a one-answer merge as single-m
 
 test("zero survivors skip the judge and return an error with every failure kept", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }], judge: { model: "p/judge" } } } });
 		const h = makeHarness({ guard: true, tools: ["read"] });
 		const recording = installControlledSpawn();
 		try {
@@ -890,14 +1029,14 @@ test("zero survivors skip the judge and return an error with every failure kept"
 	});
 });
 
-test("judge none and null skip the merge with no judge spawn and no judge usage line", async () => {
+test("a null judge skips the merge with no judge spawn, no judge usage line, and a null merge notice", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		for (const judge of [null, "none"]) {
-			configure(agentDir, { panels: { pair: { models: ["p/a"], judge: "p/judge" } } });
+		{
+			configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }], judge: { model: "p/judge" } } } });
 			const h = makeHarness({ guard: true, tools: ["read"] });
 			const recording = installControlledSpawn();
 			try {
-				const promise = runSubagent(h, cwd, { panel: "pair", task: "t", judge });
+				const promise = runSubagent(h, cwd, { panel: "pair", task: "t", judge: null });
 				await waitFor(() => recording.spawns.length === 1);
 				emitAnswer(recording.spawns[0], "answer");
 				const result = (await promise) as any;
@@ -1187,7 +1326,7 @@ test("an abort after a failed judge attempt skips the retry and preserves the an
 
 test("totals include failed panelists and every attempt exactly once and never sum context tokens", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }], judge: { model: "p/judge" } } } });
 		const h = makeHarness({ guard: true, tools: ["read"] });
 		const recording = installControlledSpawn();
 		try {
@@ -1372,7 +1511,7 @@ test("the expanded panel row shows the merged review, one section per panelist, 
 
 test("a running panel derives progress from details, marking pending models and the judge", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }], judge: { model: "p/judge" } } } });
 		const h = makeHarness({ guard: true, tools: ["read"] });
 		const updates: any[] = [];
 		const { recording, promise } = startPanelRun(h, cwd, updates);
@@ -1440,7 +1579,7 @@ test("a streaming parallel update counts a running task as running, never as don
 
 test("an unmerged panel skips the merge slot and marks the judge failed with each attempt", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }], judge: { model: "p/judge" } } } });
 		const h = makeHarness({ guard: true, tools: ["read"] });
 		const { recording, promise } = startPanelRun(h, cwd);
 		try {
@@ -1542,7 +1681,7 @@ test("a panel with no panelist results falls back to the model-facing content", 
 
 test("streaming panel emits carry no notices; the finished result carries the real ones", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }], judge: { model: "p/judge" } } } });
 		const h = makeHarness({ guard: true, tools: ["read"] });
 
 		// One survivor then a failed merge: merge-failed must not appear mid-run.
@@ -1759,18 +1898,18 @@ test("panel validation names the config file when no preset is usable", async ()
 			assert.match(missing.content[0].text, /No panel presets are configured\./);
 			assert.ok(missing.content[0].text.includes(configPath), "names the config file to create");
 			assert.match(missing.content[0].text, /"panels" object/);
-			assert.match(missing.content[0].text, /1 to 4 model ids/);
+			assert.match(missing.content[0].text, /1 to 4 entries/);
 
 			// Presets configured but all rejected: name the file and the reasons.
-			configure(agentDir, { panels: { broken: { models: [] } } });
+			configure(agentDir, { panels: { broken: { panelists: [] } } });
 			const ignored = await runSubagent(h, cwd, { panel: "broken", task: "x" }, { scopedModels });
 			assert.equal(ignored.isError, true);
 			assert.match(ignored.content[0].text, /No usable panel preset "broken"/);
 			assert.ok(ignored.content[0].text.includes(configPath), "names the config file that holds the ignored preset");
-			assert.match(ignored.content[0].text, /"models" should contain 1 to 4 non-empty model strings/);
+			assert.match(ignored.content[0].text, /"panelists" should contain 1 to 4 entries/);
 
 			// A configured preset still reports its name and the file it came from.
-			configure(agentDir, { panels: { pair: { models: ["p/a"] } } });
+			configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }] } } });
 			const unknown = await runSubagent(h, cwd, { panel: "missing", task: "x" }, { scopedModels });
 			assert.match(unknown.content[0].text, /Unknown panel "missing"\. Configured presets: pair/);
 			assert.ok(unknown.content[0].text.includes(`(from ${configPath})`), "names where the presets come from");
@@ -1822,7 +1961,7 @@ test("review-panel template targets the review preset, resolves the current PR, 
 	assert.ok(template.includes("reports no uncommitted changes"), "a dirty tree falls back to reading from GitHub");
 	assert.ok(template.includes("`pr diff` for the change set"), "each panelist fetches the diff itself");
 	assert.ok(template.includes("Stay read-only"), "panelists cannot build or test");
-	assert.ok(template.includes("Verdict:"), "each reviewer reports an explicit verdict");
+	assert.ok(template.includes("do not add a verdict line"), "no verdict, because the merge emits findings");
 	assert.ok(template.includes("Do not start fixing anything"), "the command stops at the review");
 });
 
@@ -1933,7 +2072,7 @@ test("each child resolves its agents and spawns in its own cwd while the snapsho
 
 test("a panel resolves its panelist agent from the panel's own cwd", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a"], judge: null } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }], judge: null } } });
 		distinctiveAgent(path.join(cwd, "other", ".pi", "agents"), "panelist", "PROMPT FROM THE PANEL CWD");
 		const h = makeHarness({ guard: true, tools: ["read"] });
 		const bodies: string[] = [];
@@ -2007,7 +2146,7 @@ test("aborting a dispatch returns aborted results instead of rejecting", async (
 
 test("an abort during the panelist phase keeps the partial answers", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
-		configure(agentDir, { panels: { pair: { models: ["p/a", "p/org/b"], judge: "p/judge" } } });
+		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }], judge: { model: "p/judge" } } } });
 		const h = makeHarness({ guard: true, tools: ["read"] });
 		const recording = installControlledSpawn();
 		try {

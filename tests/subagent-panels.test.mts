@@ -75,17 +75,36 @@ for (const raw of [null, [], "presets", 4, true]) {
 	});
 }
 
+/** The flat pre-2026-11-18 preset form, refused with a single migration reason. */
+const legacyPresets = [
+	{ models: ["x"] },
+	{ models: ["x"], agent: "reviewer" },
+	{ agent: "reviewer" },
+	{ judge: "model/judge" },
+	{ panelists: [{ model: "x" }], judge: "none" },
+];
+const MIGRATION_REASON =
+	'"agent"/"models"/judge string form is no longer accepted; use "panelists": [{"agent": ..., "model": ...}] and "judge": {"agent": ..., "model": ...}';
+
 const invalidPresets = [
-	null, [], "x", 1, false, {}, { models: null }, { models: "x" }, { models: [] },
-	{ models: [""] }, { models: [" \t"] }, { models: [1] }, { models: [null] }, { models: [["x"]] },
-	{ models: ["x"], agent: "" }, { models: ["x"], agent: " " }, { models: ["x"], agent: null },
-	{ models: ["x"], agent: [] }, { models: ["x"], agent: 1 },
-	{ models: ["x"], judge: "" }, { models: ["x"], judge: " " }, { models: ["x"], judge: false },
-	{ models: ["x"], judge: [] }, { models: ["x"], judge: {} }, { models: ["x"], judge: 1 },
+	null, [], "x", 1, false, {},
+	{ panelists: null }, { panelists: "x" }, { panelists: [] }, { panelists: {} },
+	{ panelists: [{}] }, { panelists: [{ model: "" }] }, { panelists: [{ model: " \t" }] },
+	{ panelists: [{ model: 1 }] }, { panelists: [{ model: null }] }, { panelists: [{ model: ["x"] }] },
+	{ panelists: [null] }, { panelists: ["x"] },
+	{ panelists: [{ model: "x" }, "y"] },
+	{ panelists: [{ model: "x", agent: "" }] }, { panelists: [{ model: "x", agent: " " }] },
+	{ panelists: [{ model: "x", agent: null }] }, { panelists: [{ model: "x", agent: [] }] },
+	{ panelists: [{ model: "x", agent: 1 }] },
+	{ panelists: [{ model: "x" }], judge: "" }, { panelists: [{ model: "x" }], judge: " " },
+	{ panelists: [{ model: "x" }], judge: false }, { panelists: [{ model: "x" }], judge: [] },
+	{ panelists: [{ model: "x" }], judge: 1 },
+	{ panelists: [{ model: "x" }], judge: { agent: "" } },
+	{ panelists: [{ model: "x" }], judge: { agent: 1 } }, { panelists: [{ model: "x" }], judge: { model: " " } },
 ];
 for (const [index, value] of invalidPresets.entries()) {
 	test(`reject malformed preset independently: ${index}`, () => {
-		const result = parsePanels({ invalid: value, valid: { models: ["x"] } });
+		const result = parsePanels({ invalid: value, valid: { panelists: [{ model: "x" }] } });
 		assert.deepEqual(result.panels.map((p) => p.name), ["valid"]);
 		assert.equal(result.ignoredPanels.length, 1);
 		assert.equal(result.ignoredPanels[0].name, "invalid");
@@ -93,60 +112,86 @@ for (const [index, value] of invalidPresets.entries()) {
 	});
 }
 
+for (const value of legacyPresets) {
+	test(`reject the flat preset form: ${JSON.stringify(value)}`, () => {
+		const result = parsePanels({ invalid: value, valid: { panelists: [{ model: "x" }] } });
+		assert.deepEqual(result.panels.map((p) => p.name), ["valid"]);
+		assert.deepEqual(result.ignoredPanels, [{ name: "invalid", reason: `[subagent] panels."invalid": ${MIGRATION_REASON}` }]);
+	});
+}
+
 test("defaults retain omission separately from resolved values", () => {
-	assert.deepEqual(parsePanels({ ask: { models: ["x"] } }), {
-		panels: [{ name: "ask", models: ["x"], agent: "panelist", judge: undefined,
-			raw: { models: ["x"], agent: null, judge: null, judgeExplicit: false }, diagnostics: [] }],
+	assert.deepEqual(parsePanels({ ask: { panelists: [{ model: "x" }] } }), {
+		panels: [{ name: "ask", panelists: [{ agent: "panelist", model: "x" }], judge: undefined, diagnostics: [] }],
 		ignoredPanels: [],
 	});
 });
 
-test("four configured models are accepted", () => {
-	assert.deepEqual(parsePanels({ ask: { models: ["a", "b", "c", "d"] } }).panels[0].models, ["a", "b", "c", "d"]);
+test("four configured panelists are accepted", () => {
+	const panelists = ["a", "b", "c", "d"].map((model) => ({ model }));
+	assert.deepEqual(parsePanels({ ask: { panelists } }).panels[0].panelists.map((p) => p.model), ["a", "b", "c", "d"]);
 });
 for (const models of [["a", "b", "c", "d", "e"], ["a", "a", "a", "a", "a"]]) {
 	test(`configured cap is checked before deduplication: ${models.join(",")}`, () => {
-		const result = parsePanels({ ask: { models } });
+		const result = parsePanels({ ask: { panelists: models.map((model) => ({ model })) } });
 		assert.equal(result.panels.length, 0);
-		assert.equal(result.ignoredPanels[0].reason, '[subagent] panels."ask": "models" exceeds the cap of 4 entries');
+		assert.equal(result.ignoredPanels[0].reason, '[subagent] panels."ask": "panelists" exceeds the cap of 4 entries');
 	});
 }
 
-test("normalization preserves first occurrence order and verbatim raw configuration without mutation", () => {
-	const models = Object.freeze([" b ", "a", " b ", "c"]);
-	const raw = Object.freeze({ review: Object.freeze({ models, agent: " reviewer ", judge: " model/judge " }) });
+test("normalization trims every field, keeps first occurrence order, and never mutates frozen input", () => {
+	const panelists = Object.freeze([
+		Object.freeze({ model: " b " }),
+		Object.freeze({ agent: " reviewer ", model: "a" }),
+		Object.freeze({ model: " b " }),
+		Object.freeze({ model: "c" }),
+	]);
+	const raw = Object.freeze({ review: Object.freeze({ panelists }) });
 	const result = parsePanels(raw);
 	const panel = result.panels[0];
-	assert.deepEqual(panel.models, ["b", "a", "c"]);
-	assert.deepEqual(panel.raw.models, models);
-	assert.notEqual(panel.raw.models, models);
-	assert.equal(panel.agent, "reviewer");
-	assert.equal(panel.raw.agent, " reviewer ");
-	assert.equal(panel.judge, "model/judge");
-	assert.equal(panel.raw.judge, " model/judge ");
-	assert.deepEqual(panel.diagnostics, ['[subagent] panels."review": duplicate model IDs removed; preset retained']);
+	assert.deepEqual(panel.panelists, [
+		{ agent: "panelist", model: "b" },
+		{ agent: "reviewer", model: "a" },
+		{ agent: "panelist", model: "c" },
+	]);
+	assert.deepEqual(panel.diagnostics, ['[subagent] panels."review": duplicate panelists removed; preset retained']);
 	assert.deepEqual(result.ignoredPanels, []);
+	assert.deepEqual(raw, { review: { panelists } });
 });
 
-for (const judge of ["provider/model", "none", null]) {
+test("the same model under two different agents is two panelists", () => {
+	const panel = parsePanels({ ask: { panelists: [{ agent: "reviewer", model: "x" }, { agent: "researcher", model: "x" }] } }).panels[0];
+	assert.deepEqual(panel.panelists, [{ agent: "reviewer", model: "x" }, { agent: "researcher", model: "x" }]);
+	assert.deepEqual(panel.diagnostics, []);
+});
+
+for (const [judge, expected] of [
+	[{}, { agent: "judge" }],
+	[{ agent: "judge-review" }, { agent: "judge-review" }],
+	[{ model: "p/judge" }, { agent: "judge", model: "p/judge" }],
+	[{ agent: " judge-review ", model: " p/judge " }, { agent: "judge-review", model: "p/judge" }],
+	[null, null],
+] as const) {
 	test(`explicit judge: ${JSON.stringify(judge)}`, () => {
-		const panel = parsePanels({ ask: { models: ["x"], judge } }).panels[0];
-		assert.equal(panel.judge, judge === "none" ? null : judge);
-		assert.equal(panel.raw.judge, judge);
-		assert.equal(panel.raw.judgeExplicit, true);
+		const panel = parsePanels({ ask: { panelists: [{ model: "x" }], judge } }).panels[0];
+		assert.deepEqual(panel.judge, expected);
 	});
 }
 
-test("sparse and undefined model entries are invalid", () => {
-	for (const models of [new Array(1), [undefined]]) {
-		assert.equal(parsePanels({ ask: { models } }).ignoredPanels.length, 1);
+test("an omitted judge resolves to undefined, which inherits the judge model chain", () => {
+	assert.equal(parsePanels({ ask: { panelists: [{ model: "x" }] } }).panels[0].judge, undefined);
+});
+
+test("sparse and explicitly undefined panelist fields are invalid", () => {
+	// An explicit `undefined` cannot arrive from the JSON config file, only from the
+	// tool's inline panelists, so these cases are parsed directly.
+	for (const panelists of [new Array(1), [{ model: "x", agent: undefined }], [{ model: undefined }]]) {
+		assert.equal(parsePanels({ ask: { panelists } }).ignoredPanels.length, 1);
 	}
 });
 
 test("explicit undefined optional fields are invalid, not omitted", () => {
-	for (const entry of [{ models: ["x"], agent: undefined }, { models: ["x"], judge: undefined }]) {
-		assert.equal(parsePanels({ ask: entry }).ignoredPanels.length, 1);
-	}
+	assert.equal(parsePanels({ ask: { panelists: [{ model: "x" }], judge: undefined } }).ignoredPanels.length, 1);
 });
 
 test("discovery without config or panels preserves models and emits no panel metadata or warnings", { concurrency: false }, () => fixture((f) => {
@@ -159,24 +204,62 @@ test("discovery without config or panels preserves models and emits no panel met
 	assert.deepEqual(f.warnings, []);
 }));
 
-test("unknown agents and duplicates warn but retain usable raw presets", { concurrency: false }, () => fixture((f) => {
-	f.config({ panels: { ask: { models: ["a", "a"], agent: "absent" } } });
+test("unknown agents and duplicates warn but retain the resolved preset", { concurrency: false }, () => fixture((f) => {
+	f.config({ panels: { ask: { panelists: [{ agent: "absent", model: "a" }, { agent: "absent", model: "a" }] } } });
 	const result = f.discover();
 	assert.equal(result.panels.length, 1);
 	assert.deepEqual(result.ignoredPanels, []);
-	assert.deepEqual(result.panels[0].raw.models, ["a", "a"]);
-	assert.equal(result.panels[0].raw.agent, "absent");
+	assert.deepEqual(result.panels[0].panelists, [{ agent: "absent", model: "a" }]);
 	assert.deepEqual(result.panels[0].diagnostics, [
-		'[subagent] panels."ask": duplicate model IDs removed; preset retained',
+		'[subagent] panels."ask": duplicate panelists removed; preset retained',
 		'[subagent] panels."ask": no agent named "absent"; preset retained',
 	]);
 	assert.deepEqual(f.warnings, result.panels[0].diagnostics.map((d) => [d]));
 }));
 
+test("one diagnostic per distinct unresolved panelist agent", { concurrency: false }, () => fixture((f) => {
+	f.config({ panels: { ask: { panelists: [{ agent: "absent", model: "a" }, { agent: "absent", model: "b" }, { agent: "gone", model: "c" }] } } });
+	assert.deepEqual(f.discover().panels[0].diagnostics, [
+		'[subagent] panels."ask": no agent named "absent"; preset retained',
+		'[subagent] panels."ask": no agent named "gone"; preset retained',
+	]);
+}));
+
+test("a configured judge agent is checked for existence and an internal role without rejecting the preset", { concurrency: false }, () => fixture((f) => {
+	f.config({ panels: {
+		missing: { panelists: [{ model: "x" }], judge: { agent: "absent" } },
+		delegate: { panelists: [{ model: "x" }], judge: { agent: "worker" } },
+		internal: { panelists: [{ model: "x" }], judge: { agent: "judge-review" } },
+		inherited: { panelists: [{ model: "x" }] },
+		disabled: { panelists: [{ model: "x" }], judge: null },
+	} });
+	const result = f.discover();
+	assert.deepEqual(result.panels.map((p) => p.name), ["missing", "delegate", "internal", "inherited", "disabled"]);
+	const diagnostics = Object.fromEntries(result.panels.map((p) => [p.name, p.diagnostics]));
+	assert.deepEqual(diagnostics.missing, ['[subagent] panels."missing": no agent named "absent" for "judge.agent"; preset retained']);
+	assert.deepEqual(diagnostics.delegate, ['[subagent] panels."delegate": "judge.agent" agent "worker" is not internal; preset retained']);
+	assert.deepEqual(diagnostics.internal, []);
+	assert.deepEqual(diagnostics.inherited, []);
+	assert.deepEqual(diagnostics.disabled, []);
+	assert.deepEqual(result.ignoredPanels, []);
+	assert.deepEqual(f.warnings, [
+		[diagnostics.missing[0]],
+		[diagnostics.delegate[0]],
+	]);
+}));
+
+test("a project agent cannot satisfy a configured judge agent", { concurrency: false }, () => fixture((f) => {
+	agent(f.project, "proj-judge", "role: internal\n");
+	f.config({ panels: { ask: { panelists: [{ model: "x" }], judge: { agent: "proj-judge" } } } });
+	assert.deepEqual(f.discover("both").panels[0].diagnostics, [
+		'[subagent] panels."ask": no agent named "proj-judge" for "judge.agent"; preset retained',
+	]);
+}));
+
 test("discovery defers model availability, internal-agent suitability, and read-only checks", { concurrency: false }, () => fixture((f) => {
 	f.config({ panels: {
-		internal: { models: ["unavailable/model"], agent: "judge" },
-		writeCapable: { models: ["unavailable/model"], agent: "worker" },
+		internal: { panelists: [{ agent: "judge", model: "unavailable/model" }] },
+		writeCapable: { panelists: [{ agent: "worker", model: "unavailable/model" }] },
 	} });
 	const result = f.discover();
 	assert.deepEqual(result.panels.map((p) => p.name), ["internal", "writeCapable"]);
@@ -185,7 +268,7 @@ test("discovery defers model availability, internal-agent suitability, and read-
 }));
 
 test("every rejected reason is exactly the single argument written to stderr", { concurrency: false }, () => fixture((f) => {
-	for (const panels of [null, [], 1, ...invalidPresets.map((p) => ({ bad: p })), { bad: { models: ["a", "a", "a", "a", "a"] } }]) {
+	for (const panels of [null, [], 1, ...invalidPresets.map((p) => ({ bad: p })), { bad: { panelists: ["a", "b", "c", "d", "e"].map((model) => ({ model })) } }]) {
 		f.warnings.length = 0;
 		f.config({ panels });
 		const result = f.discover();
@@ -208,7 +291,22 @@ test("bundled panel agents have exact tools, resolved roles, and no model pin", 
 	assert.equal(judge.model, undefined);
 	assert.doesNotMatch(fs.readFileSync(panelist.filePath, "utf8").split("---")[1], /^role:|^model:/m);
 	assert.doesNotMatch(fs.readFileSync(judge.filePath, "utf8").split("---")[1], /^model:/m);
-	assert.ok(agents.filter((a) => a.name !== "judge").every((a) => a.role === "delegate"));
+	assert.ok(agents.filter((a) => a.name !== "judge" && a.name !== "judge-review").every((a) => a.role === "delegate"));
+
+	// The review merge contract is the whole body of judge-review.md, so a
+	// presence check fails when a section is deleted or renamed.
+	const judgeReview = agents.find((a) => a.name === "judge-review")!;
+	assert.deepEqual(judgeReview.tools, judge.tools);
+	assert.equal(judgeReview.role, "internal");
+	assert.equal(judgeReview.model, undefined);
+	assert.doesNotMatch(fs.readFileSync(judgeReview.filePath, "utf8").split("---")[1], /^model:/m);
+	const body = judgeReview.systemPrompt;
+	for (const marker of ["## Findings", "## Conflicts", "## Summary", "No issues were found.", "_2 of 2 panelists answered._"]) {
+		assert.ok(body.includes(marker), `judge-review body names ${marker}`);
+	}
+	for (const severity of ["🔴 CRITICAL", "🟠 HIGH", "🟡 MEDIUM", "🟢 LOW"]) {
+		assert.ok(body.includes(severity), `judge-review body names ${severity}`);
+	}
 }));
 
 for (const role of ["delegate", "internal"]) {
@@ -246,6 +344,8 @@ test("role inheritance preserves whole-object replacement of all non-role fields
 	assert.equal(custom.filePath, path.join(f.project, "custom.md"));
 	agent(f.user, "judge");
 	assert.equal(f.discover().agents.find((a) => a.name === "judge")?.role, "internal");
+	agent(f.user, "judge-review");
+	assert.equal(f.discover().agents.find((a) => a.name === "judge-review")?.role, "internal");
 }));
 
 test("scope exclusions cannot contribute roles or resolve panel agents", { concurrency: false }, () => fixture((f) => {
@@ -259,7 +359,7 @@ test("scope exclusions cannot contribute roles or resolve panel agents", { concu
 	assert.equal(f.discover("project").agents.find((a) => a.name === "judge")?.role, "internal");
 	assert.equal(f.discover("user").agents.find((a) => a.name === "judge")?.role, "delegate");
 	assert.equal(f.discover("user").agents.some((a) => a.name === "project-only"), false);
-	f.config({ panels: { ask: { models: ["x"], agent: "project-only" } } });
+	f.config({ panels: { ask: { panelists: [{ agent: "project-only", model: "x" }] } } });
 	assert.equal(f.discover("user").panels[0].diagnostics.length, 1);
 	assert.deepEqual(f.discover("both").panels[0].diagnostics, []);
 }));
@@ -268,7 +368,7 @@ test("model overrides retain precedence while panels are processed independently
 	agent(f.user, "scout", "model: user/model\n");
 	agent(f.project, "scout", "model: project/model\n");
 	assert.equal(f.discover().agents.find((a) => a.name === "scout")?.model, "project/model");
-	f.config({ models: { scout: " override/model ", judge: "judge/model", absent: "x", worker: " " }, panels: { ask: { models: ["x"] } } });
+	f.config({ models: { scout: " override/model ", judge: "judge/model", absent: "x", worker: " " }, panels: { ask: { panelists: [{ model: "x" }] } } });
 	const result = f.discover();
 	assert.equal(result.agents.find((a) => a.name === "scout")?.model, "override/model");
 	assert.equal(result.agents.find((a) => a.name === "judge")?.model, "judge/model");
@@ -279,7 +379,7 @@ test("model overrides retain precedence while panels are processed independently
 	]);
 	for (const models of [null, "bad", [], ["x"]]) {
 		f.warnings.length = 0;
-		f.config({ models, panels: { ask: { models: ["x"] } } });
+		f.config({ models, panels: { ask: { panelists: [{ model: "x" }] } } });
 		assert.equal(f.discover().panels.length, 1);
 		assert.deepEqual(f.warnings, models === null || models === "bad"
 			? [[`[subagent] ${f.configPath}: "models" should be an object of agent name -> model`]]
@@ -290,9 +390,9 @@ test("model overrides retain precedence while panels are processed independently
 }));
 
 test("configuration is reread on every discovery including edits, removal, and malformed JSON", { concurrency: false }, () => fixture((f) => {
-	f.config({ models: { scout: "first" }, panels: { first: { models: ["a"] } } });
+	f.config({ models: { scout: "first" }, panels: { first: { panelists: [{ model: "a" }] } } });
 	assert.equal(f.discover().panels[0].name, "first");
-	f.config({ models: { scout: "second" }, panels: { second: { models: ["b"] } } });
+	f.config({ models: { scout: "second" }, panels: { second: { panelists: [{ model: "b" }] } } });
 	const second = f.discover();
 	assert.equal(second.panels[0].name, "second");
 	assert.equal(second.agents.find((a) => a.name === "scout")?.model, "second");
@@ -310,54 +410,46 @@ test("empty formatters follow their respective catalog and detailed-list convent
 	assert.deepEqual(formatPanelList([]), { text: "none", remaining: 0 });
 });
 
-test("catalog annotations and listing lines use readable values while raw fields stay raw", () => {
+test("catalog lists preset names only while the detailed list resolves panelists and judge", () => {
 	const { panels } = parsePanels({
-		a: { models: [" x ", "x", "y"] },
-		b: { models: ["x"], agent: "reviewer", judge: "judge/model" },
-		c: { models: ["x"], agent: "panelist", judge: "none" },
-		d: { models: ["x"], judge: null },
+		a: { panelists: [{ model: " x " }, { model: "y" }] },
+		b: { panelists: [{ agent: "reviewer", model: "x" }], judge: { agent: "judge-review", model: "p/judge" } },
+		c: { panelists: [{ model: "x" }], judge: null },
+		d: { panelists: [{ model: "x" }], judge: {} },
 	});
-	assert.equal(formatPanelCatalog(panels), "a: x + y; b: x (judge: judge/model) (agent: reviewer); c: x (judge: none); d: x (judge: none)");
+	assert.equal(formatPanelCatalog(panels), "a; b; c; d");
 	assert.deepEqual(formatPanelList(panels), { text: [
-		"a: panelist | x + y | judge: session model",
-		"b: reviewer | x | judge: judge/model",
-		"c: panelist | x | judge: none",
-		"d: panelist | x | judge: none",
+		"a: panelist (x) + panelist (y) | judge: judge (inherit)",
+		"b: reviewer (x) | judge: judge-review (p/judge)",
+		"c: panelist (x) | judge: none",
+		"d: panelist (x) | judge: judge (inherit)",
 	].join("\n"), remaining: 0 });
-	assert.deepEqual(panels.map((panel) => panel.raw), [
-		{ models: [" x ", "x", "y"], agent: null, judge: null, judgeExplicit: false },
-		{ models: ["x"], agent: "reviewer", judge: "judge/model", judgeExplicit: true },
-		{ models: ["x"], agent: "panelist", judge: "none", judgeExplicit: true },
-		{ models: ["x"], agent: null, judge: null, judgeExplicit: true },
-	]);
 });
 
 test("catalog and detailed caps report exact remaining counts and pure suffix output", () => {
-	const { panels } = parsePanels(Object.fromEntries(Array.from({ length: 103 }, (_, i) => [`p${String(i).padStart(3, "0")}`, { models: ["x"] }])));
-	assert.equal(formatPanelCatalog(panels), Array.from({ length: 10 }, (_, i) => `p00${i}: x`).join("; ") + " (+93 more)");
+	const { panels } = parsePanels(Object.fromEntries(Array.from({ length: 103 }, (_, i) => [`p${String(i).padStart(3, "0")}`, { panelists: [{ model: "x" }] }])));
+	assert.equal(formatPanelCatalog(panels), Array.from({ length: 10 }, (_, i) => `p00${i}`).join("; ") + " (+93 more)");
 	const list = formatPanelList(panels);
 	assert.equal(list.remaining, 3);
 	assert.equal(list.text.split("\n").length, 100);
-	assert.ok(list.text.endsWith("p099: panelist | x | judge: session model"));
+	assert.ok(list.text.endsWith("p099: panelist (x) | judge: judge (inherit)"));
 	assert.ok(`${list.text}\n(+${list.remaining} more)`.endsWith("\n(+3 more)"));
-	assert.equal(formatPanelCatalog(panels, 1), "p000: x (+102 more)");
+	assert.equal(formatPanelCatalog(panels, 1), "p000 (+102 more)");
 	assert.equal(formatPanelList(panels, 1).remaining, 102);
 	assert.equal(formatPanelList(panels, 103).remaining, 0);
 	assert.equal(formatPanelCatalog(panels, 103).includes("more)"), false);
 });
 
 test("formatting is byte stable, uses plain name ordering, and never mutates frozen input", () => {
-	const { panels } = parsePanels(Object.fromEntries(["z", "a", "ä", "A", "Z"].map((name) => [name, { models: ["b", "a"] }])));
+	const { panels } = parsePanels(Object.fromEntries(["z", "a", "ä", "A", "Z"].map((name) => [name, { panelists: [{ model: "b" }, { model: "a" }] }])));
 	const before = structuredClone(panels);
 	for (const panel of panels) {
-		Object.freeze(panel.models);
-		Object.freeze(panel.raw.models);
-		Object.freeze(panel.raw);
+		Object.freeze(panel.panelists);
 		Object.freeze(panel.diagnostics);
 		Object.freeze(panel);
 	}
 	Object.freeze(panels);
-	assert.equal(formatPanelCatalog(panels), "A: b + a; Z: b + a; a: b + a; z: b + a; ä: b + a");
+	assert.equal(formatPanelCatalog(panels), "A; Z; a; z; ä");
 	assert.equal(formatPanelCatalog([...panels].reverse()), formatPanelCatalog(panels));
 	assert.deepEqual(formatPanelList([...panels].reverse()), formatPanelList(panels));
 	assert.deepEqual(panels, before);

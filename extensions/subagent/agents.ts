@@ -19,22 +19,24 @@ export type AgentScope = "user" | "project" | "both";
 export type AgentSource = "user" | "project" | "bundled";
 export type AgentRole = "delegate" | "internal";
 
-/** Configured values, before normalization or effective defaults. */
-export interface RawPanelConfig {
-	models: string[];
-	agent: string | null;
-	judge: string | null;
-	judgeExplicit: boolean;
+/** One panelist: a model plus the read-only agent that runs it. */
+export interface PanelistConfig {
+	agent: string;
+	model: string;
+}
+
+/** Merge step: the agent that merges the answers, plus an optional explicit model. */
+export interface JudgeConfig {
+	agent: string;
+	model?: string;
 }
 
 /** Validated configuration used to resolve a panel at call time. */
 export interface PanelConfig {
 	name: string;
-	models: string[];
-	agent: string;
-	/** Undefined inherits the judge model; null skips merging. */
-	judge?: string | null;
-	raw: RawPanelConfig;
+	panelists: PanelistConfig[];
+	/** Undefined inherits the judge model chain; null skips merging. */
+	judge?: JudgeConfig | null;
 	/** Nonfatal warnings, not reasons to reject this preset. */
 	diagnostics: string[];
 }
@@ -219,11 +221,32 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	const raw = readConfiguration(configPath);
 	const configuredModels = applyModelOverrides(agentMap, raw, configPath);
 	const result = parsePanels((raw as { panels?: unknown } | null)?.panels);
+	// The judge resolves at user scope only, so a project agent can never satisfy
+	// it; report against the same set the run-time lookup sees.
+	const nonProjectAgents = new Map(
+		Array.from(agentMap.values())
+			.filter((agent) => agent.source !== "project")
+			.map((agent) => [agent.name, agent]),
+	);
 	for (const panel of result.panels) {
-		if (!agentMap.has(panel.agent)) {
-			panel.diagnostics.push(
-				`[subagent] panels.${JSON.stringify(panel.name)}: no agent named ${JSON.stringify(panel.agent)}; preset retained`,
-			);
+		for (const agentName of new Set(panel.panelists.map((panelist) => panelist.agent))) {
+			if (!agentMap.has(agentName)) {
+				panel.diagnostics.push(
+					`[subagent] panels.${JSON.stringify(panel.name)}: no agent named ${JSON.stringify(agentName)}; preset retained`,
+				);
+			}
+		}
+		if (panel.judge) {
+			const judgeAgent = nonProjectAgents.get(panel.judge.agent);
+			if (!judgeAgent) {
+				panel.diagnostics.push(
+					`[subagent] panels.${JSON.stringify(panel.name)}: no agent named ${JSON.stringify(panel.judge.agent)} for "judge.agent"; preset retained`,
+				);
+			} else if (judgeAgent.role !== "internal") {
+				panel.diagnostics.push(
+					`[subagent] panels.${JSON.stringify(panel.name)}: "judge.agent" agent ${JSON.stringify(panel.judge.agent)} is not internal; preset retained`,
+				);
+			}
 		}
 		for (const diagnostic of panel.diagnostics) console.warn(diagnostic);
 	}
@@ -287,6 +310,35 @@ function applyModelOverrides(agentMap: Map<string, AgentConfig>, raw: unknown, c
 	return accepted;
 }
 
+/**
+ * A panelist entry: a plain object whose `model` is a non-blank string and
+ * whose optional `agent`, when written, is also a non-blank string. An
+ * explicitly written `undefined` is not an omission, so it is rejected too.
+ */
+function isPanelistEntry(value: unknown): boolean {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const entry = value as Record<string, unknown>;
+	if (typeof entry.model !== "string" || !entry.model.trim()) return false;
+	return !Object.hasOwn(entry, "agent") || (typeof entry.agent === "string" && !!entry.agent.trim());
+}
+
+/** A judge value: `null` (skip the merge) or an object with optional non-blank `agent`/`model`. */
+function isJudgeEntry(value: unknown): boolean {
+	if (value === null) return true;
+	if (typeof value !== "object" || Array.isArray(value)) return false;
+	const entry = value as Record<string, unknown>;
+	if (Object.hasOwn(entry, "agent") && (typeof entry.agent !== "string" || !entry.agent.trim())) return false;
+	return !Object.hasOwn(entry, "model") || (typeof entry.model === "string" && !!entry.model.trim());
+}
+
+function normalizeJudge(value: unknown): JudgeConfig | null {
+	if (value === null) return null;
+	const entry = value as Record<string, unknown>;
+	const agent = Object.hasOwn(entry, "agent") ? (entry.agent as string).trim() : "judge";
+	if (!Object.hasOwn(entry, "model")) return { agent };
+	return { agent, model: (entry.model as string).trim() };
+}
+
 /** Parse the panels value without I/O, availability checks, or input mutation. */
 export function parsePanels(raw: unknown): PanelParseResult {
 	const panels: PanelConfig[] = [];
@@ -305,45 +357,52 @@ export function parsePanels(raw: unknown): PanelParseResult {
 			continue;
 		}
 		const entry = value as Record<string, unknown>;
-		if (!Array.isArray(entry.models) || entry.models.length === 0) {
-			reject('"models" should contain 1 to 4 non-empty model strings');
+		// The flat form is refused outright rather than coerced: an upgrade would
+		// have to guess which panelist each model belonged to.
+		if (Object.hasOwn(entry, "agent") || Object.hasOwn(entry, "models") || (Object.hasOwn(entry, "judge") && typeof entry.judge === "string")) {
+			reject(
+				'"agent"/"models"/judge string form is no longer accepted; use "panelists": [{"agent": ..., "model": ...}] and "judge": {"agent": ..., "model": ...}',
+			);
 			continue;
 		}
-		if (entry.models.length > 4) {
-			reject('"models" exceeds the cap of 4 entries');
+		// `Array.from` first: `every` skips array holes, so a sparse `panelists`
+		// array would otherwise pass the shape check and reach normalization.
+		const rawPanelists = Array.isArray(entry.panelists) ? Array.from(entry.panelists as unknown[]) : undefined;
+		if (!rawPanelists || rawPanelists.length === 0 || !rawPanelists.every(isPanelistEntry)) {
+			reject('"panelists" should contain 1 to 4 entries of {"agent"?: non-empty string, "model": non-empty string}');
 			continue;
 		}
-		if (!Array.from(entry.models).every((model) => typeof model === "string" && !!model.trim())) {
-			reject('"models" should contain 1 to 4 non-empty model strings');
-			continue;
-		}
-		const agentExplicit = Object.hasOwn(entry, "agent");
-		if (agentExplicit && (typeof entry.agent !== "string" || !entry.agent.trim())) {
-			reject('"agent" should be a non-empty agent name');
+		if (rawPanelists.length > 4) {
+			reject('"panelists" exceeds the cap of 4 entries');
 			continue;
 		}
 		const judgeExplicit = Object.hasOwn(entry, "judge");
-		if (judgeExplicit && entry.judge !== null && (typeof entry.judge !== "string" || !entry.judge.trim())) {
-			reject('"judge" should be a non-empty model string, "none", or null');
+		if (judgeExplicit && !isJudgeEntry(entry.judge)) {
+			reject('"judge" should be null or an object with optional non-empty "agent" and "model" strings');
 			continue;
 		}
-		const configuredModels = entry.models as string[];
-		const normalizedModels = configuredModels.map((model) => model.trim());
-		const models = [...new Set(normalizedModels)];
-		const rawJudge = judgeExplicit ? (entry.judge as string | null) : null;
-		const judge = rawJudge === null || rawJudge.trim() === "none" ? null : rawJudge.trim();
+		// One entry per (agent, model) pair: the same model under two different
+		// agents is two distinct panelists, so the pair is what identifies a seat.
+		const panelists: PanelistConfig[] = [];
+		const seen = new Set<string>();
+		for (const raw of rawPanelists) {
+			const item = raw as Record<string, unknown>;
+			const agent = Object.hasOwn(item, "agent") ? (item.agent as string).trim() : "panelist";
+			const model = (item.model as string).trim();
+			const key = `${agent}\u0000${model}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			panelists.push({ agent, model });
+		}
+		const diagnostics: string[] = [];
+		if (panelists.length < rawPanelists.length) {
+			diagnostics.push(`${prefix} duplicate panelists removed; preset retained`);
+		}
 		panels.push({
 			name,
-			models,
-			agent: agentExplicit ? (entry.agent as string).trim() : "panelist",
-			judge: judgeExplicit ? judge : undefined,
-			raw: {
-				models: [...configuredModels],
-				agent: agentExplicit ? (entry.agent as string) : null,
-				judge: rawJudge,
-				judgeExplicit,
-			},
-			diagnostics: models.length < configuredModels.length ? [`${prefix} duplicate model IDs removed; preset retained`] : [],
+			panelists,
+			judge: judgeExplicit ? normalizeJudge(entry.judge) : undefined,
+			diagnostics,
 		});
 	}
 	return { panels, ignoredPanels };
@@ -362,27 +421,26 @@ export function sortAgentsByName(agents: AgentConfig[]): AgentConfig[] {
 /** Compact normalized panel catalog, omitted entirely when no presets are usable. */
 export function formatPanelCatalog(panels: PanelConfig[], maxItems = 10): string {
 	if (panels.length === 0) return "";
-	const listed = sortPanelsByName(panels).slice(0, maxItems);
+	const listed = sortPanelsByName(panels).slice(0, maxItems).map((panel) => panel.name);
 	const remaining = panels.length - listed.length;
-	const text = listed
-		.map((panel) => {
-			const judge = panel.raw.judgeExplicit ? ` (judge: ${panel.judge ?? "none"})` : "";
-			const agent = panel.agent !== "panelist" ? ` (agent: ${panel.agent})` : "";
-			return `${panel.name}: ${panel.models.join(" + ")}${judge}${agent}`;
-		})
-		.join("; ");
-	return `${text}${remaining > 0 ? ` (+${remaining} more)` : ""}`;
+	return `${listed.join("; ")}${remaining > 0 ? ` (+${remaining} more)` : ""}`;
 }
 
-/** Prose listing for the model and for humans; `PanelConfig.raw` stays raw. */
+/** Prose listing for the model and for humans: resolved panelists and judge. */
 export function formatPanelList(panels: PanelConfig[], maxItems = 100): { text: string; remaining: number } {
 	const listed = sortPanelsByName(panels).slice(0, maxItems);
 	return {
 		text:
 			listed
 				.map((panel) => {
-					const judge = panel.raw.judgeExplicit ? (panel.judge === null ? "none" : panel.judge) : "session model";
-					return `${panel.name}: ${panel.agent} | ${panel.models.join(" + ")} | judge: ${judge}`;
+					const judge =
+						panel.judge === null
+							? "none"
+							: panel.judge === undefined
+								? "judge (inherit)"
+								: `${panel.judge.agent} (${panel.judge.model ?? "inherit"})`;
+					const panelists = panel.panelists.map((panelist) => `${panelist.agent} (${panelist.model})`).join(" + ");
+					return `${panel.name}: ${panelists} | judge: ${judge}`;
 				})
 				.join("\n") || "none",
 		remaining: panels.length - listed.length,

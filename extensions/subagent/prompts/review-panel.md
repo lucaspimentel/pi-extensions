@@ -21,6 +21,6 @@ Do not review a diff you did not fetch.
 Read the changed files, not the hunks alone: `read`, `ffgrep`, and `fffind` when the working tree is the head commit above and `git_read` `status` reports no uncommitted changes, otherwise `gh_read` `repo contents` with `repo`, `path`, and `ref` set to that commit.
 <extra review focus>
 Stay read-only: no `bash` is available, so do not attempt builds or tests.
-Report `Critical (must fix)`, `Warnings (should fix)`, `Suggestions (consider)`, and a two-to-three sentence `Summary`, citing `file:line` throughout, and end with a `Verdict:` line of either approve, approve with nits, or request changes.
+Report `Critical (must fix)`, `Warnings (should fix)`, `Suggestions (consider)`, and a two-to-three sentence `Summary`, citing `file:line` throughout. The merge turns these into the review findings format, so do not add a verdict line.
 
 After the tool result: reproduce what the panel returned, the merged review or the labeled per-model sections together with any merge notice, without summarizing it or dropping findings. You may add a short note on where the reviewers disagree and which findings look load-bearing. Do not start fixing anything; ask me which findings to act on.

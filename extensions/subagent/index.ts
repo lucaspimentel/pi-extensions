@@ -48,6 +48,8 @@ import {
 	type AgentDiscoveryResult,
 	type AgentScope,
 	type AgentSource,
+	type JudgeConfig,
+	type PanelistConfig,
 	discoverAgents,
 	formatAgentCatalog,
 	formatAgentList,
@@ -230,9 +232,8 @@ interface SingleResult {
 
 interface EffectivePanel {
 	name: string;
-	agent: string;
-	models: string[];
-	judge: { agent: string; model?: string } | null;
+	panelists: PanelistConfig[];
+	judge: JudgeConfig | null;
 }
 
 /** A panelist record: `results` in panel mode, never the judge. */
@@ -248,7 +249,7 @@ interface JudgeAttempt extends Omit<SingleResult, "step"> {
 }
 
 interface PanelJudgeResult {
-	agent: "judge";
+	agent: string;
 	model?: string;
 	output: string;
 	usage: UsageTotals;
@@ -449,8 +450,8 @@ function toJudgeAttempt(result: SingleResult): JudgeAttempt {
 	return { ...rest, output: getFinalOutput(result.messages) };
 }
 
-function buildJudgeResult(output: string, model: string | undefined, attempts: JudgeAttempt[]): PanelJudgeResult {
-	return { agent: "judge", model, output, usage: aggregateUsage(attempts.map((attempt) => attempt.usage)), attempts };
+function buildJudgeResult(agent: string, output: string, model: string | undefined, attempts: JudgeAttempt[]): PanelJudgeResult {
+	return { agent, model, output, usage: aggregateUsage(attempts.map((attempt) => attempt.usage)), attempts };
 }
 
 /** The last judge attempt holds a usable merge. */
@@ -491,7 +492,7 @@ function buildPanelNotices(
 	const merged = judge !== null && judgeIsMerged(judge);
 	if (!merged) {
 		if (judge === null && panel.judge === null) {
-			notices.push({ kind: "merge-skipped", reason: 'judge is "none"; per-model sections follow' });
+			notices.push({ kind: "merge-skipped", reason: "judge is null; per-model sections follow" });
 		} else if (aborted) {
 			notices.push({ kind: "merge-aborted", reason: "the judge was aborted" });
 		} else {
@@ -1207,18 +1208,32 @@ const ChainItem = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process; its project agents are discovered from there" })),
 });
 
+/** One inline panelist override, mirroring a preset `panelists` entry. */
+const PanelistItem = Type.Object({
+	agent: Type.Optional(Type.String({ description: 'Panelist agent name; defaults to the bundled "panelist"' })),
+	model: Type.String({ description: "Panelist model ID (provider/id)" }),
+});
+
+/** The inline judge override, mirroring a preset `judge` object. */
+const JudgeItem = Type.Object({
+	agent: Type.Optional(Type.String({ description: 'Merge agent name; defaults to the bundled "judge"' })),
+	model: Type.Optional(Type.String({ description: "Merge model ID; omit to inherit the judge model chain" })),
+});
+
 const AgentScopeSchema = stringEnum(["user", "project", "both"] as const, {
 	description: 'Which agent directories to use. Default: "user". Use "both" to include project-local agents.',
 	default: "user",
 });
 
 const SubagentParams = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Name of the single agent, or panelist agent override" })),
+	agent: Type.Optional(Type.String({ description: "Name of the single agent" })),
 	task: Type.Optional(Type.String({ description: "Task to delegate, shared by all panelists in panel mode" })),
-	model: Type.Optional(Type.String({ description: "Explicit single-mode model ID; use models for panels" })),
+	model: Type.Optional(Type.String({ description: "Explicit single-mode model ID; use panelists for panels" })),
 	panel: Type.Optional(Type.String({ description: "Named panel preset" })),
-	models: Type.Optional(Type.Array(Type.String(), { description: "Panel model overrides (1 to 4 model IDs)" })),
-	judge: Type.Optional(Type.Union([Type.String({ description: 'Panel judge model override; "none" or null disables it' }), Type.Null()])),
+	panelists: Type.Optional(
+		Type.Array(PanelistItem, { description: "Panel panelist overrides (1 to 4 entries); replaces the preset's panelists" }),
+	),
+	judge: Type.Optional(Type.Union([JudgeItem, Type.Null()], { description: "Panel judge override; null skips the merge" })),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
 	agentScope: Type.Optional(AgentScopeSchema),
@@ -1237,11 +1252,12 @@ const SubagentListAgentSchema = Type.Object({
 	tools: Type.Array(Type.String()),
 });
 
-const RawPanelSchema = Type.Object({
+const PanelistSchema = Type.Object({ agent: Type.String(), model: Type.String() });
+const PanelJudgeSchema = Type.Object({ agent: Type.String(), model: Type.Union([Type.String(), Type.Null()]) });
+const PanelSchema = Type.Object({
 	name: Type.String(),
-	agent: Type.Union([Type.String(), Type.Null()]),
-	models: Type.Array(Type.String()),
-	judge: Type.Union([Type.String(), Type.Null()]),
+	panelists: Type.Array(PanelistSchema),
+	judge: Type.Union([PanelJudgeSchema, Type.Null()]),
 });
 const IgnoredPanelSchema = Type.Object({ name: Type.String(), reason: Type.String() });
 
@@ -1253,7 +1269,7 @@ const SubagentListOutput = Type.Object({
 	agentScope: stringEnum(["user", "project", "both"] as const),
 	projectAgentsDir: Type.Union([Type.String(), Type.Null()]),
 	agents: Type.Array(SubagentListAgentSchema),
-	panels: Type.Array(RawPanelSchema),
+	panels: Type.Array(PanelSchema),
 	ignoredPanels: Type.Array(IgnoredPanelSchema),
 });
 
@@ -1261,7 +1277,7 @@ interface SubagentListDetails {
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	agents: Array<{ name: string; role: "delegate" | "internal"; source: AgentSource; description: string; model: string | null; tools: string[] }>;
-	panels: Array<{ name: string; agent: string | null; models: string[]; judge: string | null }>;
+	panels: Array<{ name: string; panelists: Array<{ agent: string; model: string }>; judge: { agent: string; model: string | null } | null }>;
 	ignoredPanels: Array<{ name: string; reason: string }>;
 }
 
@@ -1280,7 +1296,7 @@ const SUBAGENT_LIST_MAX_AGENTS = 100;
 function baseSubagentDescription(): string {
 	return [
 		"Delegate tasks to specialized subagents with isolated context.",
-		"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder), panel (a named preset fanned out across its read-only models).",
+		"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder), panel (a named preset fanned out across its read-only panelists).",
 		"Bundled agents are always available; agents in the user agents dir override them by name.",
 		`User agents live in ${path.join(getAgentDir(), "agents")}.`,
 		`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
@@ -1308,7 +1324,11 @@ function buildSubagentDescription(): string | undefined {
 		discovery.projectAgentsDir !== null
 			? ` Project-local agents exist under ${CONFIG_DIR_NAME}/agents but are not listed here; pass agentScope: "both" to subagent or subagent_list to include them.`
 			: "";
-	const panels = formatPanelCatalog(discovery.panels.filter((p) => discovery.agents.some((a) => a.name === p.agent && a.role !== "internal")));
+	const panels = formatPanelCatalog(
+		discovery.panels.filter((panel) =>
+			panel.panelists.every((panelist) => discovery.agents.some((a) => a.name === panelist.agent && a.role !== "internal")),
+		),
+	);
 	return `${baseSubagentDescription()} Discovered agents for agentScope "user": ${catalog}.${projectNotice}${panels ? ` Panels: ${panels}.` : ""}`;
 }
 
@@ -1339,7 +1359,7 @@ export default function (pi: ExtensionAPI) {
 		description: baseSubagentDescription(),
 		promptSnippet: "Delegate tasks to specialized subagents (single, parallel, chain, panel) or list them",
 		promptGuidelines: [
-			"Use subagent({panel, task}) to fan one task across a named preset's models; tasks[] with per-item model supports a manual pair.",
+			"Use subagent({panel, task}) to fan one task across a named preset's panelists; tasks[] with per-item model supports a manual pair.",
 			"Use scout for code reconnaissance, planner for implementation plans, researcher for evidence-gathering investigations, worker for edits, and reviewer for code review.",
 			'Project-local agents require agentScope: "both"; the default scope lists bundled and user agents only.',
 		],
@@ -1372,8 +1392,8 @@ export default function (pi: ExtensionAPI) {
 			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle) + Number(hasPanel);
 			const mode = hasPanel ? "panel" : hasChain ? "chain" : hasTasks ? "parallel" : "single";
 			let panel: EffectivePanel | undefined;
-			let panelTools: string[] = [];
-			let panelistResolved: ResolvedAgent | undefined;
+			let panelTools: string[][] = [];
+			let resolvedPanelists: ResolvedAgent[] = [];
 			let judgeResolved: ResolvedAgent | undefined;
 			// Each task resolves its agents from its own effective cwd, before any
 			// validation, so an unknown name is reported against that cwd's agents.
@@ -1413,11 +1433,17 @@ export default function (pi: ExtensionAPI) {
 				details: makeDetails(mode)([]),
 				isError: true,
 			});
-			const panelOnly = ["models", "judge"].filter((field) => params[field as "models" | "judge"] !== undefined);
+			const panelOnly = ["panelists", "judge"].filter((field) => params[field as "panelists" | "judge"] !== undefined);
 			if (!hasPanel && panelOnly.length) return invalid(`Parameters ${panelOnly.join(", ")} require panel. Use model for a single child.`);
+			// A pre-2026-11-18 caller still reaches the tool with the old array; the schema
+			// no longer declares it, so an extra property would otherwise be ignored and
+			// the call would silently run the preset's own panelists instead.
+			if ((params as Record<string, unknown>).models !== undefined) {
+				return invalid("Parameter models is no longer accepted. Pass panelists: [{model, agent?}] with panel, or model for a single child; config presets use the same panelists/judge shape.");
+			}
 			if (modeCount !== 1 || (hasPanel && (params.tasks !== undefined || params.chain !== undefined))) return invalid("Invalid parameters. Provide exactly one mode. Use agent + task, tasks, chain, or panel + task. Do not combine panel with tasks/chain or combine legacy modes.");
 			if (hasTasks && params.tasks!.length > MAX_PARALLEL_TASKS) return invalid(`Too many parallel tasks (${params.tasks!.length}). Max is ${MAX_PARALLEL_TASKS}.`);
-			if (params.model !== undefined && mode !== "single") return invalid(`Parameter model is only valid in single mode; use ${hasPanel ? "models for panel" : "per-item model in tasks/chain"}.`);
+			if (params.model !== undefined && mode !== "single") return invalid(`Parameter model is only valid in single mode; use ${hasPanel ? "panelists for panel" : "per-item model in tasks/chain"}.`);
 			if (hasPanel && !params.task) return invalid("Parameter panel requires task. Use subagent({panel, task}).");
 
 			const agentError = (name: string, field: string, resolved: ResolvedAgent, internal = false): string | undefined => {
@@ -1443,41 +1469,88 @@ export default function (pi: ExtensionAPI) {
 						);
 					}
 					return invalid(
-						`No panel presets are configured. Add a "panels" object to ${discovery.configPath} with a preset name, its "models" (1 to 4 model ids), and an optional "judge" model id (see the subagent extension README).`,
+						`No panel presets are configured. Add a "panels" object to ${discovery.configPath} with a preset name, its "panelists" (1 to 4 entries of {"agent": ..., "model": ...}), and an optional "judge" ({"agent": ..., "model": ...} or null; see the subagent extension README).`,
 					);
 				}
-				const rawModels = params.models ?? preset.models;
-				if (!rawModels.length || rawModels.length > 4 || rawModels.some((m) => !m.trim())) return invalid("Parameter models must contain 1 to 4 nonblank model IDs.");
-				const models = [...new Set(rawModels.map((m) => m.trim()))];
-				const agentName = params.agent ?? preset.agent;
-				panelistResolved = resolveAgent(ctx.cwd, agentScope, agentName, params.cwd, discoveryCache);
-				const error = agentError(agentName, "panel.agent", panelistResolved);
-				if (error) return invalid(error, namesOf(panelistResolved.available));
-				const panelist = panelistResolved.agent!;
-				const forbidden = panelist.tools?.filter((t) => ["write", "edit", "bash"].includes(t)) ?? [];
-				if (!panelist.tools?.length) return invalid(`Agent "${agentName}" panel tools declaration is missing or empty; default tools include write, edit, bash. Declare read-only tools explicitly.`);
-				if (forbidden.length) return invalid(`Agent "${agentName}" panel tools contains forbidden tools: ${forbidden.join(", ")}. Declare read-only tools instead.`);
-				panelTools = resolveAgentTools(panelist.tools.filter((t) => t !== "subagent"), availableTools) ?? [];
-				for (let i = 0; i < models.length; i++) {
-					const error = modelError(models[i], `models[${i}]`);
-					if (error) return invalid(error);
+				const rawPanelists: unknown = params.panelists ?? preset.panelists;
+				if (!Array.isArray(rawPanelists) || rawPanelists.length === 0 || rawPanelists.length > 4) {
+					return invalid("Parameter panelists must contain 1 to 4 entries.");
+				}
+				// Inline entries collapse silently on a duplicate (agent, model) pair, the
+				// same way inline model overrides deduplicated before; the effective list
+				// is what `details.panel` reports.
+				const requested: PanelistConfig[] = [];
+				const seen = new Set<string>();
+				for (let i = 0; i < rawPanelists.length; i++) {
+					const entry = rawPanelists[i] as Record<string, unknown> | null;
+					if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+						return invalid(`Parameter panelists[${i}] must be an object with a model.`);
+					}
+					if (typeof entry.model !== "string" || !entry.model.trim()) {
+						return invalid(`Parameter panelists[${i}].model must be a nonblank model ID.`);
+					}
+					if (Object.hasOwn(entry, "agent") && (typeof entry.agent !== "string" || !entry.agent.trim())) {
+						return invalid(`Parameter panelists[${i}].agent must be a nonblank agent name.`);
+					}
+					const agent = typeof entry.agent === "string" ? entry.agent.trim() : "panelist";
+					const model = entry.model.trim();
+					const key = `${agent}\u0000${model}`;
+					if (seen.has(key)) continue;
+					seen.add(key);
+					requested.push({ agent, model });
+				}
+				// Every panelist resolves its own agent, tools, and model: a panel may mix
+				// read-only agents, and each child keeps its own resolved tool list.
+				resolvedPanelists = [];
+				panelTools = [];
+				const panelists: PanelistConfig[] = [];
+				for (let i = 0; i < requested.length; i++) {
+					const entry = requested[i];
+					const resolved = resolveAgent(ctx.cwd, agentScope, entry.agent, params.cwd, discoveryCache);
+					const error = agentError(entry.agent, `panelists[${i}].agent`, resolved);
+					if (error) return invalid(error, namesOf(resolved.available));
+					const agent = resolved.agent!;
+					const forbidden = agent.tools?.filter((t) => ["write", "edit", "bash"].includes(t)) ?? [];
+					if (!agent.tools?.length) return invalid(`Agent "${entry.agent}" panel tools declaration is missing or empty; default tools include write, edit, bash. Declare read-only tools explicitly.`);
+					if (forbidden.length) return invalid(`Agent "${entry.agent}" panel tools contains forbidden tools: ${forbidden.join(", ")}. Declare read-only tools instead.`);
+					const modelProblem = modelError(entry.model, `panelists[${i}].model`);
+					if (modelProblem) return invalid(modelProblem);
+					resolvedPanelists.push(resolved);
+					panelTools.push(resolveAgentTools(agent.tools.filter((t) => t !== "subagent"), availableTools) ?? []);
+					panelists.push(entry);
 				}
 				const selectedJudge = params.judge !== undefined ? params.judge : preset.judge;
 				let judge: EffectivePanel["judge"] = null;
-				if (selectedJudge !== null && selectedJudge?.trim() !== "none") {
+				// An omitted judge (`undefined`) inherits the chain; `null` skips the merge.
+				if (selectedJudge !== null) {
+					const entry = (selectedJudge ?? {}) as Record<string, unknown>;
+					if (typeof entry !== "object" || Array.isArray(entry)) {
+						return invalid("Parameter judge must be an object with optional agent and model, or null.");
+					}
+					if (Object.hasOwn(entry, "agent") && (typeof entry.agent !== "string" || !entry.agent.trim())) {
+						return invalid("Parameter judge.agent must be a nonblank agent name.");
+					}
+					if (Object.hasOwn(entry, "model") && (typeof entry.model !== "string" || !entry.model.trim())) {
+						return invalid("Parameter judge.model must be a nonblank model ID.");
+					}
+					const judgeAgent = typeof entry.agent === "string" ? entry.agent.trim() : "judge";
 					// The judge is internal: it resolves from bundled and user scope only, so
 					// a project agent can never shadow the bundled judge.
-					judgeResolved = resolveAgent(ctx.cwd, "user", "judge", params.cwd, discoveryCache);
-					const error = agentError("judge", "panel.judge", judgeResolved, true);
+					judgeResolved = resolveAgent(ctx.cwd, "user", judgeAgent, params.cwd, discoveryCache);
+					const error = agentError(judgeAgent, "judge.agent", judgeResolved, true);
 					if (error) return invalid(error, namesOf(judgeResolved.available));
-					const model = selectedJudge?.trim() ?? discovery.configuredModels.judge ?? dispatchDefaults.model;
-					if (model !== undefined) {
-						const error = modelError(model, "judge");
-						if (error) return invalid(error);
+					if (judgeResolved.agent!.role !== "internal") {
+						return invalid(`Agent "${judgeAgent}" in judge.agent is not internal; declare "role: internal" in its frontmatter.`);
 					}
-					judge = { agent: "judge", model };
+					const configured = typeof entry.model === "string" ? entry.model.trim() : undefined;
+					const model = configured ?? discovery.configuredModels[judgeAgent] ?? dispatchDefaults.model;
+					if (model !== undefined) {
+						const modelProblem = modelError(model, "judge.model");
+						if (modelProblem) return invalid(modelProblem);
+					}
+					judge = { agent: judgeAgent, model };
 				}
-				panel = { name: preset.name, agent: agentName, models, judge };
+				panel = { name: preset.name, panelists, judge };
 			} else {
 				const requests = hasChain ? params.chain! : hasTasks ? params.tasks! : [{ agent: params.agent!, model: params.model }];
 				const resolvedRequests = hasChain ? resolvedChain : hasTasks ? resolvedTasks : resolvedSingle ? [resolvedSingle] : [];
@@ -1493,9 +1566,7 @@ export default function (pi: ExtensionAPI) {
 
 			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
 				const selected = hasPanel
-					? panelistResolved
-						? [panelistResolved]
-						: []
+					? resolvedPanelists
 					: hasChain
 						? resolvedChain
 						: hasTasks
@@ -1536,16 +1607,15 @@ export default function (pi: ExtensionAPI) {
 				// not the judge merges them.
 				const effective = panel;
 				const settings = pi.getSettings();
-				const panelistSource = panelistResolved!.agent!.source;
-				const allResults: SingleResult[] = effective.models.map((model) => ({
-					agent: effective.agent,
-					agentSource: panelistSource,
+				const allResults: SingleResult[] = effective.panelists.map((panelist, index) => ({
+					agent: panelist.agent,
+					agentSource: resolvedPanelists[index].agent!.source,
 					task: params.task!,
 					status: "pending",
 					exitCode: null,
 					messages: [],
 					stderr: "",
-					model,
+					model: panelist.model,
 					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 				}));
 				const judgeAttempts: JudgeAttempt[] = [];
@@ -1589,13 +1659,13 @@ export default function (pi: ExtensionAPI) {
 						details: makePanelDetails(allResults),
 					});
 
-				await mapWithConcurrencyLimit(effective.models, MAX_CONCURRENCY, async (model, index) => {
+				await mapWithConcurrencyLimit(effective.panelists, MAX_CONCURRENCY, async (panelist, index) => {
 					const result = await runSingleAgent(
 						ctx.cwd,
 						dispatchDefaults,
-						panelistResolved!,
+						resolvedPanelists[index],
 						availableTools,
-						effective.agent,
+						panelist.agent,
 						params.task!,
 						undefined,
 						signal,
@@ -1610,9 +1680,9 @@ export default function (pi: ExtensionAPI) {
 						(partialResults) => makePanelDetails(partialResults),
 						guardDispatch,
 						{
-							model,
-							thinkingLevel: settings.modelThinkingLevels?.[model] ?? ctx.thinkingLevel,
-							tools: panelTools,
+							model: panelist.model,
+							thinkingLevel: settings.modelThinkingLevels?.[panelist.model] ?? ctx.thinkingLevel,
+							tools: panelTools[index],
 							timeoutMs: PANEL_CHILD_TIMEOUT_MS,
 						},
 					);
@@ -1636,8 +1706,9 @@ export default function (pi: ExtensionAPI) {
 				let mergedOutput: string | null = null;
 				let judge: PanelJudgeResult | null = null;
 				// Zero survivors: no judge call, the failures are returned as an error.
-				// Judge disabled (`judge: "none"`): no call, merge-skipped notice.
+				// Judge disabled (`judge: null`): no call, merge-skipped notice.
 				if (survivors.length > 0 && effective.judge) {
+					const judgeAgent = effective.judge.agent;
 					const judgeModel = effective.judge.model;
 					// The judge tool set is fixed here, never read from the override agent's
 					// declaration, so an override cannot widen it.
@@ -1651,20 +1722,20 @@ export default function (pi: ExtensionAPI) {
 							dispatchDefaults,
 							judgeResolved!,
 							availableTools,
-							"judge",
+							judgeAgent,
 							judgeInput,
 							undefined,
 							signal,
 							(partial) => {
 								const streamed = partial.details?.results[0];
 								if (!streamed) return;
-								currentJudge = buildJudgeResult(getFinalOutput(streamed.messages), judgeModel, [...judgeAttempts, toJudgeAttempt(streamed)]);
+								currentJudge = buildJudgeResult(judgeAgent, getFinalOutput(streamed.messages), judgeModel, [...judgeAttempts, toJudgeAttempt(streamed)]);
 								emit();
 							},
 							(partialResults) => {
 								const streamed = partialResults[0];
 								const streamedJudge = streamed
-									? buildJudgeResult(getFinalOutput(streamed.messages), judgeModel, [...judgeAttempts, toJudgeAttempt(streamed)])
+									? buildJudgeResult(judgeAgent, getFinalOutput(streamed.messages), judgeModel, [...judgeAttempts, toJudgeAttempt(streamed)])
 									: currentJudge;
 								return makePanelDetails(allResults, streamedJudge);
 							},
@@ -1680,7 +1751,7 @@ export default function (pi: ExtensionAPI) {
 
 					const first = await attemptJudge();
 					judgeAttempts.push(toJudgeAttempt(first));
-					currentJudge = buildJudgeResult(getFinalOutput(first.messages), judgeModel, judgeAttempts);
+					currentJudge = buildJudgeResult(judgeAgent, getFinalOutput(first.messages), judgeModel, judgeAttempts);
 					let finalAttempt: SingleResult | null = first;
 					// Exactly one retry after an ordinary failure. Timeout and abort are
 					// terminal, and an already-aborted signal skips the retry entirely.
@@ -1692,13 +1763,13 @@ export default function (pi: ExtensionAPI) {
 							emit();
 							const second = await attemptJudge();
 							judgeAttempts.push(toJudgeAttempt(second));
-							currentJudge = buildJudgeResult(getFinalOutput(second.messages), judgeModel, judgeAttempts);
+							currentJudge = buildJudgeResult(judgeAgent, getFinalOutput(second.messages), judgeModel, judgeAttempts);
 							finalAttempt = second;
 						}
 					}
 					if (judgeAttempts.some((attempt) => attempt.terminationReason === "aborted")) aborted = true;
 					if (finalAttempt && !judgeAttemptFailed(finalAttempt)) mergedOutput = getFinalOutput(finalAttempt.messages);
-					judge = buildJudgeResult(finalAttempt ? getFinalOutput(finalAttempt.messages) : "", judgeModel, judgeAttempts);
+					judge = buildJudgeResult(judgeAgent, finalAttempt ? getFinalOutput(finalAttempt.messages) : "", judgeModel, judgeAttempts);
 					judgePhaseDone = true;
 				}
 
@@ -2409,7 +2480,11 @@ export default function (pi: ExtensionAPI) {
 				agentLines,
 			];
 			if (remaining > 0) lines.push(`(+${remaining} more)`);
-			const panels = discovery.panels.map((p) => ({ name: p.name, agent: p.raw.agent, models: [...p.raw.models], judge: p.raw.judge }));
+			const panels = discovery.panels.map((p) => ({
+				name: p.name,
+				panelists: p.panelists.map((panelist) => ({ agent: panelist.agent, model: panelist.model })),
+				judge: p.judge === null ? null : { agent: p.judge?.agent ?? "judge", model: p.judge?.model ?? null },
+			}));
 			const ignoredPanels = discovery.ignoredPanels.map((p) => ({ ...p }));
 			const appendRawListing = (label: string, entries: Array<{ name: string }>) => {
 				const sorted = [...entries].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);

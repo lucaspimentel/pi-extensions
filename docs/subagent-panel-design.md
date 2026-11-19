@@ -21,6 +21,17 @@ per-agent `models.judge` override and no new config key is introduced; a new
 internal agent is reachable only through a panel; and `subagent_list` reports
 the raw `panels` config alongside the presets it ignored.
 
+Addition (2026-11-18; see "Config", "Tool contract", "`subagent_list` contract",
+and "Merge contract"): preset config is nested as `panelists` (1 to 4 entries of
+`{agent?, model}`, deduped by the pair) plus `judge` (`{agent?, model}`, `null`,
+or omitted), replacing the flat `agent`/`models`/judge-string form, which is now
+refused with a migration reason; the `subagent` tool parameters mirror that shape
+(`panelists` and `judge` replace `models`); `subagent_list` reports resolved
+values rather than the file's raw text; the compact panel catalog in the tool
+description lists preset names only; and a new bundled, internal `judge-review`
+agent merges a review panel into the review findings format instead of the
+generic `SHARED` / `<MODEL> ONLY` / `CONFLICTS` sections, which `judge.md` keeps.
+
 Everything lands in `extensions/subagent/`. The standalone `model-panel`
 extension is explicitly deferred, not cancelled: see "Deferred".
 
@@ -136,10 +147,14 @@ how a preset happens to use it.
 
 - `extensions/subagent/agents/judge.md` declares `role: internal`, so the judge
   is not dispatchable on its own, only as a panel's merge step.
+- `extensions/subagent/agents/judge-review.md` (added 2026-11-18) is a second
+  internal merge agent for review presets: same fixed tool set and no model pin,
+  with the findings-format body described in "Merge contract". It is the agent a
+  `review` preset names in `judge.agent`.
 - `extensions/subagent/agents/panelist.md` declares no `role` line and stays a
-  `delegate`. Its only special property is being the default value of a preset's
-  `agent` field, which is a configuration fact: any read-only delegate may be a
-  preset's agent.
+  `delegate`. Its only special property is being the default value of a panelist
+  entry's `agent` field, which is a configuration fact: any read-only delegate
+  may be a panelist agent.
 
 Role resolves through the agent precedence chain by name, with one deliberate
 difference from prompts and tools: those are taken wholly from the most
@@ -161,8 +176,14 @@ Effects:
   catalog and from the unknown-agent error text; both list dispatchable agents
   only. `subagent_list` shows them, marked, because the full catalog is its
   purpose.
-- A preset whose `agent` field names an internal agent is refused, and the
-  default `panelist` resolution goes through the same check.
+- A preset whose panelist entry names an internal agent is refused, and the
+  default `panelist` resolution goes through the same check. A preset's
+  `judge.agent` must also be `internal`: an explicit judge agent that resolves to
+  a delegate is refused with an error telling the user to declare
+  `role: internal`, because a merge agent that is also directly dispatchable
+  blurs what the merge prompt is. The bundled `judge` and `judge-review` agents
+  satisfy it, and an override file that omits `role` inherits `internal` by name
+  (see the precedence rule above), so only a deliberate `role: delegate` breaks.
 
 ## Config
 
@@ -174,43 +195,60 @@ per-agent `models` overrides:
   "models": { "scout": "baseten/zai-org/GLM-5.3-Flash" },
   "panels": {
     "review": {
-      "agent": "reviewer",
-      "models": ["anthropic/claude-opus-5-5", "openai/openai/gpt-6.1-sol"],
-      "judge": "anthropic/claude-sonnet-5-5"
+      "panelists": [
+        { "agent": "reviewer", "model": "anthropic/claude-opus-5-5" },
+        { "agent": "reviewer", "model": "openai/openai/gpt-6.1-sol" }
+      ],
+      "judge": { "agent": "judge-review", "model": "anthropic/claude-sonnet-5-5" }
     },
-    "ask": { "models": ["google/gemini-4-argon", "baseten/kimi-k3"] }
+    "ask": { "panelists": [{ "model": "google/gemini-4-argon" }, { "model": "baseten/kimi-k3" }] }
   }
 }
 ```
 
-- `agent` optional, defaults to the bundled `panelist`.
-- `judge` optional. The judge model resolves in this order: the inline `judge`
-  argument, then this preset's `judge`, then the per-agent `models.judge`
-  override in `subagent.json`, then the dispatching session's model.
-  `judge: "none"` (or `null`) skips the merge entirely and returns labeled
-  per-panelist sections.
-- The judge is a bundled agent (`agents/judge.md`), which is why `models.judge`
-  remains a valid per-agent override and no new config key is introduced for it.
-  Its prompt and tool list are in "Spawn contract" and "Merge contract".
-- `models` required, 1 to 4 entries; more than 4 is an error naming the cap;
-  duplicate ids are deduped with a warning.
+- `panelists` required, 1 to 4 entries of `{agent?, model}`. `agent` defaults to
+  the bundled `panelist`, and entries may name different agents. Entries are
+  deduped by the `(agent, model)` pair with a warning, so the same model under
+  two different agents is a legitimate second panelist; more than 4 entries is
+  an error naming the cap, checked before deduplication.
+- `judge` optional, `{agent?, model}`. `agent` defaults to the bundled `judge`;
+  `model` resolves in this order: the inline `judge` argument, then this
+  preset's `judge.model`, then the per-agent override keyed by the resolved
+  judge agent name (`models.judge` for the default agent, `models.judge-review`
+  for a review preset), then the dispatching session's model. `judge: null`
+  skips the merge entirely and returns labeled per-panelist sections.
+- Review presets name `judge-review` so the merge follows the findings format
+  ("Merge contract"); leaving `judge` out keeps the generic `judge` merge.
+- The flat form is refused, not coerced: a preset with an `agent` key, a
+  `models` key, or a `judge` string (including `"none"`) is dropped with the
+  reason `"agent"/"models"/judge string form is no longer accepted; use
+  "panelists": [{"agent": ..., "model": ...}] and "judge": {"agent": ...,
+  "model": ...}`. A silent upgrade would have to guess which panelist each
+  model belonged to.
+- `judge.agent` must resolve at user scope only (bundled, then user; a project
+  agent can never satisfy it) and must be `role: internal`. Discovery warns and
+  keeps the preset, naming the missing agent or the non-internal one; the call
+  itself refuses it. This is the same shape as the panelist-agent check, applied
+  against the scope the judge actually resolves in.
 - Parsing and validation live next to `applyModelOverrides()`
-  (`extensions/subagent/agents.ts:181`), as a pure `parsePanels` (no filesystem,
+  (`extensions/subagent/agents.ts`), as a pure `parsePanels` (no filesystem,
   no console) that returns the usable presets plus an `ignoredPanels` list of
   `{name, reason}`. Malformed panels warn and are ignored, matching how
-  malformed per-agent overrides behave today. A preset naming an unknown agent
-  warns at load and fails at call time listing the valid agents. The panel
-  catalog is rebuilt per request on the same path as the agent catalog
-  (`prepareLoadout`), so a malformed `panels` entry warns on every request
-  rather than once. The request path prints those warnings on stderr from the
-  same `reason` strings that `ignoredPanels` reports and that `subagent_list`
-  returns (see "`subagent_list` contract"), so the console warning and the tool
-  result cannot drift.
-- Bundled `agents/panelist.md` (researcher-grade read-only tools) and
-  `agents/judge.md` (code-reading tools only) ship with the extension and are
-  overridable from `~/.pi/agent/agents/` like every other bundled agent.
-  `agents/judge.md` declares `role: internal`, while `agents/panelist.md`
-  declares no `role` line and therefore stays a delegate (see "Agent roles").
+  malformed per-agent overrides behave today. A panelist entry naming an unknown
+  agent, and a `judge.agent` that is unknown or not internal, warn at load and
+  fail at call time listing the valid agents. The panel catalog is rebuilt per
+  request on the same path as the agent catalog (`prepareLoadout`), so a
+  malformed `panels` entry warns on every request rather than once. The request
+  path prints those warnings on stderr from the same `reason` strings that
+  `ignoredPanels` reports and that `subagent_list` returns (see "`subagent_list`
+  contract"), so the console warning and the tool result cannot drift.
+- Bundled `agents/panelist.md` (researcher-grade read-only tools),
+  `agents/judge.md` (generic merge, code-reading tools only), and
+  `agents/judge-review.md` (review findings merge, same tools) ship with the
+  extension and are overridable from `~/.pi/agent/agents/` like every other
+  bundled agent. `judge.md` and `judge-review.md` declare `role: internal`,
+  while `agents/panelist.md` declares no `role` line and therefore stays a
+  delegate (see "Agent roles").
 
 ## Tool contract
 
@@ -219,46 +257,50 @@ New `subagent` parameters:
 | Param | Meaning |
 | --- | --- |
 | `panel` | Preset name. Expands to N panelists, and to the judge once the merge lands. Requires `task`. |
-| `models` | Inline override of the preset's model list, for this call only. |
-| `judge` | Inline override of the preset's judge; `"none"` or `null` disables the merge. |
-| `agent` | Inline override of the preset's agent; with no `panel` it is the single mode's agent. |
+| `panelists` | Inline replacement for the preset's panelist list (1 to 4 entries of `{agent?, model}`), for this call only. Entries normalize and dedupe exactly like config entries. |
+| `judge` | Inline replacement for the preset's judge: `{agent?, model}`, or `null` to disable the merge. |
+| `agent` | The single mode's agent. It no longer overrides a panel's panelists; each entry names its own agent. |
 | `task` | The task text, as in single mode, shared by every panelist. |
-| `model` | New optional per-child `model` on a single task, a `tasks[]` entry, or a `chain[]` step, for manual pairs without a preset. |
+| `model` | Optional per-child `model` on a single task, a `tasks[]` entry, or a `chain[]` step, for manual pairs without a preset. |
 
 - `panel` is mutually exclusive with `agent`/`task` (single), `tasks`, and
   `chain`. Supplying more than one mode is an error naming the conflicting
   fields.
-- `models`, `judge`, and `agent` are overrides of a named preset and are
-  rejected without `panel`: a one-off pair with no preset is expressed with the
-  new per-child `model` on a single task, a `tasks[]` entry, or a `chain[]`
-  step instead. The 4-model cap applies to the effective list after overrides.
-- A preset's `agent` resolves from the panel's `cwd` through the same discovery
-  as every other agent (bundled, then user, then project, per `agentScope`), so
-  naming a project agent requires `agentScope: "both"` or `"project"`, and the
-  existing `confirmProjectAgents` confirmation applies when the resolved agent
-  is project-sourced and its directory is not the trusted session project's
-  `.pi/agents`. `cwd` selects the panelists' working directory as it does in
-  parallel mode. A preset naming an internal agent is refused here, the same
-  check the default `panelist` resolution runs, and a directly dispatched
+- `panelists` and `judge` are overrides of a named preset and are rejected
+  without `panel`: a one-off pair with no preset is expressed with the new
+  per-child `model` on a single task, a `tasks[]` entry, or a `chain[]` step
+  instead. The 4-entry cap applies to the effective list after overrides. The
+  retired `models` array is named explicitly rather than ignored, because the
+  schema no longer declares it and an extra property would otherwise run the
+  preset's own panelists silently.
+- Each panelist entry resolves its own agent from the panel's `cwd` through the
+  same discovery as every other agent (bundled, then user, then project, per
+  `agentScope`), so naming a project agent requires `agentScope: "both"` or
+  `"project"`, and the existing `confirmProjectAgents` confirmation applies to
+  every project-sourced panelist whose directory is not the trusted session
+  project's `.pi/agents`. `cwd` selects the panelists' working directory as it
+  does in parallel mode. An entry naming an internal agent is refused here, the
+  same check the default `panelist` resolution runs, and a directly dispatched
   internal agent is refused before any spawn with an error naming the agent and
-  pointing at the panel path (see "Agent roles").
+  pointing at the panel path (see "Agent roles"). `judge.agent` resolves at user
+  scope only and must be internal, as "Config" describes.
 - Model ids are validated against `ctx.scopedModels` before any child spawns, as
   the implementation does: an empty scoped list means no scoping is configured,
   so any non-blank id is accepted, and a model that is scoped but has no usable
-  credential is still left to fail in the child. An unknown preset, an unusable
+  credential is still left to fail in the child. Validation error fields name the
+  entry (`panelists[1].model`, `judge.agent`). An unknown preset, an unusable
   model, or an unknown agent fails with the valid options listed, as a tool
   error. Nothing spawns on a typo.
-- The tool description gains a byte-stable panel section modeled on
-  `formatAgentCatalog` (`agents.ts:237`): plain name sort, up to 10 presets,
-  models joined with `" + "`, `(judge: X)` only when explicitly configured,
-  `(agent: Y)` only when not the default panelist, and a `(+N more)` suffix past
-  the cap. The section appears only when at least one panel resolves to a
-  dispatchable agent: with no `panels` key, or only ignored ones, no panel
+- The tool description gains a byte-stable panel section: plain name sort, up to
+  10 presets, **preset names only**, and a `(+N more)` suffix past the cap. Models,
+  panelist agents, and the judge agent are deliberately absent, so an internal
+  agent's name never reaches the description and the sentence stays small; the
+  full resolved values are one `subagent_list` call away. The section appears
+  only when at least one panel's every panelist agent resolves to a dispatchable
+  agent: with no `panels` key, or only ignored or unusable ones, no panel
   sentence and no `Panels: none` placeholder are appended, so the description
   differs from an unconfigured session only through the agent catalog itself.
-  The description lists dispatchable agents only, in the agent catalog and in
-  the panel section alike (see "Agent roles"). No timestamps, so prompt caching
-  is not churned.
+  No timestamps, so prompt caching is not churned.
 - The panel catalog rides the same per-request rewrite as the agent catalog:
   pure `formatPanelCatalog` lives in `agents.ts` (see "Code and test layout")
   and `index.ts` appends its result to the description that `prepareLoadout`
@@ -272,12 +314,16 @@ New `subagent` parameters:
 text output and always present, as empty arrays when nothing is configured.
 Existing shape assertions change accordingly:
 
-- `panels: [{ name, agent, models, judge }]` reports the raw configuration: the
-  `agent` and `judge` values as written, `null` when the preset omits them, and
-  the configured `models` array verbatim. Never the resolved or effective
-  values, so an inline argument, the default `panelist`, and the dispatching
-  session's model never appear here. A preset whose `agent` does not resolve in
-  the current `agentScope` is still listed raw.
+- `panels: [{ name, panelists, judge }]` reports the **resolved** configuration:
+  every panelist entry carries its effective agent name (the default
+  `panelist` filled in), and `judge` is `{ agent, model }` with the effective
+  judge agent and the configured model, `null` when that model is unset, or
+  `null` for the whole field when the merge is disabled. The judge model chain
+  is not resolved here: it ends at the dispatching session's model, which a
+  listing cannot know, so an unset model is reported as `null` rather than
+  guessed. File-level whitespace and explicit-omission detail is therefore not
+  recoverable from this field; a preset whose panelist agent does not resolve is
+  still listed, with the name as written and a diagnostic reason.
 - `ignoredPanels: [{ name, reason }]` reports the presets dropped at parse time.
   `reason` is the same string the load path writes to stderr, so the console
   warning and the tool result cannot drift (see "Config").
@@ -288,9 +334,9 @@ Existing shape assertions change accordingly:
   the `subagent` description and the unknown-agent error list dispatchable
   agents only (see "Agent roles").
 
-This listing is raw config only. The result of an actual panel run carries the
-effective configuration it used in its `details` (see "Merge contract"), which
-is a different surface with a different contract.
+This listing is the resolved configuration, not a run's. The result of an
+actual panel run carries the effective configuration it used in its `details`
+(see "Merge contract"), which is a different surface with a different contract.
 
 ## Spawn contract
 
@@ -303,8 +349,8 @@ Panelists reuse `runSingleAgent`'s path with explicit models:
   otherwise the session's current level. Today the level is only forwarded when
   the agent has no pinned model (`:391-395`), which is exactly the case a panel
   changes.
-- Tools are the preset agent's declared names intersected with what the session
-  registered (`resolveAgentTools`, `:66-78`).
+- Tools are each entry's agent's declared names intersected with what the session
+  registered (`resolveAgentTools`, `:66-78`), resolved once per entry.
 - Wall-clock timeout of 10 minutes per child, opt-in through a `timeoutMs`
   field on `runSingleAgent`'s child options, so the legacy modes stay unbounded.
   It fires one shared, idempotent kill controller that the abort path uses too:
@@ -323,15 +369,17 @@ Panelists reuse `runSingleAgent`'s path with explicit models:
 - Concurrency: panelists spawn through `mapWithConcurrencyLimit` with the
   existing `MAX_CONCURRENCY`; with the 4-model cap a panel never queues.
 
-The judge is spawned by the same code path with `agents/judge.md` as its system
-prompt. Its task is the panelist blocks verbatim (`promptMode: "verbatim"`, no
-`Task: ` prefix, no format restatement); its tool list is the fixed code-reading
-set resolved by the panel path itself, never the override agent's declaration;
-its model and thinking level are the resolved effective ones; and every attempt
-carries the parent guard snapshot and its own fresh inheritance nonce. The judge
-prompt is a bundled agent file, resolved from bundled and user scope only (a
-project `.pi/agents/judge.md` never shadows it), so
-`~/.pi/agent/agents/judge.md` retunes it.
+The judge is spawned by the same code path with the resolved judge agent's body
+as its system prompt (`agents/judge.md` by default, `agents/judge-review.md` for a
+preset that names it). Its task is the panelist blocks verbatim
+(`promptMode: "verbatim"`, no `Task: ` prefix, no format restatement); its tool
+list is the fixed code-reading set resolved by the panel path itself, never the
+override agent's declaration; its model and thinking level are the resolved
+effective ones; and every attempt carries the parent guard snapshot and its own
+fresh inheritance nonce. The judge prompt is a bundled agent file, resolved from
+bundled and user scope only (a project `.pi/agents/judge.md` never shadows it),
+so `~/.pi/agent/agents/judge.md` retunes it. The same rule covers a
+`judge.agent` a preset names, which must itself be `internal`.
 
 ## Merge contract
 
@@ -379,11 +427,54 @@ Included: the final answer plus a summary of the tools each panelist actually
 called, which is what lets the judge tell a checked finding from an assumed one
 without paying for full transcripts.
 
-Judge output is a prompt convention, not a schema: `SHARED` / `<MODEL> ONLY` /
-`CONFLICTS` sections, each finding carrying a `file:line` and its attribution,
-using a short label per model (full id on first use). A judge that ignores the
-convention degrades to a plain merged review rather than failing the call;
-nonconforming but nonempty prose is still the merged content.
+Judge output is a prompt convention, not a schema. The bundled `judge` agent
+asks for `SHARED` / `<MODEL> ONLY` / `CONFLICTS` sections, each finding carrying
+a `file:line` and its attribution, using a short label per model (full id on
+first use). A judge that ignores the convention degrades to a plain merged
+review rather than failing the call; nonconforming but nonempty prose is still
+the merged content.
+
+### `judge-review`: the review findings format
+
+A preset that names `judge.agent: "judge-review"` merges into the findings
+format of the `review-pr` skill (`~/source/lucaspimentel/agent-skills/skills/
+review-pr/SKILL.md`, "Findings Phase"), so a review panel's output reads like the
+single-agent skill's. Panelists keep their own output (`reviewer.md` still emits
+`Files Reviewed` / `Critical` / `Warnings` / `Suggestions` / `Summary`); only the
+merge changes. The body of `agents/judge-review.md` is the contract:
+
+- `## Findings`: one line per distinct issue, sorted by severity, then path, then
+  line, as `- 🔴 CRITICAL \`path/to/file.ts:42\` - what is wrong and why it matters
+  [claude-opus-5-5, gpt-6.1-sol]`. Severities are the skill's four: CRITICAL
+  (security, data loss, crashes), HIGH (logic errors, bugs, wrong behavior),
+  MEDIUM (performance, missing error handling), LOW (style, minor, suggestions).
+  A label is the last path segment of that panelist's model ID from its
+  `### PANELIST <model>` header, so `anthropic/claude-opus-5-5` is
+  `claude-opus-5-5`; the bracket names every panelist that reported the issue, and
+  labels are never invented. Two blocks that would produce the same label (one
+  model under two agents, or two ids sharing a final segment) are each qualified
+  with their full model ID, so the bracket never names one label for two
+  panelists. The panelist headings map onto the severities
+  (`Critical` to CRITICAL, `Warnings` to HIGH or MEDIUM by stated impact,
+  `Suggestions` to LOW), and a heading that contradicts the stated impact is
+  regraded.- `## Conflicts`: only when panelists disagree about whether something is a
+  defect; those items stay out of the findings list and each line names who claims
+  what and the evidence on each side, leaving the disagreement open when it cannot
+  be settled. A disagreement about severity alone is not a conflict: it stays in
+  the findings at the most severe label proposed.
+- `## Summary`: two to three sentences on what the change does and the overall
+  risk, introducing no finding absent from the list.
+- An italic coverage line, always, even when nothing failed and even in the clean
+  case: `_2 of 2 panelists answered._`. It is unconditional so a merge of fewer
+  answers can never read as a clean review; the panel's own `partial-merge`
+  notice above the merge stays as the machine-readable version.
+- Clean case: `## Findings` followed by `No issues were found.` and the coverage
+  line, with no conflicts and no summary.
+
+The judge remains read-only and keeps the generic contract's framing rules: it
+weights only what a panelist actually answered, treats a tool summary as evidence
+of inspection rather than of correctness, never turns repetition into proof,
+never invents a citation, and preserves consequential minority findings.
 
 Judge tools: the code-reading set (read, ffgrep, fffind, ls, git_read, gh_read),
 narrower than the panelists' researcher-grade set, so a CONFLICT can be settled
@@ -409,8 +500,8 @@ Result shape:
   attempt (each keeping its messages, stderr, error, and uncapped output), the
   notices, and the uncapped successful merged text. Panelist records carry no
   `step`.
-- `judge: "none"` (or `null`): no judge spawn, a `merge-skipped` notice, the
-  labeled per-panelist sections, and no judge usage line.
+- `judge: null`: no judge spawn, a `merge-skipped` notice, the labeled
+  per-panelist sections, and no judge usage line.
 
 Notices are short one-line reasons (`merge-skipped`, `merge-failed`,
 `merge-aborted`, `partial-merge`, `single-model-merge`, `no-survivors`); full
@@ -454,19 +545,21 @@ tool or produce a tool result, so `/panel` ships as a prompt template.
 
 ## Read-only guarantees
 
-- A preset whose agent declares `write`/`edit`/`bash`, or declares no `tools:`
-  line at all (which means the default tool set, including those), is refused
-  with the offending tools named. `worker` is therefore not a valid panelist
-  agent, and read-only cannot be configured away. The check reads the declared
-  tool names, so a preset cannot widen a panelist beyond its declaration;
-  whether an individual declared tool is genuinely read-only is not verified.
+- A panelist entry whose agent declares `write`/`edit`/`bash`, or declares no
+  `tools:` line at all (which means the default tool set, including those), is
+  refused with the offending tools named. `worker` is therefore not a valid
+  panelist agent, and read-only cannot be configured away. The check reads the
+  declared tool names, so a preset cannot widen a panelist beyond its
+  declaration; whether an individual declared tool is genuinely read-only is not
+  verified. The check runs per entry, because one panel may mix read-only agents.
 - Panelists never receive `subagent`, so panels cannot nest, and the panel path
-  passes the resolved tool list for every child rather than letting the agent's
-  declaration stand alone. The judge is passed the fixed code-reading list the
-  same way, so an override declaration can narrow it in effect (by making a
-  tool unavailable) but never widen it. When nothing survives resolution the
-  child is launched with `--no-tools` instead of falling back to the default
-  tool set, which is the behavior a fully dropped list used to get.
+  passes each entry's resolved tool list for that child rather than letting the
+  agent's declaration stand alone. The judge is passed the fixed code-reading
+  list the same way, whichever judge agent a preset names, so an override
+  declaration can narrow it in effect (by making a tool unavailable) but never
+  widen it. When nothing survives resolution the child is launched with
+  `--no-tools` instead of falling back to the default tool set, which is the
+  behavior a fully dropped list used to get.
 - Tool names the session did not register are still dropped at spawn time, with
   substitutes only for `ffgrep`/`fffind`. With the researcher-grade set this
   means web/Slack/session/memory sources can silently differ between sessions;
@@ -576,11 +669,11 @@ wiring, and the judge orchestration described below.
   `tests/subagent-panels.test.mts` imports it directly.
 - `extensions/subagent/index.ts` appends the panel catalog to the loadout that
   `prepareLoadout` returns, next to the agent catalog, and holds the tool-level
-  wiring: parameter validation, the refusals in "Agent roles", the
-  `subagent_list` payload, the panelist fan-out, the judge state machine with
-  its single retry, the shared child kill controller, and the content, notice,
-  and usage assembly (`aggregateUsage`, `buildPanelNotices`,
-  `formatLabeledPanelReviews`, `formatPanelContent`).
+  wiring: parameter validation (per panelist entry and for the judge), the
+  refusals in "Agent roles", the `subagent_list` payload, the per-entry panelist
+  fan-out, the judge state machine with its single retry, the shared child kill
+  controller, and the content, notice, and usage assembly (`aggregateUsage`,
+  `buildPanelNotices`, `formatLabeledPanelReviews`, `formatPanelContent`).
 - The fake-pi harness moves out of `tests/subagent-tool.test.mts` into
   `tests/subagent-harness.mts` in its own commit, before the panel work. The new
   file has no `.test.` suffix, is imported rather than run, and is deliberately
@@ -611,22 +704,23 @@ wiring, and the judge orchestration described below.
    is a prompt template as a result.
 2. Panel config parsing and validation as pure functions in
    `extensions/subagent/agents.ts`, in `tests/subagent-panels.test.mts`:
-   malformed panels, the 4-model cap, duplicate ids, unknown agent,
-   inline-override precedence, raw-versus-resolved values in the
+   malformed panels, the entry cap, duplicate panelists, unknown panelist and
+   judge agents, inline-override precedence, resolved values in the
    `subagent_list` payload, role parsing and inheritance through the agent
    precedence chain, and the `formatPanelCatalog`/`formatPanelList` rendering
-   (cap, `(+N more)` suffix, byte-stability). Done with Step 2.
+   (cap, `(+N more)` suffix, byte-stability). Done with Step 2; the nested shape
+   and the names-only catalog are covered by item 7.
 3. Spawn assertions through the `setSpawnOverride` seam (`index.ts:319`) with
    the harness imported from `tests/subagent-harness.mts`, staying in
    `tests/subagent-tool.test.mts`: one child per panelist with its own
    `--model`, mutual-exclusion errors, write-tool preset refusal, internal-agent
-   refusal both on direct dispatch and as a preset's `agent`, rejection of
-   `models`/`judge`/`agent` without `panel`, the project-agent confirmation
+   refusal both on direct dispatch and as a panelist entry's `agent`, rejection
+   of `panelists`/`judge` without `panel`, the project-agent confirmation
    under `agentScope: "both"`, catalog byte-stability including that a config
    without panels appends no panel sentence, per-child `model` in the legacy
    modes, and guard snapshots. Done with Step 3. Completed by Step 4: the judge
    child's argv (verbatim blocks, no `Task: ` prefix), its fixed tool set under
-   hostile or absent override declarations, `judge: "none"`/`null`, the
+   hostile or absent override declarations, `judge: null`, the
    configured-model precedence with a frontmatter pin that adds no level, the
    appended judge prompt inspected mid-spawn, guard snapshots and nonces per
    attempt, partial and single-survivor merge labeling, zero survivors, the
@@ -651,6 +745,21 @@ wiring, and the judge orchestration described below.
    (the panel surface, the `role` concept, the `panels` config, and the
    `subagent_list` fields) and the repo `README.md`, both updated with Step 4.
    The live run remains.
+7. The nested `panelists`/`judge` config, the mirrored tool parameters, the
+   resolved `subagent_list` values, the names-only catalog, and the
+   `judge-review` merge format (2026-11-18; see "Config", "Tool contract",
+   "`subagent_list` contract", and "Merge contract"). Done in this change:
+   `parsePanels` cases for the new shapes, the migration refusal, pair dedupe,
+   the per-entry cap, judge omission/`null`/object forms, and frozen-input
+   immutability in `tests/subagent-panels.test.mts`; discovery diagnostics for
+   unresolved panelist agents and for a missing or non-internal judge agent,
+   plus the bundled `judge-review` agent's tools, role, and contract body, in the
+   same file; the tool-level cases in `tests/subagent-tool.test.mts` for the
+   parameter schemas, the per-entry preflight and model field paths, the
+   effective `details.panel` shape, two panelists with different agents and tool
+   lists, the judge agent's prompt and fixed tools, the delegate-judge refusal,
+   project shadowing, the resolved listing, and the names-only catalog. Verified
+   with `npx tsc --noEmit`, both suites, and the live run in item 5.
 
 ## Decisions made without asking
 
@@ -664,15 +773,28 @@ Called by the implementer, open to revision:
 - The judge retries exactly once after an ordinary failure, with identical
   input, model, thinking level, and tools, and each attempt takes its own fresh
   guard snapshot.
-- `judge: "none"` and `judge` absent are distinct: absent falls through to the
-  per-agent `models.judge` override and then the session model, while `none`
-  means no merge at all.
+- `judge: null` and an omitted `judge` are distinct: omitted falls through to
+  the per-agent override keyed by the resolved judge agent name and then the
+  session model, while `null` means no merge at all.
 - Judge sections use short model labels after the first full-id mention.
 - The `role` key has exactly two values. A future value must describe what the
   agent is, a capability or a dispatch class, never how a preset happens to use
   it.
 - The unknown-agent error text lists dispatchable agents only, so internal
   agents are omitted from it exactly as they are from the description catalog.
+- (2026-11-18) The flat preset form is refused with a migration reason rather
+  than accepted as an alias, and `judge: "none"` is dropped in favor of `null`;
+  one shape per concept was worth the one-time config edit.
+- (2026-11-18) Panelist entries dedupe by `(agent, model)`, so one model may run
+  under two agents; the cap still counts entries, not distinct models.
+- (2026-11-18) Duplicate inline `panelists` collapse silently, matching how the
+  inline model override behaved, because `details.panel` reports what ran.
+- (2026-11-18) The compact catalog lists preset names only; models, agents, and
+  the judge are read from `subagent_list` instead.
+- (2026-11-18) The review merge reports attribution with the last path segment of
+  each panelist's model id, and the coverage line is unconditional.
+- (2026-11-18) A configured `judge.agent` must be `internal`, and it resolves at
+  user scope only, mirroring the bundled judge's rule.
 
 ## Deferred
 
