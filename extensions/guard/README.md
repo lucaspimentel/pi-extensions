@@ -282,6 +282,25 @@ Registration details:
 - Non-interactive contexts (print mode, subagent children) deny prompts;
   sandboxed work stays free.
 
+### Prompt records
+
+Guard writes one custom session entry per interactive prompt and per refusal
+(`pi.appendEntry("guard-prompt-v1", ...)`), so "which commands prompted, what the
+user chose, and how long the dialog waited" is a fact in the session file instead
+of a timing reconstruction. Automatic allows and the observe-only classes are
+never recorded. A record never changes enforcement, and a failed write is
+swallowed behind one warning per session.
+
+Each record carries the tool, guard's mapped class and call kind, the pre-dialog
+decision action, the outcome, guard's canonical per-step subjects (the bare path
+for write/edit and read grants), the capped text the dialog showed, guard's
+reason, the dialog lease duration `dialogMs` (excluding the classifier call and
+any commit), the profile, the codemode origin, and the `toolCallId` that joins it
+to the message stream; saves and grants add the rules, scope, and root. The full
+schema, the outcome vocabulary, and the failure rules are in
+[`docs/guard-design.md`](../../docs/guard-design.md), "Prompt records".
+Records stay invisible in the TUI: a renderer is a TODO item.
+
 ### Subagent inheritance (step 5)
 
 When the subagent extension dispatches a child, it asks guard for a fresh

@@ -1236,6 +1236,84 @@ remain useful.
   tree. End-to-end testing against the installed package needs commit, push,
   and `pi update`.
 
+## Prompt records (2026-11-20)
+
+Settled by interview on 2026-11-20 and implemented in the same change. Goal: make
+"which commands prompted, what the user chose, and how long the dialog waited" a
+first-class, readable fact in the session, instead of something reconstructed from
+timing heuristics (`(toolResult.timestamp - assistant.timestamp) - durationMs`,
+which is exact only for write/edit: for the executors the dialog time is folded
+into `durationMs` and cannot be separated).
+
+Deliverable: one custom session entry per interactive prompt and per refusal.
+
+- **Type and ownership.** `pi.appendEntry("guard-prompt-v1", data)`, pi's
+  supported writer for extension data. Custom entries never enter LLM context and
+  survive reload, fork, and compaction. The version lives in the type name, so a
+  schema change ships as `guard-prompt-v2` rather than reinterpreting records
+  already in existing sessions. The word "audit" stays reserved for the
+  protected-path workspace audit.
+- **Scope.** Prompts (every dialog that closes with an answer) and refusals only.
+  Automatic allows and the observe-only classes write nothing: those run in the
+  thousands, prompts in the hundreds.
+- **Unit.** Per prompt and per refusal, so one call may legitimately produce an
+  answer entry plus a later refusal entry (post-answer staleness, or the second
+  dialog of the per-step save loop). Nothing is deduped.
+- **Payload.** A flattened, explicit projection (never guard's internal
+  `GuardCall`/`Decision` objects), and the entry's own `timestamp` is not
+  duplicated inside `data`:
+
+| Field | Meaning |
+|---|---|
+| `tool` | the tool that prompted: `host_bash`, `pwsh`, `bash`, `python`, `node`, `write`, `edit`, `request_read_access` |
+| `class`, `kind` | guard's mapped class and call kind for that tool; `unknown` when the failure happened before the call could be mapped |
+| `action` | the pre-dialog decision action; omitted when no decision was reached (an abort, a dead runtime) |
+| `outcome` | the vocabulary below |
+| `subjects` | guard's canonical per-step subjects (the strings the rule prefills are built from); the bare path for a local write/edit or a read grant; each capped at 200 chars |
+| `display` | the text the dialog showed, capped by the same `truncateCommand` rule the dialogs use |
+| `reason` | guard's reason verbatim; for a refusal, the refusal's own message |
+| `dialogMs` | the whole dialog lease, excluding the classifier call that preceded it and the commits that followed it; absent when no dialog opened |
+| `profile`, `fromCodemode`, `toolCallId` | session context, and the join key back to the message stream |
+| `rules`, `scope` | only when an outcome persisted or granted rules: the rules and the destination scope |
+| `root` | read grants: the root the user approved (the commit then canonicalizes it, and a refused commit adds a refusal entry) |
+| `switchedTo` | `switch-profile`: the rung the user chose |
+
+- **Outcomes.** Dialog answers reuse the prompt-flow outcome names so the two
+  cannot drift: `allow-once`, `save-allow`, `session-allow`, `switch-profile`,
+  `save-deny`, `deny-once` (any outcome where the user denied the current call,
+  including the read flow's `Deny`), `grant-session`, `save-root`, `no-grant`.
+  Refusals: `deny` (a policy deny: a rule, a profile cell, or a hook-level
+  block), `headless-deny` (a prompt collapsed because the session has no UI),
+  `expired` (runtime, epoch, teardown, or cwd staleness), `refused-rules` (a
+  post-commit revalidation rejected the reviewed rules), `cancelled` (a dialog
+  that opened and closed with no answer, or a call aborted around one), and
+  `error` (fail-closed exceptions and every other refusal, with `reason` naming
+  it).
+- **Where they are written.** Inline, in the path that knows the outcome: the
+  `tool_call` hook for a hook-level block (`deny`, `headless-deny` read from
+  `Decision.nonInteractive`, `expired` for an unresolved teardown) and its
+  fail-closed catch (`error`); `authorize` for executor answers, through
+  `authorizeRecorded`, whose catch records the refusal the error carries;
+  `enforceLocalWrite` for write/edit answers and its deny/headless returns;
+  `requestReadGrant` for read-grant answers and refusals; and the
+  `request_read_access` entry for its own pre-dialog refusals.
+- **Refusal plumbing.** Refusals travel as `PromptRefusalError`
+  (`prompt-record.ts`) carrying their outcome, so no recording catch matches on
+  prose. The throw sites that represent an already-recorded denial carry
+  `outcome === null`, so a catch records nothing twice. `refusalOutcomeFor`
+  additionally covers the errors guard does not throw itself (the dialog gate's
+  cancellations, the runtime readiness gate).
+- **Failure handling.** Building and appending the payload share one try; a
+  failure is swallowed behind at most one warning per session and never changes a
+  decision, a block reason, or whether a call runs. A malformed
+  `request_read_access` request (a relative path) is input validation, not a
+  permission decision, and is not recorded.
+- **Out of scope.** A TUI renderer (`registerEntryRenderer`; TODO.md), a reader
+  command (`/guard prompts`), guard's command-level dialogs (the profile picker,
+  the model picker, and the migrate confirmation are not tool-permission
+  prompts), and a first-class `type: "permission"` session entry (needs an
+  upstream patch).
+
 ## Decision log (2026-10-02)
 
 | Topic | Decision |
@@ -1368,6 +1446,7 @@ remain useful.
 
 | Model-visible guard state (2026-11-05) | User-confirmed and implemented. One advisory `guard_state` prompt section per run, written by a `before_agent_start` handler in `index.ts` and rendered by the new pure `policy/mode-line.ts` from the same per-profile cells the decision core uses (`hostShellCell`, `writeEditCell`) plus the runtime-mode and lock adjustments (`bashRunsOnHost`, `effectiveWorkspaceMode`), so the text cannot contradict enforcement; no policy code reads it. Fixed one-line contract `guard: profile <name>[ (inherited, cannot be loosened)]; sandbox <mode>; host shell <consequence>; writes <consequence>[; /guard ack clears the lock]`, naming every profile verbatim (classifier identity excluded), with the degraded/reduced clauses and the lock-aware rewrites plus the remedy tail. Blocked sessions render `guard: session blocked (inherited contract invalid); tool execution denied` or `guard: execution blocked (unresolved teardown); tool execution denied`; an unrenderable clause renders `guard: initialized; effective state unavailable` plus a user notice (as does a failed sections write); nothing is emitted before initialization. Freshness is the run boundary (a mid-run switch or lock appears next turn; every lag is informational), and children render their inherited profile. Chosen over a `<rules>` bullet (a change would re-send the whole rules section, and a custom system prompt suppresses `<rules>` entirely) and over `context_with_system` per-LLM-call freshness (an extra request-rewriting hook that must preserve the index-0 system message and its tool declarations). Suites: `tests/guard-mode-line.test.mts` and `tests/guard-harness.test.mts`, wired into `test:ci` and `test:guard`. |
 | Guard-absent subagent dispatch (2026-11-13) | Settled by an interview after a guard-disabled session found every dispatch refused (`subagent`, `panel`, and `chain` unusable while the parent session was itself unguarded). Guard and subagent now share `guard/policy/handshake.ts` (all three channel pairs and their payload types). Guard's factory registers an unconditional load-time presence responder (`guard:extension-present-request`/`ack`) that answers before and independently of session state, carries no profile, and authorizes nothing. The subagent querier consults it, plus command provenance (an `extensions/guard`-layout registered command), only when the snapshot produced no correlated acknowledgment, distinguished by a new `kind` field on the snapshot failure shape (`absent` | `refused` | `malformed` | `duplicate`). Double silence dispatches ungated (no `PI_GUARD_INHERIT` override, no `--extension` startup gate, ambient environment untouched); a presence answer, duplicate or unreadable presence ack, presence-query emission failure, or guard-layout command refuses with a diagnostic that names the snapshot handshake. Per-spawn, no cache, no knob, no notice. Tool provenance was rejected because `--tools`/`--exclude-tools`/`defaultTools` filter custom tools out of the registry. Tests: `tests/guard-subagent.test.mts` (presence responder, presence-query matrix, failure kinds, ungated/unresponsive dispatch), `tests/subagent-tool.test.mts` + `tests/subagent-harness.mts` (absent vs unresponsive branch fixtures). Two commits: the inert guard ping first, then the subagent side. |
+| Prompt records (2026-11-20) | User-confirmed and implemented after a `grill-me` interview settled six decisions whose answers are permanent once sessions carry them. One `pi.appendEntry("guard-prompt-v1", ...)` entry per interactive prompt and per refusal, written inline in the path that knows the outcome (the `tool_call` block and its fail-closed catch, `authorize` through `authorizeRecorded`, `enforceLocalWrite`, `requestReadGrant`, and the `request_read_access` entry's pre-dialog refusals), never for an automatic allow or an observe-only decision, and never from guard's command-level dialogs. Payload: `tool`, `class`, `kind`, an optional `action`, `outcome`, capped `subjects` and `display`, `reason` verbatim, `dialogMs` (the whole dialog lease, excluding the classifier and any commit), `profile`, `fromCodemode`, `toolCallId`, plus `rules`/`scope`/`root`/`switchedTo` for the outcomes that have them. Outcomes reuse the prompt-flow names (plus `deny-once` for any user denial) and add the refusal kinds `deny`, `headless-deny`, `expired`, `refused-rules`, `cancelled`, `error`; refusals travel as `PromptRefusalError` carrying their outcome so no catch matches prose, and the denial throws that are already recorded carry a null outcome. A failed write is swallowed behind one warning per session and never affects enforcement. Settled as out of scope: a renderer (TODO.md), a reader command, and an upstream `type: "permission"` entry. Suites: new `tests/guard-prompt-record.test.mts` (the refusal classifier, payload capping, and the five surfaces, including the once-per-session warning), wired into `test:ci` and `test:guard`; `tests/guard-{harness,dialogs,subagent,request-access,render-call}.test.mts` gained the fake API's `appendEntry` |
 
 ## Implementation outline (build alongside, switch over)
 
