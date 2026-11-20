@@ -2,7 +2,8 @@
 // Unit tests run through the setSpawnOverride seam: no real git, no
 // filesystem access beyond path resolution. Integration tests run real git
 // in throwaway temp repos to pin end-to-end behavior (worktree gate,
-// --no-optional-locks, env stripping, real truncation).
+// --no-optional-locks, env stripping, real truncation, and every newly
+// allowlisted flag form).
 //
 // Design: docs/git-read-design.md ("Worktree enforcement", "Trust model for
 // config, env, and helpers", "Resource limits and failure contract").
@@ -17,7 +18,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { afterEach, mock, test } from "node:test";
 
-import { GLOBAL_OPTIONS, validateInvocation } from "../extensions/git-read/validate.ts";
+import { GLOBAL_OPTIONS, validateInvocation, type GitSubcommand } from "../extensions/git-read/validate.ts";
 import {
 	INJECTED_ENV,
 	KILL_ESCALATION_MS,
@@ -420,6 +421,96 @@ function indexHash(repo: string): string {
 	return createHash("sha256").update(readFileSync(path.join(repo, ".git", "index"))).digest("hex");
 }
 
+/** Two commits with distinct subjects and identities, for filter and format flags. */
+function makeHistoryRepo(): string {
+	const repo = mkdtempSync(path.join(tmpdir(), "git-read-flags-"));
+	gitSync(["init"], repo);
+	gitSync(["config", "user.email", "first@example.com"], repo);
+	gitSync(["config", "user.name", "First Author"], repo);
+	writeFileSync(path.join(repo, "file.txt"), "hello\n");
+	gitSync(["add", "."], repo);
+	gitSync(["commit", "-m", "first subject"], repo);
+	writeFileSync(path.join(repo, "second.txt"), "second\n");
+	gitSync(["add", "."], repo);
+	gitSync(
+		[
+			"-c",
+			"user.email=second@example.com",
+			"-c",
+			"user.name=Second Author",
+			"commit",
+			"-m",
+			"second subject",
+		],
+		repo,
+	);
+	return repo;
+}
+
+/** Validates `args` for `subcommand`, then runs the emitted argv through real git. */
+async function runValidated(subcommand: GitSubcommand, args: string[], cwd: string) {
+	const checked = validateInvocation(subcommand, args);
+	if (!checked.ok) assert.fail(`unexpected validation failure for ${subcommand} ${args.join(" ")}: ${checked.reason}`);
+	return await runGit(checked.argv, cwd);
+}
+
+/** The allowlisted `%` sequences, written out independently of validate.ts. */
+const ALLOWED_SPECIFIERS = [
+	"%%",
+	"%H",
+	"%h",
+	"%T",
+	"%t",
+	"%P",
+	"%p",
+	"%s",
+	"%f",
+	"%b",
+	"%B",
+	"%n",
+	"%d",
+	"%D",
+	"%m",
+	"%N",
+	"%e",
+	"%an",
+	"%aN",
+	"%ae",
+	"%aE",
+	"%al",
+	"%aL",
+	"%ad",
+	"%aD",
+	"%ar",
+	"%at",
+	"%ai",
+	"%aI",
+	"%as",
+	"%cn",
+	"%cN",
+	"%ce",
+	"%cE",
+	"%cl",
+	"%cL",
+	"%cd",
+	"%cD",
+	"%cr",
+	"%ct",
+	"%ci",
+	"%cI",
+	"%cs",
+	"%gd",
+	"%gD",
+	"%gs",
+	"%gN",
+	"%gE",
+	"%gn",
+	"%ge",
+];
+
+/** Preset names git resolves before parsing a custom format string. */
+const FORMAT_PRESETS = ["oneline", "short", "medium", "full", "fuller", "email", "raw"];
+
 test("integration: status succeeds and leaves the index byte-identical (--no-optional-locks)", async () => {
 	const repo = makeRepo();
 	try {
@@ -495,10 +586,197 @@ test("integration: large committed file truncates with a byte-accurate notice", 
 	}
 });
 
+// ── Integration: newly allowlisted flag forms against real git ────────────────
+
+test("integration: log count forms and the new log flags run real git", async () => {
+	const repo = makeHistoryRepo();
+	try {
+		for (const args of [
+			["-1", "--format=%s"],
+			["-n1", "--format=%s"],
+			["-n", "1", "--format=%s"],
+			["--max-count=1", "--format=%s"],
+		]) {
+			const result = await runValidated("log", args, repo);
+			assert.equal(result.ok, true, `${args.join(" ")}: ${result.text}`);
+			assert.equal(result.text.trim(), "second subject", args.join(" "));
+		}
+		const bounded = await runValidated("log", ["-2", "--format=%s"], repo);
+		assert.equal(bounded.ok, true, bounded.text);
+		assert.deepEqual(bounded.text.trim().split("\n"), ["second subject", "first subject"]);
+		const noMerges = await runValidated("log", ["--no-merges", "-1", "--format=%s"], repo);
+		assert.equal(noMerges.ok, true, noMerges.text);
+		assert.equal(noMerges.text.trim(), "second subject");
+		const firstParent = await runValidated("log", ["--first-parent", "-1", "--format=%s"], repo);
+		assert.equal(firstParent.ok, true, firstParent.text);
+		assert.equal(firstParent.text.trim(), "second subject");
+		const decorated = await runValidated("log", ["--decorate", "-1"], repo);
+		assert.equal(decorated.ok, true, decorated.text);
+		assert.ok(decorated.text.includes("HEAD"), decorated.text);
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("integration: show boolean and count forms run real git", async () => {
+	const repo = makeHistoryRepo();
+	try {
+		const noPatch = await runValidated("show", ["--no-patch", "-1", "--format=%s"], repo);
+		assert.equal(noPatch.ok, true, noPatch.text);
+		assert.equal(noPatch.text.trim(), "second subject");
+		assert.ok(!noPatch.text.includes("+second"), "no patch body under --no-patch");
+		const shortNoPatch = await runValidated("show", ["-s", "-1", "--format=%s"], repo);
+		assert.equal(shortNoPatch.ok, true, shortNoPatch.text);
+		assert.equal(shortNoPatch.text.trim(), "second subject");
+		const oneline = await runValidated("show", ["--oneline", "-1"], repo);
+		assert.equal(oneline.ok, true, oneline.text);
+		assert.ok(oneline.text.includes("second subject"), oneline.text);
+		const patched = await runValidated("show", ["-p", "-1"], repo);
+		assert.equal(patched.ok, true, patched.text);
+		assert.ok(patched.text.includes("+second"), patched.text);
+		const longPatch = await runValidated("show", ["--patch", "-1"], repo);
+		assert.equal(longPatch.ok, true, longPatch.text);
+		assert.ok(longPatch.text.includes("+second"), longPatch.text);
+		const twoCommits = await runValidated("show", ["-2", "--no-patch", "--format=%s"], repo);
+		assert.equal(twoCommits.ok, true, twoCommits.text);
+		assert.equal(twoCommits.text.trim().split("\n").length, 2);
+		const dated = await runValidated("show", ["-1", "--no-patch", "--date=iso", "--format=%ad"], repo);
+		assert.equal(dated.ok, true, dated.text);
+		assert.match(dated.text.trim(), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} /);
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("integration: diff --check reports whitespace while -w and --ignore-all-space ignore it", async () => {
+	const repo = makeRepo();
+	try {
+		// A whitespace-only change: the ignore flags suppress it, --check reports it.
+		writeFileSync(path.join(repo, "file.txt"), "hello   \n");
+		const plain = await runValidated("diff", [], repo);
+		assert.equal(plain.ok, true, plain.text);
+		assert.ok(plain.text.includes("+hello   "), plain.text);
+		const ignored = await runValidated("diff", ["-w"], repo);
+		assert.equal(ignored.ok, true, ignored.text);
+		assert.equal(ignored.text.trim(), "", "a whitespace-only change disappears under -w");
+		const ignoredLong = await runValidated("diff", ["--ignore-all-space"], repo);
+		assert.equal(ignoredLong.text.trim(), "");
+		const checked = await runValidated("diff", ["--check"], repo);
+		assert.equal(checked.ok, false);
+		assert.equal(checked.exitCode, 2);
+		assert.equal(checked.failureReason, "git exited with code 2");
+		assert.ok(checked.text.includes("trailing whitespace"), checked.text);
+		// The ignoring flag silences --check too when the whitespace difference
+		// is the whole change.
+		const checkedIgnored = await runValidated("diff", ["--check", "-w"], repo);
+		assert.equal(checkedIgnored.ok, true, checkedIgnored.text);
+		// An added line with trailing whitespace is a real change, so --check
+		// still exits 2 alongside -w.
+		writeFileSync(path.join(repo, "file.txt"), "hello world\nbad   \n");
+		const added = await runValidated("diff", ["--check", "-w"], repo);
+		assert.equal(added.ok, false, added.text);
+		assert.equal(added.exitCode, 2);
+		assert.ok(added.text.includes("trailing whitespace"), added.text);
+		// A whitespace-free change passes --check.
+		writeFileSync(path.join(repo, "file.txt"), "hello world\n");
+		const clean = await runValidated("diff", ["--check"], repo);
+		assert.equal(clean.ok, true, clean.text);
+		assert.equal(clean.text.trim(), "");
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("integration: format presets and every allowlisted specifier expand in real git", async () => {
+	const repo = makeHistoryRepo();
+	const head = gitSync(["rev-parse", "HEAD"], repo).trim();
+	try {
+		for (const preset of FORMAT_PRESETS) {
+			const result = await runValidated("log", ["-1", `--format=${preset}`], repo);
+			assert.equal(result.ok, true, `${preset}: ${result.text}`);
+		}
+		for (const specifier of ALLOWED_SPECIFIERS) {
+			const result = await runValidated("log", ["-1", `--format=${specifier}`], repo);
+			assert.equal(result.ok, true, `${specifier}: ${result.text}`);
+		}
+		const sha = await runValidated("log", ["-1", "--format=%H"], repo);
+		assert.equal(sha.text.trim(), head);
+		const author = await runValidated("log", ["-1", "--format=%an"], repo);
+		assert.equal(author.text.trim(), "Second Author");
+		const composed = await runValidated("log", ["-1", "--format=%H%n%an%n%ad%n%s"], repo);
+		assert.equal(composed.ok, true, composed.text);
+		const lines = composed.text.trim().split("\n");
+		assert.equal(lines.length, 4);
+		assert.equal(lines[0], head);
+		assert.equal(lines[1], "Second Author");
+		assert.equal(lines[3], "second subject");
+		// %% ends the scan, so the G? after it is literal text.
+		const escaped = await runValidated("log", ["-1", "--format=%%G?"], repo);
+		assert.equal(escaped.ok, true, escaped.text);
+		assert.equal(escaped.text.trim(), "%G?");
+		const doubleEscaped = await runValidated("log", ["-1", "--format=%%%%G?"], repo);
+		assert.equal(doubleEscaped.ok, true, doubleEscaped.text);
+		assert.equal(doubleEscaped.text.trim(), "%%G?");
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("integration: config pretty aliases cannot smuggle a signature specifier", async () => {
+	const repo = makeHistoryRepo();
+	// A prefix-matched alias that expands to a %G specifier: reachable through
+	// --format=<name> unless the validator demands an exact preset name.
+	gitSync(["config", "pretty.xsig", "%G? %s"], repo);
+	gitSync(["config", "pretty.oneline", "%G? %s"], repo);
+	const head = gitSync(["rev-parse", "HEAD"], repo).trim();
+	try {
+		for (const value of ["xsig", "xs", "ful"]) {
+			const checked = validateInvocation("log", ["-1", `--format=${value}`]);
+			assert.equal(checked.ok, false, value);
+			if (!checked.ok) assert.ok(checked.reason.includes("requires an exact preset name"), checked.reason);
+		}
+		// A %-containing value is parsed as a format string, so the alias cannot
+		// hijack it, and an exact preset name beats a same-named alias.
+		const sha = await runValidated("log", ["-1", "--format=%H"], repo);
+		assert.equal(sha.ok, true, sha.text);
+		assert.equal(sha.text.trim(), head);
+		const oneline = await runValidated("log", ["-1", "--format=oneline"], repo);
+		assert.equal(oneline.ok, true, oneline.text);
+		assert.match(oneline.text.trim(), /^[0-9a-f]+ second subject$/);
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("integration: date and author values are honoured by real git", async () => {
+	const repo = makeHistoryRepo();
+	try {
+		const iso = await runValidated("log", ["-1", "--date=iso", "--format=%ad"], repo);
+		assert.equal(iso.ok, true, iso.text);
+		assert.match(iso.text.trim(), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} /);
+		const short = await runValidated("log", ["-1", "--date=short", "--format=%ad"], repo);
+		assert.match(short.text.trim(), /^\d{4}-\d{2}-\d{2}$/);
+		const separateDate = await runValidated("log", ["-1", "--date", "short", "--format=%ad"], repo);
+		assert.equal(separateDate.text.trim(), short.text.trim());
+		const match = await runValidated("log", ["-1", "--author=Second", "--format=%s"], repo);
+		assert.equal(match.ok, true, match.text);
+		assert.equal(match.text.trim(), "second subject");
+		const separateAuthor = await runValidated("log", ["-1", "--author", "Second Author", "--format=%s"], repo);
+		assert.equal(separateAuthor.ok, true, separateAuthor.text);
+		assert.equal(separateAuthor.text.trim(), "second subject");
+		const noMatch = await runValidated("log", ["-1", "--author=Nobody", "--format=%s"], repo);
+		assert.equal(noMatch.ok, true, noMatch.text);
+		assert.equal(noMatch.text.trim(), "");
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
 // ── Registered tool: details shape and error signalling ───────────────────────
 
 interface RegisteredTool {
 	name: string;
+	promptGuidelines?: string[];
 	execute: (
 		id: string,
 		params: Record<string, unknown>,
@@ -595,4 +873,54 @@ test("registered tool: the worktree gate failure is an error with a bare reason"
 	assert.equal(result.isError, true);
 	assert.equal(result.details.failureReason, "not inside a git worktree");
 	assert.equal(result.details.exitCode, null);
+});
+
+test("registered tool: unsupported format, date, and author values are rejected before spawn", async () => {
+	const spawns = harness(scriptOk("/repo"));
+	for (const params of [
+		{ subcommand: "log", args: ["--format=%G?"] },
+		{ subcommand: "log", args: ["--pretty=%h %GG %s"] },
+		{ subcommand: "show", args: ["--format=%GT"] },
+		{ subcommand: "log", args: ["--format=%x41"] },
+		{ subcommand: "log", args: ["--format=xsig"] },
+		{ subcommand: "log", args: ["--format=plain text only"] },
+		{ subcommand: "show", args: ["--format=%(trailers)"] },
+		{ subcommand: "log", args: ["--date=bogus"] },
+		{ subcommand: "show", args: ["--author=Alice"] },
+	]) {
+		const result = await callTool(params);
+		assert.equal(result.isError, true, JSON.stringify(params));
+		assert.equal(result.details.subcommand, params.subcommand, JSON.stringify(params));
+		assert.equal(result.details.exitCode, null, JSON.stringify(params));
+		assert.equal(typeof result.details.failureReason, "string", JSON.stringify(params));
+	}
+	assert.equal(spawns.length, 0, "rejected values must not spawn, not even the worktree gate");
+});
+
+test("registered tool: a diff --check finding keeps the standard non-zero-exit error shape", async () => {
+	const repo = makeRepo();
+	try {
+		writeFileSync(path.join(repo, "file.txt"), "hello   \n");
+		const result = await callTool({ subcommand: "diff", args: ["--check"] }, repo);
+		assert.equal(result.isError, true);
+		assert.equal(result.details.subcommand, "diff");
+		assert.equal(result.details.exitCode, 2);
+		assert.equal(result.details.failureReason, "git exited with code 2");
+		assert.ok(result.content[0]!.text.includes("trailing whitespace"), result.content[0]!.text);
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("registered tool: the guidelines name the full-SHA format", () => {
+	const guidelines = register().promptGuidelines ?? [];
+	assert.ok(guidelines.length > 0, "the tool publishes prompt guidelines");
+	assert.ok(
+		guidelines.some((line) => line.includes("--format=%H")),
+		`a guideline names --format=%H: ${guidelines.join(" | ")}`,
+	);
+	assert.ok(
+		guidelines.some((line) => line.includes('["-n", "1", "--format=%H"]')),
+		`a guideline shows the concrete invocation: ${guidelines.join(" | ")}`,
+	);
 });

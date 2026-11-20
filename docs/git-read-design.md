@@ -152,18 +152,67 @@ dangerous, and git's own rev-vs-path disambiguation then applies).
   naming the allowed set.
 - Flags, per subcommand; unknown flags are rejected, not ignored:
   - `diff`: `--stat`, `--shortstat`, `--numstat`, `--name-only`,
-    `--name-status`, `--cached`, `--staged`, `-U<n>` / `--unified=<n>`
-    (n: 0-64)
-  - `log`: `-p`, `--oneline`, `--stat`, `-n <n>` / `--max-count=<n>`
-    (n: 1-10000)
-  - `show`: `--stat`, `-U<n>` / `--unified=<n>`
+    `--name-status`, `--cached`, `--staged`, `--check`,
+    `-w` / `--ignore-all-space`, `-U<n>` / `--unified=<n>` (n: 0-64)
+  - `log`: `-p`, `--oneline`, `--stat`, `--no-merges`, `--first-parent`,
+    `--decorate`, `-n <n>` / `-n<n>` / `-<n>` / `--max-count=<n>`
+    (n: 1-10000), `--format=<f>` / `--pretty=<f>`, `--date=<d>` /
+    `--date <d>`, `--author=<p>` / `--author <p>`
+  - `show`: `--stat`, `--no-patch` / `-s`, `--oneline`, `-p` / `--patch`,
+    `-U<n>` / `--unified=<n>` (n: 0-64), `-n <n>` / `-n<n>` / `-<n>` /
+    `--max-count=<n>` (n: 1-10000), `--format=<f>` / `--pretty=<f>`,
+    `--date=<d>` / `--date <d>`
   - `status`: flags `--short`, `--branch` (read-only; they combine safely
     with the hardcoded `--porcelain`, so branch headers appear in porcelain
     output); revs and pathspecs are rejected, `--porcelain` itself is never
     user-suppliable and is rejected when passed.
-- Value-taking flags validate their value as a plain integer; both `-U 5` and
-  `-U5` forms accepted. An absent value and a present-but-invalid value
-  produce distinct error messages (the latter names the value it got).
+- An alias of an allowlisted flag is allowlisted with it: `--staged` with
+  `--cached`, `--ignore-all-space` with `-w`, `-s` with `--no-patch`,
+  `--patch` with `-p`, `--pretty` with `--format` (rejections and the emitted
+  argv keep the spelling the caller used).
+- Value-taking flags validate their value by class. An absent value and a
+  present-but-invalid value produce distinct error messages (the latter names
+  the value it got):
+  - Counts (`-n <n>`, `-n<n>`, `-<n>`, `--max-count=<n>`) and unified context
+    (`-U<n>`, `-U <n>`, `--unified=<n>`): a plain integer in range. The count
+    shorthand belongs to log and show only and reaches the argv verbatim, so
+    `-5` stays `-5`.
+  - `--format` / `--pretty`: an exact preset name, or a format string whose
+    every `%` sequence is on the specifier allowlist below. Attached form
+    only: git rejects a bare `--format` outright, and a bare `--pretty` means
+    `--pretty=medium`, which would silently reinterpret the next token as a
+    revision. A `%`-free value that is not an exact preset name is rejected
+    before spawn, because git resolves such a value as a format name and then
+    as a `pretty.<name>` config alias, which is prefix-matched and can itself
+    contain any specifier (verified: an alias holding `%G? %h` runs gpg
+    through `--format=<alias>`). Exact preset names win over same-named
+    aliases, and an alias key cannot contain `%`, so a `%`-containing value is
+    always parsed as a format string.
+  - `--date`: one value from the closed enum `default`, `relative`, `local`,
+    `iso8601`, `iso`, `iso8601-strict`, `iso-strict`, `rfc2822`, `rfc`,
+    `short`, `raw`, `unix`, `human`; the free-form `format:` and
+    `format-local:` forms are excluded.
+  - `--author` (log only): non-empty text without control characters,
+    otherwise free, because git matches it as a regular expression (POSIX by
+    default; the repository's `grep.patternType` switches it to PCRE, verified
+    with a lookbehind pattern). Spaces are allowed, there is no length cap
+    (matching revs and pathspecs), and the read's timeout is the only backstop
+    for a pathological pattern.
+- Preset names accepted for `--format=`/`--pretty=`: `oneline`, `short`,
+  `medium`, `full`, `fuller`, `email`, `raw`.
+- Format specifier allowlist (the `Set` in `extensions/git-read/validate.ts`
+  is the source of truth): `%%`, `%H`, `%h`, `%T`, `%t`, `%P`, `%p`, `%s`,
+  `%f`, `%b`, `%B`, `%n`, `%d`, `%D`, `%m`, `%N`, `%e`; the author family
+  `%an`, `%aN`, `%ae`, `%aE`, `%al`, `%aL`, `%ad`, `%aD`, `%ar`, `%at`,
+  `%ai`, `%aI`, `%as`; the committer family `%cn`, `%cN`, `%ce`, `%cE`,
+  `%cl`, `%cL`, `%cd`, `%cD`, `%cr`, `%ct`, `%ci`, `%cI`, `%cs`; the reflog
+  family `%gd`, `%gD`, `%gs`, `%gN`, `%gE`, `%gn`, `%ge`. Everything else is
+  rejected before spawn, naming the offending sequence: the `%G` signature
+  family (`%G?`, `%GG`, `%GS`, `%GK`, `%GF`, `%GP`, `%GT`), `%(...)` atoms,
+  `%x` escapes, `%C` colors, `%w(` wrapping, `%<(` / `%>(` padding, unknown
+  codes, and a trailing `%`. Git prints an unknown specifier literally
+  instead of failing, so this allowlist, not git, is what keeps a format
+  string away from the signature family.
 
 ## Trust model for config, env, and helpers
 
@@ -187,10 +236,25 @@ injected by the tool and never user-suppliable:
   `STRIPPED_ENV` in spawn.ts; injected values are assigned after stripping,
   so they always win over anything inherited. Everything else (PATH, HOME,
   locale) is inherited untouched.
-- Known residual path: signed-commit verification only runs with
-  `--show-signature`, which is not on the allowlist; if a future flag could
-  trigger external execution, it does not enter the allowlist without a
-  matching mitigation here.
+- External execution through a format string: the `%G` specifiers (`%G?`,
+  `%GG`, `%GS`, `%GK`, `%GF`, `%GP`, `%GT`) each run signature verification,
+  which executes the program named by `gpg.program` in the repository's own
+  config (verified for each specifier). They are excluded from the format
+  allowlist for the same reason `--show-signature` is, and the two ways a
+  format *value* could reach them outside the scan are both closed: git prints
+  an unknown specifier literally instead of failing (so the check is a
+  positive allowlist), and a `%`-free value is only accepted as an exact
+  preset name (so a `pretty.<name>` config alias cannot be expanded instead).
+- Known residual path, config-driven and pre-dating this allowlist: a
+  repository config of `log.showSignature=true` makes a plain `log`/`show`
+  verify signatures, and a `format.pretty` value containing `%G` does the same
+  when no format flag is passed (both verified). Neither is reachable through
+  the flag allowlist, `-c log.showSignature=false` and `-c format.pretty=medium`
+  neutralize them, and the injected `-c` set is left as it is here because
+  overriding `format.pretty` would change the default output of a repository
+  that sets it. `--show-signature` itself is not on the allowlist, and if a
+  future flag could trigger external execution it does not enter the allowlist
+  without a matching mitigation here.
 
 ## Resource limits and failure contract
 
@@ -215,7 +279,9 @@ injected by the tool and never user-suppliable:
   - timeout: `git_read: git timed out after 15000 ms`, plus any collected
     output
   - nonzero exit: `git_read: git exited with code <N>`, followed by stderr
-    then stdout
+    then stdout. Exit 0 stays the only success: `git diff --check` exits 2
+    when it finds whitespace errors, so such a run reports `git exited with
+    code 2` with the findings as the body, and no flag reclassifies that.
   - truncation (appended to the text, never an error):
     `[git_read: output truncated, showing <retained> of <total> bytes]`
 - Every failure also sets `isError: true` and reports structured fields in
@@ -241,12 +307,20 @@ exclude it leave the agents without it.
 ## Tests
 
 - `tests/git-read-validate.test.mts`: argv construction for all four
-  subcommands, the design's valid forms, value-flag bounds, all rejections,
-  separator/union handling, and error-message contents.
+  subcommands, the design's valid forms, every value-flag class and bound, all
+  rejections (including each signature specifier, alone and embedded, the
+  `%%G?`/`%%%G?`/`%n%G?` boundaries, and a `%`-free value that is not a preset),
+  the format specifier allowlist, separator/union handling, and error-message
+  contents.
 - `tests/git-read-spawn.test.mts`: worktree gate (including outside-worktree
   and symlink cases), environment assertions (stripped and injected vars,
   index unchanged after `status`), caps and truncation, timeout escalation,
-  and the exit-code contract.
+  the exit-code contract, a real-git run of every newly allowlisted flag form
+  (counts and shorthand, log/show booleans, presets, specifiers, date values,
+  author patterns), `diff --check` exit 2 with and without `-w`, a repository
+  config that aliases a `pretty.<name>` to `%G?` to prove the alias cannot be
+  invoked or hijack a `%`-containing value, and proof that a rejected format
+  value spawns nothing.
 - Run both via `npm run test:git-read`.
 
 ## Acceptance criteria (current)

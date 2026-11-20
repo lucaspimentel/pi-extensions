@@ -55,6 +55,51 @@ Expand the allowlist in `extensions/gh-read/` and update [`docs/gh-read-design.m
 - [x] Done (2026-11-17, `lpimentel/gh-read-account-selector`): the `account` selector on every API operation, shipped together with the account-shape bug it exposed. `account` had been validated with the organization rule (`^[A-Za-z0-9-]+$`, 39 chars), so an EMU login (`lucas-pimentel_ddog`) was rejected outright and `pr batch`'s selector could not name the account that motivated it; the shape is now its own rule (underscores allowed inside, separators rejected at either end) with its own 64-character cap. Every API operation accepts `account`, resolved once before the operation runs (`gh auth status --json hosts` matched case-insensitively, then `gh auth token --user <gh's canonical login>`), attached to every child through the new `ApiRequester.useEnv`, scrubbed from the rendered text and every string in `details`, and reported as `details.account`; native subcommands still reject it. A continuation created by an account-scoped call binds that account (compared case-insensitively; account-less tokens stay byte-identical to the pre-account format), and a resolution failure surfaces gh's own bounded stderr diagnostic. Trigger evidence: the 2026-10-30 corpus (4 host-shell lines needing `GH_TOKEN=$(gh auth token --user lucas-pimentel_ddog)`) plus a ddoghq/images read blocked by the shape bug. Verified: `npx tsc --noEmit`, the gh-read suite, and a live pair on ddoghq/dd-source PR 187499 where the same `pr threads` read fails under the personal account and succeeds under `account: lucas-pimentel_ddog` with the token absent from the result. Docs updated: `docs/gh-read-design.md` "GitHub account caveat" (now records the widening and its prompt-injection risk), "Account selection", the API-runner paragraph, the non-goals bullet, and the README bullet. Environment note, unrelated to this change: `guard-dialogs` hangs and `guard-harness`/`guard-runtime` fail at baseline here (reproduced in the main clone), so a full `npm run test:ci` cannot complete on this host.
 - [ ] Deferred: the before/after session rescan for `pr batch`. Measure whether the `gh pr view` fan-out loop cluster in `host_bash` shrinks after the prompt guideline lands, using the same scan that motivated the operation (grouped `host_bash` commands whose body calls `gh pr view` or `gh api`, counted per session start date before and after), and record whether each session had `gh_read` registered.
 
+## git-read allowlist: evaluated, not added (2026-11-19)
+
+The formatted-read expansion shipped with the allowlist in
+[`docs/git-read-design.md`](docs/git-read-design.md) ("Allowlists"). These
+options were measured from `git_read` rejection messages in past sessions and
+deliberately left out; each entry records the evidence and what would justify
+revisiting it.
+
+- [ ] `log -S<pickaxe>`: 4 rejection events. Deferred as low demand: it is a
+  second free-text value class (the search string) with the same semantics as
+  `--author` fixed today, plus output that can grow with the match count.
+- [ ] `log --all`: 4 events. Deferred; walking every ref can fill the output cap
+  from one flag, so it needs its own bounded-output decision first.
+- [ ] `log --cached`: 4 events. Left rejected on purpose: the callers confused
+  it with `diff --cached`, and `git log` has no such option, so there is
+  nothing to allowlist.
+- [ ] `diff --find-renames` / `-M`: 4 events. Deferred; rename detection
+  changes both the output shape and the cost, and none of the observed callers
+  needed it.
+- [ ] `%(...)` format atoms (`%(trailers)`, `%(decorate)`, `%(describe)`): 0
+  events across the 44 recorded `--format` rejections. Excluded from the
+  closed commit-field grammar; revisit only with a concrete caller, keeping
+  the `%G` signature family out.
+- [ ] `format:` / `tformat:` format prefixes: 0 events. Excluded as redundant
+  with the unprefixed form.
+- [ ] `--date=format:<strftime>` / `format-local:<strftime>`: 0 events.
+  Excluded to keep `--date` a closed enum; harmless if demand appears, since
+  strftime runs in process.
+- [ ] Treating `diff --check` exit 2 as success: not done by decision. The
+  findings are the body and the run keeps the standard non-zero-exit shape;
+  revisit only if that shape proves misleading in practice.
+- [ ] Config-driven signature display (found 2026-11-19 while allowing
+  `--format`): a repository config of `log.showSignature=true` makes a plain
+  `log`/`show` run signature verification, and a `format.pretty` value
+  containing `%G` does the same when no format flag is passed (both verified
+  in a temp repo, both pre-date the allowlist work). `-c log.showSignature=false`
+  and `-c format.pretty=medium` neutralize them, but the injected `-c` set was
+  left alone because overriding `format.pretty` changes the default output of a
+  repository that sets it. The `pretty.<name>` alias half of the same class is
+  closed: a `%`-free `--format` value must be an exact preset name.
+- [ ] Low single-digit leftovers, unmeasured beyond the count: `show
+  --name-only` (2), `diff --raw` (1), `diff --cc` (1), `diff --stat=<width>`
+  (1), `diff -n` (1), `show -e` (1). Not worth allowlist surface on this
+  evidence.
+
 ## GitHub review write extension
 
 - [ ] Port `../gh-pr-threads/` API operations to a native TypeScript pi extension exposing `gh_review_write` with `reply`, `resolve`, and `submit_review` actions. Keep `gh_read` strictly read-only; retain the standalone CLI for manual use and other agents.

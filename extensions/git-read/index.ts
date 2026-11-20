@@ -88,6 +88,7 @@ export default function gitReadExtension(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Prefer git_read over asking the user to paste diffs or logs; it runs sandboxed read-only git in the session's cwd.",
 			"Always pass the subcommand in its dedicated `subcommand` property (diff, log, show, or status); pass revs, flags, and pathspecs in args, e.g. subcommand 'diff' with args ['HEAD~1', '--', 'src/'].",
+			"For a full commit SHA, use subcommand 'log' with args [\"-n\", \"1\", \"--format=%H\"] instead of parsing the first line of the default log output; --format values are allowlisted, so signature specifiers like %G? are rejected.",
 		],
 		parameters: gitReadParams,
 		renderCall(args, theme, context) {

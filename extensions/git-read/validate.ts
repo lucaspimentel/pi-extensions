@@ -34,26 +34,132 @@ export const DIFF_LOG_SHOW_OPTIONS = ["--no-ext-diff", "--no-textconv"] as const
 /** Upper bound for `-U<n>` / `--unified=<n>` (range 0..UNIFIED_MAX). */
 export const UNIFIED_MAX = 64;
 
-/** Upper bound for `-n <n>` / `--max-count=<n>` (range 1..MAX_COUNT_MAX). */
+/**
+ * Upper bound for every count form: `-n <n>`, `-n<n>`, `-<n>`, and
+ * `--max-count=<n>` (range 1..MAX_COUNT_MAX).
+ */
 export const MAX_COUNT_MAX = 10000;
 
 /** Hardcoded flag appended to status; --porcelain is never user-suppliable. */
 const STATUS_PORCELAIN = "--porcelain";
 
 const BOOLEAN_FLAGS: Record<GitSubcommand, ReadonlySet<string>> = {
-	diff: new Set(["--stat", "--shortstat", "--numstat", "--name-only", "--name-status", "--cached", "--staged"]),
-	log: new Set(["-p", "--oneline", "--stat"]),
-	show: new Set(["--stat"]),
+	diff: new Set([
+		"--stat",
+		"--shortstat",
+		"--numstat",
+		"--name-only",
+		"--name-status",
+		"--cached",
+		"--staged",
+		"--check",
+		"-w",
+		"--ignore-all-space",
+	]),
+	log: new Set(["-p", "--oneline", "--stat", "--no-merges", "--first-parent", "--decorate"]),
+	show: new Set(["--stat", "--no-patch", "-s", "--oneline", "-p", "--patch"]),
 	status: new Set(["--short", "--branch"]),
 };
 
 /** Human-readable value-flag forms, listed in unknown-flag rejections. */
 const VALUE_FLAG_FORMS: Record<GitSubcommand, string> = {
 	diff: "-U<n>, --unified=<n>",
-	log: "-n <n>, --max-count=<n>",
-	show: "-U<n>, --unified=<n>",
+	log:
+		"-n <n>, -n<n>, -<n>, --max-count=<n>, --format=<format>, --pretty=<format>, " +
+		"--date=<date>, --author=<pattern>",
+	show:
+		"-U<n>, --unified=<n>, -n <n>, -n<n>, -<n>, --max-count=<n>, " +
+		"--format=<format>, --pretty=<format>, --date=<date>",
 	status: "none",
 };
+
+/**
+ * Preset names accepted for `--format=`/`--pretty=`; git resolves these
+ * before it parses a custom format string.
+ */
+const PRETTY_PRESETS = new Set(["oneline", "short", "medium", "full", "fuller", "email", "raw"]);
+
+/**
+ * The only `%` sequences a custom format string may contain, written as the
+ * exact text of the sequence: two characters for the commit-field codes
+ * (`%H`, `%%`), three for the author, committer, and reflog families (`%an`,
+ * `%gd`). This set is the source of truth for the format allowlist: git
+ * prints an unknown specifier literally instead of failing, so the tool has
+ * to reject the unsupported ones itself. `%G?`/`%GG`/`%GS`/`%GK`/`%GF`/`%GP`/
+ * `%GT` are absent because each of them runs signature verification, which
+ * executes the repository-configurable `gpg.program`, the same path that
+ * keeps `--show-signature` off the allowlist; `%x`, `%C`, `%w(`, `%<(` and
+ * `%>(` are absent because they emit raw bytes, colors, or padding.
+ */
+const FORMAT_SPECIFIERS = new Set([
+	"%%",
+	"%H",
+	"%h",
+	"%T",
+	"%t",
+	"%P",
+	"%p",
+	"%s",
+	"%f",
+	"%b",
+	"%B",
+	"%n",
+	"%d",
+	"%D",
+	"%m",
+	"%N",
+	"%e",
+	"%an",
+	"%aN",
+	"%ae",
+	"%aE",
+	"%al",
+	"%aL",
+	"%ad",
+	"%aD",
+	"%ar",
+	"%at",
+	"%ai",
+	"%aI",
+	"%as",
+	"%cn",
+	"%cN",
+	"%ce",
+	"%cE",
+	"%cl",
+	"%cL",
+	"%cd",
+	"%cD",
+	"%cr",
+	"%ct",
+	"%ci",
+	"%cI",
+	"%cs",
+	"%gd",
+	"%gD",
+	"%gs",
+	"%gN",
+	"%gE",
+	"%gn",
+	"%ge",
+]);
+
+/** `--date=` values git accepts; the free-form `format:` forms are excluded. */
+const DATE_FORMATS = new Set([
+	"default",
+	"relative",
+	"local",
+	"iso8601",
+	"iso",
+	"iso8601-strict",
+	"iso-strict",
+	"rfc2822",
+	"rfc",
+	"short",
+	"raw",
+	"unix",
+	"human",
+]);
 
 /**
  * Untyped raw tool input, before schema-level narrowing. `subcommand` is
@@ -159,6 +265,101 @@ function checkIntFlag(flag: string, raw: string, min: number, max: number): stri
 	if (!/^\d+$/.test(raw) || Number(raw) < min || Number(raw) > max) {
 		return `flag ${flag} requires an integer between ${min} and ${max}, got '${raw}'`;
 	}
+	return null;
+}
+
+/**
+ * C0 control characters and DEL. Unlike CONTROL_RE this does not reject
+ * whitespace: spaces are legitimate inside format strings and author patterns.
+ */
+const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F]/;
+
+/**
+ * Returns the first `%` sequence in `value` that is not allowlisted, or null
+ * when every one of them is. Scanning consumes each accepted code, longest
+ * match first, so an escaped percent (`%%G?`) ends at the literal `G?`
+ * instead of re-examining it as a specifier.
+ */
+function unsupportedFormatSpecifier(value: string): string | null {
+	let index = 0;
+	while (index < value.length) {
+		if (value[index] !== "%") {
+			index += 1;
+			continue;
+		}
+		// Longest match first: the author/committer/reflog codes are three
+		// characters (`%an`, `%gd`), the rest are two (`%H`, `%%`).
+		const three = value.slice(index, index + 3);
+		if (three.length === 3 && FORMAT_SPECIFIERS.has(three)) {
+			index += 3;
+			continue;
+		}
+		const two = value.slice(index, index + 2);
+		if (FORMAT_SPECIFIERS.has(two)) {
+			index += 2;
+			continue;
+		}
+		return nameFormatSpecifier(value, index);
+	}
+	return null;
+}
+
+/**
+ * Names a rejected sequence for an error message: the three-character
+ * signature forms in full (`%G?`), otherwise the two-character code (a
+ * trailing `%` stays a bare `%`).
+ */
+function nameFormatSpecifier(value: string, index: number): string {
+	const signature = value.slice(index, index + 3);
+	if (/^%G[?GSKFPT]$/.test(signature)) return signature;
+	return value.slice(index, index + 2);
+}
+
+/**
+ * Validates a `--format=`/`--pretty=` value: an exact preset name, or a
+ * format string whose every `%` is allowlisted. A `%`-free value that is not
+ * a preset is rejected here: git resolves such a value as a format name and
+ * then as a `pretty.<name>` config alias, which is prefix-matched and may
+ * itself contain any specifier, including the `%G` family.
+ */
+function checkFormatValue(flag: string, raw: string): string | null {
+	if (raw.length === 0) return `flag ${flag} requires a value`;
+	if (CONTROL_CHARS_RE.test(raw)) return `flag ${flag} value contains control characters`;
+	if (raw.startsWith("format:") || raw.startsWith("tformat:")) {
+		const prefix = raw.startsWith("tformat:") ? "tformat:" : "format:";
+		return `flag ${flag} does not accept a '${prefix}' prefix; pass the format string directly, e.g. ${flag}=%H`;
+	}
+	if (PRETTY_PRESETS.has(raw)) return null;
+	if (!raw.includes("%")) {
+		return (
+			`flag ${flag} requires an exact preset name (${[...PRETTY_PRESETS].join(", ")}) or a format ` +
+			`string containing %; '${raw}' is neither`
+		);
+	}
+	const unsupported = unsupportedFormatSpecifier(raw);
+	if (unsupported === null) return null;
+	const reason = /^%G[?GSKFPT]$/.test(unsupported)
+		? "signature specifiers run an external program"
+		: "it is not on the format allowlist";
+	return (
+		`unknown format specifier '${unsupported}' in ${flag}: ${reason}; ` +
+		`use commit fields like %H %h %s %an %ad %aI`
+	);
+}
+
+/** Validates a `--date=` value against the closed enum. */
+function checkDateValue(flag: string, raw: string): string | null {
+	if (raw.length === 0) return `flag ${flag} requires a value`;
+	if (!DATE_FORMATS.has(raw)) {
+		return `flag ${flag} requires one of ${[...DATE_FORMATS].join(", ")}, got '${raw}'`;
+	}
+	return null;
+}
+
+/** Validates a `--author=` value: free text, but non-empty and control-free. */
+function checkAuthorValue(flag: string, raw: string): string | null {
+	if (raw.length === 0) return `flag ${flag} requires a value`;
+	if (CONTROL_CHARS_RE.test(raw)) return `flag ${flag} value contains control characters`;
 	return null;
 }
 
@@ -278,8 +479,11 @@ interface FlagHandling {
 }
 
 /**
- * Handles one flag token at `index`. Exact `-U`/`-n` matches are checked
- * before attached `-U\d+` prefix matching so the exact forms do not mis-parse.
+ * Handles one flag token at `index`. Exact separate-form matches (`-U`, `-n`,
+ * `--date`, `--author`) are checked before attached-form matching so the exact
+ * forms do not mis-parse, and each subcommand group is applied independently: diff
+ * and show share the unified-context forms, log and show share the count,
+ * format, and date forms, and author is log-only.
  */
 function handleFlag(
 	subcommand: GitSubcommand,
@@ -293,16 +497,7 @@ function handleFlag(
 		return { tokens: [token], consumed: 0, error: null };
 	}
 
-	if (subcommand === "log") {
-		if (token === "-n") {
-			return consumeIntValue("-n", args, index, 1, MAX_COUNT_MAX);
-		}
-		if (token.startsWith("--max-count=")) {
-			const raw = token.slice("--max-count=".length);
-			return { tokens: [token], consumed: 0, error: checkIntFlag("--max-count", raw, 1, MAX_COUNT_MAX) };
-		}
-	} else {
-		// diff and show share the -U/--unified value flags.
+	if (subcommand === "diff" || subcommand === "show") {
 		if (token === "-U") {
 			return consumeIntValue("-U", args, index, 0, UNIFIED_MAX);
 		}
@@ -316,11 +511,78 @@ function handleFlag(
 		}
 	}
 
+	if (subcommand === "log" || subcommand === "show") {
+		if (token === "-n") {
+			return consumeIntValue("-n", args, index, 1, MAX_COUNT_MAX);
+		}
+		const attachedCount = /^-n(\d+)$/.exec(token);
+		if (attachedCount !== null) {
+			return { tokens: [token], consumed: 0, error: checkIntFlag("-n", attachedCount[1] ?? "", 1, MAX_COUNT_MAX) };
+		}
+		const shorthand = /^-(\d+)$/.exec(token);
+		if (shorthand !== null) {
+			return { tokens: [token], consumed: 0, error: checkIntFlag("-<n>", shorthand[1] ?? "", 1, MAX_COUNT_MAX) };
+		}
+		if (token.startsWith("--max-count=")) {
+			const raw = token.slice("--max-count=".length);
+			return { tokens: [token], consumed: 0, error: checkIntFlag("--max-count", raw, 1, MAX_COUNT_MAX) };
+		}
+		if (token === "--format" || token === "--pretty") {
+			// git rejects a bare --format outright and treats a bare --pretty as
+			// --pretty=medium, which would reinterpret the next token as a rev.
+			return { tokens: [], consumed: 0, error: `flag ${token} requires the attached form, e.g. ${token}=%H` };
+		}
+		if (token.startsWith("--format=")) {
+			const raw = token.slice("--format=".length);
+			return { tokens: [token], consumed: 0, error: checkFormatValue("--format", raw) };
+		}
+		if (token.startsWith("--pretty=")) {
+			const raw = token.slice("--pretty=".length);
+			return { tokens: [token], consumed: 0, error: checkFormatValue("--pretty", raw) };
+		}
+		if (token === "--date") {
+			return consumeValue("--date", args, index, checkDateValue);
+		}
+		if (token.startsWith("--date=")) {
+			const raw = token.slice("--date=".length);
+			return { tokens: [token], consumed: 0, error: checkDateValue("--date", raw) };
+		}
+	}
+
+	if (subcommand === "log") {
+		if (token === "--author") {
+			return consumeValue("--author", args, index, checkAuthorValue);
+		}
+		if (token.startsWith("--author=")) {
+			const raw = token.slice("--author=".length);
+			return { tokens: [token], consumed: 0, error: checkAuthorValue("--author", raw) };
+		}
+	}
+
 	return {
 		tokens: [],
 		consumed: 0,
 		error: `unknown flag '${token}' for git ${subcommand}; allowed flags: ${allowedFlagsText(subcommand)}`,
 	};
+}
+
+/**
+ * Consumes the token after a separate-form value flag (`--date iso`,
+ * `--author Jane`) and validates it with `check`. The next token is consumed
+ * even when it is not a valid value (e.g. `--date --stat`), so the error names
+ * the rejected value instead of misparsing it as the next flag.
+ */
+function consumeValue(
+	flag: string,
+	args: readonly string[],
+	index: number,
+	check: (flag: string, raw: string) => string | null,
+): FlagHandling {
+	const value = args[index + 1];
+	if (value === undefined) {
+		return { tokens: [], consumed: 0, error: `flag ${flag} requires a value` };
+	}
+	return { tokens: [flag, value], consumed: 1, error: check(flag, value) };
 }
 
 /**
