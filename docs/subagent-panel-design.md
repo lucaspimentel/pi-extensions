@@ -231,17 +231,24 @@ per-agent `models` overrides:
   "model": ...}`. A silent upgrade would have to guess which panelist each
   model belonged to.
 - `judge.agent` must resolve at user scope only (bundled, then user; a project
-  agent can never satisfy it) and must be `role: internal`. Discovery warns and
-  keeps the preset, naming the missing agent or the non-internal one; the call
-  itself refuses it. This is the same shape as the panelist-agent check, applied
-  against the scope the judge actually resolves in.
+  agent can never satisfy it) and must be `role: internal`. The check covers the
+  effective judge agent whether the preset names one or not: an omitted `judge`
+  still merges with the bundled default, so a `~/.pi/agent/agents/judge.md`
+  downgraded to `role: delegate` is reported instead of silently failing every
+  call. Only `judge: null` resolves no judge and is checked for nothing.
+  Discovery warns and keeps the preset, naming the missing agent or the
+  non-internal one; the call itself refuses it. This is the same shape as the
+  panelist-agent check, applied against the scope the judge actually resolves in.
 - Parsing and validation live next to `applyModelOverrides()`
   (`extensions/subagent/agents.ts`), as a pure `parsePanels` (no filesystem,
   no console) that returns the usable presets plus an `ignoredPanels` list of
   `{name, reason}`. Malformed panels warn and are ignored, matching how
   malformed per-agent overrides behave today. A panelist entry naming an unknown
   agent, and a `judge.agent` that is unknown or not internal, warn at load and
-  fail at call time listing the valid agents. The panel catalog is rebuilt per
+  fail at call time listing the valid agents. A `models.<agent>` override warns
+  only when no directory defines that agent: an agent the requested scope leaves
+  out is still resolvable by the judge at user scope, so dropping its override is
+  not "ignored". The panel catalog is rebuilt per
   request on the same path as the agent catalog (`prepareLoadout`), so a
   malformed `panels` entry is rediscovered on every request rather than once.
   Every diagnostic goes through one sink (`setDiagnosticSink`,
@@ -399,17 +406,23 @@ Judge input, one block per panelist in effective configured order:
 
 ```
 ### PANELIST <model id>
+agent: <the panelist agent that ran this seat>
 task: <the task text>
 tools: read src/Foo.cs, gh_read pr diff, ffgrep BuildSampleRate
 status: completed
 <final answer, capped at 50 KiB>
 ```
 
+The `agent` line keeps two seats distinguishable when they share a model: entries
+dedupe by `(agent, model)`, so `reviewer` on one model and `researcher` on the
+same model are two legitimate seats whose headers would otherwise be identical.
+
 A failed panelist keeps its slot, its error, and any partial text under an
 explicit incomplete label:
 
 ```
 ### PANELIST <model id>
+agent: <the panelist agent that ran this seat>
 task: <the task text>
 tools: (none)
 status: failed
@@ -418,7 +431,7 @@ error: <short failure reason>
 <partial text, capped at 50 KiB; may be empty>
 ```
 
-The `PANELIST` header, the repeated task, the `status` line, and the diagnostic
+The `PANELIST` header, the agent line, the repeated task, the `status` line, and the diagnostic
 labels are outside the 50 KiB answer budget, and the input has no aggregate
 ceiling. `tools` is a bounded summary of what that panelist actually called:
 known tools render their identifying arguments (the file path for a read, search
@@ -463,10 +476,12 @@ merge changes. The body of `agents/judge-review.md` is the contract:
   A label is the last path segment of that panelist's model ID from its
   `### PANELIST <model>` header, so `anthropic/claude-opus-5-5` is
   `claude-opus-5-5`; the bracket names every panelist that reported the issue, and
-  labels are never invented. Two blocks that would produce the same label (one
-  model under two agents, or two ids sharing a final segment) are each qualified
-  with their full model ID, so the bracket never names one label for two
-  panelists. The panelist headings map onto the severities
+  labels are never invented. Two blocks that would produce the same label are
+  distinguished: the same model under two agents gets its `agent:` line appended
+  (`gpt-6.1-sol (reviewer)`, `gpt-6.1-sol (researcher)`), and two model ids
+  sharing a final segment get their full id instead, so the bracket never names
+  one label for two panelists. An empty conflicts section is never emitted, not
+  even with a `None` placeholder. The panelist headings map onto the severities
   (`Critical` to CRITICAL, `Warnings` to HIGH or MEDIUM by stated impact,
   `Suggestions` to LOW), and a heading that contradicts the stated impact is
   regraded.
@@ -824,6 +839,15 @@ Called by the implementer, open to revision:
 - (2026-11-18) A panel's `diagnostics` travel in the `subagent_list` payload, and
   a per-entry error names the position the caller wrote even after a duplicate
   collapse (the original index travels with the deduplicated entry).
+- (2026-11-18, second review round) The judge input carries each seat's `agent`
+  line, because dedupe by `(agent, model)` makes a shared model a supported
+  configuration and without it the merge could not attribute a finding to one of
+  two identical headers. The `models.<agent>` override lookup is own-property
+  only, because an agent named `constructor` would otherwise resolve to an
+  inherited `Object.prototype` member and crash the judge resolution, and an
+  override is reported as ignored only when no directory defines that agent. The
+  effective judge agent is checked even when a preset omits `judge`, and the
+  review contract never emits an empty conflicts section.
 
 ## Deferred
 

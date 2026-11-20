@@ -50,6 +50,7 @@ import {
 	type AgentSource,
 	type JudgeConfig,
 	type PanelistConfig,
+	configuredModel,
 	discoverAgents,
 	formatAgentCatalog,
 	formatAgentList,
@@ -1588,9 +1589,11 @@ export default function (pi: ExtensionAPI) {
 					}
 					// The override map comes from the resolution's own (user-scope)
 					// discovery, not the request's: a judge agent that exists only in the
-					// user dir has no entry in a project-scoped discovery.
+					// user dir has no entry in a project-scoped discovery. The lookup is
+					// own-property only: an agent named after an Object.prototype member
+					// would otherwise resolve to the inherited function.
 					const explicitModel = (typeof entry.model === "string" ? entry.model.trim() : undefined) ?? presetJudge?.model;
-					const model = explicitModel ?? judgeResolved.discovery.configuredModels[judgeAgent] ?? dispatchDefaults.model;
+					const model = explicitModel ?? configuredModel(judgeResolved.discovery, judgeAgent) ?? dispatchDefaults.model;
 					if (model !== undefined) {
 						const modelProblem = modelError(model, "judge.model");
 						if (modelProblem) return invalid(modelProblem);
@@ -1742,6 +1745,7 @@ export default function (pi: ExtensionAPI) {
 				const survivors = panelists.filter((result) => !isFailedResult(result));
 				const reviews: PanelReviewInput[] = panelists.map((result) => ({
 					model: result.model,
+					agent: result.agent,
 					task: params.task!,
 					toolCallSummary: result.toolCallSummary,
 					status: isFailedResult(result) ? "failed" : "completed",

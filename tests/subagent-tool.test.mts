@@ -996,6 +996,7 @@ test("the judge prompt is the verbatim panelist blocks, inspected during spawn b
 				prompt,
 				[
 					"### PANELIST p/a",
+					"agent: panelist",
 					"task: Shared task",
 					"tools: (none)",
 					"status: completed",
@@ -1003,6 +1004,7 @@ test("the judge prompt is the verbatim panelist blocks, inspected during spawn b
 					"answer A",
 					"",
 					"### PANELIST p/org/b",
+					"agent: panelist",
 					"task: Shared task",
 					"tools: (none)",
 					"status: completed",

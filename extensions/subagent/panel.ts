@@ -29,6 +29,8 @@ export const TOOL_SUMMARY_ARGUMENT_TAIL_CAP = 50;
 /** One panelist's contribution to the judge input. */
 export interface PanelReviewInput {
 	model: string;
+	/** The agent that ran this seat, so two seats sharing one model stay distinguishable. */
+	agent: string;
 	task: string;
 	toolCallSummary: string;
 	status: "completed" | "failed";
@@ -185,13 +187,15 @@ export function truncateTaskOutput(output: string): string {
 }
 
 /**
- * One judge-input block: the settled `PANELIST` header, the repeated task, the
- * tool-call summary, the status, and the capped answer. Failed blocks keep the
- * error and label the (possibly empty) partial text as incomplete.
+ * One judge-input block: the settled `PANELIST` header, the panelist agent, the
+ * repeated task, the tool-call summary, the status, and the capped answer. Failed
+ * blocks keep the error and label the (possibly empty) partial text as
+ * incomplete.
  */
 export function buildPanelistBlock(review: PanelReviewInput): string {
 	const lines = [
 		`### PANELIST ${review.model}`,
+		`agent: ${review.agent}`,
 		`task: ${review.task}`,
 		`tools: ${review.toolCallSummary}`,
 		`status: ${review.status}`,

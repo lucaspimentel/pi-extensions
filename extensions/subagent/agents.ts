@@ -213,6 +213,10 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	const bundledAgents = loadAgentsFromDir(bundledDir, "bundled");
 	const userAgents = loadAgentsFromDir(userDir, "user");
 	const projectAgents = scope !== "user" && projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
+	// A `models` override names an agent that this session can resolve from any of
+	// those directories, so one for an agent outside the requested scope is not
+	// "ignored": the judge resolves at user scope regardless of the request's.
+	const knownAgentNames = new Set([...bundledAgents, ...userAgents, ...projectAgents].map((agent) => agent.name));
 	for (const agent of bundledAgents) merge(agent);
 	if (scope !== "project") {
 		for (const agent of userAgents) merge(agent);
@@ -223,7 +227,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 
 	const configPath = path.join(getAgentDir(), "subagent.json");
 	const raw = readConfiguration(configPath);
-	const configuredModels = applyModelOverrides(agentMap, raw, configPath);
+	const configuredModels = applyModelOverrides(agentMap, raw, configPath, knownAgentNames);
 	const result = parsePanels((raw as { panels?: unknown } | null)?.panels);
 	// The judge resolves at user scope only, so its check has to see bundled and
 	// user agents even when the request's scope excluded the user dir: reading
@@ -244,15 +248,18 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 				);
 			}
 		}
-		if (panel.judge) {
-			const judgeAgent = judgeAgents.get(panel.judge.agent);
+		if (panel.judge !== null) {
+			// An omitted `judge` still merges with the bundled default, so the
+			// effective agent is checked either way; only `judge: null` disables it.
+			const judgeName = panel.judge?.agent ?? "judge";
+			const judgeAgent = judgeAgents.get(judgeName);
 			if (!judgeAgent) {
 				panel.diagnostics.push(
-					`[subagent] panels.${JSON.stringify(panel.name)}: no agent named ${JSON.stringify(panel.judge.agent)} for "judge.agent"; preset retained`,
+					`[subagent] panels.${JSON.stringify(panel.name)}: no agent named ${JSON.stringify(judgeName)} for "judge.agent"; preset retained`,
 				);
 			} else if (judgeAgent.role !== "internal") {
 				panel.diagnostics.push(
-					`[subagent] panels.${JSON.stringify(panel.name)}: "judge.agent" agent ${JSON.stringify(panel.judge.agent)} is not internal; preset retained`,
+					`[subagent] panels.${JSON.stringify(panel.name)}: "judge.agent" agent ${JSON.stringify(judgeName)} is not internal; preset retained`,
 				);
 			}
 		}
@@ -290,9 +297,16 @@ function readConfiguration(configPath: string): unknown {
  * Applies the per-agent overrides in place and returns the accepted, trimmed
  * map. The return value is what the judge precedence chain reads, because it
  * is the only place that distinguishes a configured override from a
- * frontmatter pin.
+ * frontmatter pin. `knownAgentNames` is every agent this session can resolve
+ * from any directory, so an override for an agent outside the requested scope is
+ * neither warned about nor dropped as unknown.
  */
-function applyModelOverrides(agentMap: Map<string, AgentConfig>, raw: unknown, configPath: string): Record<string, string> {
+function applyModelOverrides(
+	agentMap: Map<string, AgentConfig>,
+	raw: unknown,
+	configPath: string,
+	knownAgentNames: ReadonlySet<string> = new Set(agentMap.keys()),
+): Record<string, string> {
 	const accepted: Record<string, string> = {};
 	const models = (raw as { models?: unknown } | null)?.models;
 	if (typeof models !== "object" || models === null) {
@@ -305,7 +319,7 @@ function applyModelOverrides(agentMap: Map<string, AgentConfig>, raw: unknown, c
 	for (const [name, model] of Object.entries(models as Record<string, unknown>)) {
 		const agent = agentMap.get(name);
 		if (!agent) {
-			reportDiagnostic(`[subagent] ${configPath}: no agent named "${name}"; model override ignored`);
+			if (!knownAgentNames.has(name)) reportDiagnostic(`[subagent] ${configPath}: no agent named "${name}"; model override ignored`);
 			continue;
 		}
 		if (typeof model !== "string" || !model.trim()) {
@@ -368,6 +382,17 @@ export function setDiagnosticSink(sink: ((reason: string) => void) | null): void
 export function reportDiagnostic(reason: string): void {
 	if (diagnosticSink) diagnosticSink(reason);
 	else console.warn(reason);
+}
+
+/**
+ * The configured `models.<agent>` override for one agent, or undefined.
+ *
+ * Own-property only: agent names come from user files, and a name matching an
+ * `Object.prototype` member (`constructor`, `toString`) would otherwise resolve
+ * to the inherited function instead of no override.
+ */
+export function configuredModel(discovery: AgentDiscoveryResult, agentName: string): string | undefined {
+	return Object.hasOwn(discovery.configuredModels, agentName) ? discovery.configuredModels[agentName] : undefined;
 }
 
 /** Parse the panels value without I/O, availability checks, or input mutation. */

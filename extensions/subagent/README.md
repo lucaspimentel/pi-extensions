@@ -260,10 +260,10 @@ What a call does:
 - The judge runs `runSingleAgent` with the resolved judge agent, the fixed
   code-reading tool list (read, ffgrep, fffind, ls, git_read, gh_read; never
   `subagent`), the resolved judge model and thinking level, and the panelist
-  blocks as its task: the exact `### PANELIST <model>` header, the repeated task,
-  a bounded tool-use summary, the status, and the answer (each answer capped at
-  50 KiB). A failed panelist keeps its block with its error and its partial text
-  under an explicit incomplete label.
+  blocks as its task: the exact `### PANELIST <model>` header, the panelist agent
+  that ran the seat, the repeated task, a bounded tool-use summary, the status,
+  and the answer (each answer capped at 50 KiB). A failed panelist keeps its
+  block with its error and its partial text under an explicit incomplete label.
 - A failed judge attempt (nonzero or error exit, captured spawn error, guard
   refusal, or a whitespace-only exit-zero answer) is retried exactly once with
   identical input, model, thinking level, and tools, each attempt taking its own

@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import {
+	configuredModel,
 	discoverAgents,
 	formatPanelCatalog,
 	formatPanelList,
@@ -277,6 +278,39 @@ test("a project agent cannot satisfy a configured judge agent", { concurrency: f
 	]);
 }));
 
+test("a preset that omits judge still has its effective judge agent checked", { concurrency: false }, () => fixture((f) => {
+	agent(f.user, "judge", "role: delegate\n");
+	f.config({ panels: { ask: { panelists: [{ model: "x" }] } } });
+	assert.deepEqual(f.discover("user").panels[0].diagnostics, [
+		'[subagent] panels."ask": "judge.agent" agent "judge" is not internal; preset retained',
+	], "an omitted judge resolves to the bundled default, so it is checked");
+	f.config({ panels: { ask: { panelists: [{ model: "x" }], judge: null } } });
+	assert.deepEqual(f.discover("user").panels[0].diagnostics, [], "a disabled merge resolves no judge");
+}));
+
+test("an override for an agent outside the requested scope is not reported as ignored", { concurrency: false }, () => fixture((f) => {
+	agent(f.user, "my-judge", "role: internal\n");
+	f.config({ models: { "my-judge": "review/id" }, panels: { ask: { panelists: [{ model: "x" }], judge: { agent: "my-judge" } } } });
+	const result = f.discover("project");
+	assert.deepEqual(f.warnings, [], "the judge resolves at user scope, so the override is not ignored");
+	assert.deepEqual(result.panels[0].diagnostics, [], "and the user-scope judge agent is not reported as missing");
+	f.warnings.length = 0;
+	f.config({ models: { absent: "x" }, panels: { ask: { panelists: [{ model: "x" }] } } });
+	f.discover("project");
+	assert.equal(f.warnings.length, 1, "a name no directory defines still warns");
+	assert.match(f.warnings[0][0] as string, /no agent named "absent"; model override ignored/);
+}));
+
+test("an override lookup for a name matching an Object.prototype member stays undefined", { concurrency: false }, () => fixture((f) => {
+	agent(f.user, "constructor", "role: internal\n");
+	f.config({ panels: { ask: { panelists: [{ model: "x" }], judge: { agent: "constructor" } } } });
+	const discovery = f.discover("user");
+	assert.equal(configuredModel(discovery, "constructor"), undefined, "no inherited prototype member is returned");
+	assert.deepEqual(discovery.panels[0].diagnostics, [], "the agent itself is found and internal");
+	f.config({ models: { constructor: "pinned/model" }, panels: { ask: { panelists: [{ model: "x" }], judge: { agent: "constructor" } } } });
+	assert.equal(configuredModel(f.discover("user"), "constructor"), "pinned/model", "a configured override still applies");
+}));
+
 test("discovery defers model availability, internal-agent suitability, and read-only checks", { concurrency: false }, () => fixture((f) => {
 	f.config({ panels: {
 		internal: { panelists: [{ agent: "judge", model: "unavailable/model" }] },
@@ -381,8 +415,15 @@ test("scope exclusions cannot contribute roles or resolve panel agents", { concu
 	assert.equal(f.discover("user").agents.find((a) => a.name === "judge")?.role, "delegate");
 	assert.equal(f.discover("user").agents.some((a) => a.name === "project-only"), false);
 	f.config({ panels: { ask: { panelists: [{ agent: "project-only", model: "x" }] } } });
-	assert.equal(f.discover("user").panels[0].diagnostics.length, 1);
-	assert.deepEqual(f.discover("both").panels[0].diagnostics, []);
+	// The omitted judge still resolves to the user-scope `judge`, which this
+	// fixture downgraded to delegate, so it is reported too.
+	assert.deepEqual(f.discover("user").panels[0].diagnostics, [
+		'[subagent] panels."ask": no agent named "project-only"; preset retained',
+		'[subagent] panels."ask": "judge.agent" agent "judge" is not internal; preset retained',
+	]);
+	assert.deepEqual(f.discover("both").panels[0].diagnostics, [
+		'[subagent] panels."ask": "judge.agent" agent "judge" is not internal; preset retained',
+	]);
 }));
 
 test("model overrides retain precedence while panels are processed independently", { concurrency: false }, () => fixture((f) => {
@@ -491,15 +532,16 @@ function toolResultMessage(id: string, isError = false): any {
 
 test("judge input blocks have the settled structure, repeat the task, and keep configured order", () => {
 	const reviews: PanelReviewInput[] = [
-		{ model: "p/a", task: "Do the thing", toolCallSummary: "read src/a.ts", status: "completed", output: "Answer A" },
-		{ model: "p/b", task: "Do the thing", toolCallSummary: "(none)", status: "failed", output: "Partial B", error: "provider boom" },
-		{ model: "p/c", task: "Do the thing", toolCallSummary: "ffgrep BuildSampleRate", status: "completed", output: "Answer C" },
+		{ model: "p/a", agent: "reviewer", task: "Do the thing", toolCallSummary: "read src/a.ts", status: "completed", output: "Answer A" },
+		{ model: "p/b", agent: "panelist", task: "Do the thing", toolCallSummary: "(none)", status: "failed", output: "Partial B", error: "provider boom" },
+		{ model: "p/c", agent: "researcher", task: "Do the thing", toolCallSummary: "ffgrep BuildSampleRate", status: "completed", output: "Answer C" },
 	];
 	const input = buildPanelJudgeInput(reviews);
 	assert.equal(
 		input,
 		[
 			"### PANELIST p/a",
+			"agent: reviewer",
 			"task: Do the thing",
 			"tools: read src/a.ts",
 			"status: completed",
@@ -507,6 +549,7 @@ test("judge input blocks have the settled structure, repeat the task, and keep c
 			"Answer A",
 			"",
 			"### PANELIST p/b",
+			"agent: panelist",
 			"task: Do the thing",
 			"tools: (none)",
 			"status: failed",
@@ -515,6 +558,7 @@ test("judge input blocks have the settled structure, repeat the task, and keep c
 			"Partial B",
 			"",
 			"### PANELIST p/c",
+			"agent: researcher",
 			"task: Do the thing",
 			"tools: ffgrep BuildSampleRate",
 			"status: completed",
@@ -530,9 +574,18 @@ test("judge input blocks have the settled structure, repeat the task, and keep c
 	assert.equal(buildPanelJudgeInput([]), "");
 });
 
+test("two seats sharing one model stay distinguishable in the judge input", () => {
+	const seat = { task: "t", toolCallSummary: "(none)", status: "completed", output: "same answer" } as const;
+	const reviewer = buildPanelistBlock({ ...seat, model: "p/a", agent: "reviewer" });
+	const researcher = buildPanelistBlock({ ...seat, model: "p/a", agent: "researcher" });
+	assert.notEqual(reviewer, researcher, "the blocks differ, so attribution stays unambiguous");
+	assert.ok(reviewer.includes("agent: reviewer") && researcher.includes("agent: researcher"));
+});
+
 test("the block header uses the effective requested label and a failed block labels its partial answer", () => {
 	const review: PanelReviewInput = {
 		model: "effective/model",
+		agent: "panelist",
 		task: "t",
 		toolCallSummary: "(none)",
 		status: "failed",
@@ -540,7 +593,7 @@ test("the block header uses the effective requested label and a failed block lab
 		error: "timed out after 10 minutes",
 	};
 	const block = buildPanelistBlock(review);
-	assert.ok(block.startsWith("### PANELIST effective/model\ntask: t\ntools: (none)\nstatus: failed\nerror: timed out after 10 minutes\n"));
+	assert.ok(block.startsWith("### PANELIST effective/model\nagent: panelist\ntask: t\ntools: (none)\nstatus: failed\nerror: timed out after 10 minutes\n"));
 	assert.ok(block.includes("[Incomplete partial answer:]\nhalf an answer"));
 	const empty: PanelReviewInput = { ...review, output: "" };
 	assert.ok(buildPanelistBlock(empty).endsWith("[Incomplete partial answer:]\n"));
