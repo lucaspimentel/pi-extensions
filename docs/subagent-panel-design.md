@@ -534,6 +534,12 @@ Result shape:
   attempts and noting the retry, with the failure reason when no merge was
   produced; and a `Total:` across every panelist and every judge attempt.
   Context tokens are never summed, so the total has no `ctx:` field.
+- Panelist labels use the full effective requested model ID. When different
+  agents share that ID, every seat with it is qualified as `model (agent)` in
+  fallback sections, usage/failure lines, notices, and running/expanded UI.
+  Unique models keep their labels. The full configured seat list is present
+  from the first update and is used for labeling even after failures, so labels
+  remain stable; raw model IDs in details and judge input are unchanged.
 - Tool details: `mode: "panel"`, the effective panel config, every panelist's
   full messages, its uncapped final text (`output`), its tool-call summary, the
   judge as a separate top-level record with its raw output, usage, and every

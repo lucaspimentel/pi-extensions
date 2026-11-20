@@ -1649,6 +1649,69 @@ test("the expanded panel row shows the merged review, one section per panelist, 
 	});
 });
 
+for (const outcome of ["disabled", "failed", "partial", "no-survivors"] as const) {
+	test(`shared-model panel seats keep agent attribution in content and UI: ${outcome}`, async () => {
+		await withIsolatedAgents(async (cwd, agentDir) => {
+			panelConfig(agentDir, {
+				panelists: [{ agent: "reviewer", model: "p/shared" }, { agent: "researcher", model: "p/shared" }],
+				judge: outcome === "disabled" || outcome === "no-survivors" ? null : "p/judge",
+			});
+			for (const agent of ["reviewer", "researcher"]) {
+				distinctiveAgent(path.join(agentDir, "agents"), agent, `Seat ${agent}`);
+			}
+			const h = makeHarness({ guard: true, tools: ["read"] });
+			const updates: any[] = [];
+			const { recording, promise } = startPanelRun(h, cwd, updates);
+			try {
+				await waitFor(() => recording.spawns.length === 2);
+				const seat = (agent: string) => recording.spawns.find((spawn) =>
+					fs.readFileSync(flag(spawn.args, "--append-system-prompt")!, "utf8").includes(`Seat ${agent}`),
+				);
+				const reviewer = seat("reviewer");
+				const researcher = seat("researcher");
+				assert.ok(reviewer, "reviewer seat spawned");
+				assert.ok(researcher, "researcher seat spawned");
+				reviewer.child.stdout.emit("data", assistantLine("partial seat answer"));
+				await waitFor(() => updates.some((u) => u.details.results[0].messages.length > 0));
+				// Render before either seat finishes: the second has not emitted anything.
+				const running = updates.at(-1);
+				const runningCollapsed = renderPanel(h, running, { expanded: false, isPartial: true }).join("\n");
+				const runningExpanded = renderPanel(h, running, { expanded: true, isPartial: true }).join("\n");
+				if (outcome === "no-survivors") failAnswer(reviewer, "reviewer failed");
+				else emitAnswer(reviewer, "reviewer answer");
+				if (outcome === "partial" || outcome === "no-survivors") failAnswer(researcher, "researcher failed");
+				else emitAnswer(researcher, "researcher answer");
+				if (outcome === "failed") {
+					await waitFor(() => recording.spawns.length === 3);
+					failAnswer(recording.spawns[2], "judge failed");
+					await waitFor(() => recording.spawns.length === 4);
+					failAnswer(recording.spawns[3], "judge failed again");
+				} else if (outcome === "partial") {
+					await waitFor(() => recording.spawns.length === 3);
+					emitAnswer(recording.spawns[2], "merged answer");
+				}
+				const result = await promise;
+				const text = result.content[0].text;
+				const expanded = renderPanel(h, result, { expanded: true }).join("\n");
+				for (const agent of ["reviewer", "researcher"]) {
+					const label = `p/shared (${agent})`;
+					assert.ok(runningCollapsed.includes(`[accent]${label}`), runningCollapsed);
+					assert.ok(runningExpanded.includes(`[accent]${label}`), runningExpanded);
+					assert.ok(expanded.includes(`[accent]${label}`), expanded);
+					assert.ok(text.includes(`- ${label}`), "usage/failure line identifies the agent");
+					if (outcome !== "partial") assert.ok(text.includes(`### [${label}]`), text);
+				}
+				if (outcome === "partial") {
+					assert.ok(text.includes("single-model-merge: only p/shared (reviewer) answered"));
+					assert.ok(text.includes("panelists failed: p/shared (researcher) (researcher failed)"));
+				} else if (outcome === "no-survivors") {
+					assert.ok(text.includes("all 2 panelists failed: p/shared (reviewer) (reviewer failed); p/shared (researcher) (researcher failed)"));
+				}
+			} finally { recording.restore(); }
+		});
+	});
+}
+
 test("a running panel derives progress from details, marking pending models and the judge", async () => {
 	await withIsolatedAgents(async (cwd, agentDir) => {
 		configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }, { model: "p/org/b" }], judge: { model: "p/judge" } } } });

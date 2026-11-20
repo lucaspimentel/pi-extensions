@@ -484,7 +484,7 @@ function buildPanelNotices(
 			{
 				kind: "no-survivors",
 				reason: boundedLine(
-					`all ${results.length} panelists failed: ${failed.map((result) => `${result.model} (${failureReason(result)})`).join("; ")}`,
+					`all ${results.length} panelists failed: ${failed.map((result) => `${panelistLabel(result, results)} (${failureReason(result)})`).join("; ")}`,
 				),
 			},
 		];
@@ -506,17 +506,24 @@ function buildPanelNotices(
 		}
 	}
 	if (merged && survivors.length === 1) {
-		notices.push({ kind: "single-model-merge", reason: boundedLine(`only ${survivors[0].model} answered`) });
+		notices.push({ kind: "single-model-merge", reason: boundedLine(`only ${panelistLabel(survivors[0], results)} answered`) });
 	}
 	if (merged && failed.length > 0) {
 		notices.push({
 			kind: "partial-merge",
 			reason: boundedLine(
-				`${failed.length} of ${results.length} panelists failed: ${failed.map((result) => `${result.model} (${failureReason(result)})`).join("; ")}`,
+				`${failed.length} of ${results.length} panelists failed: ${failed.map((result) => `${panelistLabel(result, results)} (${failureReason(result)})`).join("; ")}`,
 			),
 		});
 	}
 	return notices;
+}
+
+/** Keep seat labels stable across pending, surviving, and failed panelists. */
+function panelistLabel(result: PanelistResult, results: readonly PanelistResult[]): string {
+	return results.some((other) => other.model === result.model && other.agent !== result.agent)
+		? `${result.model} (${result.agent})`
+		: result.model;
 }
 
 /** Capped labeled sections, the fallback whenever there is no merged review. */
@@ -525,7 +532,7 @@ function formatLabeledPanelReviews(results: readonly PanelistResult[]): string {
 		.map((result) => {
 			const status = statusLabel(result);
 			const body = isFailedResult(result) ? getFailureEvidence(result) : result.output || "(no output)";
-			return `### [${result.model}] ${status}\n\n${truncateTaskOutput(body)}`;
+			return `### [${panelistLabel(result, results)}] ${status}\n\n${truncateTaskOutput(body)}`;
 		})
 		.join("\n\n---\n\n");
 }
@@ -548,11 +555,11 @@ function formatPanelContent(details: PanelDetails): string {
 
 	const usageLines: string[] = [];
 	for (const result of details.results) {
-		if (!isFailedResult(result)) usageLines.push(`- ${result.model}: ${usageText(result.usage)}`);
+		if (!isFailedResult(result)) usageLines.push(`- ${panelistLabel(result, details.results)}: ${usageText(result.usage)}`);
 	}
 	for (const result of details.results) {
 		if (!isFailedResult(result)) continue;
-		usageLines.push(`- ${result.model} failed: ${failureReason(result)}`);
+		usageLines.push(`- ${panelistLabel(result, details.results)} failed: ${failureReason(result)}`);
 		if (hasNonzeroUsage(result.usage)) usageLines.push(`  usage: ${usageText(result.usage)}`);
 	}
 	if (judge) {
@@ -2144,7 +2151,7 @@ export default function (pi: ExtensionAPI) {
 					// Running: derived from details, never from the model-facing content.
 					if (running) {
 						let text = `${theme.fg("warning", "⏳")} ${header}${theme.fg("accent", ` ${settledCount}/${modelCount} done, ${runningCount} running, ${pendingCount} pending`)}`;
-						for (const result of details.results) text += `\n${resultIcon(result)} ${theme.fg("accent", result.model)}`;
+						for (const result of details.results) text += `\n${resultIcon(result)} ${theme.fg("accent", panelistLabel(result, details.results))}`;
 						if (judge) {
 							const attempt = judge.attempts.length > 1 ? theme.fg("dim", ` (attempt ${judge.attempts.length})`) : "";
 							text += `\n${theme.fg("warning", "⏳")} ${theme.fg("accent", `judge ${judgeLabel}`)}${theme.fg("dim", " merging…")}${attempt}`;
@@ -2195,7 +2202,7 @@ export default function (pi: ExtensionAPI) {
 					const failed = !unsettled && isFailedResult(result);
 					container.addChild(new Spacer(1));
 					container.addChild(
-						new Text(`${theme.fg("muted", "─── ")}${theme.fg("accent", result.model)} ${resultIcon(result)}`, 0, 0),
+						new Text(`${theme.fg("muted", "─── ")}${theme.fg("accent", panelistLabel(result, details.results))} ${resultIcon(result)}`, 0, 0),
 					);
 					for (const item of getDisplayItems(result.messages)) {
 						if (item.type === "toolCall")

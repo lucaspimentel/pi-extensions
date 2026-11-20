@@ -295,7 +295,11 @@ What a call does:
   when there is one, then a section per panelist (mark, tool calls, error line
   and answer, usage) and the judge with every attempt, then a `Total:`. A
   running panel shows progress from details instead, with `⏳` for pending
-  sections and no expand hint.
+  sections and no expand hint. Seats sharing a full model ID use `model (agent)`
+  labels in fallback answers, usage/failure lines, notices, and running/expanded
+  views; unique models keep their existing labels. Labels use all configured
+  seats, including pending and failed ones, so attribution does not change as
+  the run progresses.
 
 Tool availability is a runtime property, not a declaration. `resolveAgentTools`
 drops every declared name the dispatching session did not register, and only
