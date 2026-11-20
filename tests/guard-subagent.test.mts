@@ -115,6 +115,8 @@ function makeGuardHarness(): GuardHarness {
 			h.shortcuts.push({ shortcut, handler: options.handler });
 		},
 		registerFlag: () => {},
+		// Mirrors the real API: guard records its prompts and refusals as custom entries.
+		appendEntry: () => {},
 		getCommands: () => [],
 		getActiveTools: () => [],
 		getAllTools: () => [],
@@ -313,6 +315,8 @@ function makeSubagentHarness(options: { guardCommand?: "cli" | "package" | "pack
 		registerCommand: () => {},
 		registerShortcut: () => {},
 		registerFlag: () => {},
+		// Mirrors the real API: guard records its prompts and refusals as custom entries.
+		appendEntry: () => {},
 		getCommands: () => commands,
 		getActiveTools: () => [],
 		getAllTools: () => [],

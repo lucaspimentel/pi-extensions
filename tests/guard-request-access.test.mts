@@ -80,6 +80,8 @@ function makeHarness(): Harness {
 		},
 		registerShortcut: () => {},
 		registerFlag: () => {},
+		// Mirrors the real API: guard records its prompts and refusals as custom entries.
+		appendEntry: () => {},
 		sendUserMessage: (text: string, options?: { deliverAs?: string }) => { h.steering.push({ text, deliverAs: options?.deliverAs }); },
 		getCommands: () => [],
 		getActiveTools: () => [],

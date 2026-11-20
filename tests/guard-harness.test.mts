@@ -65,6 +65,8 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 			h.shortcuts.push({ shortcut, handler: options.handler });
 		},
 		registerFlag: () => {},
+		// Mirrors the real API: guard records its prompts and refusals as custom entries.
+		appendEntry: () => {},
 		sendUserMessage: (text: string, options?: { deliverAs?: string }) => { h.steering.push({ text, deliverAs: options?.deliverAs }); },
 		getCommands: () => h.commands,
 		getActiveTools: () => h.tools.map((t) => t.name),

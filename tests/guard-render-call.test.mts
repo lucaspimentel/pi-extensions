@@ -35,6 +35,8 @@ const pi: any = {
 	registerCommand: () => {},
 	registerShortcut: () => {},
 	registerFlag: () => {},
+		// Mirrors the real API: guard records its prompts and refusals as custom entries.
+		appendEntry: () => {},
 	getCommands: () => [],
 	getActiveTools: () => [],
 	getAllTools: () => [],
