@@ -1589,9 +1589,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					// The override map comes from the resolution's own (user-scope)
 					// discovery, not the request's: a judge agent that exists only in the
-					// user dir has no entry in a project-scoped discovery. The lookup is
-					// own-property only: an agent named after an Object.prototype member
-					// would otherwise resolve to the inherited function.
+					// user dir has no entry in a project-scoped discovery.
 					const explicitModel = (typeof entry.model === "string" ? entry.model.trim() : undefined) ?? presetJudge?.model;
 					const model = explicitModel ?? configuredModel(judgeResolved.discovery, judgeAgent) ?? dispatchDefaults.model;
 					if (model !== undefined) {

@@ -241,11 +241,10 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	for (const agent of bundledAgents) mergeJudgeAgent(agent);
 	for (const agent of userAgents) mergeJudgeAgent(agent);
 	for (const panel of result.panels) {
+		const label = `[subagent] panels.${JSON.stringify(panel.name)}:`;
 		for (const agentName of new Set(panel.panelists.map((panelist) => panelist.agent))) {
 			if (!agentMap.has(agentName)) {
-				panel.diagnostics.push(
-					`[subagent] panels.${JSON.stringify(panel.name)}: no agent named ${JSON.stringify(agentName)}; preset retained`,
-				);
+				panel.diagnostics.push(`${label} no agent named ${JSON.stringify(agentName)}; preset retained`);
 			}
 		}
 		if (panel.judge !== null) {
@@ -254,13 +253,9 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 			const judgeName = panel.judge?.agent ?? "judge";
 			const judgeAgent = judgeAgents.get(judgeName);
 			if (!judgeAgent) {
-				panel.diagnostics.push(
-					`[subagent] panels.${JSON.stringify(panel.name)}: no agent named ${JSON.stringify(judgeName)} for "judge.agent"; preset retained`,
-				);
+				panel.diagnostics.push(`${label} no agent named ${JSON.stringify(judgeName)} for "judge.agent"; preset retained`);
 			} else if (judgeAgent.role !== "internal") {
-				panel.diagnostics.push(
-					`[subagent] panels.${JSON.stringify(panel.name)}: "judge.agent" agent ${JSON.stringify(judgeName)} is not internal; preset retained`,
-				);
+				panel.diagnostics.push(`${label} "judge.agent" agent ${JSON.stringify(judgeName)} is not internal; preset retained`);
 			}
 		}
 		for (const diagnostic of panel.diagnostics) reportDiagnostic(diagnostic);
@@ -305,7 +300,7 @@ function applyModelOverrides(
 	agentMap: Map<string, AgentConfig>,
 	raw: unknown,
 	configPath: string,
-	knownAgentNames: ReadonlySet<string> = new Set(agentMap.keys()),
+	knownAgentNames: ReadonlySet<string>,
 ): Record<string, string> {
 	const accepted: Record<string, string> = {};
 	const models = (raw as { models?: unknown } | null)?.models;
