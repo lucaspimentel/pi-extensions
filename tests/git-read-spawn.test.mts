@@ -418,6 +418,14 @@ function gitInput(args: string[], cwd: string, input: string): string {
 	return result.stdout;
 }
 
+/**
+ * Runs git outside the tool, with the fixture's hermetic environment: the
+ * reference point for what plain git does with the same repository.
+ */
+function rawGit(args: string[], cwd: string): void {
+	spawnSync("git", args, { cwd, encoding: "utf8", env: HERMETIC_GIT_ENV });
+}
+
 function makeRepo(): string {
 	const repo = mkdtempSync(path.join(tmpdir(), "git-read-spawn-"));
 	gitSync(["init"], repo);
@@ -735,14 +743,16 @@ test("integration: repo config cannot drive gpg through log or show", async () =
 		gitSync(["config", "log.showSignature", "true"], repo);
 		gitSync(["config", "format.pretty", "%G? %h"], repo);
 		const head = gitSync(["rev-parse", "HEAD"], repo).trim();
-		// Premise: plain git honours both config paths and runs the program.
-		spawnSync("git", ["--no-pager", "log", "-1", "--format=%H", head], {
-			cwd: repo,
-			encoding: "utf8",
-			env: HERMETIC_GIT_ENV,
-		});
-		assert.equal(gpgRan(repo), true, "fixture premise: plain git log runs the configured gpg program");
-		rmSync(path.join(repo, "gpg.log"), { force: true });
+		const gpgLog = path.join(repo, "gpg.log");
+		const resetGpgLog = () => rmSync(gpgLog, { force: true });
+		// Premise for each override: plain git honours the repository setting and
+		// runs the program, so a later "gpg did not run" cannot be vacuous.
+		rawGit(["--no-pager", "log", "-1", "--format=%H", head], repo);
+		assert.equal(gpgRan(repo), true, "premise: log.showSignature runs the configured program");
+		resetGpgLog();
+		rawGit(["--no-pager", "-c", "log.showSignature=false", "log", "-1", head], repo);
+		assert.equal(gpgRan(repo), true, "premise: a %G in format.pretty runs the configured program");
+		resetGpgLog();
 		// The injected -c overrides win over both repository settings.
 		const formatted = await runValidated("log", ["-1", "--format=%H", head], repo);
 		assert.equal(formatted.ok, true, formatted.text);
@@ -750,9 +760,11 @@ test("integration: repo config cannot drive gpg through log or show", async () =
 		assert.equal(gpgRan(repo), false, "log.showSignature must be overridden");
 		const plain = await runValidated("log", ["-1", head], repo);
 		assert.equal(plain.ok, true, plain.text);
+		assert.ok(plain.text.includes(head), plain.text);
 		assert.equal(gpgRan(repo), false, "format.pretty must be overridden");
 		const shown = await runValidated("show", ["-1", "--format=%H", head], repo);
 		assert.equal(shown.ok, true, shown.text);
+		assert.equal(shown.text.trim(), head);
 		assert.equal(gpgRan(repo), false);
 	} finally {
 		rmSync(repo, { recursive: true, force: true });
@@ -954,6 +966,8 @@ test("registered tool: unsupported format, date, and author values are rejected 
 		{ subcommand: "log", args: ["--pretty=%h %GG %s"] },
 		{ subcommand: "show", args: ["--format=%GT"] },
 		{ subcommand: "log", args: ["--format=%x41"] },
+		{ subcommand: "log", args: ["--format=%+G?"] },
+		{ subcommand: "show", args: ["--format=%-G?"] },
 		{ subcommand: "log", args: ["--format=xsig"] },
 		{ subcommand: "log", args: ["--format=plain text only"] },
 		{ subcommand: "show", args: ["--format=%(trailers)"] },

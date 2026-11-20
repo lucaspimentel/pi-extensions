@@ -508,6 +508,13 @@ test("rejections: unsupported format strings name the offending sequence", () =>
 		["%h %", "'%'"],
 		["%%%G?", "'%G?'"],
 		["%n%G?", "'%G?'"],
+		// git's placeholder modifiers reach the signature family too: each of
+		// these runs gpg, and `%+G?` prints nothing, so only a rejection keeps
+		// them out.
+		["%+G?", "'%+'"],
+		["%-G?", "'%-'"],
+		["% G?", "'% '"],
+		["%-GS", "'%-'"],
 	];
 	for (const [value, expected] of rejected) {
 		validateRejects("log", [`--format=${value}`], expected);

@@ -251,7 +251,12 @@ injected by the tool and never user-suppliable:
   `-c format.pretty=medium` overrides close the config-driven paths, and
   `--show-signature` is not on the allowlist. If a future flag could trigger
   external execution, it does not enter the allowlist without a matching
-  mitigation here.
+  mitigation here. This closes signature *display*, not repo-config execution
+  in general: a repository whose config names a `filter.<driver>.clean` for a
+  path its `.gitattributes` attributes to that driver still runs that program
+  during `git diff` under this sanitized environment (verified), and no
+  command-line override disables filters wholesale. That exposure predates
+  this work, needs its own design, and is tracked in [TODO.md](TODO.md).
 
 ## Resource limits and failure contract
 

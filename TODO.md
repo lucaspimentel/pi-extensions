@@ -86,6 +86,18 @@ revisiting it.
 - [ ] Treating `diff --check` exit 2 as success: not done by decision. The
   findings are the body and the run keeps the standard non-zero-exit shape;
   revisit only if that shape proves misleading in practice.
+- [ ] Repo-config execution outside signature display (found 2026-11-19 while
+  scoping the signature claim in [`docs/git-read-design.md`](docs/git-read-design.md),
+  "Trust model"): a repository that attributes a path to a filter driver
+  (`.gitattributes`: `f filter=x`) whose config names a command
+  (`filter.x.clean`) runs that command during `git diff` under the tool's
+  sanitized environment; verified in a temp repo, and unchanged by
+  `--no-ext-diff`, `--no-textconv` or any `-c` override (there is no wholesale
+  "disable filters" switch). Reaching it needs the repository's own config,
+  which a clone does not carry, so it is not attacker-controlled the way a
+  hostile worktree is; it is a trust-model gap for a user-configured repo.
+  Needs a design decision (ignore attributed filters? refuse to read paths
+  with filters? accept and document?), not a flag.
 - [ ] Low single-digit leftovers, unmeasured beyond the count: `show
   --name-only` (2), `diff --raw` (1), `diff --cc` (1), `diff --stat=<width>`
   (1), `diff -n` (1), `show -e` (1). Not worth allowlist surface on this
