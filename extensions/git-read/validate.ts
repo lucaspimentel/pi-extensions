@@ -18,7 +18,12 @@ export const SUBCOMMANDS = ["diff", "log", "show", "status"] as const;
 
 export type GitSubcommand = (typeof SUBCOMMANDS)[number];
 
-/** Injected global options, prepended for every subcommand (never user-suppliable). */
+/**
+ * Injected global options, prepended for every subcommand (never
+ * user-suppliable). The `-c` overrides neutralize repository config that
+ * would otherwise execute helpers (`core.fsmonitor`) or display signatures
+ * (`log.showSignature`, `format.pretty`), which runs `gpg.program`.
+ */
 export const GLOBAL_OPTIONS = [
 	"--no-pager",
 	"--no-optional-locks",
@@ -26,6 +31,10 @@ export const GLOBAL_OPTIONS = [
 	"core.fsmonitor=false",
 	"-c",
 	"core.untrackedCache=false",
+	"-c",
+	"log.showSignature=false",
+	"-c",
+	"format.pretty=medium",
 ] as const;
 
 /** Injected immediately after the subcommand for diff/log/show only. */
@@ -311,8 +320,13 @@ function unsupportedFormatSpecifier(value: string): string | null {
  */
 function nameFormatSpecifier(value: string, index: number): string {
 	const signature = value.slice(index, index + 3);
-	if (/^%G[?GSKFPT]$/.test(signature)) return signature;
+	if (isSignatureSpecifier(signature)) return signature;
 	return value.slice(index, index + 2);
+}
+
+/** True for the `%G` family, the specifiers that run signature verification. */
+function isSignatureSpecifier(sequence: string): boolean {
+	return /^%G[?GSKFPT]$/.test(sequence);
 }
 
 /**
@@ -323,8 +337,8 @@ function nameFormatSpecifier(value: string, index: number): string {
  * itself contain any specifier, including the `%G` family.
  */
 function checkFormatValue(flag: string, raw: string): string | null {
-	if (raw.length === 0) return `flag ${flag} requires a value`;
-	if (CONTROL_CHARS_RE.test(raw)) return `flag ${flag} value contains control characters`;
+	const textError = checkTextValue(flag, raw);
+	if (textError !== null) return textError;
 	if (raw.startsWith("format:") || raw.startsWith("tformat:")) {
 		const prefix = raw.startsWith("tformat:") ? "tformat:" : "format:";
 		return `flag ${flag} does not accept a '${prefix}' prefix; pass the format string directly, e.g. ${flag}=%H`;
@@ -338,7 +352,7 @@ function checkFormatValue(flag: string, raw: string): string | null {
 	}
 	const unsupported = unsupportedFormatSpecifier(raw);
 	if (unsupported === null) return null;
-	const reason = /^%G[?GSKFPT]$/.test(unsupported)
+	const reason = isSignatureSpecifier(unsupported)
 		? "signature specifiers run an external program"
 		: "it is not on the format allowlist";
 	return (
@@ -347,19 +361,22 @@ function checkFormatValue(flag: string, raw: string): string | null {
 	);
 }
 
+/**
+ * Rejects an empty value and one carrying control characters, returning the
+ * error or null.
+ */
+function checkTextValue(flag: string, raw: string): string | null {
+	if (raw.length === 0) return `flag ${flag} requires a value`;
+	if (CONTROL_CHARS_RE.test(raw)) return `flag ${flag} value contains control characters`;
+	return null;
+}
+
 /** Validates a `--date=` value against the closed enum. */
 function checkDateValue(flag: string, raw: string): string | null {
 	if (raw.length === 0) return `flag ${flag} requires a value`;
 	if (!DATE_FORMATS.has(raw)) {
 		return `flag ${flag} requires one of ${[...DATE_FORMATS].join(", ")}, got '${raw}'`;
 	}
-	return null;
-}
-
-/** Validates a `--author=` value: free text, but non-empty and control-free. */
-function checkAuthorValue(flag: string, raw: string): string | null {
-	if (raw.length === 0) return `flag ${flag} requires a value`;
-	if (CONTROL_CHARS_RE.test(raw)) return `flag ${flag} value contains control characters`;
 	return null;
 }
 
@@ -532,31 +549,25 @@ function handleFlag(
 			// --pretty=medium, which would reinterpret the next token as a rev.
 			return { tokens: [], consumed: 0, error: `flag ${token} requires the attached form, e.g. ${token}=%H` };
 		}
-		if (token.startsWith("--format=")) {
-			const raw = token.slice("--format=".length);
-			return { tokens: [token], consumed: 0, error: checkFormatValue("--format", raw) };
-		}
-		if (token.startsWith("--pretty=")) {
-			const raw = token.slice("--pretty=".length);
-			return { tokens: [token], consumed: 0, error: checkFormatValue("--pretty", raw) };
-		}
+		const attachedFormat = handleAttachedValue(token, "--format", checkFormatValue);
+		if (attachedFormat !== null) return attachedFormat;
+		const attachedPretty = handleAttachedValue(token, "--pretty", checkFormatValue);
+		if (attachedPretty !== null) return attachedPretty;
 		if (token === "--date") {
 			return consumeValue("--date", args, index, checkDateValue);
 		}
-		if (token.startsWith("--date=")) {
-			const raw = token.slice("--date=".length);
-			return { tokens: [token], consumed: 0, error: checkDateValue("--date", raw) };
-		}
+		const attachedDate = handleAttachedValue(token, "--date", checkDateValue);
+		if (attachedDate !== null) return attachedDate;
 	}
 
 	if (subcommand === "log") {
+		// --author is free text that git matches as a regular expression, so only
+		// emptiness and control characters are rejected.
 		if (token === "--author") {
-			return consumeValue("--author", args, index, checkAuthorValue);
+			return consumeValue("--author", args, index, checkTextValue);
 		}
-		if (token.startsWith("--author=")) {
-			const raw = token.slice("--author=".length);
-			return { tokens: [token], consumed: 0, error: checkAuthorValue("--author", raw) };
-		}
+		const attachedAuthor = handleAttachedValue(token, "--author", checkTextValue);
+		if (attachedAuthor !== null) return attachedAuthor;
 	}
 
 	return {
@@ -583,6 +594,20 @@ function consumeValue(
 		return { tokens: [], consumed: 0, error: `flag ${flag} requires a value` };
 	}
 	return { tokens: [flag, value], consumed: 1, error: check(flag, value) };
+}
+
+/**
+ * Handles an attached `--<flag>=<value>` token, returning null when the token
+ * is not that flag. `check` validates the value and reports the flag spelling
+ * it is given, so a rejection of `--pretty` says `--pretty`.
+ */
+function handleAttachedValue(
+	token: string,
+	flag: string,
+	check: (flag: string, raw: string) => string | null,
+): FlagHandling | null {
+	if (!token.startsWith(`${flag}=`)) return null;
+	return { tokens: [token], consumed: 0, error: check(flag, token.slice(flag.length + 1)) };
 }
 
 /**

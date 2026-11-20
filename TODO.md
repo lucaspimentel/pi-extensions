@@ -86,15 +86,6 @@ revisiting it.
 - [ ] Treating `diff --check` exit 2 as success: not done by decision. The
   findings are the body and the run keeps the standard non-zero-exit shape;
   revisit only if that shape proves misleading in practice.
-- [ ] Config-driven signature display (found 2026-11-19 while allowing
-  `--format`): a repository config of `log.showSignature=true` makes a plain
-  `log`/`show` run signature verification, and a `format.pretty` value
-  containing `%G` does the same when no format flag is passed (both verified
-  in a temp repo, both pre-date the allowlist work). `-c log.showSignature=false`
-  and `-c format.pretty=medium` neutralize them, but the injected `-c` set was
-  left alone because overriding `format.pretty` changes the default output of a
-  repository that sets it. The `pretty.<name>` alias half of the same class is
-  closed: a `%`-free `--format` value must be an exact preset name.
 - [ ] Low single-digit leftovers, unmeasured beyond the count: `show
   --name-only` (2), `diff --raw` (1), `diff --cc` (1), `diff --stat=<width>`
   (1), `diff -n` (1), `show -e` (1). Not worth allowlist surface on this

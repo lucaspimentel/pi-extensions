@@ -96,7 +96,8 @@ commands. It is deliberately not tied to any one agent; agents opt in via their
     ...args]`
   - status: `[...GLOBAL_OPTIONS, "status", "--porcelain"]`
   `GLOBAL_OPTIONS` (validate.ts) is `--no-pager --no-optional-locks
-  -c core.fsmonitor=false -c core.untrackedCache=false`;
+  -c core.fsmonitor=false -c core.untrackedCache=false
+  -c log.showSignature=false -c format.pretty=medium`;
   `DIFF_LOG_SHOW_OPTIONS` is `--no-ext-diff --no-textconv`, injected
   immediately after the subcommand for diff/log/show only (`status` does not
   accept them).
@@ -223,7 +224,9 @@ injected by the tool and never user-suppliable:
 - Global options for every subcommand: `--no-pager`, `--no-optional-locks`
   (a nominally read-only `status` otherwise refreshes and can rewrite the
   index), `-c core.fsmonitor=false` (blocks the filesystem-monitor hook),
-  `-c core.untrackedCache=false`.
+  `-c core.untrackedCache=false`, `-c log.showSignature=false` and
+  `-c format.pretty=medium` (block config-driven signature display, which runs
+  `gpg.program`).
 - Diff/log/show only: `--no-ext-diff`, `--no-textconv`.
 - Environment for the child: `GIT_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`,
   `GIT_ASKPASS=echo`; `GIT_CONFIG_SYSTEM=/dev/null`,
@@ -236,25 +239,19 @@ injected by the tool and never user-suppliable:
   `STRIPPED_ENV` in spawn.ts; injected values are assigned after stripping,
   so they always win over anything inherited. Everything else (PATH, HOME,
   locale) is inherited untouched.
-- External execution through a format string: the `%G` specifiers (`%G?`,
+- External execution through signature display: the `%G` specifiers (`%G?`,
   `%GG`, `%GS`, `%GK`, `%GF`, `%GP`, `%GT`) each run signature verification,
   which executes the program named by `gpg.program` in the repository's own
-  config (verified for each specifier). They are excluded from the format
-  allowlist for the same reason `--show-signature` is, and the two ways a
-  format *value* could reach them outside the scan are both closed: git prints
-  an unknown specifier literally instead of failing (so the check is a
-  positive allowlist), and a `%`-free value is only accepted as an exact
-  preset name (so a `pretty.<name>` config alias cannot be expanded instead).
-- Known residual path, config-driven and pre-dating this allowlist: a
-  repository config of `log.showSignature=true` makes a plain `log`/`show`
-  verify signatures, and a `format.pretty` value containing `%G` does the same
-  when no format flag is passed (both verified). Neither is reachable through
-  the flag allowlist, `-c log.showSignature=false` and `-c format.pretty=medium`
-  neutralize them, and the injected `-c` set is left as it is here because
-  overriding `format.pretty` would change the default output of a repository
-  that sets it. `--show-signature` itself is not on the allowlist, and if a
-  future flag could trigger external execution it does not enter the allowlist
-  without a matching mitigation here.
+  config (verified for each specifier). Every route to it is closed: they are
+  absent from the format allowlist, the two ways a format *value* could reach
+  them outside the scan cannot (git prints an unknown specifier literally
+  instead of failing, so the check is a positive allowlist, and a `%`-free
+  value is only accepted as an exact preset name, so a `pretty.<name>` config
+  alias cannot be expanded instead), the `-c log.showSignature=false` and
+  `-c format.pretty=medium` overrides close the config-driven paths, and
+  `--show-signature` is not on the allowlist. If a future flag could trigger
+  external execution, it does not enter the allowlist without a matching
+  mitigation here.
 
 ## Resource limits and failure contract
 
@@ -319,8 +316,10 @@ exclude it leave the agents without it.
   (counts and shorthand, log/show booleans, presets, specifiers, date values,
   author patterns), `diff --check` exit 2 with and without `-w`, a repository
   config that aliases a `pretty.<name>` to `%G?` to prove the alias cannot be
-  invoked or hijack a `%`-containing value, and proof that a rejected format
-  value spawns nothing.
+  invoked or hijack a `%`-containing value, a repository config of
+  `log.showSignature=true` plus a `format.pretty` of `%G? %h` over a commit
+  with a signature header to prove the injected overrides keep gpg from
+  running, and proof that a rejected format value spawns nothing.
 - Run both via `npm run test:git-read`.
 
 ## Acceptance criteria (current)

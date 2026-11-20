@@ -1,7 +1,7 @@
 // Unit tests for git-read argument validation (extensions/git-read/validate.ts).
 // Pure module tests: no pi imports, no subprocesses, no filesystem access.
-// Covers argv construction, the design's valid forms, value-flag ranges,
-// rejections, separator/union handling, and error-message contents.
+// Covers argv construction, the design's valid forms, every value-flag class
+// and bound, rejections, separator/union handling, and error-message contents.
 //
 // Design: docs/git-read-design.md ("Argument validation", "Allowlists",
 // "Command construction").
@@ -49,6 +49,10 @@ test("constants match the design bounds", () => {
 		"core.fsmonitor=false",
 		"-c",
 		"core.untrackedCache=false",
+		"-c",
+		"log.showSignature=false",
+		"-c",
+		"format.pretty=medium",
 	]);
 	assert.deepEqual([...DIFF_LOG_SHOW_OPTIONS], ["--no-ext-diff", "--no-textconv"]);
 });

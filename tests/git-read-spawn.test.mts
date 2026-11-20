@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
@@ -104,10 +104,15 @@ async function untilSpawn(spawns: CapturedSpawn[], count: number): Promise<void>
 
 const STATUS_ARGV = [...GLOBAL_OPTIONS, "status", "--porcelain"];
 
-function showArgv(rev: string): string[] {
-	const checked = validateInvocation("show", [rev]);
-	if (!checked.ok) assert.fail(`unexpected validation failure: ${checked.reason}`);
+/** Validates `subcommand`/`args`, failing the test when validation rejects them. */
+function validatedArgv(subcommand: GitSubcommand, args: string[]): string[] {
+	const checked = validateInvocation(subcommand, args);
+	if (!checked.ok) assert.fail(`unexpected validation failure for ${subcommand} ${args.join(" ")}: ${checked.reason}`);
 	return checked.argv;
+}
+
+function showArgv(rev: string): string[] {
+	return validatedArgv("show", [rev]);
 }
 
 afterEach(() => {
@@ -406,6 +411,13 @@ function gitSync(args: string[], cwd: string): string {
 	return result.stdout;
 }
 
+/** Runs a setup git command that reads its input from stdin. */
+function gitInput(args: string[], cwd: string, input: string): string {
+	const result = spawnSync("git", args, { cwd, encoding: "utf8", env: HERMETIC_GIT_ENV, input });
+	assert.equal(result.status, 0, `setup git ${args.join(" ")} failed: ${result.stderr}`);
+	return result.stdout;
+}
+
 function makeRepo(): string {
 	const repo = mkdtempSync(path.join(tmpdir(), "git-read-spawn-"));
 	gitSync(["init"], repo);
@@ -430,32 +442,62 @@ function makeHistoryRepo(): string {
 	writeFileSync(path.join(repo, "file.txt"), "hello\n");
 	gitSync(["add", "."], repo);
 	gitSync(["commit", "-m", "first subject"], repo);
+	gitSync(["config", "user.email", "second@example.com"], repo);
+	gitSync(["config", "user.name", "Second Author"], repo);
 	writeFileSync(path.join(repo, "second.txt"), "second\n");
 	gitSync(["add", "."], repo);
-	gitSync(
-		[
-			"-c",
-			"user.email=second@example.com",
-			"-c",
-			"user.name=Second Author",
-			"commit",
-			"-m",
-			"second subject",
-		],
-		repo,
-	);
+	gitSync(["commit", "-m", "second subject"], repo);
 	return repo;
 }
 
 /** Validates `args` for `subcommand`, then runs the emitted argv through real git. */
 async function runValidated(subcommand: GitSubcommand, args: string[], cwd: string) {
-	const checked = validateInvocation(subcommand, args);
-	if (!checked.ok) assert.fail(`unexpected validation failure for ${subcommand} ${args.join(" ")}: ${checked.reason}`);
-	return await runGit(checked.argv, cwd);
+	return runGit(validatedArgv(subcommand, args), cwd);
+}
+
+/**
+ * A repo whose HEAD is a commit carrying a (bogus) `gpgsig` header, so any
+ * signature display runs the configured gpg program. `gpg.program` points at a
+ * script that records its own invocation, which `gpgRan` reads back.
+ */
+function makeSignatureRepo(): string {
+	const repo = mkdtempSync(path.join(tmpdir(), "git-read-gpg-"));
+	gitSync(["init"], repo);
+	gitSync(["config", "user.email", "test@example.com"], repo);
+	gitSync(["config", "user.name", "Test"], repo);
+	writeFileSync(path.join(repo, "file.txt"), "hello\n");
+	gitSync(["add", "."], repo);
+	gitSync(["commit", "-m", "init"], repo);
+	const raw = [
+		`tree ${gitSync(["rev-parse", "HEAD^{tree}"], repo).trim()}`,
+		`parent ${gitSync(["rev-parse", "HEAD"], repo).trim()}`,
+		"author Test <test@example.com> 1000000000 +0000",
+		"committer Test <test@example.com> 1000000000 +0000",
+		"gpgsig -----BEGIN PGP SIGNATURE-----",
+		" ",
+		" iQEcBAABCgAGBQJ",
+		" =abcd",
+		" -----END PGP SIGNATURE-----",
+		"",
+		"signed",
+		"",
+	].join("\n");
+	const sha = gitInput(["hash-object", "-t", "commit", "-w", "--stdin"], repo, raw).trim();
+	gitSync(["update-ref", "HEAD", sha], repo);
+	const program = path.join(repo, "gpg.sh");
+	writeFileSync(program, '#!/bin/sh\necho invoked >> "$(dirname "$0")/gpg.log"\n');
+	chmodSync(program, 0o755);
+	gitSync(["config", "gpg.program", program], repo);
+	return repo;
+}
+
+/** True when the fixture's gpg program has run since the last reset. */
+function gpgRan(repo: string): boolean {
+	return existsSync(path.join(repo, "gpg.log"));
 }
 
 /** The allowlisted `%` sequences, written out independently of validate.ts. */
-const ALLOWED_SPECIFIERS = [
+const FORMAT_SPECIFIERS = [
 	"%%",
 	"%H",
 	"%h",
@@ -509,7 +551,7 @@ const ALLOWED_SPECIFIERS = [
 ];
 
 /** Preset names git resolves before parsing a custom format string. */
-const FORMAT_PRESETS = ["oneline", "short", "medium", "full", "fuller", "email", "raw"];
+const PRETTY_PRESETS = ["oneline", "short", "medium", "full", "fuller", "email", "raw"];
 
 test("integration: status succeeds and leaves the index byte-identical (--no-optional-locks)", async () => {
 	const repo = makeRepo();
@@ -687,15 +729,45 @@ test("integration: diff --check reports whitespace while -w and --ignore-all-spa
 	}
 });
 
+test("integration: repo config cannot drive gpg through log or show", async () => {
+	const repo = makeSignatureRepo();
+	try {
+		gitSync(["config", "log.showSignature", "true"], repo);
+		gitSync(["config", "format.pretty", "%G? %h"], repo);
+		const head = gitSync(["rev-parse", "HEAD"], repo).trim();
+		// Premise: plain git honours both config paths and runs the program.
+		spawnSync("git", ["--no-pager", "log", "-1", "--format=%H", head], {
+			cwd: repo,
+			encoding: "utf8",
+			env: HERMETIC_GIT_ENV,
+		});
+		assert.equal(gpgRan(repo), true, "fixture premise: plain git log runs the configured gpg program");
+		rmSync(path.join(repo, "gpg.log"), { force: true });
+		// The injected -c overrides win over both repository settings.
+		const formatted = await runValidated("log", ["-1", "--format=%H", head], repo);
+		assert.equal(formatted.ok, true, formatted.text);
+		assert.equal(formatted.text.trim(), head);
+		assert.equal(gpgRan(repo), false, "log.showSignature must be overridden");
+		const plain = await runValidated("log", ["-1", head], repo);
+		assert.equal(plain.ok, true, plain.text);
+		assert.equal(gpgRan(repo), false, "format.pretty must be overridden");
+		const shown = await runValidated("show", ["-1", "--format=%H", head], repo);
+		assert.equal(shown.ok, true, shown.text);
+		assert.equal(gpgRan(repo), false);
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
 test("integration: format presets and every allowlisted specifier expand in real git", async () => {
 	const repo = makeHistoryRepo();
 	const head = gitSync(["rev-parse", "HEAD"], repo).trim();
 	try {
-		for (const preset of FORMAT_PRESETS) {
+		for (const preset of PRETTY_PRESETS) {
 			const result = await runValidated("log", ["-1", `--format=${preset}`], repo);
 			assert.equal(result.ok, true, `${preset}: ${result.text}`);
 		}
-		for (const specifier of ALLOWED_SPECIFIERS) {
+		for (const specifier of FORMAT_SPECIFIERS) {
 			const result = await runValidated("log", ["-1", `--format=${specifier}`], repo);
 			assert.equal(result.ok, true, `${specifier}: ${result.text}`);
 		}
