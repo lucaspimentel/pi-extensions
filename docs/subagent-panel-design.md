@@ -185,6 +185,18 @@ Effects:
   satisfy it, and an override file that omits `role` inherits `internal` by name
   (see the precedence rule above), so only a deliberate `role: delegate` breaks.
 
+### Malformed agent files
+
+Agent loading isolates frontmatter parsing and field processing per file. A
+parse failure reports `[subagent] could not parse agent <path>; file ignored`
+through the existing diagnostic sink and skips that file, without exposing the
+parser error or any file contents. This applies to every scope and to bundled,
+user, and project files. In particular, a project-only request still reads user
+files for judge resolution, but an unrelated malformed user file cannot abort
+its discovery, listing, or dispatch. Names come from frontmatter rather than
+filenames, so skipping a malformed override may leave a lower-precedence
+definition available; no shadowed name is inferred from the filename.
+
 ## Config
 
 New `panels` key in `~/.pi/agent/subagent.json`, alongside the existing

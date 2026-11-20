@@ -129,6 +129,36 @@ test("user agents override bundled agents by name and are reported as user", asy
 	);
 });
 
+test("malformed user YAML does not block project listing, dispatch, or user-scope judging", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		const userDir = path.join(agentDir, "agents");
+		fs.mkdirSync(userDir, { recursive: true });
+		fs.writeFileSync(path.join(userDir, "broken.md"), '---\nname: [SECRET_TEST_TOKEN\n---\n');
+		declaredAgent(path.join(cwd, ".pi", "agents"), "localbot", "read");
+		declaredAgent(userDir, "custom-judge", "read", "role: internal\n");
+		panelConfig(agentDir, { panelists: [{ agent: "localbot", model: "p/a" }], judge: { agent: "custom-judge", model: "p/judge" } });
+		const warnings: string[] = [];
+		setDiagnosticSink((reason) => warnings.push(reason));
+		const recording = installRecordingSpawn((spawn) => emitAnswer(spawn, "answer"));
+		try {
+			const h = makeHarness({ guard: true, tools: ["read"] });
+			const listing = await runList(h, cwd, { agentScope: "project" });
+			assert.ok(listing.structuredContent?.agents.some((a) => a.name === "localbot"));
+			const single = await runSubagent(h, cwd, { agent: "localbot", task: "x", agentScope: "project" });
+			assert.notEqual(single.isError, true);
+			const panel = await runSubagent(h, cwd, { panel: "pair", task: "x", agentScope: "project" });
+			assert.equal(panel.isError, false);
+			assert.equal((panel.details as any).mergedOutput, "answer");
+			assert.equal(recording.spawns.length, 3, "single, panelist, and user-scope judge dispatch");
+			assert.ok(warnings.some((reason) => reason.includes("broken.md")));
+			assert.equal(warnings.some((reason) => reason.includes("SECRET_TEST_TOKEN")), false);
+		} finally {
+			recording.restore();
+			setDiagnosticSink(null);
+		}
+	});
+});
+
 test("project agents appear only when the scope includes them", async () => {
 	await withIsolatedAgents(async (cwd) => {
 		writeAgent(path.join(cwd, ".pi", "agents"), "localbot", "A project-local agent.");

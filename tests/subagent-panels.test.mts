@@ -62,6 +62,23 @@ function agent(dir: string, name: string, frontmatter = "", body = "Replacement 
 	fs.writeFileSync(path.join(dir, `${name}.md`), `---\nname: ${name}\ndescription: Replacement description.\n${frontmatter}---\n${body}\n`);
 }
 
+for (const scope of ["user", "project", "both"] as const) {
+	test(`malformed agent YAML is isolated without leaking its contents: ${scope}`, () => {
+		fixture((f) => {
+			const badPath = path.join(f.user, "unrelated.md");
+			fs.writeFileSync(badPath, '---\nname: [SECRET_TEST_TOKEN\n---\n');
+			agent(f.user, "valid-user");
+			agent(f.project, "valid-project");
+			const discovery = f.discover(scope);
+			assert.ok(discovery.agents.some((a) => a.name === "scout"), "bundled agents survive");
+			assert.equal(discovery.agents.some((a) => a.name === "valid-user"), scope !== "project");
+			assert.equal(discovery.agents.some((a) => a.name === "valid-project"), scope !== "user");
+			assert.deepEqual(f.warnings, [[`[subagent] could not parse agent ${badPath}; file ignored`]]);
+			assert.equal(JSON.stringify(f.warnings).includes("SECRET_TEST_TOKEN"), false);
+		});
+	});
+}
+
 for (const raw of [undefined, {}]) {
 	test(`empty panel configuration: ${JSON.stringify(raw)}`, () => {
 		assert.deepEqual(parsePanels(raw), { panels: [], ignoredPanels: [] });

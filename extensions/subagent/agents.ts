@@ -146,22 +146,27 @@ function loadAgentsFromDir(dir: string, source: AgentSource): LoadedAgentConfig[
 			continue;
 		}
 
-		const { frontmatter, body } = parseFrontmatter<AgentFrontmatter>(content);
+		try {
+			const { frontmatter, body } = parseFrontmatter<AgentFrontmatter>(content);
 
-		if (typeof frontmatter.name !== "string" || typeof frontmatter.description !== "string") {
-			continue;
+			if (typeof frontmatter.name !== "string" || typeof frontmatter.description !== "string") {
+				continue;
+			}
+
+			agents.push({
+				name: frontmatter.name,
+				role: frontmatter.role === "delegate" || frontmatter.role === "internal" ? frontmatter.role : undefined,
+				description: frontmatter.description,
+				tools: parseToolList(frontmatter.tools),
+				model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
+				systemPrompt: body,
+				source,
+				filePath,
+			});
+		} catch {
+			// Parser errors can contain file contents; report only the path.
+			reportDiagnostic(`[subagent] could not parse agent ${filePath}; file ignored`);
 		}
-
-		agents.push({
-			name: frontmatter.name,
-			role: frontmatter.role === "delegate" || frontmatter.role === "internal" ? frontmatter.role : undefined,
-			description: frontmatter.description,
-			tools: parseToolList(frontmatter.tools),
-			model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
-			systemPrompt: body,
-			source,
-			filePath,
-		});
 	}
 
 	return agents;

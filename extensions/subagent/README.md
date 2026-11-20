@@ -243,6 +243,13 @@ panelists and merges the answers with a judge agent. Presets live in
   report `Critical` / `Warnings` / `Suggestions` and the merge follows the review
   findings format described below.
 
+Agent files with malformed YAML are skipped with a path-only diagnostic through
+that same warning sink, so one bad file cannot abort discovery, listing, or
+dispatch, even when the file is read only for user-scope judge resolution.
+Parser messages and file contents are never included. Agent names come from
+frontmatter, not filenames: skipping a malformed override may leave its bundled
+or lower-precedence definition available.
+
 What a call does:
 
 - Panelists spawn in parallel (4 concurrent) with their own `--model`, their
