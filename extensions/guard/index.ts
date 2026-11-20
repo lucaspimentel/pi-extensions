@@ -27,6 +27,7 @@ import { classifyAction } from "./policy/classifier.ts";
 import { addToConfigScope, effectiveAllowSuggestion, readGrantSuggestion } from "./policy/suggest.ts";
 import { parseReadRootInput, parseShellRuleLines, planAllowSave, planDenyRules, validateShellAllowSave, validateShellSave } from "./policy/save.ts";
 import { runExecutionPrompt, runReadGrantPrompt, runWriteEditPrompt, type PromptFlowIO } from "./prompt-flow.ts";
+import { buildPromptRecord, promptActionFor, promptCallSubjects, promptCallText, PromptRefusalError, promptRefusal, recordedRefusal, refusalOutcomeFor, refusalReason, writePromptRecord, type PromptAction, type PromptOutcome, type PromptRecord, type PromptRecordBase } from "./prompt-record.ts";
 import { createGuardEditorStage, createGuardPickerStage } from "./ask-components.ts";
 import { ackWorkspaceLock, createSessionState, footerLabel, lockWorkspace, mapToolCallToGuardCall, profileEventPayload, profileChangeAllowed, setProfile, toPolicyState, type GuardSessionState } from "./policy/state.ts";
 import { constraintFromParse, INHERIT_ENV, INHERITANCE_VERSION, parseInheritance, type InheritanceConstraint, type InheritanceContract } from "./policy/inheritance.ts";
@@ -137,6 +138,8 @@ export default function guard(pi: ExtensionAPI) {
 	// Once-per-session notice for an unavailable bash parser (host shell then
 	// fails closed to a prompt on every command).
 	let shellAstNotified = false;
+	// Once-per-session notice for a failed prompt record (see recordPrompt).
+	let promptRecordWarned = false;
 
 	function getAnnotations(name: string): ToolAnnotations | undefined {
 		if (annotationSnapshot === null) annotationSnapshot = pi.getAllTools().map((t) => ({ name: t.name, annotations: t.annotations }));
@@ -322,9 +325,9 @@ export default function guard(pi: ExtensionAPI) {
 	 * epoch, availability, unresolved teardown, and cwd compatibility.
 	 */
 	function assertDialogCurrent(rt: GuardRuntime, epoch: number, ctx: ExtensionContext, cwd: string, expired: string): void {
-		if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw new Error(expired);
+		if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw promptRefusal("expired", expired);
 		rt.assertAvailable();
-		if (rt.policy.cwd !== cwd || ctx.cwd !== cwd) throw new Error("guard cwd changed; awaiting session replacement");
+		if (rt.policy.cwd !== cwd || ctx.cwd !== cwd) throw promptRefusal("expired", "guard cwd changed; awaiting session replacement");
 	}
 	function configSignature(cfg: ResolvedGuardConfig): string {
 		const { warnings: _warnings, ...policy } = cfg as ResolvedGuardConfig & { warnings?: string[] };
@@ -421,6 +424,7 @@ export default function guard(pi: ExtensionAPI) {
 			pinNotifier.reset();
 			projectPinKeysNotified = false;
 			shellAstNotified = false;
+			promptRecordWarned = false;
 		}
 		if (runtime) {
 			dialogs.invalidate("approval expired after a session replacement");
@@ -522,24 +526,53 @@ export default function guard(pi: ExtensionAPI) {
 		// block on deny, approval dialog on prompt. Everything else stays
 		// observe-only. Captured outside the try so failures fail closed.
 		const enforceWriteEdit = !owned && (event.toolName.toLowerCase() === "write" || event.toolName.toLowerCase() === "edit");
+		// Also outside the try: the codemode origin, so the record of a failure
+		// that happens before any decision can still carry it.
+		const nested = callIsNested(event.toolCallId, event.parentToolCallId);
+		let decided: (() => PromptRecordBase) | null = null;
 		try {
 			const input = (event.input ?? {}) as Record<string, unknown>;
 			const policy = policyFor(ctx);
 			const mapped = mappedCall(event.toolName, input);
-			const nested = callIsNested(event.toolCallId, event.parentToolCallId);
 			const analysis = await analysisFor(mapped.call);
 			// No classifier or dialog here for owned tools: execute is authoritative.
 			const decision = owned ? decide({ ...policy, interactive: ctx.hasUI }, mapped.call, analysis) : await decisionFor(event.toolName, input, ctx, policy, analysis);
 			const labeled = withCodemodeOrigin(decision, nested);
 			// Pathless local writes (memory_write, scratchpad, ...) stay observe-only.
 			const enforced = enforceWriteEdit && mapped.call.kind === "local-write" && mapped.call.path !== undefined;
+			// Built inside the record's try, never here.
+			const base = (): PromptRecordBase => ({
+				tool: event.toolName, class: mapped.cls, kind: mapped.call.kind, action: promptActionFor(labeled.action),
+				subjects: promptCallSubjects(mapped.call, null, analysis), display: promptCallText(mapped.call), reason: labeled.reason,
+				profile: sessionProfile(), fromCodemode: nested, toolCallId: event.toolCallId,
+			});
+			decided = base;
 			pi.events.emit("guard:decision", { toolName: event.toolName, class: mapped.cls, call: mapped.call, ...labeled, enforcement: owned || enforced, fromCodemode: nested });
 			if (debugEnabled) notify(ctx, `[guard ${owned || enforced ? "enforce" : "observe"}] ${event.toolName}: ${labeled.action} (${labeled.reason})`);
-			if (owned && (labeled.action === "deny" || runtime?.teardownFailure)) return { block: true, reason: runtime?.teardownFailure ?? labeled.reason };
-			if (enforced && runtime) return await enforceLocalWrite(runtime, event.toolName, input, ctx, labeled);
+			if (owned && (labeled.action === "deny" || runtime?.teardownFailure)) {
+				// A teardown failure blocks an otherwise allowed call; a prompt collapsed
+				// by finalize() is the headless deny; everything else is a policy deny.
+				const blocked = runtime?.teardownFailure ?? labeled.reason;
+				const outcome: PromptOutcome = runtime?.teardownFailure ? "expired" : labeled.nonInteractive ? "headless-deny" : "deny";
+				recordPrompt(ctx, () => buildPromptRecord(base(), outcome, { reason: blocked }));
+				return { block: true, reason: blocked };
+			}
+			if (enforced && runtime) return await enforceLocalWrite(runtime, event.toolName, input, ctx, labeled, event.toolCallId, nested);
 		} catch (err) {
-			if (owned) return { block: true, reason: `guard: authorization failed closed: ${String(err)}` };
-			if (enforceWriteEdit) return { block: true, reason: `guard: write/edit authorization failed closed: ${String(err)}` };
+			// Fail closed first, then record: the record is best effort and must never
+			// change the block reason or whether the call is blocked at all.
+			const fallback = (): PromptRecordBase => {
+				let cls = "unknown";
+				let kind = "unknown";
+				try {
+					const retry = mappedCall(event.toolName, (event.input ?? {}) as Record<string, unknown>);
+					cls = retry.cls;
+					kind = retry.call.kind;
+				} catch { /* an unmappable tool is still named by the record */ }
+				return { tool: event.toolName, class: cls, kind, subjects: [], display: "", reason: refusalReason(err), profile: sessionProfile(), fromCodemode: nested, toolCallId: event.toolCallId };
+			};
+			if (owned) { recordRefusal(ctx, decided ?? fallback, err); return { block: true, reason: `guard: authorization failed closed: ${String(err)}` }; }
+			if (enforceWriteEdit) { recordRefusal(ctx, decided ?? fallback, err); return { block: true, reason: `guard: write/edit authorization failed closed: ${String(err)}` }; }
 			// Observation errors never block unrelated tools.
 		}
 	});
@@ -549,8 +582,46 @@ export default function guard(pi: ExtensionAPI) {
 		catch { return { content: [{ type: "text" as const, text: "Search result suppressed by guard: unable to safely filter masked files." }], details: undefined, isError: true }; }
 	});
 
+	/**
+	 * Abort of the owning operation: a refusal with no answer, classified as a
+	 * cancellation by whichever surface catches it.
+	 */
 	function assertCallActive(signal?: AbortSignal): void {
-		if (signal?.aborted) throw new Error("guard: call aborted; nothing saved or executed");
+		if (signal?.aborted) throw promptRefusal("cancelled", "guard: call aborted; nothing saved or executed");
+	}
+	// ── Prompt records ───────────────────────────────────────────────────────
+	// One custom session entry per interactive prompt and per refusal (design:
+	// docs/guard-design.md "Prompt records"). Ledger only: a record never
+	// authorizes, denies, or changes a block reason, and a write failure is
+	// swallowed behind at most one warning per session. Every payload is built
+	// inside writePromptRecord's try, because building is as fallible as
+	// appending, and nothing on this path awaits.
+	/** Best-effort append of one record. */
+	function recordPrompt(ctx: ExtensionContext, build: () => PromptRecord): void {
+		if (writePromptRecord(build, (customType, data) => pi.appendEntry(customType, data))) return;
+		if (promptRecordWarned) return;
+		promptRecordWarned = true;
+		notify(ctx, "guard: could not record a prompt entry in this session; enforcement is unaffected", "warning");
+	}
+	/**
+	 * Record the refusal an error represents. The error's own base wins over the
+	 * fallback when it carries one, and an error whose entry was already written
+	 * (the terminal throw after a denial answer) records nothing.
+	 */
+	function recordRefusal(ctx: ExtensionContext, fallback: () => PromptRecordBase, error: unknown): void {
+		const outcome = refusalOutcomeFor(error);
+		if (outcome === null) return;
+		const base = error instanceof PromptRefusalError && error.base ? error.base : fallback;
+		recordPrompt(ctx, () => buildPromptRecord(base(), outcome, { reason: refusalReason(error) }));
+	}
+	/** The profile a decision was taken under; "unknown" before initialization. */
+	function sessionProfile(): string {
+		return state?.profile ?? "unknown";
+	}
+	/** Record one post-answer refusal and return the block it produces. */
+	function blockWithRecord(ctx: ExtensionContext, base: () => PromptRecordBase, reason: string, dialogMs?: number): { block: true; reason: string } {
+		recordPrompt(ctx, () => buildPromptRecord(base(), "error", { reason, dialogMs }));
+		return { block: true, reason };
 	}
 	/**
 	 * Enforce one write/edit decision for a non-owned tool (settled 2026-10-16
@@ -565,19 +636,39 @@ export default function guard(pi: ExtensionAPI) {
 	 * mirroring authorize. Subagent children run with -p (print mode), so the
 	 * ctx.hasUI check covers the child contract: prompts deny.
 	 */
-	async function enforceLocalWrite(rt: GuardRuntime, toolName: string, input: Record<string, unknown>, ctx: ExtensionContext, decision: Decision): Promise<{ block: true; reason: string } | undefined> {
+	async function enforceLocalWrite(rt: GuardRuntime, toolName: string, input: Record<string, unknown>, ctx: ExtensionContext, decision: Decision, toolCallId: string, nested: boolean): Promise<{ block: true; reason: string } | undefined> {
+		// Lazy record fields: derived only when a record is actually written, so
+		// the allow path does no extra work. The payload is built inside the
+		// record's own try.
+		const base = (reasonText: string): PromptRecordBase => {
+			const mapping = mappedCall(toolName, input);
+			return {
+				tool: toolName, class: mapping.cls, kind: mapping.call.kind, action: promptActionFor(decision.action),
+				subjects: promptCallSubjects(mapping.call, null, null), display: promptCallText(mapping.call), reason: reasonText,
+				profile: sessionProfile(), fromCodemode: nested, toolCallId,
+			};
+		};
 		rt.assertAvailable();
 		const epoch = rt.epoch;
 		const cwd = rt.policy.cwd;
-		if (decision.action === "deny") return { block: true, reason: `guard: ${decision.reason}` };
+		if (decision.action === "deny") {
+			const reasonText = `guard: ${decision.reason}`;
+			recordPrompt(ctx, () => buildPromptRecord(base(reasonText), decision.nonInteractive ? "headless-deny" : "deny", { reason: reasonText }));
+			return { block: true, reason: reasonText };
+		}
 		if (decision.action === "allow") return undefined;
-		if (!ctx.hasUI) return { block: true, reason: "guard: headless write/edit prompts deny" };
+		if (!ctx.hasUI) {
+			const reasonText = "guard: headless write/edit prompts deny";
+			recordPrompt(ctx, () => buildPromptRecord(base(reasonText), "headless-deny", { reason: reasonText }));
+			return { block: true, reason: reasonText };
+		}
 		const mapped = mappedCall(toolName, input);
 		if (mapped.call.kind !== "local-write" || mapped.call.path === undefined) return undefined;
 		const policy = policyFor(ctx);
 		const offerSwitch = state?.profile === "default"
 			&& pathInsideWriteRoots(mapped.call.path, policy.config)
 			&& !makeIsProtectedPath(policy.config)(mapped.call.path);
+		const started = Date.now();
 		const outcome = await dialogs.run({}, async (dialogSignal) => {
 			dialogSignal.throwIfAborted();
 			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
@@ -594,25 +685,55 @@ export default function guard(pi: ExtensionAPI) {
 			return result;
 		});
 		// The lease has been released: the switch transition below can no longer
-		// cancel its own dialog.
-		if (outcome.kind === "allow-once") return undefined;
+		// cancel its own dialog. Every answer is one record; the dialog time
+		// covers the whole lease and never the classifier that preceded it.
+		const dialogMs = Date.now() - started;
+		if (outcome.kind === "allow-once") {
+			recordPrompt(ctx, () => buildPromptRecord(base(decision.reason), "allow-once", { dialogMs }));
+			return undefined;
+		}
 		if (outcome.kind === "deny-once") {
+			recordPrompt(ctx, () => buildPromptRecord(base(decision.reason), "deny-once", { dialogMs }));
 			deliverSteering(outcome.steering, undefined, rt, epoch, cwd);
 			return { block: true, reason: "guard: write/edit denied" };
 		}
 		// switch-to-allow-edits: land the rung through the same transition path
 		// as the profile commands (inherited restrictions are honored), then
 		// approve the current call. A refused or failed transition denies the call.
-		if (rt !== runtime || epoch !== rt.epoch || !state || !config || rt.teardownFailure) throw new Error("guard: approval expired after a policy change");
+		recordPrompt(ctx, () => buildPromptRecord(base(decision.reason), "switch-profile", { dialogMs, switchedTo: "allow-edits" }));
+		if (rt !== runtime || epoch !== rt.epoch || !state || !config || rt.teardownFailure) throw promptRefusal("expired", "guard: approval expired after a policy change", () => base(decision.reason));
 		const next = { ...state };
 		const applied = setProfile(next, "allow-edits");
-		if (!applied.ok) return { block: true, reason: `guard: ${applied.notice}` };
+		if (!applied.ok) return blockWithRecord(ctx, () => base(decision.reason), `guard: ${applied.notice}`, dialogMs);
 		try {
 			await transition(next, config, ctx);
 			notify(ctx, "Profile: allow-edits (this session only)");
 			return undefined;
 		} catch (err) {
-			return { block: true, reason: `guard: profile transition failed; write/edit denied: ${String(err)}` };
+			return blockWithRecord(ctx, () => base(decision.reason), `guard: profile transition failed; write/edit denied: ${String(err)}`, dialogMs);
+		}
+	}
+	/**
+	 * authorize with this call's refusal recorded before the error propagates:
+	 * the prompt surface decides the outcome and the error carries the fields,
+	 * so every exit path (a policy deny, an abort, a stale approval, a dead
+	 * runtime) is ledgered exactly once, including the paths that throw from
+	 * inside the loop. The record is best effort and never changes the error.
+	 */
+	async function authorizeRecorded(rt: GuardRuntime, name: OwnedExecutor, id: string, input: Record<string, unknown>, ctx: ExtensionContext, analysis: ShellCommandAnalysis | null, signal?: AbortSignal): Promise<number> {
+		const nested = callIsNested(id);
+		try {
+			return await authorize(rt, name, input, ctx, analysis, signal, nested, id);
+		} catch (err) {
+			recordRefusal(ctx, () => {
+				const mapping = mappedCall(name, input);
+				return {
+					tool: name, class: mapping.cls, kind: mapping.call.kind,
+					subjects: promptCallSubjects(mapping.call, null, analysis), display: promptCallText(mapping.call),
+					reason: refusalReason(err), profile: sessionProfile(), fromCodemode: nested, toolCallId: id,
+				};
+			}, err);
+			throw err;
 		}
 	}
 	/**
@@ -648,7 +769,19 @@ export default function guard(pi: ExtensionAPI) {
 	 * headless deny, and the approval dialog title) carries the codemode origin
 	 * suffix.
 	 */
-	async function authorize(rt: GuardRuntime, name: OwnedExecutor, input: Record<string, unknown>, ctx: ExtensionContext, analysis: ShellCommandAnalysis | null, signal?: AbortSignal, nested = false): Promise<number> {
+	async function authorize(rt: GuardRuntime, name: OwnedExecutor, input: Record<string, unknown>, ctx: ExtensionContext, analysis: ShellCommandAnalysis | null, signal?: AbortSignal, nested = false, toolCallId = ""): Promise<number> {
+		// Record fields for this call, derived once: neither the call nor the
+		// analysis changes across the save/deny loop's iterations, and the action
+		// comes from the iteration's own decision (see refusalBase). Both are
+		// pure; the payload is still built inside the record's try.
+		const mappedOnce = mappedCall(name, input);
+		const callSubjects = promptCallSubjects(mappedOnce.call, null, analysis);
+		const callDisplay = promptCallText(mappedOnce.call);
+		const baseFor = (action: PromptAction | undefined, reason: string): PromptRecordBase => ({
+			tool: name, class: mappedOnce.cls, kind: mappedOnce.call.kind, action,
+			subjects: callSubjects, display: callDisplay, reason,
+			profile: sessionProfile(), fromCodemode: nested, toolCallId,
+		});
 		for (;;) {
 			rt.assertAvailable();
 			assertCallActive(signal);
@@ -656,14 +789,17 @@ export default function guard(pi: ExtensionAPI) {
 			const decision = await decisionFor(name, input, ctx, policyFor(ctx), analysis);
 			assertCallActive(signal);
 			rt.assertAvailable();
-			if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw new Error("guard: approval expired after a policy change");
 			const labeled = withCodemodeOrigin(decision, nested);
-			if (labeled.action === "deny") throw new Error(`guard: ${labeled.reason}`);
+			// Attached to every refusal from here on, so the recording catch names
+			// the decision this call was refused on (authorizeRecorded owns it).
+			const refusalBase = (): PromptRecordBase => baseFor(promptActionFor(labeled.action), labeled.reason);
+			if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
+			if (labeled.action === "deny") throw promptRefusal(labeled.nonInteractive ? "headless-deny" : "deny", `guard: ${labeled.reason}`, refusalBase);
 			if (labeled.action === "allow") return epoch;
 			// Defensive: decisionFor collapses non-interactive prompts to deny, so
 			// this is unreachable today; kept labeled for consistency if that
 			// ever changes.
-			if (!ctx.hasUI) throw new Error(`guard: headless prompts deny${originSuffix(nested)}`);
+			if (!ctx.hasUI) throw promptRefusal("headless-deny", `guard: headless prompts deny${originSuffix(nested)}`, refusalBase);
 		const policy = policyFor(ctx);
 		const mapped = mappedCall(name, input).call;
 		// bash is sandbox-only now (sandboxed profiles allow, host-execution
@@ -699,6 +835,9 @@ export default function guard(pi: ExtensionAPI) {
 		// execution happen after the lease is released, so the transition this
 		// choice triggers cannot cancel its own dialog.
 		const cwd = rt.policy.cwd;
+		// The whole dialog lease is what `dialogMs` measures; the classifier that
+		// preceded it and the commits that follow it are excluded.
+		const startedDialog = Date.now();
 		const outcome = await dialogs.run({ signal }, async (dialogSignal) => {
 			dialogSignal.throwIfAborted();
 			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
@@ -734,13 +873,21 @@ export default function guard(pi: ExtensionAPI) {
 			return result;
 		});
 		assertCallActive(signal);
-		if (outcome.kind === "allow-once") return epoch;
+		const dialogMs = Date.now() - startedDialog;
+		if (outcome.kind === "allow-once") {
+			recordPrompt(ctx, () => buildPromptRecord(refusalBase(), "allow-once", { dialogMs }));
+			return epoch;
+		}
 		if (outcome.kind === "deny-once") {
+			recordPrompt(ctx, () => buildPromptRecord(refusalBase(), "deny-once", { dialogMs }));
 			deliverSteering(outcome.steering, signal, rt, epoch, cwd);
-			throw new Error("guard: execution denied");
+			throw recordedRefusal("guard: execution denied");
 		}
 		if (outcome.kind === "save-allow") {
 			if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
+			// The answer is one record; every later refusal in this branch is a
+			// separate one, and the saved rules and scope say what it persisted.
+			recordPrompt(ctx, () => buildPromptRecord(refusalBase(), "save-allow", { dialogMs, rules: outcome.rules, scope: outcome.scope }));
 			// Validator by plan kind: per-step allows a partial selection (every
 			// selected step must resolve allow); whole-call keeps the complete-call
 			// contract. Applied at all three checkpoints (in-dialog validation runs
@@ -752,15 +899,15 @@ export default function guard(pi: ExtensionAPI) {
 			// (never a regenerated suggestion) against the latest effective policy.
 			const diskConfig = loadConfig(ctx.cwd);
 			const latestCheck = validateReviewed(policyWithSessionOverlays(ctx, diskConfig));
-			if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the selected steps (${latestCheck.error}); nothing saved or executed`);
+			if (!latestCheck.ok) throw promptRefusal("refused-rules", `guard: the reviewed rules no longer authorize the selected steps (${latestCheck.error}); nothing saved or executed`, refusalBase);
 			const target = { ...diskConfig, hostBash: { ...diskConfig.hostBash, allow: dedupe([...diskConfig.hostBash.allow, ...outcome.rules]) } };
 			let owningEpoch = epoch;
 			await transition({ ...state! }, target, ctx, { epoch, beforeCommit: () => {
 				assertCallActive(signal);
-				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or executed");
+				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw promptRefusal("expired", "guard: config changed while waiting; nothing saved or executed", refusalBase);
 				const fresh = loadConfig(ctx.cwd);
 				const freshCheck = validateReviewed(policyWithSessionOverlays(ctx, fresh));
-				if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the selected steps (${freshCheck.error}); nothing saved`);
+				if (!freshCheck.ok) throw promptRefusal("refused-rules", `guard: the reviewed rules no longer authorize the selected steps (${freshCheck.error}); nothing saved`, refusalBase);
 				// Record the owning commit epoch synchronously (no await between the
 				// final checks and the write) for the steering/execution ownership checks.
 				owningEpoch = rt.epoch;
@@ -778,24 +925,26 @@ export default function guard(pi: ExtensionAPI) {
 			// proceeds on a stale owner: recheck the owner captured at commit.
 			assertCallActive(signal);
 			if (rt !== runtime || rt.teardownFailure || rt.epoch !== owningEpoch || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
-				throw new Error("guard: approval expired after a policy change");
+				throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
 			}
 			rt.assertAvailable();
 			const freshDecision = await decisionFor(name, input, ctx, freshPolicy, analysis);
 			assertCallActive(signal);
 			if (rt !== runtime || rt.teardownFailure || rt.epoch !== owningEpoch || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
-				throw new Error("guard: approval expired after a policy change");
+				throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
 			}
 			if (freshDecision.action === "allow") return rt.epoch;
-			if (freshDecision.action === "deny") throw new Error(`guard: ${withCodemodeOrigin(freshDecision, nested).reason}`);
+			if (freshDecision.action === "deny") throw promptRefusal(freshDecision.nonInteractive ? "headless-deny" : "deny", `guard: ${withCodemodeOrigin(freshDecision, nested).reason}`, () => baseFor("deny", withCodemodeOrigin(freshDecision, nested).reason));
 			continue;
 		}
 		if (outcome.kind === "session-allow") {
 			if (!shellCall) throw new Error("guard: only host-shell calls support rule grants");
+			// The grant answer is one record; what the commit then does is another.
+			recordPrompt(ctx, () => buildPromptRecord(refusalBase(), "session-allow", { dialogMs, rules: outcome.rules, scope: "session" }));
 			// Re-resolve the granting workspace at commit time; an unresolvable
 			// identity fails closed (nothing granted, nothing executed).
 			const scope = resolveWorkspaceScope(ctx.cwd);
-			if (!scope) throw new Error("guard: the workspace identity could not be resolved; nothing granted or executed");
+			if (!scope) throw promptRefusal("error", "guard: the workspace identity could not be resolved; nothing granted or executed", refusalBase);
 			// The captured workspace is the grant's scope for the rest of this branch;
 			// the commit barrier re-resolves it and rejects any change, so validation
 			// and installation can never describe different directories.
@@ -820,16 +969,16 @@ export default function guard(pi: ExtensionAPI) {
 			// written, or compared here.
 			const diskConfig = loadConfig(ctx.cwd);
 			const latestCheck = validateReviewed(policyWithSessionOverlays(ctx, diskConfig));
-			if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the selected steps (${latestCheck.error}); nothing granted or executed`);
-			if (!sameWorkspace()) throw new Error("guard: the workspace changed while waiting; nothing granted or executed");
+			if (!latestCheck.ok) throw promptRefusal("refused-rules", `guard: the reviewed rules no longer authorize the selected steps (${latestCheck.error}); nothing granted or executed`, refusalBase);
+			if (!sameWorkspace()) throw promptRefusal("expired", "guard: the workspace changed while waiting; nothing granted or executed", refusalBase);
 			let owningEpoch = epoch;
 			await transition({ ...state! }, diskConfig, ctx, { epoch, beforeCommit: () => {
 				assertCallActive(signal);
-				if (!sameWorkspace()) throw new Error("guard: the workspace changed while waiting; nothing granted or executed");
-				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing granted or executed");
+				if (!sameWorkspace()) throw promptRefusal("expired", "guard: the workspace changed while waiting; nothing granted or executed", refusalBase);
+				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw promptRefusal("expired", "guard: config changed while waiting; nothing granted or executed", refusalBase);
 				const fresh = loadConfig(ctx.cwd);
 				const freshCheck = validateReviewed(policyWithSessionOverlays(ctx, fresh));
-				if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer authorize the selected steps (${freshCheck.error}); nothing granted`);
+				if (!freshCheck.ok) throw promptRefusal("refused-rules", `guard: the reviewed rules no longer authorize the selected steps (${freshCheck.error}); nothing granted`, refusalBase);
 				// Record the owning commit epoch, then install the reviewed rules at the
 				// successful commit boundary (no await between the final checks and the
 				// mutation). The transition derives its post-commit policy afterwards,
@@ -849,36 +998,39 @@ export default function guard(pi: ExtensionAPI) {
 			// execution never proceeds on a stale owner.
 			assertCallActive(signal);
 			if (rt !== runtime || rt.teardownFailure || rt.epoch !== owningEpoch || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
-				throw new Error("guard: approval expired after a policy change");
+				throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
 			}
 			rt.assertAvailable();
 			const freshDecision = await decisionFor(name, input, ctx, freshPolicy, analysis);
 			assertCallActive(signal);
 			if (rt !== runtime || rt.teardownFailure || rt.epoch !== owningEpoch || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
-				throw new Error("guard: approval expired after a policy change");
+				throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
 			}
 			if (freshDecision.action === "allow") return rt.epoch;
-			if (freshDecision.action === "deny") throw new Error(`guard: ${withCodemodeOrigin(freshDecision, nested).reason}`);
+			if (freshDecision.action === "deny") throw promptRefusal(freshDecision.nonInteractive ? "headless-deny" : "deny", `guard: ${withCodemodeOrigin(freshDecision, nested).reason}`, () => baseFor("deny", withCodemodeOrigin(freshDecision, nested).reason));
 			continue;
 		}
 		if (outcome.kind === "switch-profile") {
 			if (!shellCall) throw new Error("guard: only host-shell calls support the profile switch");
+			// The switch answer is one record; a refused or failed transition is a
+			// separate refusal, exactly like the save paths.
+			recordPrompt(ctx, () => buildPromptRecord(refusalBase(), "switch-profile", { dialogMs, switchedTo: outcome.profile }));
 			assertCallActive(signal);
 			if (rt !== runtime || epoch !== rt.epoch || !state || !config || rt.teardownFailure || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
-				throw new Error("guard: approval expired after a policy change");
+				throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
 			}
 			const next = { ...state };
 			const applied = setProfile(next, outcome.profile);
 			// Defensive: the offer filter only proposes rungs profileChangeAllowed
 			// accepts, so a refusal here means the offer and the commit disagree.
-			if (!applied.ok) throw new Error(`guard: ${applied.notice}`);
+			if (!applied.ok) throw promptRefusal("error", `guard: ${applied.notice}`, refusalBase);
 			// The lease has been released, so this transition cannot cancel its own
 			// dialog. No persistence or command options: like the write/edit switch,
 			// the rungs share worker mode and the launch policy key.
 			try {
 				await transition(next, config, ctx);
 			} catch (err) {
-				throw new Error(`guard: profile transition failed; call denied: ${String(err)}`);
+				throw promptRefusal("error", `guard: profile transition failed; call denied: ${String(err)}`, refusalBase);
 			}
 			notify(ctx, `Profile: ${outcome.profile} (this session only)`);
 			// Re-decide the ORIGINAL call under the post-transition policy before
@@ -886,39 +1038,42 @@ export default function guard(pi: ExtensionAPI) {
 			// fresh decision confirms that after any concurrent change.
 			assertCallActive(signal);
 			if (rt !== runtime || rt.teardownFailure || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
-				throw new Error("guard: approval expired after a policy change");
+				throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
 			}
 			const freshDecision = await decisionFor(name, input, ctx, policyFor(ctx), analysis);
 			assertCallActive(signal);
 			if (rt !== runtime || rt.teardownFailure || rt.policy.cwd !== cwd || ctx.cwd !== cwd) {
-				throw new Error("guard: approval expired after a policy change");
+				throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
 			}
 			if (freshDecision.action === "allow") return rt.epoch;
-			if (freshDecision.action === "deny") throw new Error(`guard: ${withCodemodeOrigin(freshDecision, nested).reason}`);
-			throw new Error(`guard: the call still prompts under profile ${outcome.profile}; denied`);
+			if (freshDecision.action === "deny") throw promptRefusal(freshDecision.nonInteractive ? "headless-deny" : "deny", `guard: ${withCodemodeOrigin(freshDecision, nested).reason}`, () => baseFor("deny", withCodemodeOrigin(freshDecision, nested).reason));
+			throw promptRefusal("error", `guard: the call still prompts under profile ${outcome.profile}; denied`, refusalBase);
 		}
 		if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
 		// save-deny: the steering was collected inside the flow before the commit.
+		// Its answer is one record; the lines that follow may refuse it.
+		recordPrompt(ctx, () => buildPromptRecord(refusalBase(), "save-deny", { dialogMs, rules: outcome.rules, scope: outcome.scope }));
 		const diskConfig = loadConfig(ctx.cwd);
 		const latestCheck = validateShellSave(shellCall, policyWithSessionOverlays(ctx, diskConfig), "deny", outcome.rules, analysis);
-		if (!latestCheck.ok) throw new Error(`guard: the reviewed rules no longer deny the complete call (${latestCheck.error}); nothing saved`);
+		if (!latestCheck.ok) throw promptRefusal("refused-rules", `guard: the reviewed rules no longer deny the complete call (${latestCheck.error}); nothing saved`, refusalBase);
 		const target = { ...diskConfig, hostBash: { ...diskConfig.hostBash, deny: dedupe([...diskConfig.hostBash.deny, ...outcome.rules]) } };
 		let owningEpoch = epoch;
 		await transition({ ...state! }, target, ctx, { epoch, beforeCommit: () => {
 			assertCallActive(signal);
-			if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or executed");
+			if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw promptRefusal("expired", "guard: config changed while waiting; nothing saved or executed", refusalBase);
 			const fresh = loadConfig(ctx.cwd);
 			const freshCheck = validateShellSave(shellCall, policyWithSessionOverlays(ctx, fresh), "deny", outcome.rules, analysis);
-			if (!freshCheck.ok) throw new Error(`guard: the reviewed rules no longer deny the complete call (${freshCheck.error}); nothing saved`);
+			if (!freshCheck.ok) throw promptRefusal("refused-rules", `guard: the reviewed rules no longer deny the complete call (${freshCheck.error}); nothing saved`, refusalBase);
 			owningEpoch = rt.epoch;
 			addToConfigScope(outcome.scope, { hostBash: { deny: outcome.rules } }, { cwd: ctx.cwd });
 			return loadConfig(ctx.cwd);
 		} });
 		announceSave(ctx, outcome.scope, "deny", outcome.rules.length);
 		// Committed: keep the saved rule; suppress steering if ownership went
-		// invalid between the commit and the handoff.
+		// invalid between the commit and the handoff. The denial is already
+		// recorded as the save-deny answer, so this throw records nothing.
 		deliverSteering(outcome.steering, signal, rt, owningEpoch, cwd);
-		throw new Error("guard: execution denied");
+		throw recordedRefusal("guard: execution denied");
 	}
 	}
 
@@ -930,7 +1085,7 @@ export default function guard(pi: ExtensionAPI) {
 		const rt = runtime;
 		if (!rt) throw new Error("guard session state not initialized");
 		const analysis = await analysisFor(mappedCall(name, input).call);
-		const epoch = await authorize(rt, name, input, ctx, analysis, signal, callIsNested(id));
+		const epoch = await authorizeRecorded(rt, name, id, input, ctx, analysis, signal);
 		const outcome = await rt.run(async (policy) => {
 			if (rt !== runtime || rt.epoch !== epoch) return false;
 			const decision = await decisionFor(name, input, ctx, policy, analysis);
@@ -1009,11 +1164,11 @@ export default function guard(pi: ExtensionAPI) {
 		execute: async (id, input, signal, _onUpdate, ctx) => {
 			const rt = runtime;
 			if (!rt) throw new Error("guard session state not initialized");
-			const epoch = await authorize(rt, name, input, ctx, null, signal, callIsNested(id));
+			const epoch = await authorizeRecorded(rt, name, id, input, ctx, null, signal);
 			const outcome = await rt.run(async (policy) => rt === runtime && rt.epoch === epoch && (await decisionFor(name, input, ctx, policy)).action === "allow", (execution) => rt.worker(name, input, execution), signal);
 			let data = outcome.result as Record<string, any>;
 			if (data.status === "permission_needed" && typeof data.permissionPath === "string") {
-				const grant = await requestReadGrant(rt, name, String(data.permissionPath), ctx, signal, "worker", callIsNested(id));
+				const grant = await requestReadGrant(rt, name, String(data.permissionPath), ctx, signal, "worker", id);
 				// Project the typed outcome into the existing worker response fields
 				// (diagnostic/stateLost/stateLostReason), byte-identical to the former
 				// handleReadGrant payloads. An empty refusal diagnostic is the no-UI
@@ -1048,8 +1203,30 @@ export default function guard(pi: ExtensionAPI) {
 			const nested = callIsNested(id);
 			const rt = runtime;
 			if (!rt) throw new Error("guard session state not initialized");
-			if (signal?.aborted) return errorResult("No read grant: call aborted.");
 			const requestPath = typeof input.path === "string" ? input.path : "";
+			// Record fields for a refusal on this path: every permission refusal
+			// below is recorded before its error result is returned, and the grant
+			// dialog itself records its answers. A malformed request is input
+			// validation, not a permission decision, so it stays unrecorded.
+			const readBase = (reason: string, action?: PromptAction): PromptRecordBase => {
+				const mapping = mappedCall("request_read_access", { path: requestPath });
+				return {
+					tool: "request_read_access", class: mapping.cls, kind: mapping.call.kind, action,
+					subjects: promptCallSubjects(mapping.call, null, null), display: promptCallText(mapping.call),
+					reason, profile: sessionProfile(), fromCodemode: nested, toolCallId: id,
+				};
+			};
+			/** Record one refusal, then return its error result. */
+			const refuse = (outcome: PromptOutcome, text: string, action?: PromptAction): AgentToolResult<any> => {
+				recordPrompt(ctx, () => buildPromptRecord(readBase(text, action), outcome));
+				return errorResult(text);
+			};
+			/** The same for a failure whose outcome the error itself decides. */
+			const refuseError = (error: unknown, text: string, action?: PromptAction): AgentToolResult<any> => {
+				recordRefusal(ctx, () => readBase(text, action), error);
+				return errorResult(text);
+			};
+			if (signal?.aborted) return refuse("cancelled", "No read grant: call aborted.");
 			// The read-grant primitives resolve rather than reject relative input,
 			// so the entry enforces isAbsolute itself: no dialog, no policy
 			// evaluation, and the request is judged only on the resolved location.
@@ -1066,18 +1243,18 @@ export default function guard(pi: ExtensionAPI) {
 			// still at its captured epoch, AND operational; assertAvailable rejects
 			// a disposed runtime), and cwd, mirroring assertDialogCurrent's checks
 			// and authorize's own post-await epoch recheck.
-			if (signal?.aborted) return errorResult("No read grant: call aborted.");
-			if (rt !== runtime || rt.epoch !== epoch || rt.teardownFailure) return errorResult("No read grant: the guard session changed; nothing was approved or saved.");
-			try { rt.assertAvailable(); } catch (err) { return errorResult(`No read grant: ${err instanceof Error ? err.message : String(err)}`); }
-			if (rt.policy.cwd !== cwd || ctx.cwd !== cwd) return errorResult("No read grant: guard cwd changed; awaiting session replacement.");
+			if (signal?.aborted) return refuse("cancelled", "No read grant: call aborted.");
+			if (rt !== runtime || rt.epoch !== epoch || rt.teardownFailure) return refuse("expired", "No read grant: the guard session changed; nothing was approved or saved.");
+			try { rt.assertAvailable(); } catch (err) { return refuseError(err, `No read grant: ${err instanceof Error ? err.message : String(err)}`, promptActionFor(decision.action)); }
+			if (rt.policy.cwd !== cwd || ctx.cwd !== cwd) return refuse("expired", "No read grant: guard cwd changed; awaiting session replacement.", promptActionFor(decision.action));
 			// Decision contract: deny refuses with the cause, no dialog; prompt
 			// with no UI refuses with an actionable diagnostic; prompt with UI and
 			// allow both open the dialog (the consent surface, never an automatic
 			// grant); classifier failures and indeterminate verdicts fail closed.
-			if (decision.action === "deny") return errorResult(`No read grant: guard denied the request (${withCodemodeOrigin(decision, nested).reason}). No interpreter workers were stopped and no previously run code was replayed.`);
-			if (decision.action === "prompt" && /classifier (call failed|had no verdict)/.test(decision.reason)) return errorResult("No read grant: guard could not classify this request, so it fails closed. Retry later, or have the user add a covering read root to the guard config.");
-			if (decision.action === "prompt" && !ctx.hasUI) return errorResult("No read grant: no interactive UI is available to approve read access. Ask the user in an interactive session, or have the user add a covering read root to the guard config.");
-			const outcome = await requestReadGrant(rt, "request_read_access", requestPath, ctx, signal, "tool", nested);
+			if (decision.action === "deny") return refuse(decision.nonInteractive ? "headless-deny" : "deny", `No read grant: guard denied the request (${withCodemodeOrigin(decision, nested).reason}). No interpreter workers were stopped and no previously run code was replayed.`, "deny");
+			if (decision.action === "prompt" && /classifier (call failed|had no verdict)/.test(decision.reason)) return refuse("error", "No read grant: guard could not classify this request, so it fails closed. Retry later, or have the user add a covering read root to the guard config.", "prompt");
+			if (decision.action === "prompt" && !ctx.hasUI) return refuse("headless-deny", "No read grant: no interactive UI is available to approve read access. Ask the user in an interactive session, or have the user add a covering read root to the guard config.", "prompt");
+			const outcome = await requestReadGrant(rt, "request_read_access", requestPath, ctx, signal, "tool", id, promptActionFor(decision.action));
 			if (outcome.kind === "granted") {
 				const savedTo = outcome.savedTo ? ` Saved to ${outcome.savedTo}.` : "";
 				return { content: [{ type: "text", text: `Read-only grant added for ${outcome.root} (${outcome.scope} scope).${savedTo} Running interpreter workers were stopped; their state was discarded; previously run code was not replayed.` }], details: undefined };
@@ -1117,13 +1294,31 @@ export default function guard(pi: ExtensionAPI) {
 	 * (the request came from a nested tool call), the dialog title carries the
 	 * codemode origin suffix.
 	 */
-	async function requestReadGrant(rt: GuardRuntime, requesterName: string, requestPath: string, ctx: ExtensionContext, signal: AbortSignal | undefined, caller: "worker" | "tool", nested: boolean): Promise<GrantOutcome> {
-		if (signal?.aborted) return { kind: "refused", diagnostic: "No read grant: call aborted." };
+	async function requestReadGrant(rt: GuardRuntime, requesterName: string, requestPath: string, ctx: ExtensionContext, signal: AbortSignal | undefined, caller: "worker" | "tool", toolCallId: string, action?: PromptAction): Promise<GrantOutcome> {
+		const nested = callIsNested(toolCallId);
+		// Record fields for one read-grant decision: the subject is the requested
+		// path, `tool` is whoever asked (a worker or the request tool), and
+		// `class`/`kind` describe that requester. The dialog's own answers are
+		// recorded as they resolve; the catch below records everything else.
+		const base = (reason: string, actionOverride?: PromptAction): PromptRecordBase => {
+			const mapping = mappedCall(requesterName, { path: requestPath });
+			return {
+				tool: requesterName, class: mapping.cls, kind: mapping.call.kind, action: actionOverride ?? action,
+				subjects: [requestPath], display: requestPath,
+				reason, profile: sessionProfile(), fromCodemode: nested, toolCallId,
+			};
+		};
+		/** Record one refusal, then return its diagnostic. */
+		const refuse = (outcome: PromptOutcome, diagnostic: string): GrantOutcome => {
+			recordPrompt(ctx, () => buildPromptRecord(base(diagnostic), outcome));
+			return { kind: "refused", diagnostic };
+		};
+		if (signal?.aborted) return refuse("cancelled", "No read grant: call aborted.");
 		if (!ctx.hasUI) {
 			// The tool gets an actionable diagnostic; the worker path keeps the
 			// silent passthrough (an empty diagnostic means no field changes).
-			if (caller === "tool") return { kind: "refused", diagnostic: `No read grant: no interactive UI is available to approve read access to ${requestPath}. Ask the user in an interactive session, or have the user add a covering read root to the guard config.` };
-			return { kind: "refused", diagnostic: "" };
+			if (caller === "tool") return refuse("headless-deny", `No read grant: no interactive UI is available to approve read access to ${requestPath}. Ask the user in an interactive session, or have the user add a covering read root to the guard config.`);
+			return refuse("headless-deny", "");
 		}
 		const epoch = rt.epoch;
 		const cwd = rt.policy.cwd;
@@ -1136,7 +1331,9 @@ export default function guard(pi: ExtensionAPI) {
 			const suggestedRoot = validateReadGrant(readGrantSuggestion(requestPath, ctx.cwd), ctx.cwd);
 			// Same narrow lease as approvals: validation, the complete interaction,
 			// validation. Session grants stay one-stage; persistent saves open the
-			// root editor and preview through the prompt flow.
+			// root editor and preview through the prompt flow. `dialogMs` is this
+			// lease only.
+			const startedDialog = Date.now();
 			const outcome = await dialogs.run({ signal }, async (dialogSignal) => {
 				dialogSignal.throwIfAborted();
 				assertDialogCurrent(rt, epoch, ctx, cwd, "Read grant expired; nothing saved or replayed.");
@@ -1160,11 +1357,20 @@ export default function guard(pi: ExtensionAPI) {
 				return result;
 			});
 			assertCallActive(signal);
-			if (outcome.kind === "no-grant") return { kind: "refused", diagnostic: `No read grant: the request was not approved.${capabilityNote}` };
+			const dialogMs = Date.now() - startedDialog;
+			if (outcome.kind === "no-grant") return refuse("no-grant", `No read grant: the request was not approved.${capabilityNote}`);
 			if (outcome.kind === "deny") {
+				recordPrompt(ctx, () => buildPromptRecord(base(`Read-only access requested: ${requestPath}`), "deny-once", { dialogMs }));
 				deliverSteering(outcome.steering, signal, rt, epoch, cwd);
 				return { kind: "denied" };
 			}
+			// The grant answer is one record, including its root; a commit that then
+			// fails is a separate refusal (the catch below).
+			recordPrompt(ctx, () => buildPromptRecord(base(`Read-only access requested: ${requestPath}`), outcome.kind === "grant-session" ? "grant-session" : "save-root", {
+				dialogMs,
+				scope: outcome.kind === "grant-session" ? "session" : outcome.scope,
+				root: outcome.kind === "save-root" ? outcome.root : suggestedRoot,
+			}));
 			rt.assertAvailable();
 			// Revalidate the ACTUAL edited root (or the suggested root for a session
 			// grant, which has no editor) against the request path before committing.
@@ -1174,7 +1380,7 @@ export default function guard(pi: ExtensionAPI) {
 			const target = { ...diskConfig, readRoots: [...new Set([...diskConfig.readRoots, root])] };
 			await transition({ ...state! }, target, ctx, { epoch, beforeCommit: () => {
 				assertCallActive(signal);
-				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw new Error("guard: config changed while waiting; nothing saved or replayed");
+				if (configSignature(loadConfig(ctx.cwd)) !== configSignature(diskConfig)) throw promptRefusal("expired", "guard: config changed while waiting; nothing saved or replayed", () => base("guard: config changed while waiting; nothing saved or replayed"));
 				if (outcome.kind === "save-root") validateReadRootSave(root, requestPath, ctx.cwd);
 				else validateReadGrant(root, ctx.cwd);
 				if (outcome.kind === "grant-session") sessionReadRoots = [...new Set([...sessionReadRoots, root])];
@@ -1184,7 +1390,13 @@ export default function guard(pi: ExtensionAPI) {
 			return outcome.kind === "grant-session"
 				? { kind: "granted", scope: "session", root }
 				: { kind: "granted", scope: outcome.scope, root, savedTo: configDestination(ctx, outcome.scope) };
-		} catch (err) { return { kind: "refused", diagnostic: `Read grant refused: ${String(err)}${capabilityNote}` }; }
+		} catch (err) {
+			// The diagnostic text is unchanged; the record's outcome comes from the
+			// error (an expired lease, a cancellation, or a failure).
+			const diagnostic = `Read grant refused: ${String(err)}${capabilityNote}`;
+			recordRefusal(ctx, () => base(diagnostic), err);
+			return { kind: "refused", diagnostic };
+		}
 	}
 
 	// Step 5: load-time presence. Answered unconditionally as soon as this

@@ -90,6 +90,13 @@ export type DecisionAction = "allow" | "prompt" | "deny" | "classify";
 export interface Decision {
 	action: DecisionAction;
 	reason: string;
+	/**
+	 * Set only by finalize() when a prompt cell collapsed to deny because the
+	 * session has no UI. Structured so consumers (the prompt-record ledger)
+	 * never have to match the wording, and it survives withCodemodeOrigin's
+	 * spread because the suffix is appended to a COPY of reason.
+	 */
+	nonInteractive?: true;
 	/** Explicit ask rules never offer saving an allow rule. */
 	provenance?: "explicit-ask" | "fallback";
 	/** Raw rule identifier when an explicit shell rule decided this result. */
@@ -807,9 +814,9 @@ function finalize(
 	policy: PolicyState,
 	action: "allow" | "prompt" | "deny",
 	reason: string,
-): { action: "allow" | "prompt" | "deny"; reason: string } {
+): { action: "allow" | "prompt" | "deny"; reason: string; nonInteractive?: true } {
 	if (action === "prompt" && !policy.interactive) {
-		return { action: "deny", reason: `${reason}; non-interactive prompt collapses to deny` };
+		return { action: "deny", reason: `${reason}; non-interactive prompt collapses to deny`, nonInteractive: true };
 	}
 	return { action, reason };
 }

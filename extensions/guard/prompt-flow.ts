@@ -88,8 +88,12 @@ function notExactNoteFor(text: string, references: readonly string[]): string | 
 /** Display names for the tools guard prompts for (OwnedExecutors plus pwsh routing). */
 const TOOL_LABELS: Record<string, string> = { bash: "Bash", host_bash: "Bash", pwsh: "Pwsh", python: "Python", node: "Node" };
 
-/** Match pi-tool-permissions' old prompt: full command truncated at 200 chars. */
-function truncateCommand(text: string): string {
+/**
+ * Match pi-tool-permissions' old prompt: full command truncated at 200 chars.
+ * Also the cap for prompt records (prompt-record.ts), so the ledger shows
+ * exactly what the dialog showed.
+ */
+export function truncateCommand(text: string): string {
 	return text.length > 200 ? `${text.slice(0, 197)}...` : text;
 }
 
