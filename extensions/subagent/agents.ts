@@ -208,26 +208,34 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 		const role = agent.role ?? agentMap.get(agent.name)?.role ?? "delegate";
 		agentMap.set(agent.name, { ...agent, role });
 	};
-	for (const agent of loadAgentsFromDir(bundledDir, "bundled")) merge(agent);
-
+	// Every directory is read once: the judge check needs the bundled and user
+	// agents even when the requested scope excludes the user dir.
+	const bundledAgents = loadAgentsFromDir(bundledDir, "bundled");
+	const userAgents = loadAgentsFromDir(userDir, "user");
+	const projectAgents = scope !== "user" && projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
+	for (const agent of bundledAgents) merge(agent);
 	if (scope !== "project") {
-		for (const agent of loadAgentsFromDir(userDir, "user")) merge(agent);
+		for (const agent of userAgents) merge(agent);
 	}
 	if (scope !== "user" && projectAgentsDir) {
-		for (const agent of loadAgentsFromDir(projectAgentsDir, "project")) merge(agent);
+		for (const agent of projectAgents) merge(agent);
 	}
 
 	const configPath = path.join(getAgentDir(), "subagent.json");
 	const raw = readConfiguration(configPath);
 	const configuredModels = applyModelOverrides(agentMap, raw, configPath);
 	const result = parsePanels((raw as { panels?: unknown } | null)?.panels);
-	// The judge resolves at user scope only, so a project agent can never satisfy
-	// it; report against the same set the run-time lookup sees.
-	const nonProjectAgents = new Map(
-		Array.from(agentMap.values())
-			.filter((agent) => agent.source !== "project")
-			.map((agent) => [agent.name, agent]),
-	);
+	// The judge resolves at user scope only, so its check has to see bundled and
+	// user agents even when the request's scope excluded the user dir: reading
+	// them here is not a scope widening, because the run-time lookup reads them
+	// too.
+	const judgeAgents = new Map<string, AgentConfig>();
+	const mergeJudgeAgent = (agent: LoadedAgentConfig) => {
+		const role = agent.role ?? judgeAgents.get(agent.name)?.role ?? "delegate";
+		judgeAgents.set(agent.name, { ...agent, role });
+	};
+	for (const agent of bundledAgents) mergeJudgeAgent(agent);
+	for (const agent of userAgents) mergeJudgeAgent(agent);
 	for (const panel of result.panels) {
 		for (const agentName of new Set(panel.panelists.map((panelist) => panelist.agent))) {
 			if (!agentMap.has(agentName)) {
@@ -237,7 +245,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 			}
 		}
 		if (panel.judge) {
-			const judgeAgent = nonProjectAgents.get(panel.judge.agent);
+			const judgeAgent = judgeAgents.get(panel.judge.agent);
 			if (!judgeAgent) {
 				panel.diagnostics.push(
 					`[subagent] panels.${JSON.stringify(panel.name)}: no agent named ${JSON.stringify(panel.judge.agent)} for "judge.agent"; preset retained`,

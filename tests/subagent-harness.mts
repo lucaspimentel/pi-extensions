@@ -22,7 +22,12 @@ export interface ToolResult {
 		agentScope: string;
 		projectAgentsDir: string | null;
 		agents: Array<{ name: string; role: string; source: string; description: string; model: string | null; tools: string[] }>;
-		panels: Array<{ name: string; panelists: Array<{ agent: string; model: string }>; judge: { agent: string; model: string | null } | null }>;
+		panels: Array<{
+			name: string;
+			panelists: Array<{ agent: string; model: string }>;
+			judge: { agent: string; model: string | null } | null;
+			diagnostics: string[];
+		}>;
 		ignoredPanels: Array<{ name: string; reason: string }>;
 	};
 	isError?: boolean;

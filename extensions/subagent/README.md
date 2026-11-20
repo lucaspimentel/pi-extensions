@@ -219,16 +219,22 @@ panelists and merges the answers with a judge agent. Presets live in
   ignored, and `subagent_list` reports the resolved `panels` config and the
   `ignoredPanels` reasons.
 - `judge` is optional, `{agent?, model}`. `agent` defaults to the bundled
-  `judge`; `model` resolves in this order: the inline `judge` argument, the
-  preset's `judge.model`, the per-agent override keyed by the resolved judge
-  agent name (`models.judge` for the default agent, `models.judge-review` for a
-  review preset), then the dispatching session's model. `judge: null` skips the
-  merge and returns labeled per-model sections; omitting `judge` keeps the merge.
-  A `model:` pin in a judge agent override is not part of that chain.
+  `judge`, and a judge given inline is merged field by field over the preset's,
+  so naming only the agent keeps the preset's judge model. `model` resolves in
+  this order: the inline `judge` model, the preset's `judge.model`, the per-agent
+  override keyed by the resolved judge agent name (`models.judge` for the default
+  agent, `models.judge-review` for a review preset), then the dispatching
+  session's model. That override comes from the same user-scope lookup that
+  resolves the agent, so a judge agent that exists only in the user agents dir
+  keeps its pin under any `agentScope`. `judge: null` skips the merge and returns
+  labeled per-model sections; omitting `judge` keeps the merge. A `model:` pin in
+  a judge agent override is not part of that chain.
 - A named judge agent must be `role: internal` and resolves from bundled and user
   agents only, so a project `judge.md` never shadows it. Pointing `judge.agent`
   at a delegate agent is refused with the fix in the error. The retired `models`
-  array is refused by name rather than ignored.
+  array and the retired `agent` override are refused by name rather than ignored,
+  because both used to configure a panel and silently running the preset's own
+  panelists would hide the change.
 - The flat pre-2026-11-18 preset form (`agent`, `models`, or a `judge` string) is
   refused with a migration reason naming the new shape.
 - `/panel <preset> <text>` is a prompt template that calls the tool with the
@@ -337,6 +343,6 @@ Each command name lists its stages, so what a command skips is visible:
 - `/implement-review <task>`: worker → reviewer → worker. Implements, reviews, applies feedback; no scouting or planning, for well-specified tasks
 - `/scout-plan-implement-review <task>`: scout → planner → worker → reviewer → worker. Full pipeline: context, plan, implement, review, apply feedback; the review-and-fix loop runs unattended (no human checkpoint between implement and fix)
 - `/scout-grill-plan-implement <task>`: scout → grill → planner → main agent. Scouts as a subagent, interviews me about the design (the `grill-me` skill, falling back to the same loop inline) until the frontier is empty, plans as a subagent, then implements in the main session. Verification is not delegated: the only subagents are scout and planner, and implementation never runs as a `worker` child.
-- `/review-panel [<PR>] [focus]`: runs the `review` panel preset on one PR, the current branch's PR when no argument names one. Any text after a PR number or URL is extra review focus for the panel task. The panel fetches the PR itself and each reviewer reports a verdict; the merged result is reproduced as returned and no fixes are applied.
+- `/review-panel [<PR>] [focus]`: runs the `review` panel preset on one PR, the current branch's PR when no argument names one. Any text after a PR number or URL is extra review focus for the panel task. The panel fetches the PR itself, and the merge reports findings in the review findings format; the merged result is reproduced as returned and no fixes are applied.
 
 The first four run as subagent chains, passing output between steps via `{previous}`. `/scout-grill-plan-implement` is not a chain, because the interview and the implementation must run in the main session; it calls the `subagent` tool in single mode twice. `/review-panel` is not a chain either: it is one `subagent({panel, task})` call, so its reviewers run in parallel and a judge merges them.

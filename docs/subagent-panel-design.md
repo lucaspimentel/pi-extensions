@@ -211,12 +211,17 @@ per-agent `models` overrides:
   deduped by the `(agent, model)` pair with a warning, so the same model under
   two different agents is a legitimate second panelist; more than 4 entries is
   an error naming the cap, checked before deduplication.
-- `judge` optional, `{agent?, model}`. `agent` defaults to the bundled `judge`;
-  `model` resolves in this order: the inline `judge` argument, then this
-  preset's `judge.model`, then the per-agent override keyed by the resolved
-  judge agent name (`models.judge` for the default agent, `models.judge-review`
-  for a review preset), then the dispatching session's model. `judge: null`
-  skips the merge entirely and returns labeled per-panelist sections.
+- `judge` optional, `{agent?, model}`. `agent` defaults to the bundled `judge`; a
+  judge given inline is merged field by field over the preset's, so naming only
+  the agent keeps the preset's judge model and naming only the model keeps the
+  preset's judge agent. `model` resolves in this order: the inline `judge` model,
+  then this preset's `judge.model`, then the per-agent override keyed by the
+  resolved judge agent name (`models.judge` for the default agent,
+  `models.judge-review` for a review preset), then the dispatching session's
+  model. The override comes from the same user-scope lookup that resolves the
+  agent, so a judge agent that exists only in the user agents dir keeps its pin
+  under any `agentScope`. `judge: null` skips the merge entirely and returns
+  labeled per-panelist sections.
 - Review presets name `judge-review` so the merge follows the findings format
   ("Merge contract"); leaving `judge` out keeps the generic `judge` merge.
 - The flat form is refused, not coerced: a preset with an `agent` key, a
@@ -274,9 +279,9 @@ New `subagent` parameters:
   without `panel`: a one-off pair with no preset is expressed with the new
   per-child `model` on a single task, a `tasks[]` entry, or a `chain[]` step
   instead. The 4-entry cap applies to the effective list after overrides. The
-  retired `models` array is named explicitly rather than ignored, because the
-  schema no longer declares it and an extra property would otherwise run the
-  preset's own panelists silently.
+  retired `models` array and the retired `agent` override are named explicitly
+  rather than ignored, because the schema no longer declares them and an extra
+  property would otherwise run the preset's own panelists silently.
 - Each panelist entry resolves its own agent from the panel's `cwd` through the
   same discovery as every other agent (bundled, then user, then project, per
   `agentScope`), so naming a project agent requires `agentScope: "both"` or
@@ -318,16 +323,19 @@ New `subagent` parameters:
 text output and always present, as empty arrays when nothing is configured.
 Existing shape assertions change accordingly:
 
-- `panels: [{ name, panelists, judge }]` reports the **resolved** configuration:
-  every panelist entry carries its effective agent name (the default
-  `panelist` filled in), and `judge` is `{ agent, model }` with the effective
+- `panels: [{ name, panelists, judge, diagnostics }]` reports the **resolved**
+  configuration: every panelist entry carries its effective agent name (the
+  default `panelist` filled in), `judge` is `{ agent, model }` with the effective
   judge agent and the configured model, `null` when that model is unset, or
-  `null` for the whole field when the merge is disabled. The judge model chain
-  is not resolved here: it ends at the dispatching session's model, which a
-  listing cannot know, so an unset model is reported as `null` rather than
-  guessed. File-level whitespace and explicit-omission detail is therefore not
-  recoverable from this field; a preset whose panelist agent does not resolve is
-  still listed, with the name as written and a diagnostic reason.
+  `null` for the whole field when the merge is disabled, and `diagnostics`
+  carries this preset's discovery reasons (an unresolvable panelist agent, a
+  judge agent that is missing or not internal, collapsed duplicates). Those
+  reasons are the same strings the session reports, so the warning and the tool
+  result cannot drift. The judge model chain is not resolved here: it ends at
+  the dispatching session's model, which a listing cannot know, so an unset model
+  is reported as `null` rather than guessed. File-level whitespace and
+  explicit-omission detail is not recoverable from this field; a preset whose
+  panelist agent does not resolve is still listed, with the name as written.
 - `ignoredPanels: [{ name, reason }]` reports the presets dropped at parse time.
   `reason` is the same string the load path reports, so the user-visible warning
   and the tool result cannot drift (see "Config").
@@ -461,7 +469,8 @@ merge changes. The body of `agents/judge-review.md` is the contract:
   panelists. The panelist headings map onto the severities
   (`Critical` to CRITICAL, `Warnings` to HIGH or MEDIUM by stated impact,
   `Suggestions` to LOW), and a heading that contradicts the stated impact is
-  regraded.- `## Conflicts`: only when panelists disagree about whether something is a
+  regraded.
+- `## Conflicts`: only when panelists disagree about whether something is a
   defect; those items stay out of the findings list and each line names who claims
   what and the evidence on each side, leaving the disagreement open when it cannot
   be settled. A disagreement about severity alone is not a conflict: it stays in
@@ -806,7 +815,15 @@ Called by the implementer, open to revision:
   on the terminal row the cursor occupies, which is the editor: it reads as if
   the user had typed it, and the per-request catalog rebuild repeated it on every
   request. Modes without a UI keep the console (and are not deduplicated), which
-  is also what pi's own extension runner does with its diagnostics.
+  is also what pi's own extension runner does with its diagnostics. The reported
+  set is cleared when the sink is installed, because `/new`, `/resume`, and
+  `/fork` start a new session in the same process.
+- (2026-11-18) The retired `agent` parameter is refused with `panel` for the same
+  reason the retired `models` array is: it used to be the panel's panelist-agent
+  override, so ignoring it would silently run the preset's own panelists.
+- (2026-11-18) A panel's `diagnostics` travel in the `subagent_list` payload, and
+  a per-entry error names the position the caller wrote even after a duplicate
+  collapse (the original index travels with the deduplicated entry).
 
 ## Deferred
 

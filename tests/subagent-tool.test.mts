@@ -282,6 +282,8 @@ test("mode, model, and agent preflight errors are actionable and spawn nothing w
 				[{ agent: "scout", task: "x", judge: null }, /judge require panel/, "single"],
 				[{ agent: "scout", task: "x", models: ["p/a"] }, /Parameter models is no longer accepted\. Pass panelists/, "single"],
 				[{ panel: "pair", task: "x", models: ["p/a"] }, /Parameter models is no longer accepted\. Pass panelists/, "panel"],
+				[{ panel: "pair", task: "x", agent: "scout" }, /Parameter agent is only valid in single mode; name each panelist's agent in panelists/, "panel"],
+				[{ panel: "pair", task: "x", panelists: [{ model: "p/a" }, { model: "p/a" }, { model: "p/unknown" }] }, /panelists\[2\]\.model.*Usable models/, "panel"],
 				[{ panel: "pair", task: "x", model: "p/a" }, /use panelists for panel/, "panel"],
 				[{ panel: "missing", task: "x" }, /Unknown panel.*Configured presets: internal, pair/, "panel"],
 				[{ panel: "pair", task: "x", panelists: [] }, /panelists must contain 1 to 4 entries/, "panel"],
@@ -352,6 +354,54 @@ test("session start routes every panel diagnostic to the UI once, never to the c
 		assert.equal(notified[0][1], "warning");
 		assert.match(notified[0][0], /panelists" should contain 1 to 4 entries/);
 		assert.deepEqual(warnings, [], "nothing reaches the console while a UI sink is installed");
+
+		// A `/new`, `/resume`, or `/fork` runs `session_start` again in the same
+		// process, and the new session reports the reasons for itself.
+		for (const handler of h.handlers["session_start"] ?? []) {
+			await handler(
+				{ reason: "new_session" },
+				toolCtx(cwd, { hasUI: true, ui: { confirm: async () => true, notify: (message, type) => notified.push([message, type]) } }),
+			);
+		}
+		await runSubagent(h, cwd, { panel: "pair", task: "x" });
+		try {
+			assert.equal(notified.length, 2, "the reported set is cleared with the session");
+		} finally {
+			setDiagnosticSink(null);
+		}
+	});
+});
+
+test("a judge agent outside the request scope keeps its override and reports no missing-agent warning", async () => {
+	await withIsolatedAgents(async (cwd, agentDir) => {
+		// The judge always resolves at user scope, so a project-scoped request must
+		// still see the user-scope agent and its `models` override.
+		declaredAgent(path.join(agentDir, "agents"), "judge-review", "read", "role: internal\n");
+		configure(agentDir, {
+			models: { "judge-review": "review/id" },
+			panels: { pair: { panelists: [{ model: "p/a" }], judge: { agent: "judge-review" } } },
+		});
+		const notified: string[] = [];
+		const h = makeHarness({ guard: true, tools: ["read"] });
+		for (const handler of h.handlers["session_start"] ?? []) {
+			await handler(
+				{ reason: "startup" },
+				toolCtx(cwd, { hasUI: true, ui: { confirm: async () => true, notify: (message) => notified.push(message) } }),
+			);
+		}
+		const recording = installRecordingSpawn((spawn) => {
+			spawn.child.stdout.emit("data", assistantLine(isJudgeSpawn(spawn) ? "merged review" : "answer"));
+		});
+		try {
+			const result = await runSubagent(h, cwd, { panel: "pair", task: "x", agentScope: "project" }, { model: { provider: "session", id: "id" } });
+			assert.equal(result.isError, false);
+			assert.deepEqual((result.details?.panel as any).judge, { agent: "judge-review", model: "review/id" });
+			assert.equal(flag(recording.spawns.find(isJudgeSpawn)!.args, "--model"), "review/id");
+			assert.deepEqual(notified, [], "the user-scope judge agent is not reported as missing");
+		} finally {
+			recording.restore();
+			setDiagnosticSink(null);
+		}
 	});
 });
 
@@ -557,7 +607,12 @@ test("inline panel overrides normalize without mutating config and zero resolved
 			}
 			assert.deepEqual(JSON.parse(fs.readFileSync(path.join(agentDir, "subagent.json"), "utf8")), config);
 			assert.deepEqual((await runList(h, cwd)).structuredContent?.panels, [
-				{ name: "pair", panelists: [{ agent: "panelist", model: "p/a" }], judge: { agent: "judge", model: "p/judge" } },
+				{
+					name: "pair",
+					panelists: [{ agent: "panelist", model: "p/a" }],
+					judge: { agent: "judge", model: "p/judge" },
+					diagnostics: [],
+				},
 			]);
 		} finally { recording.restore(); }
 	});
@@ -570,11 +625,15 @@ test("judge metadata precedence is inline, preset, configured override, session 
 			if (isJudgeSpawn(spawn)) spawn.child.stdout.emit("data", assistantLine("judge answer"));
 		});
 		try {
-			for (const [models, presetJudge, inline, expected] of [
-				[{ judge: "pin/id" }, { agent: "judge", model: "preset/id" }, { model: "inline/id" }, "inline/id"],
-				[{ judge: "pin/id" }, { agent: "judge", model: "preset/id" }, undefined, "preset/id"],
-				[{ judge: "pin/id" }, undefined, undefined, "pin/id"],
-				[{}, undefined, undefined, "session/id"],
+			for (const [models, presetJudge, inline, expectedAgent, expectedModel] of [
+				[{ judge: "pin/id" }, { agent: "judge", model: "preset/id" }, { model: "inline/id" }, "judge", "inline/id"],
+				[{ judge: "pin/id" }, { agent: "judge", model: "preset/id" }, undefined, "judge", "preset/id"],
+				[{ judge: "pin/id" }, undefined, undefined, "judge", "pin/id"],
+				[{}, undefined, undefined, "judge", "session/id"],
+				// An inline judge merges field by field over the preset's, so naming only
+				// the agent keeps the preset's judge model and vice versa.
+				[{}, { agent: "judge-review", model: "preset/id" }, { agent: "judge" }, "judge", "preset/id"],
+				[{}, { agent: "judge", model: "preset/id" }, { agent: "judge-review" }, "judge-review", "preset/id"],
 			] as const) {
 				configure(agentDir, {
 					models,
@@ -583,28 +642,29 @@ test("judge metadata precedence is inline, preset, configured override, session 
 				const before = recording.spawns.length;
 				const result = await runSubagent(h, cwd, { panel: "pair", task: "x", judge: inline }, { model: { provider: "session", id: "id" } });
 				assert.equal(result.isError, false);
-				assert.deepEqual((result.details?.panel as any).judge, { agent: "judge", model: expected });
+				assert.deepEqual((result.details?.panel as any).judge, { agent: expectedAgent, model: expectedModel });
 				const judgeSpawn = recording.spawns.slice(before).find(isJudgeSpawn);
-				assert.ok(judgeSpawn, `judge spawned for ${expected}`);
-				assert.equal(flag(judgeSpawn.args, "--model"), expected);
+				assert.ok(judgeSpawn, `judge spawned for ${expectedModel}`);
+				assert.equal(flag(judgeSpawn.args, "--model"), expectedModel);
 			}
-			assert.equal(recording.spawns.length, 8, "one panelist plus one judge attempt per case");
+			assert.equal(recording.spawns.length, 12, "one panelist plus one judge attempt per case");
 			// A named judge agent carries its own override key, exactly as the default
 			// `judge` agent is pinned through `models.judge`.
 			configure(agentDir, {
 				models: { "judge-review": "review/id" },
 				panels: { pair: { panelists: [{ model: "p/a" }], judge: { agent: "judge-review" } } },
 			});
+			const reviewBefore = recording.spawns.length;
 			const review = await runSubagent(h, cwd, { panel: "pair", task: "x" }, { model: { provider: "session", id: "id" } });
 			assert.equal(review.isError, false);
 			assert.deepEqual((review.details?.panel as any).judge, { agent: "judge-review", model: "review/id" });
-			assert.equal(flag(recording.spawns.slice(8).find(isJudgeSpawn)!.args, "--model"), "review/id");
-			assert.equal(recording.spawns.length, 10);
+			assert.equal(flag(recording.spawns.slice(reviewBefore).find(isJudgeSpawn)!.args, "--model"), "review/id");
+			assert.equal(recording.spawns.length, 14);
 			configure(agentDir, { panels: { pair: { panelists: [{ model: "p/a" }] } } });
 			const rejected = await runSubagent(h, cwd, { panel: "pair", task: "x" }, { scopedModels, model: { provider: "unknown", id: "id" } });
 			assert.equal(rejected.isError, true);
 			assert.match(rejected.content[0].text, /judge\.model.*Usable models/);
-			assert.equal(recording.spawns.length, 10);
+			assert.equal(recording.spawns.length, 14);
 		} finally { recording.restore(); }
 	});
 });
@@ -796,9 +856,24 @@ test("listing reports resolved panelists and judges, unresolved agents, roles, a
 		const result = await runList(h, cwd);
 		const sc = result.structuredContent!;
 		assert.deepEqual(sc.panels, [
-			{ name: "z", panelists: [{ agent: "missing", model: "p/a" }], judge: { agent: "judge", model: null } },
-			{ name: "a", panelists: [{ agent: "panelist", model: "p/a" }], judge: null },
-			{ name: "reviewish", panelists: [{ agent: "judge-review", model: "p/a" }], judge: { agent: "judge-review", model: "p/judge" } },
+			{
+				name: "z",
+				panelists: [{ agent: "missing", model: "p/a" }],
+				judge: { agent: "judge", model: null },
+				// The discovery reasons travel with the panel: they are the same strings
+				// the session reports, so the warning and this payload cannot drift.
+				diagnostics: [
+					'[subagent] panels."z": duplicate panelists removed; preset retained',
+					'[subagent] panels."z": no agent named "missing"; preset retained',
+				],
+			},
+			{ name: "a", panelists: [{ agent: "panelist", model: "p/a" }], judge: null, diagnostics: [] },
+			{
+				name: "reviewish",
+				panelists: [{ agent: "judge-review", model: "p/a" }],
+				judge: { agent: "judge-review", model: "p/judge" },
+				diagnostics: [],
+			},
 		]);
 		assert.deepEqual(sc.ignoredPanels, [{ name: "bad", reason: '[subagent] panels."bad": preset should be an object' }]);
 		assert.deepEqual(result.details, sc);
