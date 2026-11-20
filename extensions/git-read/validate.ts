@@ -86,7 +86,7 @@ const VALUE_FLAG_FORMS: Record<GitSubcommand, string> = {
  * Preset names accepted for `--format=`/`--pretty=`; git resolves these
  * before it parses a custom format string.
  */
-const PRETTY_PRESETS = new Set(["oneline", "short", "medium", "full", "fuller", "email", "raw"]);
+export const PRETTY_PRESETS = new Set(["oneline", "short", "medium", "full", "fuller", "email", "raw"]);
 
 /**
  * The only `%` sequences a custom format string may contain, written as the
@@ -100,7 +100,7 @@ const PRETTY_PRESETS = new Set(["oneline", "short", "medium", "full", "fuller", 
  * keeps `--show-signature` off the allowlist; `%x`, `%C`, `%w(`, `%<(` and
  * `%>(` are absent because they emit raw bytes, colors, or padding.
  */
-const FORMAT_SPECIFIERS = new Set([
+export const FORMAT_SPECIFIERS = new Set([
 	"%%",
 	"%H",
 	"%h",
@@ -154,7 +154,7 @@ const FORMAT_SPECIFIERS = new Set([
 ]);
 
 /** `--date=` values git accepts; the free-form `format:` forms are excluded. */
-const DATE_FORMATS = new Set([
+export const DATE_FORMATS = new Set([
 	"default",
 	"relative",
 	"local",

@@ -18,7 +18,14 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { afterEach, mock, test } from "node:test";
 
-import { GLOBAL_OPTIONS, validateInvocation, type GitSubcommand } from "../extensions/git-read/validate.ts";
+import {
+	DATE_FORMATS,
+	FORMAT_SPECIFIERS,
+	GLOBAL_OPTIONS,
+	PRETTY_PRESETS,
+	validateInvocation,
+	type GitSubcommand,
+} from "../extensions/git-read/validate.ts";
 import {
 	INJECTED_ENV,
 	KILL_ESCALATION_MS,
@@ -504,62 +511,6 @@ function gpgRan(repo: string): boolean {
 	return existsSync(path.join(repo, "gpg.log"));
 }
 
-/** The allowlisted `%` sequences, written out independently of validate.ts. */
-const FORMAT_SPECIFIERS = [
-	"%%",
-	"%H",
-	"%h",
-	"%T",
-	"%t",
-	"%P",
-	"%p",
-	"%s",
-	"%f",
-	"%b",
-	"%B",
-	"%n",
-	"%d",
-	"%D",
-	"%m",
-	"%N",
-	"%e",
-	"%an",
-	"%aN",
-	"%ae",
-	"%aE",
-	"%al",
-	"%aL",
-	"%ad",
-	"%aD",
-	"%ar",
-	"%at",
-	"%ai",
-	"%aI",
-	"%as",
-	"%cn",
-	"%cN",
-	"%ce",
-	"%cE",
-	"%cl",
-	"%cL",
-	"%cd",
-	"%cD",
-	"%cr",
-	"%ct",
-	"%ci",
-	"%cI",
-	"%cs",
-	"%gd",
-	"%gD",
-	"%gs",
-	"%gN",
-	"%gE",
-	"%gn",
-	"%ge",
-];
-
-/** Preset names git resolves before parsing a custom format string. */
-const PRETTY_PRESETS = ["oneline", "short", "medium", "full", "fuller", "email", "raw"];
 
 test("integration: status succeeds and leaves the index byte-identical (--no-optional-locks)", async () => {
 	const repo = makeRepo();
@@ -779,14 +730,46 @@ test("integration: format presets and every allowlisted specifier expand in real
 			const result = await runValidated("log", ["-1", `--format=${preset}`], repo);
 			assert.equal(result.ok, true, `${preset}: ${result.text}`);
 		}
+		// git prints an unknown code literally and still exits 0, so exit status
+		// alone would not catch a wrong entry in the allowlist: every specifier must
+		// differ from its own literal text. Fields that are legitimately empty in
+		// this fixture (no notes, no reflog, no --left-right) still satisfy that.
 		for (const specifier of FORMAT_SPECIFIERS) {
 			const result = await runValidated("log", ["-1", `--format=${specifier}`], repo);
 			assert.equal(result.ok, true, `${specifier}: ${result.text}`);
+			assert.notEqual(result.text.trim(), specifier, `${specifier} was echoed literally, not expanded`);
 		}
-		const sha = await runValidated("log", ["-1", "--format=%H"], repo);
-		assert.equal(sha.text.trim(), head);
-		const author = await runValidated("log", ["-1", "--format=%an"], repo);
-		assert.equal(author.text.trim(), "Second Author");
+		// Deterministic expansions, compared exactly.
+		for (const [specifier, expected] of [
+			["%H", head],
+			["%s", "second subject"],
+			["%f", "second-subject"],
+			["%B", "second subject"],
+			["%an", "Second Author"],
+			["%aN", "Second Author"],
+			["%ae", "second@example.com"],
+			["%al", "second"],
+			["%cn", "Second Author"],
+			["%ce", "second@example.com"],
+			["%%", "%"],
+		] as Array<[string, string]>) {
+			const result = await runValidated("log", ["-1", `--format=${specifier}`], repo);
+			assert.equal(result.text.trim(), expected, `${specifier}: ${result.text}`);
+		}
+		// Hashes and dates vary per run, so those check their shape.
+		for (const [specifier, pattern] of [
+			["%h", /^[0-9a-f]{7,40}$/],
+			["%T", /^[0-9a-f]{40}$/],
+			["%t", /^[0-9a-f]+$/],
+			["%P", /^[0-9a-f]{40}$/],
+			["%at", /^\d+$/],
+			["%ct", /^\d+$/],
+			["%as", /^\d{4}-\d{2}-\d{2}$/],
+			["%cs", /^\d{4}-\d{2}-\d{2}$/],
+		] as Array<[string, RegExp]>) {
+			const result = await runValidated("log", ["-1", `--format=${specifier}`], repo);
+			assert.match(result.text.trim(), pattern, `${specifier}: ${result.text}`);
+		}
 		const composed = await runValidated("log", ["-1", "--format=%H%n%an%n%ad%n%s"], repo);
 		assert.equal(composed.ok, true, composed.text);
 		const lines = composed.text.trim().split("\n");
@@ -835,6 +818,13 @@ test("integration: config pretty aliases cannot smuggle a signature specifier", 
 test("integration: date and author values are honoured by real git", async () => {
 	const repo = makeHistoryRepo();
 	try {
+		// Every allowlisted date form must be accepted by git; a value git does
+		// not know exits non-zero, so this loop is what catches a bad enum entry.
+		for (const value of DATE_FORMATS) {
+			const accepted = await runValidated("log", ["-1", `--date=${value}`, "--format=%ad"], repo);
+			assert.equal(accepted.ok, true, `${value}: ${accepted.text}`);
+			assert.notEqual(accepted.text.trim(), "", `${value} produced no date`);
+		}
 		const iso = await runValidated("log", ["-1", "--date=iso", "--format=%ad"], repo);
 		assert.equal(iso.ok, true, iso.text);
 		assert.match(iso.text.trim(), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} /);
