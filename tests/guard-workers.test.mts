@@ -331,6 +331,22 @@ for (const worker of workers) {
 					assert.equal(protectedWrite.status, workspaceMode === "none" ? "ok" : "runtime_error", protectedWrite.diagnostic ?? "");
 					assert.equal(fs.readFileSync(path.join(f.projectDir, filename), "utf8"), workspaceMode === "none" ? "changed" : "protected");
 				}
+				// An ordinary (non-protected) workspace file. This is the worker half of
+				// the child read-only workspace rule: a `default` child's worker runs in
+				// `overlay` (workerMode maps the profile's rw to overlay), so its write
+				// succeeds in the sandbox but must never reach the host, while an
+				// explicit ro mount refuses the write outright.
+				const ordinaryWrite = await c.execute(write("worker-write.txt"), undefined, undefined);
+				if (workspaceMode === "none") {
+					assert.equal(ordinaryWrite.status, "ok", ordinaryWrite.diagnostic ?? "");
+					assert.equal(fs.readFileSync(path.join(f.projectDir, "worker-write.txt"), "utf8"), "changed");
+				} else if (workspaceMode === "ro") {
+					assert.equal(ordinaryWrite.status, "runtime_error", ordinaryWrite.diagnostic ?? "");
+					assert.equal(fs.existsSync(path.join(f.projectDir, "worker-write.txt")), false);
+				} else {
+					assert.equal(ordinaryWrite.status, "ok", ordinaryWrite.diagnostic ?? "");
+					assert.equal(fs.existsSync(path.join(f.projectDir, "worker-write.txt")), false, "an overlay write must not reach the host");
+				}
 				const network = worker.name === "python"
 					? `import socket\ns = socket.socket()\ns.settimeout(1)\ntry:\n    s.connect(('127.0.0.1', ${port}))\n    print('connected')\nexcept OSError:\n    print('blocked')\nfinally:\n    s.close()`
 					: `require('child_process').spawnSync(require('process').execPath, ['--max-old-space-size=64', '-e', ${JSON.stringify(`const s = require('net').connect(${port}, '127.0.0.1'); s.on('connect', () => {console.log('connected'); s.destroy()}); s.on('error', () => console.log('blocked')); s.setTimeout(1000, () => {console.log('blocked'); s.destroy()})`)}], {timeout: 3000}).stdout.toString()`;

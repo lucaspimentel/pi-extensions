@@ -112,6 +112,12 @@ export interface PolicyState {
 	workspaceLocked: boolean;
 	/** False in print/JSON mode: prompt collapses to deny. */
 	interactive: boolean;
+	/**
+	 * True in a subagent child (an inherited PI_GUARD_INHERIT constraint). Used
+	 * only to decide the bash workspace mode: a child whose write/edit gate
+	 * collapses to deny gets a read-only workspace (see bashWorkspaceMode).
+	 */
+	inherited: boolean;
 }
 
 /** The async classifier strategy injected into resolveDecision (auto profile). */
@@ -683,12 +689,16 @@ export function decideLocalWrite(call: Extract<GuardCall, { kind: "local-write" 
 	if (cell === "prompt") {
 		// default: every non-protected write/edit prompts, in-root or not. The
 		// dialog offers the switch to allow-edits for in-root targets.
-		return {
-			action: "prompt",
-			reason: pathInsideWriteRoots(call.path, config)
-				? "write/edit requires approval in the default profile"
-				: "write outside cwd and every write root",
-		};
+		const base = pathInsideWriteRoots(call.path, config)
+			? "write/edit requires approval in the default profile"
+			: "write outside cwd and every write root";
+		// A child's prompt has no UI to answer it, so the denial must be a real
+		// barrier: its sandboxed workspace is read-only (bashWorkspaceMode), and
+		// the reason says so, so the model does not route the write through bash.
+		if (childWriteDeniesWorkspace(policy)) {
+			return { action: "prompt", reason: `${base}; this subagent has no UI, so the write is denied and its sandboxed workspace is read-only: do not route the write through bash, and ask the parent session to switch to allow-edits or auto and re-dispatch` };
+		}
+		return { action: "prompt", reason: base };
 	}
 	if (cell === "roots") {
 		return pathInsideWriteRoots(call.path, config)
@@ -832,6 +842,34 @@ export function effectiveWorkspaceMode(policy: PolicyState): WorkspaceMode | "no
 	const base = workspaceModeForProfile(policy.profile);
 	if (base === "overlay" && policy.sandboxMode !== "full") return "ro";
 	return base;
+}
+
+/**
+ * True when this session is a subagent child whose write/edit gate collapses
+ * to deny: an inherited profile on the prompt cell (today only `default`) with
+ * no UI to answer the prompt and no workspace lock. `auto` and `allow-edits`
+ * are excluded because their in-root gate can still resolve to allow without a
+ * UI (the classifier runs headless), `research` is excluded because its
+ * workspace is already a throwaway overlay, and a locked session is excluded
+ * because the lock is the cause and renders its own clauses. Every true result
+ * implies bashWorkspaceMode() === "ro", which the mode-line suite asserts.
+ */
+export function childWriteDeniesWorkspace(policy: PolicyState): boolean {
+	return policy.inherited && !policy.interactive && !policy.workspaceLocked && writeEditCell(policy.profile) === "prompt";
+}
+
+/**
+ * The bash workspace mode for this session: effectiveWorkspaceMode, except that
+ * a child whose write/edit gate denies gets `ro` instead of `rw`, so the denied
+ * write cannot be performed through sandboxed bash (or any process bash runs).
+ * python/node deliberately keep the profile-derived mode from
+ * effectiveWorkspaceMode: their worker-lifetime overlay already prevents
+ * workspace writes from reaching the host, so `ro` there would only turn
+ * discarded writes into EROFS failures.
+ */
+export function bashWorkspaceMode(policy: PolicyState): WorkspaceMode | "none" {
+	const mode = effectiveWorkspaceMode(policy);
+	return mode === "rw" && childWriteDeniesWorkspace(policy) ? "ro" : mode;
 }
 
 /**

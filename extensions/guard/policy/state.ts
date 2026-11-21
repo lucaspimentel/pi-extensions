@@ -14,7 +14,7 @@ import type { SandboxDetection } from "../sandbox/detect.ts";
 import type { WorkspaceMode } from "../sandbox/spec.ts";
 import type { ResolvedGuardConfig } from "./config.ts";
 import { classifyToolCall, type ToolClass } from "./classes.ts";
-import { effectiveWorkspaceMode, type GuardCall, type PolicyState } from "./decision.ts";
+import { bashWorkspaceMode, type GuardCall, type PolicyState } from "./decision.ts";
 import { makeIsProtectedPath } from "./protected.ts";
 import { nextProfile, profileFooterLabel, type Profile } from "./profiles.ts";
 import type { InheritanceConstraint } from "./inheritance.ts";
@@ -141,6 +141,7 @@ export function toPolicyState(
 		cwd,
 		workspaceLocked: state.workspaceLocked,
 		interactive,
+		inherited: state.inherited !== null,
 	};
 }
 
@@ -156,13 +157,13 @@ export interface ProfileEventPayload {
 	workspaceLocked: boolean;
 }
 
-export function profileEventPayload(state: GuardSessionState, config: ResolvedGuardConfig, cwd: string): ProfileEventPayload {
-	const policy = toPolicyState(state, config, cwd, true);
+export function profileEventPayload(state: GuardSessionState, config: ResolvedGuardConfig, cwd: string, interactive: boolean): ProfileEventPayload {
+	const policy = toPolicyState(state, config, cwd, interactive);
 	return {
 		profile: state.profile,
 		sandbox: {
 			mode: policy.sandboxMode,
-			workspaceMode: effectiveWorkspaceMode(policy),
+			workspaceMode: bashWorkspaceMode(policy),
 			readRoots: config.readRoots,
 		},
 		workspaceLocked: state.workspaceLocked,

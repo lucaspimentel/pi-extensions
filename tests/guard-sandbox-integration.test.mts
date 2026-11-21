@@ -782,6 +782,24 @@ if (supported) {
 		// other reasons; neither outcome fails this test.
 	});
 
+	test("a read-only workspace rejects writes while the shared scratch stays writable", async () => {
+		// bashWorkspaceMode resolves a default subagent child to "ro"; this asserts
+		// the mount behavior that mode produces: the workspace rejects writes
+		// loudly rather than discarding them, and the shared scratch remains the one
+		// writable location (so a child can still persist an output deliberately).
+		const ws = makeWorkspace();
+		const scratch = trackCleanup(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-int-scratch-"))));
+		const r = await bash(
+			ws,
+			`echo x > ro-write.txt 2>/dev/null; echo ws=$?; echo y > '${scratch}/ok.txt'; echo scratch=$?`,
+			{ workspaceMode: "ro", extraRwBinds: [[scratch, scratch]] },
+		);
+		assert.match(r.out, /ws=[1-9]/, `the workspace write must fail: ${r.out}${r.err}`);
+		assert.match(r.out, /scratch=0/, `the scratch write must succeed: ${r.out}${r.err}`);
+		assert.equal(fs.existsSync(path.join(ws, "ro-write.txt")), false, "nothing may be written to the workspace");
+		assert.equal(fs.readFileSync(path.join(scratch, "ok.txt"), "utf8"), "y\n");
+	});
+
 	// ── Rlimits ──────────────────────────────────────────────────────────────
 
 	test("RLIMITS_PYTHON blocks a >2 GiB allocation", async () => {

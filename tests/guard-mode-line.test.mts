@@ -2,7 +2,8 @@
 // (extensions/guard/policy/mode-line.ts): the exact section body for every
 // profile, the sandbox/lock/inherited variants, the blocked and fallback
 // states, and drift guards that pin the rendered clauses to the decision core
-// (bashRunsOnHost, effectiveWorkspaceMode, decide, decideLocalWrite).
+// (bashRunsOnHost, effectiveWorkspaceMode, bashWorkspaceMode,
+// childWriteDeniesWorkspace, decide, decideLocalWrite).
 //
 // Run: node --test tests/guard-mode-line.test.mts
 import assert from "node:assert/strict";
@@ -10,6 +11,8 @@ import assert from "node:assert/strict";
 import { mergeConfig } from "../extensions/guard/policy/config.ts";
 import {
 	bashRunsOnHost,
+	bashWorkspaceMode,
+	childWriteDeniesWorkspace,
 	decide as decidePolicy,
 	decideLocalWrite,
 	effectiveWorkspaceMode,
@@ -46,6 +49,8 @@ function input(overrides: Partial<GuardStateSectionInput> = {}): GuardStateSecti
 		sandboxMode: "full",
 		workspaceLocked: false,
 		inheritedProfile: null,
+		interactive: true,
+		bashWorkspaceReadOnly: false,
 		...overrides,
 	};
 }
@@ -58,6 +63,7 @@ function makePolicy(overrides: Partial<PolicyState> = {}): PolicyState {
 		cwd: CWD,
 		workspaceLocked: false,
 		interactive: true,
+		inherited: false,
 		...overrides,
 	};
 }
@@ -71,7 +77,7 @@ test("the state line is exact for every profile at full sandbox, unlocked", () =
 	assert.equal(GUARD_STATE_SECTION, "guard_state");
 	const expected: Record<Profile, string> = {
 		research: "guard: profile research; sandbox full; host shell denied; writes denied",
-		default: "guard: profile default; sandbox full; host shell rules, then read-only tier, then prompt; writes prompted (in-root or not)",
+		default: "guard: profile default; sandbox full; host shell rules, then read-only tier, then prompt; writes prompted (in-root or not), and sandboxed bash writes the workspace directly",
 		"allow-edits": "guard: profile allow-edits; sandbox full; host shell rules, then read-only tier, then prompt; writes in-root allowed, out-of-root prompt",
 		auto: "guard: profile auto; sandbox full; host shell rules, then read-only tier, then classifier; writes in-root classified, out-of-root prompt",
 		trusted: "guard: profile trusted; sandbox full; host shell rules, then read-only tier, then allow; writes allowed",
@@ -127,7 +133,7 @@ test("a locked workspace rewrites the affected clauses and adds the remedy", () 
 test("the inherited suffix is shown while a valid constraint exists", () => {
 	assert.equal(
 		renderGuardStateSection(input({ profile: "default", inheritedProfile: "default" })),
-		"guard: profile default (inherited, cannot be loosened); sandbox full; host shell rules, then read-only tier, then prompt; writes prompted (in-root or not)",
+		"guard: profile default (inherited, cannot be loosened); sandbox full; host shell rules, then read-only tier, then prompt; writes prompted (in-root or not), and sandboxed bash writes the workspace directly",
 	);
 	// Even after the child moved to research on its own: the restriction stands.
 	assert.equal(
@@ -206,7 +212,9 @@ test("the writes clause agrees with decideLocalWrite", () => {
 		switch (clause) {
 			case "writes denied":
 			case "writes stopped (workspace locked)": return { inRoot: "deny", outRoot: "deny" };
-			case "writes prompted (in-root or not)": return { inRoot: "prompt", outRoot: "prompt" };
+			case "writes prompted (in-root or not), and sandboxed bash writes the workspace directly":
+			case "writes denied (no UI, so prompts collapse, and sandboxed bash cannot write the read-only workspace)":
+			case "writes denied (no UI, so prompts collapse, but sandboxed bash still writes the workspace directly)": return { inRoot: "prompt", outRoot: "prompt" };
 			case "writes in-root allowed, out-of-root prompt": return { inRoot: "allow", outRoot: "prompt" };
 			case "writes in-root classified, out-of-root prompt": return { inRoot: "classify", outRoot: "prompt" };
 			case "writes allowed": return { inRoot: "allow", outRoot: "allow" };
@@ -224,6 +232,78 @@ test("the writes clause agrees with decideLocalWrite", () => {
 			assert.deepEqual(actual, actionsFromClause(clause), `${profile} locked=${workspaceLocked} (${clause})`);
 		}
 	}
+});
+
+test("a denied child renders the read-only workspace and the real write barrier", () => {
+	// A subagent child is non-interactive and, on the default profile, its
+	// write/edit gate collapses to deny: its bash workspace is read-only, and the
+	// line says so instead of claiming prompts it can never answer.
+	assert.equal(
+		renderGuardStateSection(input({ inheritedProfile: "default", interactive: false, bashWorkspaceReadOnly: true })),
+		"guard: profile default (inherited, cannot be loosened); sandbox full (workspace read-only: writes denied without a UI); host shell rules, then read-only tier, then prompt; writes denied (no UI, so prompts collapse, and sandboxed bash cannot write the read-only workspace)",
+	);
+	// Print/JSON mode is also non-interactive but keeps a writable workspace: the
+	// clause must not claim a read-only mount, and must still name the bash path.
+	assert.equal(
+		renderGuardStateSection(input({ interactive: false })),
+		"guard: profile default; sandbox full; host shell rules, then read-only tier, then prompt; writes denied (no UI, so prompts collapse, but sandboxed bash still writes the workspace directly)",
+	);
+});
+
+test("bashWorkspaceMode and childWriteDeniesWorkspace pin the child rule", () => {
+	// A default child with no UI: denied gate, read-only bash workspace.
+	assert.equal(childWriteDeniesWorkspace(makePolicy({ inherited: true, interactive: false })), true);
+	assert.equal(bashWorkspaceMode(makePolicy({ inherited: true, interactive: false })), "ro");
+	// Everything else keeps the profile-derived mode: interactive parents (their
+	// prompt is answerable), allow-edits and auto children (their gate can still
+	// allow headless), and the raw profiles.
+	assert.equal(bashWorkspaceMode(makePolicy({ inherited: false, interactive: true })), "rw");
+	assert.equal(bashWorkspaceMode(makePolicy({ inherited: true, interactive: true })), "rw");
+	assert.equal(bashWorkspaceMode(makePolicy({ profile: "allow-edits", inherited: true, interactive: false })), "rw");
+	assert.equal(bashWorkspaceMode(makePolicy({ profile: "auto", inherited: true, interactive: false })), "rw");
+	assert.equal(bashWorkspaceMode(makePolicy({ profile: "research", inherited: true, interactive: false })), "overlay");
+	assert.equal(bashWorkspaceMode(makePolicy({ profile: "yolo", inherited: false, interactive: false })), "none");
+	// Reduced mode degrades a research overlay but never invents rw for a child.
+	assert.equal(bashWorkspaceMode(makePolicy({ profile: "research", inherited: true, interactive: false, sandboxMode: "reduced" })), "ro");
+	assert.equal(bashWorkspaceMode(makePolicy({ inherited: true, interactive: false, sandboxMode: "reduced" })), "ro");
+	// The workspace lock still wins, and renders on the sandbox clause.
+	assert.equal(bashWorkspaceMode(makePolicy({ inherited: true, interactive: false, workspaceLocked: true })), "ro");
+	// decideLocalWrite keeps returning the raw prompt; resolveDecision collapses it.
+	const childPolicy = makePolicy({ inherited: true, interactive: false });
+	assert.equal(decideLocalWrite({ kind: "local-write", tool: "edit", path: `${CWD}/a.ts` }, childPolicy).action, "prompt");
+	assert.match(decideLocalWrite({ kind: "local-write", tool: "edit", path: `${CWD}/a.ts` }, childPolicy).reason, /do not route the write through bash/);
+	// The interactive parent's reason carries no child guidance.
+	assert.doesNotMatch(decideLocalWrite({ kind: "local-write", tool: "edit", path: `${CWD}/a.ts` }, makePolicy()).reason, /do not route the write through bash/);
+	// The split, stated once: bash's mount mode is ro, while the profile-derived
+	// mode that runtime.workerMode turns into a worker workspace stays rw (->
+	// overlay in full mode), so python/node writes are discarded rather than
+	// persisted (and not failed as EROFS).
+	const childSplit = makePolicy({ inherited: true, interactive: false });
+	assert.equal(effectiveWorkspaceMode(childSplit), "rw");
+	assert.equal(bashWorkspaceMode(childSplit), "ro");
+	// The text can never claim a read-only workspace that is writable: the child
+	// predicate implies the ro mount across the whole matrix (the reverse is not
+	// required: a lock or a degraded overlay is ro for its own reason and renders
+	// its own clause).
+	for (const profile of ALL_PROFILES) {
+		for (const inherited of [false, true]) {
+			for (const interactive of [false, true]) {
+				for (const workspaceLocked of [false, true]) {
+					for (const sandboxMode of ["full", "reduced", "degraded"] as const) {
+						const p = makePolicy({ profile, inherited, interactive, workspaceLocked, sandboxMode });
+						if (!childWriteDeniesWorkspace(p)) continue;
+						assert.equal(inherited, true, "only an inherited session can trigger the child rule");
+						assert.equal(bashWorkspaceMode(p), "ro", `${profile}/inherited=${inherited}/interactive=${interactive}/locked=${workspaceLocked}/${sandboxMode}`);
+					}
+				}
+			}
+		}
+	}
+	// A degraded child never reaches a mount: bash is denied by name there, so the
+	// ro mode is inert rather than a claim about an unconfined spawn.
+	assert.equal(decide(makePolicy({ inherited: true, interactive: false, sandboxMode: "degraded" }), { kind: "sandboxed-exec", tool: "bash", command: "touch x" }).action, "deny");
+	// A locked child is not the child rule's case: the lock renders instead.
+	assert.equal(childWriteDeniesWorkspace(makePolicy({ inherited: true, interactive: false, workspaceLocked: true })), false);
 });
 
 // ── Runner ────────────────────────────────────────────────────────────────────

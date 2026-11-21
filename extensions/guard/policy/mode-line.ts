@@ -46,6 +46,14 @@ export interface GuardStateSectionInput {
 	workspaceLocked: boolean;
 	/** The inherited profile while the constraint is valid, else null. */
 	inheritedProfile: Profile | null;
+	/** False in print/JSON mode and in subagent children: prompts collapse to deny. */
+	interactive: boolean;
+	/**
+	 * True when this session's bash workspace resolves to read-only because the
+	 * write/edit gate collapses to deny (see bashWorkspaceMode). Distinct from
+	 * the workspace lock, which already renders on the sandbox clause.
+	 */
+	bashWorkspaceReadOnly: boolean;
 	/** The bash parser's load diagnostic, or null/undefined while it is available. */
 	shellAstDiagnostic?: string | null;
 }
@@ -98,6 +106,7 @@ function sandboxClause(input: GuardStateSectionInput): string | null {
 	const raw = !input.workspaceLocked && (input.profile === "yolo" || input.profile === "unrestricted");
 	if (raw) return "sandbox none (tools run raw)";
 	if (input.workspaceLocked) return `sandbox ${mode} (workspace locked: read-only)`;
+	if (input.bashWorkspaceReadOnly) return `sandbox ${mode} (workspace read-only: writes denied without a UI)`;
 	return mode === "full" ? "sandbox full" : "sandbox reduced (workspace overlay degrades to read-only)";
 }
 
@@ -135,7 +144,17 @@ function writesClause(input: GuardStateSectionInput): string | null {
 	if (input.profile === "research") return "writes denied";
 	if (input.workspaceLocked) return "writes stopped (workspace locked)";
 	switch (writeEditCell(input.profile)) {
-		case "prompt": return "writes prompted (in-root or not)";
+		case "prompt":
+			// The prompt cell is a barrier only for the file tools: sandboxed bash
+			// writes the workspace directly unless the session is a child whose
+			// workspace is read-only. Say which, so the line never implies a
+			// containment it does not have.
+			if (!input.interactive) {
+				return input.bashWorkspaceReadOnly
+					? "writes denied (no UI, so prompts collapse, and sandboxed bash cannot write the read-only workspace)"
+					: "writes denied (no UI, so prompts collapse, but sandboxed bash still writes the workspace directly)";
+			}
+			return "writes prompted (in-root or not), and sandboxed bash writes the workspace directly";
 		case "roots": return "writes in-root allowed, out-of-root prompt";
 		case "classify": return "writes in-root classified, out-of-root prompt";
 		case "allow": return "writes allowed";

@@ -10,7 +10,7 @@ import { GuardRuntime, validateReadGrant, validateReadRootSave } from "./runtime
 import { DialogGate } from "./dialogs.ts";
 import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
 import { FAILURE_STATUSES as NODE_FAILURES } from "./tools/node/session.ts";
-import { BASH_PROMPT_SNIPPET, HOST_BASH_PROMPT_SNIPPET, SANDBOX_FAILURE_HINT, SANDBOX_TOOL_GUIDELINES, SHELL_SANDBOX_FAILURE_HINT, bashToolDescription, createGuardShellOperations, hostBashToolDescription, sandboxFailureHint, workerToolDescription, type SandboxPaths } from "./tools/shell.ts";
+import { BASH_PROMPT_SNIPPET, HOST_BASH_PROMPT_SNIPPET, SANDBOX_FAILURE_HINT, SANDBOX_TOOL_GUIDELINES, SHELL_SANDBOX_FAILURE_HINT, SHELL_WORKSPACE_READ_ONLY_HINT, bashToolDescription, createGuardShellOperations, hostBashToolDescription, sandboxFailureHint, workerToolDescription, type SandboxPaths } from "./tools/shell.ts";
 import type { MountEntry } from "./sandbox/bwrap.ts";
 import { createShellRenderCall, nativeBashRenderResult } from "./tools/shell-render.ts";
 import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
@@ -18,7 +18,7 @@ import { detectSandboxMode } from "./sandbox/detect.ts";
 import { PROTECTED_TOP_LEVEL, SCAN_MATCH_CAP_DEFAULT, SCAN_TIMEOUT_MS_DEFAULT } from "./sandbox/spec.ts";
 import { effectivePruneNames } from "./sandbox/scan.ts";
 import { clearUserModelPin, discoveryCollisionWarningsFor, discoveryNoticeText, discoveryWeakeningSignature, leftoverProjectPinKeys, loadConfig, loadUserConfigRaw, PROJECT_CONFIG_REL, resolvedClassifierConfig, setUserModelPin, dedupe, type ResolvedGuardConfig } from "./policy/config.ts";
-import { bashRunsOnHost, decide, explainHostShellCommand, pathInsideWriteRoots, qualifyingSwitchRungs, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
+import { bashRunsOnHost, childWriteDeniesWorkspace, decide, explainHostShellCommand, pathInsideWriteRoots, qualifyingSwitchRungs, resolveDecision, type Decision, type GuardCall, type HostShellExplanation, type PolicyState } from "./policy/decision.ts";
 import { analyzeHostCommand, preloadShellAst, shellAstStatus, type ShellCommandAnalysis } from "./policy/shellast.ts";
 import { makeIsProtectedPath } from "./policy/protected.ts";
 import { isOwnedExecutor, type OwnedExecutor } from "./policy/classes.ts";
@@ -165,7 +165,7 @@ export default function guard(pi: ExtensionAPI) {
 		} catch { /* best effort */ }
 	}
 	function emitProfile(ctx: ExtensionContext): void {
-		if (state && config) pi.events.emit("guard:profile", profileEventPayload(state, effectiveConfig(), ctx.cwd));
+		if (state && config) pi.events.emit("guard:profile", profileEventPayload(state, effectiveConfig(), ctx.cwd, ctx.hasUI));
 	}
 	function publish(ctx: ExtensionContext): void {
 		updateFooter(ctx);
@@ -509,6 +509,8 @@ export default function guard(pi: ExtensionAPI) {
 				sandboxMode: state?.sandbox?.mode ?? null,
 				workspaceLocked: state?.workspaceLocked ?? false,
 				inheritedProfile: inherited !== null && "profile" in inherited ? inherited.profile : null,
+				interactive: ctx.hasUI,
+				bashWorkspaceReadOnly: runtime !== null && childWriteDeniesWorkspace(runtime.policy),
 				shellAstDiagnostic: shellAstStatus().available ? null : shellAstStatus().diagnostic,
 			});
 		} catch {
@@ -1106,11 +1108,11 @@ export default function guard(pi: ExtensionAPI) {
 					// its own analysis of the command: without this both specific
 					// hints (host-bound command, unmounted path) are unreachable.
 					const hintAnalysis = await analyzeHostCommand(input.command);
-					return appendWarnings(result, [sandboxFailureHint(hintAnalysis, mountedPaths)]);
+					return appendWarnings(result, [sandboxFailureHint(hintAnalysis, mountedPaths, childWriteDeniesWorkspace(execution.policy))]);
 				}
 				return result;
 			} catch (err) {
-				if (!host) throw new Error(`${err instanceof Error ? err.message : String(err)}\n${SHELL_SANDBOX_FAILURE_HINT}`);
+				if (!host) throw new Error(`${err instanceof Error ? err.message : String(err)}\n${childWriteDeniesWorkspace(execution.policy) ? SHELL_WORKSPACE_READ_ONLY_HINT : SHELL_SANDBOX_FAILURE_HINT}`);
 				throw err;
 			}
 		}, signal);
@@ -1125,7 +1127,7 @@ export default function guard(pi: ExtensionAPI) {
 	 */
 	const sandboxPaths = (): SandboxPaths | undefined => {
 		const rt = runtime;
-		return rt === null ? undefined : { workspace: rt.policy.cwd, scratch: rt.scratchDir, home: homedir() };
+		return rt === null ? undefined : { workspace: rt.policy.cwd, scratch: rt.scratchDir, home: homedir(), bashWorkspaceReadOnly: childWriteDeniesWorkspace(rt.policy) };
 	};
 	/**
 	 * The loadout hook shared by all four executors: pi re-runs it on every

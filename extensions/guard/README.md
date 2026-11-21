@@ -27,7 +27,7 @@ transitions; `tools/` holds the tool implementations.
 
 | Tool | Implementation |
 |---|---|
-| `bash` | `createBashTool()` with sandboxed `BashOperations` (`tools/shell.ts`); one bwrap process per call, no persistent shell, and **always sandboxed**: the unlocked raw profiles (yolo, unrestricted) and a host with no sandbox (degraded mode) deny a `bash` call by name and point at `host_bash` instead of silently running it on the host. A workspace lock forces the read-only sandbox back on, so a locked raw profile keeps sandboxed `bash`. |
+| `bash` | `createBashTool()` with sandboxed `BashOperations` (`tools/shell.ts`); one bwrap process per call, no persistent shell, and **always sandboxed**: the unlocked raw profiles (yolo, unrestricted) and a host with no sandbox (degraded mode) deny a `bash` call by name and point at `host_bash` instead of silently running it on the host. A workspace lock forces the read-only sandbox back on, so a locked raw profile keeps sandboxed `bash`. A subagent child that inherits `default` also gets a read-only workspace (it has no UI, so its write/edit gate denies; see the profile table), so a denied write cannot be performed through `bash` instead. |
 | `host_bash` | The only sandbox escape: argv-array host exec with `HostBash(...)` rules and the tightened read-only tier. It is the shell for yolo, unrestricted, and degraded mode; in degraded mode the research profile restricts it to the read-only tier (allow rules never widen that set). |
 | `python` / `node` | Ports of the old controllers (`tools/python/`, `tools/node/`) onto the shared sandbox: persistent worker, fd-3 JSON protocol, bounded output/timeouts, no code replay. Every sandboxed profile uses a worker-lifetime workspace overlay; reduced mode or a workspace lock degrades to read-only; yolo/unrestricted run the worker raw (full env and filesystem, no launcher, no rlimits). |
 | `pwsh` | Not registered by guard. The standalone `pwsh` extension was removed; pi's built-in `powershell` tool is opt-in (`defaultTools`) and, when enabled, is classified as a host shell on the pwsh tier (`Pwsh(...)` rules, no read-only tier). |
@@ -375,7 +375,7 @@ filter stays observe-only:
 
 | | research | default | allow-edits | auto | trusted | yolo | unrestricted |
 |---|---|---|---|---|---|---|---|
-| Sandbox workspace (step 3) | overlay (ro unless full mode) | rw | rw | rw | rw | none | none |
+| Sandbox workspace (step 3) | overlay (ro unless full mode) | rw* | rw | rw | rw | none | none |
 | host_bash / pwsh | deny | rules, then tier, then prompt | as default | rules, then tier, then classify | rules, then tier, then allow | deny/ask rules, else allow | allow |
 | write/edit (non-protected) | deny | prompt every write (in-root or not) | cwd + writeRoots, prompt outside | roots gate, then classify (out-of-root always prompts) | allow | allow | allow |
 | Protected-path write/edit | deny | prompt | prompt | prompt | prompt | allow | allow |
@@ -401,6 +401,12 @@ filter stays observe-only:
   `Switch to trusted (this session only)` for a call that would otherwise
   prompt, applied after the lease and re-decided before execution. It is not
   tied to the `allow-edits` rung and needs no owned editor/picker stages.
+- **Child read-only workspace (`*`):** a subagent child runs with no UI, so a
+  `default` child's write/edit gate collapses to deny; its bash workspace is
+  mounted read-only for the child's lifetime so that denial is a real barrier
+  rather than something `bash` (or any process it runs) can perform instead.
+  `allow-edits` and `auto` children keep `rw` because their in-root gate can
+  still resolve to allow headless, and the workers keep their overlay.
 - **unrestricted is never in the cycle**; it is reachable only with
   `/guard profile unrestricted`. Cycling from unrestricted goes to research.
 - In `yolo` and `unrestricted` the workers run raw but `bash` does not: it is
@@ -724,7 +730,7 @@ order; later binds shadow earlier ones.
 | Caches | `~/.cargo/registry`, `~/.cargo/git`, `~/.nuget/packages`, `~/.npm`, plus the .NET state path `~/.dotnet/corefx` (SDK 11 creates `corefx/Runtime` for named-mutex shared memory on every startup), 1:1. In full mode with `cacheOverlays` each is a per-launch overlay (writes land in the upper layer and are discarded); otherwise read-only, and SDK 11+ `dotnet` then cannot start. |
 | Credentials | `/dev/null` over `~/.cargo/credentials` and `credentials.toml` when they exist; a sanitized copy of `~/.nuget/NuGet/NuGet.Config` (credentials and apikeys sections removed) over the original |
 | Read roots | granted host dirs, read-only, 1:1, filtered against reserved mountpoints and the workspace |
-| Workspace | at its real path: read-write, read-only, or the launcher-mounted overlay view (full mode); in reduced mode an overlay workspace degrades to read-only |
+| Workspace | at its real path: read-write, read-only, or the launcher-mounted overlay view (full mode); in reduced mode an overlay workspace degrades to read-only. A subagent child whose write/edit gate collapses to deny (an inherited `default`) always gets read-only. |
 | Protected paths | top-level entries (`.git` as a whole, `.pi`, `.claude`, `.agents`, `.vscode`, `skills`, `.envrc`, `AGENTS.md`, `CLAUDE.md`, ...) bound read-only when they exist; nested `AGENTS.md`, `CLAUDE.md`, `.envrc`, and `.git` entries from the scan; a worktree's common dir |
 | Secret masks | `/dev/null` over every workspace file matching a mask pattern |
 
@@ -843,7 +849,12 @@ process tree down, and `kill(-pid)` on the returned child's pid works too.
   step 1.
 - **Accepted by design:** in read-write mode a sandboxed command can delete
   untracked workspace files; Unix sockets inside mounted directories are
-  connectable from the sandbox.
+  connectable from the sandbox. The exception is a subagent child whose
+  write/edit gate collapses to deny: its workspace is read-only, so the denial
+  is a barrier rather than a `bash` workaround. A `host_bash` command that the
+  user's own `HostBash(...)` allow rules cover is still the explicit escape a
+  child can take; those rules are the user's standing authorization, and the
+  sandbox/carve-out above does not narrow it.
 
 ## Tests
 

@@ -5,7 +5,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { spawnSandboxed } from "../sandbox/run.ts";
 import { isPathVisible, type MountEntry } from "../sandbox/bwrap.ts";
-import { effectiveWorkspaceMode } from "../policy/decision.ts";
+import { bashWorkspaceMode } from "../policy/decision.ts";
 import { normalizeRootList } from "../policy/paths.ts";
 import type { ShellCommandAnalysis } from "../policy/shellast.ts";
 import { homedir, constants } from "node:os";
@@ -43,7 +43,7 @@ export function createGuardShellOperations(
 				child.once("close", (code, signal) => resolve({ code, signal }));
 			});
 		} else {
-			const mode = effectiveWorkspaceMode(ctx.policy);
+			const mode = bashWorkspaceMode(ctx.policy);
 			if (mode === "none") throw new Error("guard: raw shell must use HostBash authorization");
 			const spec: LaunchSpec = {
 				workspace: ctx.policy.cwd, cwd: realpathSync(cwd), workspaceMode: mode,
@@ -186,6 +186,13 @@ export const SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; protect
  */
 export const SHELL_SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted (protected paths are read-only, and the sandbox /tmp is a private tmpfs, not the host /tmp). Use host_bash if host access is required. For persistent sandbox read access, request a grant with the request_read_access tool. Sandbox launch failures never fall back to host execution.";
 
+/**
+ * The failure hint for a child whose workspace is read-only because its
+ * write/edit gate collapses to deny (see bashWorkspaceMode). It names the escape
+ * (the parent session switching rungs) so the model does not retry with bash.
+ */
+export const SHELL_WORKSPACE_READ_ONLY_HINT = "Guard sandbox: this session's workspace is mounted read-only because its write/edit gate denies without a UI, so a write here cannot succeed. Ask the parent session to switch to allow-edits or auto and re-dispatch; do not retry with bash. Sandbox launch failures never fall back to host execution.";
+
 /** Live session locations substituted into the boundary prose. */
 export interface SandboxPaths {
 	/** The workspace root (the sandbox's writable project mount). */
@@ -194,6 +201,12 @@ export interface SandboxPaths {
 	scratch: string;
 	/** The host home directory (used to name `~/.pi`). */
 	home: string;
+	/**
+	 * True when this session's bash workspace is read-only because the write/edit
+	 * gate collapses to deny (a subagent child). Read only by
+	 * bashToolDescription; the workers keep their overlay semantics.
+	 */
+	bashWorkspaceReadOnly?: boolean;
 }
 
 /**
@@ -234,7 +247,10 @@ export const HOST_BASH_PROMPT_SNIPPET = "Run a shell command on the host (networ
 
 /** The model-facing description of the sandboxed shell tool. */
 export function bashToolDescription(native: string, paths?: SandboxPaths): string {
-	return `Sandboxed shell: no network, no host credentials. ${sandboxBoundaryText(paths)} ${SANDBOX_TOOL_ROUTING} ${BASH_SANDBOX_NOTE} ${TRUNCATED_OUTPUT_NOTE} ${native} ${READ_GRANT_NOTE}`;
+	const readOnly = paths?.bashWorkspaceReadOnly === true
+		? " The workspace is mounted read-only in this session (the write/edit gate denies without a UI), so commands that write it fail: ask the parent session to switch to allow-edits or auto to delegate in-root writes."
+		: "";
+	return `Sandboxed shell: no network, no host credentials. ${sandboxBoundaryText(paths)}${readOnly} ${SANDBOX_TOOL_ROUTING} ${BASH_SANDBOX_NOTE} ${TRUNCATED_OUTPUT_NOTE} ${native} ${READ_GRANT_NOTE}`;
 }
 
 /** The model-facing description of the host shell tool. */
@@ -333,7 +349,7 @@ export function unmountedPathCandidates(
  * action at host_bash or the read tool, and still hedges causation; everything
  * else keeps the generic shell hint.
  */
-export function sandboxFailureHint(analysis: ShellCommandAnalysis | null, mountedPaths?: readonly MountEntry[]): string {
+export function sandboxFailureHint(analysis: ShellCommandAnalysis | null, mountedPaths?: readonly MountEntry[], workspaceReadOnly = false): string {
 	const reason = hostBoundCommandReason(analysis);
 	if (reason !== null) {
 		return `Guard sandbox: '${reason}' needs network access or host credentials and cannot succeed here. Re-run this command with host_bash (not bash); do not retry with bash.`;
@@ -342,5 +358,5 @@ export function sandboxFailureHint(analysis: ShellCommandAnalysis | null, mounte
 	if (paths.length > 0) {
 		return `Guard sandbox: this command mentions path(s) that are not visible in this sandbox: ${paths.join(", ")}. If the command needs them, use host_bash (or the read tool to read them); do not retry with bash. Other causes are possible. ${SHELL_SANDBOX_FAILURE_HINT}`;
 	}
-	return SHELL_SANDBOX_FAILURE_HINT;
+	return workspaceReadOnly ? SHELL_WORKSPACE_READ_ONLY_HINT : SHELL_SANDBOX_FAILURE_HINT;
 }

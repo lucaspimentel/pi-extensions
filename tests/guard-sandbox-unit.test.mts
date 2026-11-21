@@ -832,6 +832,17 @@ test("argv golden: overlay, ro, and reduced variants", () => {
 	// Reduced overlay is degraded to ro by the caller; the builder sees "ro".
 	const ro = buildBwrapArgs(makeSpec(), makeCtx({ workspaceMode: "ro" }));
 	assert.ok(indexOfAllPairs(ro, "--ro-bind", ws).length > 0);
+	// A read-only workspace is bound BEFORE the nested protected reads and secret
+	// masks that live under it, so those carve-outs are not shadowed by the new
+	// read-only mount.
+	const roCarved = buildBwrapArgs(
+		makeSpec(),
+		makeCtx({ workspaceMode: "ro", nestedProtected: [`${ws}/sub/AGENTS.md`], masks: [`${ws}/.env`] }),
+	);
+	const roWsIdx = indexOfAllPairs(roCarved, "--ro-bind", ws)[0] ?? -1;
+	assert.ok(roWsIdx >= 0, "the workspace must be read-only bound");
+	assert.ok(indexOfAllPairs(roCarved, "--ro-bind", `${ws}/sub/AGENTS.md`)[0] > roWsIdx, "nested protected binds must follow the workspace");
+	assert.ok(roCarved.indexOf(`${ws}/.env`) > roWsIdx, "secret masks must follow the workspace");
 	// Reduced mode tail uses prlimit and no launcher bind.
 	const reduced = buildBwrapArgs(makeSpec(), makeCtx({ mode: "reduced" }));
 	assert.ok(!reduced.includes("/.guard/launch"));

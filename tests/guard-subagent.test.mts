@@ -33,7 +33,9 @@ import {
 	footerLabel,
 	profileChangeAllowed,
 	setProfile,
+	toPolicyState,
 } from "../extensions/guard/policy/state.ts";
+import { bashWorkspaceMode, childWriteDeniesWorkspace } from "../extensions/guard/policy/decision.ts";
 import guardExtension from "../extensions/guard/index.ts";
 import {
 	CHILD_CONTRACT_ACK,
@@ -509,6 +511,37 @@ test("footer and list surface inheritance without changing ordinary sessions", (
 	assert.equal(footerLabel(ordinary), "", "ordinary default session with no sandbox detection is blank");
 	const child = createSessionState({ config: makeConfig(), sandbox: null, cwd: "/w", interactive: true, inherited: { profile: "trusted" } });
 	assert.match(footerLabel(child), /inherited trusted/);
+});
+
+test("the child flag rides toPolicyState so a default child's bash workspace is read-only", () => {
+	// The subagent child runs with -p, so hasUI is false; this is the path that
+	// makes a denied child write a real barrier (bashWorkspaceMode keyed on
+	// childWriteDeniesWorkspace).
+	const ordinary = createSessionState({ config: makeConfig(), sandbox: null, cwd: "/w", interactive: true });
+	const ordinaryPolicy = toPolicyState(ordinary, makeConfig(), "/w", true);
+	assert.equal(ordinaryPolicy.inherited, false);
+	assert.equal(childWriteDeniesWorkspace(ordinaryPolicy), false);
+	assert.equal(bashWorkspaceMode(ordinaryPolicy), "rw", "an interactive parent keeps its writable workspace");
+
+	const child = createSessionState({ config: makeConfig(), sandbox: null, cwd: "/w", interactive: false, inherited: { profile: "default" } });
+	const childPolicy = toPolicyState(child, makeConfig(), "/w", false);
+	assert.equal(childPolicy.inherited, true);
+	assert.equal(childPolicy.interactive, false);
+	assert.equal(childWriteDeniesWorkspace(childPolicy), true);
+	assert.equal(bashWorkspaceMode(childPolicy), "ro", "a default child's bash workspace is read-only");
+
+	// Only the denied rung is converted: an allow-edits child still writes in-root.
+	const editable = createSessionState({ config: makeConfig(), sandbox: null, cwd: "/w", interactive: false, inherited: { profile: "allow-edits" } });
+	assert.equal(bashWorkspaceMode(toPolicyState(editable, makeConfig(), "/w", false)), "rw");
+
+	// The rule is a pure function of the inherited flag, so it survives the two
+	// moves a child may make: research (already an overlay) and back to default.
+	assert.equal(setProfile(child, "research").ok, true);
+	// This fixture has no sandbox detection, so research's overlay degrades to ro
+	// (the point is that no profile move can widen a child's workspace).
+	assert.equal(bashWorkspaceMode(toPolicyState(child, makeConfig(), "/w", false)), "ro");
+	assert.equal(setProfile(child, "default").ok, true);
+	assert.equal(bashWorkspaceMode(toPolicyState(child, makeConfig(), "/w", false)), "ro", "the denial is restored after the child moves back to default");
 });
 
 // ── C. Guard extension: commands, responders, lifecycle ──────────────────────
