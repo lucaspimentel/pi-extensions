@@ -212,9 +212,7 @@ test("the writes clause agrees with decideLocalWrite", () => {
 		switch (clause) {
 			case "writes denied":
 			case "writes stopped (workspace locked)": return { inRoot: "deny", outRoot: "deny" };
-			case "writes prompted (in-root or not), and sandboxed bash writes the workspace directly":
-			case "writes denied (no UI, so prompts collapse, and sandboxed bash cannot write the read-only workspace)":
-			case "writes denied (no UI, so prompts collapse, but sandboxed bash still writes the workspace directly)": return { inRoot: "prompt", outRoot: "prompt" };
+			case "writes prompted (in-root or not), and sandboxed bash writes the workspace directly": return { inRoot: "prompt", outRoot: "prompt" };
 			case "writes in-root allowed, out-of-root prompt": return { inRoot: "allow", outRoot: "prompt" };
 			case "writes in-root classified, out-of-root prompt": return { inRoot: "classify", outRoot: "prompt" };
 			case "writes allowed": return { inRoot: "allow", outRoot: "allow" };

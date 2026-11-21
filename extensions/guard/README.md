@@ -854,7 +854,7 @@ process tree down, and `kill(-pid)` on the returned child's pid works too.
   is a barrier rather than a `bash` workaround. A `host_bash` command that the
   user's own `HostBash(...)` allow rules cover is still the explicit escape a
   child can take; those rules are the user's standing authorization, and the
-  sandbox/carve-out above does not narrow it.
+  read-only workspace does not narrow it.
 
 ## Tests
 

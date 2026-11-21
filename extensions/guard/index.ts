@@ -1098,6 +1098,8 @@ export default function guard(pi: ExtensionAPI) {
 			// One predicate for both layers: the bash ban in decide() uses the
 			// same helper, so routing and authorization cannot drift.
 			const host = name === "host_bash" || bashRunsOnHost(execution.policy);
+			// One evaluation, shared by the failure hint and the throw below.
+			const childWriteDenied = childWriteDeniesWorkspace(execution.policy);
 			let mountedPaths: MountEntry[] | undefined;
 			const tool = createBashTool(ctx.cwd, { operations: createGuardShellOperations(execution, host, (paths) => { mountedPaths = paths; }), exposeSessionEnvironment: false });
 			const run = () => tool.execute(id, input, execution.signal, onUpdate);
@@ -1108,11 +1110,11 @@ export default function guard(pi: ExtensionAPI) {
 					// its own analysis of the command: without this both specific
 					// hints (host-bound command, unmounted path) are unreachable.
 					const hintAnalysis = await analyzeHostCommand(input.command);
-					return appendWarnings(result, [sandboxFailureHint(hintAnalysis, mountedPaths, childWriteDeniesWorkspace(execution.policy))]);
+					return appendWarnings(result, [sandboxFailureHint(hintAnalysis, mountedPaths, childWriteDenied)]);
 				}
 				return result;
 			} catch (err) {
-				if (!host) throw new Error(`${err instanceof Error ? err.message : String(err)}\n${childWriteDeniesWorkspace(execution.policy) ? SHELL_WORKSPACE_READ_ONLY_HINT : SHELL_SANDBOX_FAILURE_HINT}`);
+				if (!host) throw new Error(`${err instanceof Error ? err.message : String(err)}\n${childWriteDenied ? SHELL_WORKSPACE_READ_ONLY_HINT : SHELL_SANDBOX_FAILURE_HINT}`);
 				throw err;
 			}
 		}, signal);

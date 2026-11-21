@@ -536,12 +536,13 @@ test("the child flag rides toPolicyState so a default child's bash workspace is 
 
 	// The rule is a pure function of the inherited flag, so it survives the two
 	// moves a child may make: research (already an overlay) and back to default.
+	const childBashMode = () => bashWorkspaceMode(toPolicyState(child, makeConfig(), "/w", false));
 	assert.equal(setProfile(child, "research").ok, true);
 	// This fixture has no sandbox detection, so research's overlay degrades to ro
 	// (the point is that no profile move can widen a child's workspace).
-	assert.equal(bashWorkspaceMode(toPolicyState(child, makeConfig(), "/w", false)), "ro");
+	assert.equal(childBashMode(), "ro");
 	assert.equal(setProfile(child, "default").ok, true);
-	assert.equal(bashWorkspaceMode(toPolicyState(child, makeConfig(), "/w", false)), "ro", "the denial is restored after the child moves back to default");
+	assert.equal(childBashMode(), "ro", "the denial is restored after the child moves back to default");
 });
 
 // ── C. Guard extension: commands, responders, lifecycle ──────────────────────

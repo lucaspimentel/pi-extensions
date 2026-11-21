@@ -94,6 +94,9 @@ function profileClause(input: GuardStateSectionInput): string | null {
  * The sandbox clause. Mirrors effectiveWorkspaceMode() and bashRunsOnHost()
  * (decision.ts): the lock forces a read-only sandbox back on, so a locked raw
  * profile no longer runs raw. Tests assert this against those two functions.
+ * The read-only child workspace is not re-derived here: it arrives as
+ * `bashWorkspaceReadOnly` so the one predicate (childWriteDeniesWorkspace)
+ * decides it, and the lock still outranks it.
  */
 function sandboxClause(input: GuardStateSectionInput): string | null {
 	const mode = input.sandboxMode;

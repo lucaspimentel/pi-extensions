@@ -176,7 +176,10 @@ export function hostBoundCommandReason(analysis: ShellCommandAnalysis | null): s
 	return null;
 }
 
-export const SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; protected/read-only paths may fail with EROFS and outside paths may not be mounted. Use host_bash if host access is required, or request a grant with the request_read_access tool. Sandbox launch failures never fall back to host execution.";
+/** The invariant tail every sandbox failure hint ends with. */
+const NO_HOST_FALLBACK_TAIL = "Sandbox launch failures never fall back to host execution.";
+
+export const SANDBOX_FAILURE_HINT = `Guard sandbox: network is disabled; protected/read-only paths may fail with EROFS and outside paths may not be mounted. Use host_bash if host access is required, or request a grant with the request_read_access tool. ${NO_HOST_FALLBACK_TAIL}`;
 
 /**
  * The generic failure hint for sandboxed bash only. It states the filesystem
@@ -184,14 +187,14 @@ export const SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; protect
  * for persistent read access (the tool opens the guard read-grant dialog for
  * an absolute path; sandboxed bash has no way to trigger one itself).
  */
-export const SHELL_SANDBOX_FAILURE_HINT = "Guard sandbox: network is disabled; only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted (protected paths are read-only, and the sandbox /tmp is a private tmpfs, not the host /tmp). Use host_bash if host access is required. For persistent sandbox read access, request a grant with the request_read_access tool. Sandbox launch failures never fall back to host execution.";
+export const SHELL_SANDBOX_FAILURE_HINT = `Guard sandbox: network is disabled; only the workspace, the shared scratch directory, configured read roots, and standard toolchain directories are mounted (protected paths are read-only, and the sandbox /tmp is a private tmpfs, not the host /tmp). Use host_bash if host access is required. For persistent sandbox read access, request a grant with the request_read_access tool. ${NO_HOST_FALLBACK_TAIL}`;
 
 /**
  * The failure hint for a child whose workspace is read-only because its
  * write/edit gate collapses to deny (see bashWorkspaceMode). It names the escape
  * (the parent session switching rungs) so the model does not retry with bash.
  */
-export const SHELL_WORKSPACE_READ_ONLY_HINT = "Guard sandbox: this session's workspace is mounted read-only because its write/edit gate denies without a UI, so a write here cannot succeed. Ask the parent session to switch to allow-edits or auto and re-dispatch; do not retry with bash. Sandbox launch failures never fall back to host execution.";
+export const SHELL_WORKSPACE_READ_ONLY_HINT = `Guard sandbox: this session's workspace is mounted read-only because its write/edit gate denies without a UI, so a write here cannot succeed. Ask the parent session to switch to allow-edits or auto and re-dispatch; do not retry with bash. ${NO_HOST_FALLBACK_TAIL}`;
 
 /** Live session locations substituted into the boundary prose. */
 export interface SandboxPaths {
