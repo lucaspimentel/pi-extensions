@@ -7,7 +7,7 @@
 // Run: node --test tests/guard-prompt-record.test.mts
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -27,31 +27,29 @@ import {
 	writePromptRecord,
 	type PromptRecord,
 } from "../extensions/guard/prompt-record.ts";
+import { DialogCancelledError } from "../extensions/guard/dialogs.ts";
+import { RuntimeNotReadyError } from "../extensions/guard/runtime.ts";
+import { drainTempDirs, makeTempDir, tempDirs } from "./guard-test-temp.mts";
 
 // Owned-stage components need an initialized host theme.
 initTheme("dark", false);
 
-const createdDirs: string[] = [];
-after(() => {
-	for (const dir of createdDirs) rmSync(dir, { recursive: true, force: true });
-});
+after(() => { drainTempDirs(); });
 
 /** The real home, captured before any HOME override in a test. */
 const REAL_HOME = process.env.HOME ?? os.homedir();
 
-function makeTempDir(prefix: string): string {
-	const dir = realpathSync(mkdtempSync(path.isAbsolute(prefix) ? prefix : path.join(os.tmpdir(), prefix)));
-	createdDirs.push(dir);
-	return dir;
-}
-
 /**
  * A grantable external directory: outside the workspace and outside the
  * reserved sandbox mountpoints, under the real home (never /tmp). Created
- * before any HOME override so mount resolution sees the real path.
+ * before any HOME override so mount resolution sees the real path. An absolute
+ * prefix is the one case the shared helper does not cover (it joins
+ * `os.tmpdir()`), so the directory is adopted for the same cleanup.
  */
 function externalDir(): string {
-	return makeTempDir(path.join(REAL_HOME, ".guard-record-grant-"));
+	const dir = realpathSync(mkdtempSync(path.join(REAL_HOME, ".guard-record-grant-")));
+	tempDirs.push(dir);
+	return dir;
 }
 
 /** Override HOME for the duration of fn so guard config stays in a temp dir. */
@@ -75,14 +73,18 @@ test("refusalOutcomeFor classifies guard refusals, foreign cancellations, and th
 	assert.equal(refusalOutcomeFor(new Error("guard: x")), "error");
 	// An already-recorded refusal is skipped by every recording catch.
 	assert.equal(refusalOutcomeFor(recordedRefusal("guard: execution denied")), null);
-	// Foreign cancellations: the dialog gate and an aborted SDK selector.
-	assert.equal(refusalOutcomeFor(new Error("guard: dialog cancelled: approval expired during shutdown")), "cancelled");
-	assert.equal(refusalOutcomeFor(new Error("guard: call aborted; nothing saved or executed")), "cancelled");
+	// Foreign cancellations are typed: the dialog gate and an aborted SDK selector.
+	assert.equal(refusalOutcomeFor(new DialogCancelledError("guard: dialog cancelled: approval expired during shutdown")), "cancelled");
 	assert.equal(refusalOutcomeFor(Object.assign(new Error("the operation was aborted"), { name: "AbortError" })), "cancelled");
 	// The runtime's readiness gate is staleness, not an unexpected failure.
-	assert.equal(refusalOutcomeFor(new Error("guard: runtime disposed")), "expired");
-	assert.equal(refusalOutcomeFor(new Error("guard: unresolved teardown: worker did not stop")), "expired");
-	assert.equal(refusalOutcomeFor(new Error("guard: policy transition in progress; retry the call")), "expired");
+	assert.equal(refusalOutcomeFor(new RuntimeNotReadyError("guard: runtime disposed")), "expired");
+	assert.equal(refusalOutcomeFor(new RuntimeNotReadyError("guard: unresolved teardown: worker did not stop")), "expired");
+	assert.equal(refusalOutcomeFor(new RuntimeNotReadyError("guard: policy transition in progress; retry the call")), "expired");
+	// No message is ever classified: a plain error carrying a gate's wording is an
+	// unexpected failure, and only the type makes it staleness or a cancellation.
+	assert.equal(refusalOutcomeFor(new Error("guard: dialog cancelled: call aborted")), "error");
+	assert.equal(refusalOutcomeFor(new Error("guard: runtime disposed")), "error");
+	assert.equal(refusalOutcomeFor(new Error("guard: unresolved teardown: worker did not stop")), "error");
 	assert.equal(refusalOutcomeFor("boom"), "error");
 	// Only guard's own refusals drop the "Error: " rendering.
 	assert.equal(refusalReason(promptRefusal("error", "guard: x")), "guard: x");
@@ -122,10 +124,10 @@ test("promptActionFor, promptCallText, and promptCallSubjects project one call",
 	assert.equal(promptActionFor("classify"), "prompt");
 	const shell = { kind: "host-shell", shell: "host-bash", command: "git push origin main" } as const;
 	assert.equal(promptCallText(shell), "git push origin main");
-	assert.deepEqual(promptCallSubjects(shell, null, null), []);
+	assert.deepEqual(promptCallSubjects(shell, null), []);
 	const write = { kind: "local-write", tool: "write", path: "/tmp/x.txt" } as const;
 	assert.equal(promptCallText(write), "/tmp/x.txt");
-	assert.deepEqual(promptCallSubjects(write, null, null), ["/tmp/x.txt"]);
+	assert.deepEqual(promptCallSubjects(write, null), ["/tmp/x.txt"]);
 	assert.equal(promptCallText({ kind: "web-fetch", tool: "web_fetch", url: "https://example.com" }), "");
 });
 

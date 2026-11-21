@@ -1269,12 +1269,12 @@ Deliverable: one custom session entry per interactive prompt and per refusal.
 | `class`, `kind` | guard's mapped class and call kind for that tool; `unknown` when the failure happened before the call could be mapped |
 | `action` | the pre-dialog decision action; omitted when no decision was reached (an abort, a dead runtime) |
 | `outcome` | the vocabulary below |
-| `subjects` | guard's canonical per-step subjects (the strings the rule prefills are built from); the bare path for a local write/edit or a read grant; each capped at 200 chars |
+| `subjects` | guard's canonical per-step subjects for the call: the analysis's per-call subjects, which are the strings the dialog's steps and the rule prefills are built from; the bare path for a local write/edit or a read grant; each capped at 200 chars |
 | `display` | the text the dialog showed, capped by the same `truncateCommand` rule the dialogs use |
 | `reason` | guard's reason verbatim; for a refusal, the refusal's own message |
 | `dialogMs` | the whole dialog lease, excluding the classifier call that preceded it and the commits that followed it; absent when no dialog opened |
 | `profile`, `fromCodemode`, `toolCallId` | session context, and the join key back to the message stream |
-| `rules`, `scope` | only when an outcome persisted or granted rules: the rules and the destination scope |
+| `rules`, `scope` | only for an outcome that selected rules (`save-allow`, `session-allow`, `save-deny`): the rules the answer selected and the destination scope the commit then writes them to; a refused commit adds its own refusal entry |
 | `root` | read grants: the root the user approved (the commit then canonicalizes it, and a refused commit adds a refusal entry) |
 | `switchedTo` | `switch-profile`: the rung the user chose |
 
@@ -1285,8 +1285,10 @@ Deliverable: one custom session entry per interactive prompt and per refusal.
   Refusals: `deny` (a policy deny: a rule, a profile cell, or a hook-level
   block), `headless-deny` (a prompt collapsed because the session has no UI),
   `expired` (runtime, epoch, teardown, or cwd staleness), `refused-rules` (a
-  post-commit revalidation rejected the reviewed rules), `cancelled` (a dialog
-  that opened and closed with no answer, or a call aborted around one), and
+  revalidation after the answer rejected the reviewed rules: the latest
+  effective policy, or the fresh re-read inside the commit barrier),
+  `cancelled` (a dialog that opened and closed with no answer, or a call
+  aborted around one), and
   `error` (fail-closed exceptions and every other refusal, with `reason` naming
   it).
 - **Where they are written.** Inline, in the path that knows the outcome: the
@@ -1298,11 +1300,13 @@ Deliverable: one custom session entry per interactive prompt and per refusal.
   `requestReadGrant` for read-grant answers and refusals; and the
   `request_read_access` entry for its own pre-dialog refusals.
 - **Refusal plumbing.** Refusals travel as `PromptRefusalError`
-  (`prompt-record.ts`) carrying their outcome, so no recording catch matches on
-  prose. The throw sites that represent an already-recorded denial carry
-  `outcome === null`, so a catch records nothing twice. `refusalOutcomeFor`
-  additionally covers the errors guard does not throw itself (the dialog gate's
-  cancellations, the runtime readiness gate).
+  (`prompt-record.ts`) carrying their outcome, and every failure guard does not
+  throw itself is typed by the module that raises it (`DialogCancelledError`
+  from `dialogs.ts`, `RuntimeNotReadyError` from `runtime.ts`) or by the SDK
+  (`AbortError`), so `refusalOutcomeFor` reads types only: a plain error is an
+  `error` however it is worded. The throw sites that represent an
+  already-recorded denial carry `outcome === null`, so a catch records nothing
+  twice.
 - **Failure handling.** Building and appending the payload share one try; a
   failure is swallowed behind at most one warning per session and never changes a
   decision, a block reason, or whether a call runs. A malformed

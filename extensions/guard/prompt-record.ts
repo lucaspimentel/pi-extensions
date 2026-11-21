@@ -14,7 +14,9 @@
  * existing sessions.
  */
 import { truncateCommand } from "./prompt-flow.ts";
-import type { DecisionAction, GuardCall, HostShellExplanation } from "./policy/decision.ts";
+import { DialogCancelledError } from "./dialogs.ts";
+import { RuntimeNotReadyError } from "./runtime.ts";
+import type { DecisionAction, GuardCall } from "./policy/decision.ts";
 import type { ShellCommandAnalysis } from "./policy/shellast.ts";
 
 /** Session entry type of one prompt or refusal record. */
@@ -51,42 +53,32 @@ export type PromptOutcome =
 /** Config destination named by an outcome that wrote or granted something. */
 export type PromptScope = "project" | "user" | "session";
 
-/** The permanent payload of one `guard-prompt-v1` entry. */
-export interface PromptRecord {
-	tool: string;
-	class: string;
-	kind: string;
-	/** Omitted only when no decision was reached (an abort or a dead runtime). */
-	action?: PromptAction;
-	outcome: PromptOutcome;
-	/** Guard's canonical per-step subjects, capped like `display`. */
-	subjects: string[];
-	/** The capped text the dialog showed: the command, or the path. */
-	display: string;
-	reason: string;
-	/** Omitted when no dialog opened; the whole lease, never the classifier. */
-	dialogMs?: number;
-	profile: string;
-	fromCodemode: boolean;
-	toolCallId: string;
-	rules?: string[];
-	scope?: PromptScope;
-	root?: string;
-	switchedTo?: string;
-}
-
 /** The per-call fields every record carries; captured before any dialog. */
 export interface PromptRecordBase {
 	tool: string;
 	class: string;
 	kind: string;
+	/** Omitted only when no decision was reached (an abort or a dead runtime). */
 	action?: PromptAction;
+	/** Guard's canonical per-step subjects, capped like `display`. */
 	subjects: string[];
+	/** The capped text the dialog showed: the command, or the path. */
 	display: string;
 	reason: string;
 	profile: string;
 	fromCodemode: boolean;
 	toolCallId: string;
+}
+
+/** The permanent payload of one `guard-prompt-v1` entry. */
+export interface PromptRecord extends PromptRecordBase {
+	outcome: PromptOutcome;
+	/** Omitted when no dialog opened; the whole lease, never the classifier. */
+	dialogMs?: number;
+	rules?: string[];
+	scope?: PromptScope;
+	root?: string;
+	switchedTo?: string;
 }
 
 /** Outcome-specific additions, all optional. */
@@ -120,15 +112,13 @@ export function promptCallText(call: GuardCall): string {
 }
 
 /**
- * Guard's canonical per-step subjects for a host-shell call. The explanation's
- * steps are preferred (they are what the dialog and the rule prefills use); a
- * refusal that never built one falls back to the analysis, whose per-call
- * subjects are the same strings. An unfaithful projection yields none, and the
+ * Guard's canonical per-step subjects for a host-shell call: the analysis's
+ * per-call subjects, which are the strings the dialog's steps and the rule
+ * prefills are built from, falling back to the raw spelling. No analysis (a
+ * sandboxed call, or a failure before one was built) yields none, and the
  * caller still has `display`.
  */
-export function hostShellSubjects(explanation: HostShellExplanation | null, analysis: ShellCommandAnalysis | null): string[] {
-	const steps = explanation?.steps ?? [];
-	if (steps.length) return steps.map((step) => step.subject ?? step.display);
+export function hostShellSubjects(analysis: ShellCommandAnalysis | null): string[] {
 	return analysis?.calls.map((call) => call.subject ?? call.rawSubject) ?? [];
 }
 
@@ -136,9 +126,9 @@ export function hostShellSubjects(explanation: HostShellExplanation | null, anal
  * The subjects for one call: guard's canonical shell subjects, or the bare
  * path of a local read/write (a path has no per-step spelling).
  */
-export function promptCallSubjects(call: GuardCall, explanation: HostShellExplanation | null, analysis: ShellCommandAnalysis | null): string[] {
+export function promptCallSubjects(call: GuardCall, analysis: ShellCommandAnalysis | null): string[] {
 	if (call.kind === "local-read" || call.kind === "local-write") return call.path ? [call.path] : [];
-	return hostShellSubjects(explanation, analysis);
+	return hostShellSubjects(analysis);
 }
 
 export function buildPromptRecord(base: PromptRecordBase, outcome: PromptOutcome, details: PromptRecordDetails = {}): PromptRecord {
@@ -199,30 +189,17 @@ export function recordedRefusal(message: string): PromptRefusalError {
 }
 
 /**
- * Foreign cancellations arrive as ordinary errors: the dialog gate rejects
- * with `guard: dialog cancelled: <reason>`, and an SDK selector can reject with
- * an AbortError. Guard's own throws carry their outcome instead.
- */
-const CANCELLED_MESSAGES: readonly RegExp[] = [/^guard: dialog cancelled: /, /^guard: call aborted; /];
-/**
- * The runtime's readiness gate throws before any dialog: a disposed runtime, an
- * unresolved teardown, or a policy transition in flight are all staleness, so
- * they are recorded as expired rather than as an unexpected error.
- */
-const EXPIRED_MESSAGES: readonly RegExp[] = [/^guard: runtime disposed$/, /^guard: unresolved teardown: /, /^guard: policy transition in progress; retry the call$/];
-
-/**
  * The outcome to record for an error thrown out of a prompt surface, or null
  * when the error was already recorded. Guard's own refusals carry the outcome;
- * the two tables cover the errors guard does not throw itself; anything else is
- * an error.
+ * every failure guard does not throw itself is typed by the module that raises
+ * it (the gate's `DialogCancelledError`, the runtime's `RuntimeNotReadyError`)
+ * or by the SDK (`AbortError`), so nothing here reads a message: a plain error
+ * is an error however it is worded.
  */
 export function refusalOutcomeFor(error: unknown): PromptOutcome | null {
 	if (error instanceof PromptRefusalError) return error.outcome;
-	if (error instanceof Error) {
-		if (error.name === "AbortError" || CANCELLED_MESSAGES.some((pattern) => pattern.test(error.message))) return "cancelled";
-		if (EXPIRED_MESSAGES.some((pattern) => pattern.test(error.message))) return "expired";
-	}
+	if (error instanceof DialogCancelledError || (error instanceof Error && error.name === "AbortError")) return "cancelled";
+	if (error instanceof RuntimeNotReadyError) return "expired";
 	return "error";
 }
 

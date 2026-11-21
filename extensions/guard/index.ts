@@ -226,6 +226,28 @@ export default function guard(pi: ExtensionAPI) {
 		}
 	}
 	/**
+	 * Run one admitted permission dialog under the standard lease: pre-display
+	 * validation, the complete interaction, post-answer validation, and the
+	 * measured dialog time. The lease covers the whole dialog and excludes the
+	 * classifier that preceded it and the commits that follow it: persistence and
+	 * execution happen after it releases, so a transition an answer triggers can
+	 * no longer cancel its own dialog. `expired` is this flow's staleness
+	 * message, and `signal` is the owning operation's when it has one.
+	 */
+	async function runPromptLease<T>(rt: GuardRuntime, ctx: ExtensionContext, epoch: number, cwd: string, signal: AbortSignal | undefined, expired: string, prompt: (dialogSignal: AbortSignal) => Promise<T>): Promise<{ outcome: T; dialogMs: number }> {
+		const started = Date.now();
+		const outcome = await dialogs.run({ signal }, async (dialogSignal) => {
+			dialogSignal.throwIfAborted();
+			assertDialogCurrent(rt, epoch, ctx, cwd, expired);
+			const result = await admittedDialog(ctx, () => prompt(dialogSignal));
+			dialogSignal.throwIfAborted();
+			assertDialogCurrent(rt, epoch, ctx, cwd, expired);
+			return result;
+		});
+		assertCallActive(signal);
+		return { outcome, dialogMs: Date.now() - started };
+	}
+	/**
 	 * True when the host can mount guard's editor/picker stages (full save
 	 * contract). The inline presentation needs only `ui.custom` (every TUI host
 	 * provides it); the owned overlay remains the stacking fallback inside the
@@ -541,11 +563,7 @@ export default function guard(pi: ExtensionAPI) {
 			// Pathless local writes (memory_write, scratchpad, ...) stay observe-only.
 			const enforced = enforceWriteEdit && mapped.call.kind === "local-write" && mapped.call.path !== undefined;
 			// Built inside the record's try, never here.
-			const base = (): PromptRecordBase => ({
-				tool: event.toolName, class: mapped.cls, kind: mapped.call.kind, action: promptActionFor(labeled.action),
-				subjects: promptCallSubjects(mapped.call, null, analysis), display: promptCallText(mapped.call), reason: labeled.reason,
-				profile: sessionProfile(), fromCodemode: nested, toolCallId: event.toolCallId,
-			});
+			const base = (): PromptRecordBase => recordBaseFor(event.toolName, mapped, labeled.reason, promptActionFor(labeled.action), analysis, nested, event.toolCallId);
 			decided = base;
 			pi.events.emit("guard:decision", { toolName: event.toolName, class: mapped.cls, call: mapped.call, ...labeled, enforcement: owned || enforced, fromCodemode: nested });
 			if (debugEnabled) notify(ctx, `[guard ${owned || enforced ? "enforce" : "observe"}] ${event.toolName}: ${labeled.action} (${labeled.reason})`);
@@ -557,7 +575,7 @@ export default function guard(pi: ExtensionAPI) {
 				recordPrompt(ctx, () => buildPromptRecord(base(), outcome, { reason: blocked }));
 				return { block: true, reason: blocked };
 			}
-			if (enforced && runtime) return await enforceLocalWrite(runtime, event.toolName, input, ctx, labeled, event.toolCallId, nested);
+			if (enforced && runtime) return await enforceLocalWrite(runtime, event.toolName, mapped, ctx, labeled, event.toolCallId, nested);
 		} catch (err) {
 			// Fail closed first, then record: the record is best effort and must never
 			// change the block reason or whether the call is blocked at all.
@@ -596,6 +614,22 @@ export default function guard(pi: ExtensionAPI) {
 	// swallowed behind at most one warning per session. Every payload is built
 	// inside writePromptRecord's try, because building is as fallible as
 	// appending, and nothing on this path awaits.
+	/**
+	 * The per-call fields every record carries, from the mapping the surface
+	 * already has: `action` is the pre-dialog decision action (absent when no
+	 * decision was reached), and `analysis` supplies the per-step subjects. The
+	 * caller invokes this only when a record is actually written, so the allow
+	 * paths never do the extra work.
+	 */
+	function recordBaseFor(tool: string, mapping: ReturnType<typeof mappedCall>, reason: string, action: PromptAction | undefined, analysis: ShellCommandAnalysis | null, nested: boolean, toolCallId: string): PromptRecordBase {
+		const base: PromptRecordBase = {
+			tool, class: mapping.cls, kind: mapping.call.kind,
+			subjects: promptCallSubjects(mapping.call, analysis), display: promptCallText(mapping.call),
+			reason, profile: sessionProfile(), fromCodemode: nested, toolCallId,
+		};
+		if (action !== undefined) base.action = action;
+		return base;
+	}
 	/** Best-effort append of one record. */
 	function recordPrompt(ctx: ExtensionContext, build: () => PromptRecord): void {
 		if (writePromptRecord(build, (customType, data) => pi.appendEntry(customType, data))) return;
@@ -636,58 +670,42 @@ export default function guard(pi: ExtensionAPI) {
 	 * mirroring authorize. Subagent children run with -p (print mode), so the
 	 * ctx.hasUI check covers the child contract: prompts deny.
 	 */
-	async function enforceLocalWrite(rt: GuardRuntime, toolName: string, input: Record<string, unknown>, ctx: ExtensionContext, decision: Decision, toolCallId: string, nested: boolean): Promise<{ block: true; reason: string } | undefined> {
+	async function enforceLocalWrite(rt: GuardRuntime, toolName: string, mapping: ReturnType<typeof mappedCall>, ctx: ExtensionContext, decision: Decision, toolCallId: string, nested: boolean): Promise<{ block: true; reason: string } | undefined> {
 		// Lazy record fields: derived only when a record is actually written, so
 		// the allow path does no extra work. The payload is built inside the
-		// record's own try.
-		const base = (reasonText: string): PromptRecordBase => {
-			const mapping = mappedCall(toolName, input);
-			return {
-				tool: toolName, class: mapping.cls, kind: mapping.call.kind, action: promptActionFor(decision.action),
-				subjects: promptCallSubjects(mapping.call, null, null), display: promptCallText(mapping.call), reason: reasonText,
-				profile: sessionProfile(), fromCodemode: nested, toolCallId,
-			};
-		};
+		// record's own try. The mapping is the hook's, which already made it.
+		const base = (reasonText: string): PromptRecordBase => recordBaseFor(toolName, mapping, reasonText, promptActionFor(decision.action), null, nested, toolCallId);
 		rt.assertAvailable();
 		const epoch = rt.epoch;
 		const cwd = rt.policy.cwd;
 		if (decision.action === "deny") {
 			const reasonText = `guard: ${decision.reason}`;
-			recordPrompt(ctx, () => buildPromptRecord(base(reasonText), decision.nonInteractive ? "headless-deny" : "deny", { reason: reasonText }));
+			recordPrompt(ctx, () => buildPromptRecord(base(reasonText), decision.nonInteractive ? "headless-deny" : "deny"));
 			return { block: true, reason: reasonText };
 		}
 		if (decision.action === "allow") return undefined;
 		if (!ctx.hasUI) {
 			const reasonText = "guard: headless write/edit prompts deny";
-			recordPrompt(ctx, () => buildPromptRecord(base(reasonText), "headless-deny", { reason: reasonText }));
+			recordPrompt(ctx, () => buildPromptRecord(base(reasonText), "headless-deny"));
 			return { block: true, reason: reasonText };
 		}
-		const mapped = mappedCall(toolName, input);
-		if (mapped.call.kind !== "local-write" || mapped.call.path === undefined) return undefined;
+		const mapped = mapping.call;
+		if (mapped.kind !== "local-write" || mapped.path === undefined) return undefined;
 		const policy = policyFor(ctx);
 		const offerSwitch = state?.profile === "default"
-			&& pathInsideWriteRoots(mapped.call.path, policy.config)
-			&& !makeIsProtectedPath(policy.config)(mapped.call.path);
-		const started = Date.now();
-		const outcome = await dialogs.run({}, async (dialogSignal) => {
-			dialogSignal.throwIfAborted();
-			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
-			const result = await admittedDialog(ctx, () => runWriteEditPrompt({
-				io: promptIO(ctx),
-				signal: dialogSignal,
-				toolName,
-				path: mapped.call.kind === "local-write" ? mapped.call.path! : "",
-				decision,
-				offerSwitch,
-			}));
-			dialogSignal.throwIfAborted();
-			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
-			return result;
-		});
+			&& pathInsideWriteRoots(mapped.path, policy.config)
+			&& !makeIsProtectedPath(policy.config)(mapped.path);
 		// The lease has been released: the switch transition below can no longer
 		// cancel its own dialog. Every answer is one record; the dialog time
 		// covers the whole lease and never the classifier that preceded it.
-		const dialogMs = Date.now() - started;
+		const { outcome, dialogMs } = await runPromptLease(rt, ctx, epoch, cwd, undefined, "guard: approval expired; nothing saved or executed", (dialogSignal) => runWriteEditPrompt({
+			io: promptIO(ctx),
+			signal: dialogSignal,
+			toolName,
+			path: mapped.kind === "local-write" ? mapped.path! : "",
+			decision,
+			offerSwitch,
+		}));
 		if (outcome.kind === "allow-once") {
 			recordPrompt(ctx, () => buildPromptRecord(base(decision.reason), "allow-once", { dialogMs }));
 			return undefined;
@@ -725,14 +743,7 @@ export default function guard(pi: ExtensionAPI) {
 		try {
 			return await authorize(rt, name, input, ctx, analysis, signal, nested, id);
 		} catch (err) {
-			recordRefusal(ctx, () => {
-				const mapping = mappedCall(name, input);
-				return {
-					tool: name, class: mapping.cls, kind: mapping.call.kind,
-					subjects: promptCallSubjects(mapping.call, null, analysis), display: promptCallText(mapping.call),
-					reason: refusalReason(err), profile: sessionProfile(), fromCodemode: nested, toolCallId: id,
-				};
-			}, err);
+			recordRefusal(ctx, () => recordBaseFor(name, mappedCall(name, input), refusalReason(err), undefined, analysis, nested, id), err);
 			throw err;
 		}
 	}
@@ -770,18 +781,21 @@ export default function guard(pi: ExtensionAPI) {
 	 * suffix.
 	 */
 	async function authorize(rt: GuardRuntime, name: OwnedExecutor, input: Record<string, unknown>, ctx: ExtensionContext, analysis: ShellCommandAnalysis | null, signal?: AbortSignal, nested = false, toolCallId = ""): Promise<number> {
-		// Record fields for this call, derived once: neither the call nor the
-		// analysis changes across the save/deny loop's iterations, and the action
-		// comes from the iteration's own decision (see refusalBase). Both are
-		// pure; the payload is still built inside the record's try.
+		// The mapping is derived once: neither the call nor the analysis changes
+		// across the save/deny loop's iterations, and the action comes from the
+		// iteration's own decision (see refusalBase). The payload is still built
+		// inside the record's own try.
 		const mappedOnce = mappedCall(name, input);
-		const callSubjects = promptCallSubjects(mappedOnce.call, null, analysis);
-		const callDisplay = promptCallText(mappedOnce.call);
-		const baseFor = (action: PromptAction | undefined, reason: string): PromptRecordBase => ({
-			tool: name, class: mappedOnce.cls, kind: mappedOnce.call.kind, action,
-			subjects: callSubjects, display: callDisplay, reason,
-			profile: sessionProfile(), fromCodemode: nested, toolCallId,
-		});
+		const baseFor = (action: PromptAction | undefined, reason: string): PromptRecordBase => recordBaseFor(name, mappedOnce, reason, action, analysis, nested, toolCallId);
+		/**
+		 * Refuse this call on a decision that denies, recording that decision: the
+		 * codemode origin is applied once, so the thrown reason and the recorded
+		 * one are the same string.
+		 */
+		function refuseDenial(decision: Decision, base: (action: PromptAction | undefined, reason: string) => PromptRecordBase): never {
+			const labeled = withCodemodeOrigin(decision, nested);
+			throw promptRefusal(decision.nonInteractive ? "headless-deny" : "deny", `guard: ${labeled.reason}`, () => base("deny", labeled.reason));
+		}
 		for (;;) {
 			rt.assertAvailable();
 			assertCallActive(signal);
@@ -794,7 +808,7 @@ export default function guard(pi: ExtensionAPI) {
 			// the decision this call was refused on (authorizeRecorded owns it).
 			const refusalBase = (): PromptRecordBase => baseFor(promptActionFor(labeled.action), labeled.reason);
 			if (rt !== runtime || epoch !== rt.epoch || rt.teardownFailure) throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
-			if (labeled.action === "deny") throw promptRefusal(labeled.nonInteractive ? "headless-deny" : "deny", `guard: ${labeled.reason}`, refusalBase);
+			if (decision.action === "deny") refuseDenial(decision, baseFor);
 			if (labeled.action === "allow") return epoch;
 			// Defensive: decisionFor collapses non-interactive prompts to deny, so
 			// this is unreachable today; kept labeled for consistency if that
@@ -835,45 +849,33 @@ export default function guard(pi: ExtensionAPI) {
 		// execution happen after the lease is released, so the transition this
 		// choice triggers cannot cancel its own dialog.
 		const cwd = rt.policy.cwd;
-		// The whole dialog lease is what `dialogMs` measures; the classifier that
-		// preceded it and the commits that follow it are excluded.
-		const startedDialog = Date.now();
-		const outcome = await dialogs.run({ signal }, async (dialogSignal) => {
-			dialogSignal.throwIfAborted();
-			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
-			const result = await admittedDialog(ctx, () => runExecutionPrompt({
-				io: promptIO(ctx),
-				signal: dialogSignal,
-				toolName: name,
-				command: commandText,
-				decision: labeled,
-				explanation,
-				allowPlan,
-				denySaveSupported,
-				sessionAllowSupported,
-				switchProfileRungs: switchRungs,
-				sessionScopeLabel: ctx.cwd,
-				shell: shellCall?.shell ?? "host-bash",
-				scopes: ["project", "user"],
-				parseRules: (text) => parseShellRuleLines(text, shellCall?.shell ?? "host-bash"),
-				validateRules: (intent, rules) => shellCall
-					? validateShellSave(shellCall, policy, intent, rules, analysis)
-					: { ok: false as const, error: "only host-shell calls support rule saves" },
-				// Per-step allow saves validate every selected step against the
-				// merged policy; whole-call allow saves and deny saves keep
-				// validateShellSave. All three checkpoints use the same validators.
-				validateAllowSave: (rules, ids) => shellCall
-					? validateShellAllowSave(shellCall, policy, rules, ids, analysis)
-					: { ok: false as const, error: "only host-shell calls support rule saves" },
-				denyRulesFor: (ids) => shellCall && explanation ? planDenyRules(shellCall, explanation, ids) : [],
-				destination: (scope) => configDestination(ctx, scope),
-			}));
-			dialogSignal.throwIfAborted();
-			assertDialogCurrent(rt, epoch, ctx, cwd, "guard: approval expired; nothing saved or executed");
-			return result;
-		});
-		assertCallActive(signal);
-		const dialogMs = Date.now() - startedDialog;
+		const { outcome, dialogMs } = await runPromptLease(rt, ctx, epoch, cwd, signal, "guard: approval expired; nothing saved or executed", (dialogSignal) => runExecutionPrompt({
+			io: promptIO(ctx),
+			signal: dialogSignal,
+			toolName: name,
+			command: commandText,
+			decision: labeled,
+			explanation,
+			allowPlan,
+			denySaveSupported,
+			sessionAllowSupported,
+			switchProfileRungs: switchRungs,
+			sessionScopeLabel: ctx.cwd,
+			shell: shellCall?.shell ?? "host-bash",
+			scopes: ["project", "user"],
+			parseRules: (text) => parseShellRuleLines(text, shellCall?.shell ?? "host-bash"),
+			validateRules: (intent, rules) => shellCall
+				? validateShellSave(shellCall, policy, intent, rules, analysis)
+				: { ok: false as const, error: "only host-shell calls support rule saves" },
+			// Per-step allow saves validate every selected step against the
+			// merged policy; whole-call allow saves and deny saves keep
+			// validateShellSave. All three checkpoints use the same validators.
+			validateAllowSave: (rules, ids) => shellCall
+				? validateShellAllowSave(shellCall, policy, rules, ids, analysis)
+				: { ok: false as const, error: "only host-shell calls support rule saves" },
+			denyRulesFor: (ids) => shellCall && explanation ? planDenyRules(shellCall, explanation, ids) : [],
+			destination: (scope) => configDestination(ctx, scope),
+		}));
 		if (outcome.kind === "allow-once") {
 			recordPrompt(ctx, () => buildPromptRecord(refusalBase(), "allow-once", { dialogMs }));
 			return epoch;
@@ -934,7 +936,7 @@ export default function guard(pi: ExtensionAPI) {
 				throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
 			}
 			if (freshDecision.action === "allow") return rt.epoch;
-			if (freshDecision.action === "deny") throw promptRefusal(freshDecision.nonInteractive ? "headless-deny" : "deny", `guard: ${withCodemodeOrigin(freshDecision, nested).reason}`, () => baseFor("deny", withCodemodeOrigin(freshDecision, nested).reason));
+			if (freshDecision.action === "deny") refuseDenial(freshDecision, baseFor);
 			continue;
 		}
 		if (outcome.kind === "session-allow") {
@@ -1007,7 +1009,7 @@ export default function guard(pi: ExtensionAPI) {
 				throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
 			}
 			if (freshDecision.action === "allow") return rt.epoch;
-			if (freshDecision.action === "deny") throw promptRefusal(freshDecision.nonInteractive ? "headless-deny" : "deny", `guard: ${withCodemodeOrigin(freshDecision, nested).reason}`, () => baseFor("deny", withCodemodeOrigin(freshDecision, nested).reason));
+			if (freshDecision.action === "deny") refuseDenial(freshDecision, baseFor);
 			continue;
 		}
 		if (outcome.kind === "switch-profile") {
@@ -1046,7 +1048,7 @@ export default function guard(pi: ExtensionAPI) {
 				throw promptRefusal("expired", "guard: approval expired after a policy change", refusalBase);
 			}
 			if (freshDecision.action === "allow") return rt.epoch;
-			if (freshDecision.action === "deny") throw promptRefusal(freshDecision.nonInteractive ? "headless-deny" : "deny", `guard: ${withCodemodeOrigin(freshDecision, nested).reason}`, () => baseFor("deny", withCodemodeOrigin(freshDecision, nested).reason));
+			if (freshDecision.action === "deny") refuseDenial(freshDecision, baseFor);
 			throw promptRefusal("error", `guard: the call still prompts under profile ${outcome.profile}; denied`, refusalBase);
 		}
 		if (!shellCall) throw new Error("guard: only host-shell calls support rule saves");
@@ -1208,14 +1210,7 @@ export default function guard(pi: ExtensionAPI) {
 			// below is recorded before its error result is returned, and the grant
 			// dialog itself records its answers. A malformed request is input
 			// validation, not a permission decision, so it stays unrecorded.
-			const readBase = (reason: string, action?: PromptAction): PromptRecordBase => {
-				const mapping = mappedCall("request_read_access", { path: requestPath });
-				return {
-					tool: "request_read_access", class: mapping.cls, kind: mapping.call.kind, action,
-					subjects: promptCallSubjects(mapping.call, null, null), display: promptCallText(mapping.call),
-					reason, profile: sessionProfile(), fromCodemode: nested, toolCallId: id,
-				};
-			};
+			const readBase = (reason: string, action?: PromptAction): PromptRecordBase => recordBaseFor("request_read_access", mappedCall("request_read_access", { path: requestPath }), reason, action, null, nested, id);
 			/** Record one refusal, then return its error result. */
 			const refuse = (outcome: PromptOutcome, text: string, action?: PromptAction): AgentToolResult<any> => {
 				recordPrompt(ctx, () => buildPromptRecord(readBase(text, action), outcome));
@@ -1300,10 +1295,10 @@ export default function guard(pi: ExtensionAPI) {
 		// path, `tool` is whoever asked (a worker or the request tool), and
 		// `class`/`kind` describe that requester. The dialog's own answers are
 		// recorded as they resolve; the catch below records everything else.
-		const base = (reason: string, actionOverride?: PromptAction): PromptRecordBase => {
+		const base = (reason: string): PromptRecordBase => {
 			const mapping = mappedCall(requesterName, { path: requestPath });
 			return {
-				tool: requesterName, class: mapping.cls, kind: mapping.call.kind, action: actionOverride ?? action,
+				tool: requesterName, class: mapping.cls, kind: mapping.call.kind, action,
 				subjects: [requestPath], display: requestPath,
 				reason, profile: sessionProfile(), fromCodemode: nested, toolCallId,
 			};
@@ -1329,35 +1324,23 @@ export default function guard(pi: ExtensionAPI) {
 		try {
 			rt.assertAvailable();
 			const suggestedRoot = validateReadGrant(readGrantSuggestion(requestPath, ctx.cwd), ctx.cwd);
-			// Same narrow lease as approvals: validation, the complete interaction,
-			// validation. Session grants stay one-stage; persistent saves open the
-			// root editor and preview through the prompt flow. `dialogMs` is this
-			// lease only.
-			const startedDialog = Date.now();
-			const outcome = await dialogs.run({ signal }, async (dialogSignal) => {
-				dialogSignal.throwIfAborted();
-				assertDialogCurrent(rt, epoch, ctx, cwd, "Read grant expired; nothing saved or replayed.");
-				const result = await admittedDialog(ctx, () => runReadGrantPrompt({
-					io: promptIO(ctx),
-					signal: dialogSignal,
-					workerName: requesterName,
-					originSuffix: originSuffix(nested),
-					requestPath,
-					suggestedRoot,
-					scopes: ["project", "user"],
-					parseReadRoot: (text) => parseReadRootInput(text, ctx.cwd),
-					validateRoot: (candidate) => {
-						try { validateReadRootSave(candidate, requestPath, ctx.cwd); return { ok: true as const }; }
-						catch (err) { return { ok: false as const, error: err instanceof Error ? err.message : String(err) }; }
-					},
-					destination: (scope) => configDestination(ctx, scope),
-				}));
-				dialogSignal.throwIfAborted();
-				assertDialogCurrent(rt, epoch, ctx, cwd, "Read grant expired; nothing saved or replayed.");
-				return result;
-			});
-			assertCallActive(signal);
-			const dialogMs = Date.now() - startedDialog;
+			// Session grants stay one-stage; persistent saves open the root editor
+			// and preview through the prompt flow.
+			const { outcome, dialogMs } = await runPromptLease(rt, ctx, epoch, cwd, signal, "Read grant expired; nothing saved or replayed.", (dialogSignal) => runReadGrantPrompt({
+				io: promptIO(ctx),
+				signal: dialogSignal,
+				workerName: requesterName,
+				originSuffix: originSuffix(nested),
+				requestPath,
+				suggestedRoot,
+				scopes: ["project", "user"],
+				parseReadRoot: (text) => parseReadRootInput(text, ctx.cwd),
+				validateRoot: (candidate) => {
+					try { validateReadRootSave(candidate, requestPath, ctx.cwd); return { ok: true as const }; }
+					catch (err) { return { ok: false as const, error: err instanceof Error ? err.message : String(err) }; }
+				},
+				destination: (scope) => configDestination(ctx, scope),
+			}));
 			if (outcome.kind === "no-grant") return refuse("no-grant", `No read grant: the request was not approved.${capabilityNote}`);
 			if (outcome.kind === "deny") {
 				recordPrompt(ctx, () => buildPromptRecord(base(`Read-only access requested: ${requestPath}`), "deny-once", { dialogMs }));
@@ -1366,7 +1349,7 @@ export default function guard(pi: ExtensionAPI) {
 			}
 			// The grant answer is one record, including its root; a commit that then
 			// fails is a separate refusal (the catch below).
-			recordPrompt(ctx, () => buildPromptRecord(base(`Read-only access requested: ${requestPath}`), outcome.kind === "grant-session" ? "grant-session" : "save-root", {
+			recordPrompt(ctx, () => buildPromptRecord(base(`Read-only access requested: ${requestPath}`), outcome.kind, {
 				dialogMs,
 				scope: outcome.kind === "grant-session" ? "session" : outcome.scope,
 				root: outcome.kind === "save-root" ? outcome.root : suggestedRoot,
