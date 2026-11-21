@@ -26,11 +26,21 @@ interface Entry {
 	release: () => void;
 }
 
+/**
+ * A dialog cancelled rather than answered: the gate raises it for a caller
+ * abort or an invalidating lifecycle boundary, and the selector adapters raise
+ * it when a dialog closes with no answer. Typed so a recording catch classifies
+ * it without parsing prose. The name stays the inherited "Error": call sites
+ * render `String(err)` into user-visible reasons, and those strings must not
+ * change.
+ */
+export class DialogCancelledError extends Error {}
+
 /** Reason passed to AbortSignal when the caller's own signal aborted. */
 function callerAbortReason(signal: AbortSignal): unknown {
 	const reason = signal.reason;
 	if (reason instanceof Error) return reason;
-	return new Error("guard: dialog cancelled: call aborted");
+	return new DialogCancelledError("guard: dialog cancelled: call aborted");
 }
 
 export interface DialogGateOptions {
@@ -56,7 +66,7 @@ export class DialogGate {
 	 * the lease is held until it does.
 	 */
 	invalidate(reason: string): void {
-		const error = new Error(`guard: dialog cancelled: ${reason}`);
+		const error = new DialogCancelledError(`guard: dialog cancelled: ${reason}`);
 		for (const entry of [...this.pending]) {
 			if (entry.state === "queued" && !entry.settled) {
 				entry.settled = true;

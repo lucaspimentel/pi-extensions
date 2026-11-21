@@ -15,6 +15,13 @@ import { DEFAULT_MASK_PATTERNS, DEFAULT_MASK_EXCEPTIONS } from "./sandbox/spec.t
 import { normalizeMatchPath, normalizeRootList } from "./policy/paths.ts";
 import { effectiveWorkspaceMode, type PolicyState } from "./policy/decision.ts";
 
+/**
+ * The readiness gate refused: the runtime is disposed, still tearing down, or
+ * mid transition. Typed so a recording catch reads staleness instead of prose;
+ * the name stays the inherited "Error" for `String(err)` call sites.
+ */
+export class RuntimeNotReadyError extends Error {}
+
 export type WorkerController = Pick<PythonSessionController, "execute" | "reset" | "status" | "dispose">;
 export interface RuntimeOptions {
 	policy: PolicyState;
@@ -88,16 +95,16 @@ export class GuardRuntime {
 		return result;
 	}
 	private assertReady(): void {
-		if (this.failure) throw new Error(`guard: unresolved teardown: ${this.failure}`);
-		if (this.closed) throw new Error("guard: runtime disposed");
-		if (this.transitioning) throw new Error("guard: policy transition in progress; retry the call");
+		if (this.failure) throw new RuntimeNotReadyError(`guard: unresolved teardown: ${this.failure}`);
+		if (this.closed) throw new RuntimeNotReadyError("guard: runtime disposed");
+		if (this.transitioning) throw new RuntimeNotReadyError("guard: policy transition in progress; retry the call");
 	}
 	private sticky(err: unknown): Error {
 		if (!this.failure) {
 			this.failure = err instanceof Error ? err.message : String(err);
 			try { this.options.onWarning?.(`guard: unresolved teardown blocks every guarded executor and cannot be acknowledged: ${this.failure}`); } catch { /* best effort */ }
 		}
-		return new Error(`guard: unresolved teardown: ${this.failure}`);
+		return new RuntimeNotReadyError(`guard: unresolved teardown: ${this.failure}`);
 	}
 	private stopActive(): Promise<void> {
 		const active = this.active;
@@ -171,7 +178,7 @@ export class GuardRuntime {
 			try {
 				await stopped;
 				if (this.failure) throw this.sticky(this.failure);
-				if (this.closed) throw new Error("guard: runtime disposed");
+				if (this.closed) throw new RuntimeNotReadyError("guard: runtime disposed");
 				checkApproval();
 				validate?.();
 				if (options.invalidateWorkers || this.launchPolicyKey(policy, detection) !== this.launchPolicyKey(this.currentPolicy, this.detection)) {

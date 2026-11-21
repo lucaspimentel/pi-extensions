@@ -108,6 +108,8 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 
+import { DialogCancelledError } from "./dialogs.ts";
+
 const HIDE_KEY = "ctrl+]";
 const HINT_LABEL = `${HIDE_KEY} hide/show`;
 
@@ -162,7 +164,7 @@ export interface GuardAskOverlayDeps {
 }
 
 function abortReason(signal: AbortSignal): Error {
-	return signal.reason instanceof Error ? signal.reason : new Error("guard: dialog cancelled: call aborted");
+	return signal.reason instanceof Error ? signal.reason : new DialogCancelledError("guard: dialog cancelled: call aborted");
 }
 
 function terminalMetric(tui: TUI, metric: "rows" | "columns"): number {
