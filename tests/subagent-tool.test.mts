@@ -2357,7 +2357,8 @@ test("an abort during the panelist phase keeps the partial answers", async () =>
 			const controller = new AbortController();
 			const promise = h.tools.get("subagent")!.execute("id", { panel: "pair", task: "t" }, controller.signal, undefined, toolCtx(cwd)) as Promise<any>;
 			await waitFor(() => recording.spawns.length === 2, "both panelists must spawn");
-			recording.spawns[0].child.stdout.emit("data", assistantLine("partial answer"));
+			const panelistA = recording.spawns.find((spawn) => flag(spawn.args, "--model") === "p/a")!;
+			panelistA.child.stdout.emit("data", assistantLine("partial answer"));
 			controller.abort();
 			for (const spawn of recording.spawns) spawn.child.emit("close", null, "SIGTERM");
 			const result = await promise;
