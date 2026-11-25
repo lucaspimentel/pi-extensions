@@ -109,8 +109,7 @@ the per-request `readToolRoutingClause`) is recorded in
 explicit-target bullet and the standalone multi-endpoint fan-out bullet into
 one bullet (explicit-target sentences first, fan-out sentences second) and
 made it the first element of `promptGuidelines`; the standalone copy was
-deleted, and the recipes bullet dropped its now-duplicated
-"; do not fall back to raw gh api" clause.
+deleted.
 
 Corpus (2026-10-29): all 1277 pi sessions, current session excluded; 1536
 `gh api` occurrences in total, 405 command lines in the 317 sessions where
@@ -156,9 +155,8 @@ Guidance added:
   `issue timeline`, `git/trees/HEAD` is `repo tree`, default branch is
   `repo metadata`, and the tool-authored GraphQL review-thread read is
   `pr threads`), folded into the API-operations bullet. REVISED
-  (2026-11-25): PR commit lists are now named, as the recipes bullet's
-  `pr view --json commits` route with gh's 100-commit cap and the timeline's
-  committed events as the fallback. A bare `commits/{ref}` read stays
+  (2026-11-25): PR commit lists are now named in the recipes bullet below. A
+  bare `commits/{ref}` read stays
   deliberately unnamed: `commit checks` returns check runs, and commit
   details remain an open TODO (the 2026-11-03 refresh below measures 22
   commit reads across 9 sessions).
@@ -193,7 +191,7 @@ Guidance added:
   were merged after the explicit-target sentences into the leading
   `promptGuidelines` bullet. A guard-side counterpart now routes GitHub reads
   in the shell descriptions (`readToolRoutingClause` in
-  `extensions/guard/tools/shell.ts`); see `docs/guard-design.md`.
+  `extensions/guard/tools/shell.ts`).
 
 Not covered by guidance: `search/issues`, `branches`, releases and tags,
 and generic `graphql` reads other than the review-thread read. PR commit
