@@ -228,7 +228,51 @@ export function sandboxBoundaryText(paths?: SandboxPaths): string {
 }
 
 /** The tool-choice rule, stated once and reused by every sandboxed tool. */
-export const SANDBOX_TOOL_ROUTING = "Decide the tool before writing the command: network or credentials (gh, curl, ssh, git push/fetch, package installs), or any host path outside those mounts (for example a /tmp handoff file), needs host_bash, or the read tool when you only need to read it.";
+export const SANDBOX_TOOL_ROUTING = "Decide the tool before writing the command: network or credentials (gh writes and auth, curl, ssh, git push/fetch, package installs), or any host path outside those mounts (for example a /tmp handoff file), needs host_bash, or the read tool when you only need to read it.";
+
+/** The loadout facts the read-tool clause needs, structurally, so this module needs no pi types. */
+export interface ReadToolLoadout {
+	declared: readonly { name: string }[];
+	callable: readonly { name: string }[];
+}
+
+/**
+ * One loadout list, or an empty list when the field is absent or is not an
+ * array. pi always passes arrays; this keeps the clause builder total for a
+ * malformed one instead of letting a throw cost every description in the
+ * request.
+ */
+function loadoutNames(list: readonly { name: string }[] | null | undefined): readonly { name: string }[] {
+	return Array.isArray(list) ? list : [];
+}
+
+function reachable(loadout: ReadToolLoadout | null | undefined, name: string): "declared" | "codemode" | null {
+	if (loadout == null) return null;
+	if (loadoutNames(loadout.declared).some((tool) => tool?.name === name)) return "declared";
+	if (loadoutNames(loadout.callable).some((tool) => tool?.name === name)) return "codemode";
+	return null;
+}
+
+/**
+ * The read-tool routing clause appended to both shell descriptions. It names a
+ * tool only when this request's loadout makes it reachable, and never invites a
+ * direct call for a tool reachable only from codemode. Total: an absent, null,
+ * or malformed loadout (a missing list, or a field that is not an array) yields
+ * the empty string rather than a throw, so a clause failure can never cost the
+ * live path substitution.
+ */
+export function readToolRoutingClause(loadout: ReadToolLoadout | null | undefined): string {
+	const parts: string[] = [];
+	const gh = reachable(loadout, "gh_read");
+	if (gh === "declared") parts.push(reachable(loadout, "codemode") === null
+		? "GitHub reads are gh_read, not a shell."
+		: "GitHub reads are gh_read, not a shell: fan several reads out from one codemode script.");
+	else if (gh === "codemode") parts.push("GitHub reads are gh_read from one codemode script, not a shell.");
+	const git = reachable(loadout, "git_read");
+	if (git === "declared") parts.push("Local git reads are git_read.");
+	else if (git === "codemode") parts.push("Local git reads are git_read from one codemode script.");
+	return parts.join(" ");
+}
 
 /** Why bash cannot be the host escape, and what always can. */
 export const BASH_SANDBOX_NOTE = "bash runs in the sandbox only and is unavailable on a host without one (degraded mode): use host_bash there, limited to read-only-tier commands in the research profile.";
@@ -239,28 +283,50 @@ export const TRUNCATED_OUTPUT_NOTE = "When a result is truncated, full_output_pa
 /** How to make a host path visible to sandboxed commands persistently. */
 export const READ_GRANT_NOTE = "For persistent sandbox read access outside the mounts, request a grant with the request_read_access tool.";
 
-/** Two routing bullets appended to the system prompt while a shell tool is active. */
+/** The routing bullets appended to the system prompt while a shell tool is active. */
 export const SANDBOX_TOOL_GUIDELINES: readonly string[] = [
 	"Decide the shell tool before writing the command: `bash` is sandboxed (workspace, session scratch, granted read roots, and toolchain dirs only; no network, no host credentials; the sandbox `/tmp` is not the host `/tmp`); use `host_bash` for network, credentials, or any host path outside those mounts, including the host `/tmp`.",
 	"To read a host file outside the sandbox mounts (for example a handoff file in `/tmp`), use the `read` tool or `host_bash`; `bash` cannot see it. Use `request_read_access` only when the path must become visible to sandboxed commands.",
+	"Read GitHub and local git state with the dedicated read tools, not the shell: the GitHub read tool is allowed as a read, while a raw `gh api` read may prompt, and a `gh api ... | jq` pipeline or a `gh pr view` loop in a script should be one codemode pass instead.",
 ];
 
 export const BASH_PROMPT_SNIPPET = "Run a shell command in the guard sandbox (workspace and session scratch only; no network)";
 export const HOST_BASH_PROMPT_SNIPPET = "Run a shell command on the host (network, credentials, host paths outside the sandbox)";
 
-/** The model-facing description of the sandboxed shell tool. */
-export function bashToolDescription(native: string, paths?: SandboxPaths): string {
+/**
+ * The rendered read-tool clause, or the empty string when the caller supplied
+ * nothing, only whitespace, or a padded sentence. Normalizing here keeps the
+ * no-clause text byte-identical and stops a stray clause from introducing a
+ * leading or doubled space into the routing rule.
+ */
+function renderReadToolClause(readToolClause?: string): string {
+	const clause = readToolClause?.trim() ?? "";
+	return clause === "" ? "" : ` ${clause}`;
+}
+
+/**
+ * The model-facing description of the sandboxed shell tool. The optional
+ * `readToolClause` carries this request's read-tool routing sentence between
+ * the routing rule and the sandbox note; absent, the text is unchanged.
+ */
+export function bashToolDescription(native: string, paths?: SandboxPaths, readToolClause?: string): string {
 	const readOnly = paths?.bashWorkspaceReadOnly === true
 		? " The workspace is mounted read-only in this session (the write/edit gate denies without a UI), so commands that write it fail: ask the parent session to switch to allow-edits or auto to delegate in-root writes."
 		: "";
-	return `Sandboxed shell: no network, no host credentials. ${sandboxBoundaryText(paths)}${readOnly} ${SANDBOX_TOOL_ROUTING} ${BASH_SANDBOX_NOTE} ${TRUNCATED_OUTPUT_NOTE} ${native} ${READ_GRANT_NOTE}`;
+	const clause = renderReadToolClause(readToolClause);
+	return `Sandboxed shell: no network, no host credentials. ${sandboxBoundaryText(paths)}${readOnly} ${SANDBOX_TOOL_ROUTING}${clause} ${BASH_SANDBOX_NOTE} ${TRUNCATED_OUTPUT_NOTE} ${native} ${READ_GRANT_NOTE}`;
 }
 
-/** The model-facing description of the host shell tool. */
-export function hostBashToolDescription(native: string, paths?: SandboxPaths): string {
+/**
+ * The model-facing description of the host shell tool. The optional
+ * `readToolClause` carries this request's read-tool routing sentence before
+ * the HostBash rules sentence; absent, the text is unchanged.
+ */
+export function hostBashToolDescription(native: string, paths?: SandboxPaths, readToolClause?: string): string {
 	const hostTmp = "the host /tmp";
 	const homePi = paths === undefined ? "~/.pi" : `${paths.home}/.pi`;
-	return `Host shell: runs on the host with full network access and host credentials. ${native} Use it for network or auth commands (gh, curl, ssh, git push/fetch, package installs), for host paths outside the sandbox mounts (${hostTmp}, ${homePi}, other repositories), and as the only shell in yolo, unrestricted, and degraded mode (in degraded research only read-only-tier commands run). Subject to HostBash rules and guard profile.`;
+	const clause = renderReadToolClause(readToolClause);
+	return `Host shell: runs on the host with full network access and host credentials. ${native} Use it for network or auth commands (gh writes and auth, curl, ssh, git push/fetch, package installs), for host paths outside the sandbox mounts (${hostTmp}, ${homePi}, other repositories), and as the only shell in yolo, unrestricted, and degraded mode (in degraded research only read-only-tier commands run).${clause} Subject to HostBash rules and guard profile.`;
 }
 
 /** The model-facing description of the persistent interpreter workers. */

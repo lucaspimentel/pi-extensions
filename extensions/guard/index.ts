@@ -1,5 +1,5 @@
 /** Guard owns four executors and enforces write/edit; other non-owned tool decisions remain observe-only. */
-import { createBashTool, ExtensionSelectorComponent, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type ToolAnnotations, type ToolLoadoutChanges, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { createBashTool, ExtensionSelectorComponent, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type ToolAnnotations, type ToolLoadout, type ToolLoadoutChanges, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -10,7 +10,7 @@ import { GuardRuntime, validateReadGrant, validateReadRootSave } from "./runtime
 import { DialogGate } from "./dialogs.ts";
 import { FAILURE_STATUSES as PYTHON_FAILURES } from "./tools/python/session.ts";
 import { FAILURE_STATUSES as NODE_FAILURES } from "./tools/node/session.ts";
-import { BASH_PROMPT_SNIPPET, HOST_BASH_PROMPT_SNIPPET, SANDBOX_FAILURE_HINT, SANDBOX_TOOL_GUIDELINES, SHELL_SANDBOX_FAILURE_HINT, SHELL_WORKSPACE_READ_ONLY_HINT, bashToolDescription, createGuardShellOperations, hostBashToolDescription, sandboxFailureHint, workerToolDescription, type SandboxPaths } from "./tools/shell.ts";
+import { BASH_PROMPT_SNIPPET, HOST_BASH_PROMPT_SNIPPET, SANDBOX_FAILURE_HINT, SANDBOX_TOOL_GUIDELINES, SHELL_SANDBOX_FAILURE_HINT, SHELL_WORKSPACE_READ_ONLY_HINT, bashToolDescription, createGuardShellOperations, hostBashToolDescription, readToolRoutingClause, sandboxFailureHint, workerToolDescription, type SandboxPaths } from "./tools/shell.ts";
 import type { MountEntry } from "./sandbox/bwrap.ts";
 import { createShellRenderCall, nativeBashRenderResult } from "./tools/shell-render.ts";
 import { filterSearchResult, type SearchResultEvent } from "./filter.ts";
@@ -1137,11 +1137,12 @@ export default function guard(pi: ExtensionAPI) {
 	 * throws, which is why the static text below must stay usable before the
 	 * runtime exists.
 	 */
-	const prepareSandboxDescriptions = (): ToolLoadoutChanges => {
+	const prepareSandboxDescriptions = (loadout?: ToolLoadout): ToolLoadoutChanges => {
 		const paths = sandboxPaths();
+		const clause = readToolRoutingClause(loadout);
 		return { descriptions: {
-			bash: bashToolDescription(bash.description, paths),
-			host_bash: hostBashToolDescription(bash.description, paths),
+			bash: bashToolDescription(bash.description, paths, clause),
+			host_bash: hostBashToolDescription(bash.description, paths, clause),
 			python: workerToolDescription("python", paths),
 			node: workerToolDescription("node", paths),
 		} };

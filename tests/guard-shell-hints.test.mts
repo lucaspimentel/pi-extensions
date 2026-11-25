@@ -13,7 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { isPathVisible, mountTable, type MountEntry } from "../extensions/guard/sandbox/bwrap.ts";
-import { SHELL_SANDBOX_FAILURE_HINT, bashToolDescription, hostBashToolDescription, sandboxBoundaryText, sandboxFailureHint as sandboxFailureHintPolicy, unmountedPathCandidates as unmountedPathCandidatesPolicy, workerToolDescription } from "../extensions/guard/tools/shell.ts";
+import { SHELL_SANDBOX_FAILURE_HINT, bashToolDescription, hostBashToolDescription, readToolRoutingClause, sandboxBoundaryText, sandboxFailureHint as sandboxFailureHintPolicy, unmountedPathCandidates as unmountedPathCandidatesPolicy, workerToolDescription } from "../extensions/guard/tools/shell.ts";
 import { analyzeSync } from "./shellast-sync.mts";
 
 // Synchronous test façade: the production path analyses the command once and
@@ -243,6 +243,76 @@ test("bash and host_bash descriptions name the live paths and the private /tmp",
 	assert.match(host, /as the only shell in yolo, unrestricted, and degraded mode/);
 	assert.match(host, /in degraded research only read-only-tier commands run/);
 	assert.match(host, /Subject to HostBash rules and guard profile\.$/);
+
+	// The routing parentheses now say `gh writes and auth`: plain gh reads are
+	// not the escape this sentence is about.
+	assert.match(bash, /\(gh writes and auth, curl, ssh, git push\/fetch, package installs\)/);
+	assert.match(host, /\(gh writes and auth, curl, ssh, git push\/fetch, package installs\)/);
+
+	// No clause is the old text exactly: no tool names, no double space.
+	assert.doesNotMatch(bash, /gh_read|git_read/);
+	assert.doesNotMatch(host, /gh_read|git_read/);
+	assert.doesNotMatch(bash, / {2}/);
+	assert.doesNotMatch(host, / {2}/);
+	// The no-clause junctions are pinned as literals rather than compared with a
+	// second call to the same builder, so a change to the routing sentence or to
+	// the note that follows it cannot pass unnoticed.
+	assert.match(bash, /when you only need to read it\. bash runs in the sandbox only/);
+	assert.match(host, /in degraded research only read-only-tier commands run\)\. Subject to HostBash rules and guard profile\.$/);
+	assert.equal(bashToolDescription("NATIVE", LIVE_PATHS), bash, "identical inputs are byte-identical");
+	assert.equal(hostBashToolDescription("NATIVE", LIVE_PATHS), host, "identical inputs are byte-identical");
+
+	// A clause lands immediately after the amended routing sentence in bash,
+	// and immediately before the HostBash rules sentence in host_bash.
+	const bashClause = bashToolDescription("NATIVE", LIVE_PATHS, "GitHub reads are gh_read, not a shell.");
+	assert.match(bashClause, /when you only need to read it\. GitHub reads are gh_read, not a shell\. bash runs in the sandbox only/);
+	const hostClause = hostBashToolDescription("NATIVE", LIVE_PATHS, "GitHub reads are gh_read, not a shell.");
+	assert.match(hostClause, /in degraded research only read-only-tier commands run\)\. GitHub reads are gh_read, not a shell\. Subject to HostBash rules and guard profile\.$/);
+	// An empty clause is the no-clause text exactly.
+	assert.equal(bashToolDescription("NATIVE", LIVE_PATHS, ""), bash);
+	assert.equal(hostBashToolDescription("NATIVE", LIVE_PATHS, ""), host);
+	// A whitespace-only or padded clause is normalized, so no caller can
+	// introduce a leading or doubled space into the routing rule.
+	assert.equal(bashToolDescription("NATIVE", LIVE_PATHS, "   "), bash, "a whitespace-only clause is no clause");
+	assert.equal(hostBashToolDescription("NATIVE", LIVE_PATHS, "\t"), host, "a tab-only clause is no clause");
+	assert.doesNotMatch(bashToolDescription("NATIVE", LIVE_PATHS, "  Local git reads are git_read.  "), / {2}/);
+	assert.match(bashToolDescription("NATIVE", LIVE_PATHS, "  Local git reads are git_read.  "), /read it\. Local git reads are git_read\. bash runs/);
+});
+
+test("readToolRoutingClause names only the read tools this request can reach", () => {
+	const tools = (...names: string[]) => names.map((name) => ({ name }));
+	const declared = (names: string[]) => ({ declared: tools(...names), callable: [] });
+	const callable = (names: string[]) => ({ declared: [], callable: tools(...names) });
+	const fanOut = "GitHub reads are gh_read, not a shell: fan several reads out from one codemode script.";
+	assert.equal(readToolRoutingClause(declared(["gh_read", "codemode"])), fanOut, "gh_read declared with codemode: the fan-out sentence");
+	assert.equal(readToolRoutingClause(declared(["gh_read"])), "GitHub reads are gh_read, not a shell.", "gh_read declared without codemode: no invitation to a codemode call");
+	assert.equal(readToolRoutingClause(callable(["gh_read"])), "GitHub reads are gh_read from one codemode script, not a shell.", "gh_read reachable only from codemode");
+	assert.equal(readToolRoutingClause(declared(["git_read"])), "Local git reads are git_read.", "git_read declared");
+	assert.equal(readToolRoutingClause(callable(["git_read"])), "Local git reads are git_read from one codemode script.", "git_read reachable only from codemode");
+	assert.equal(
+		readToolRoutingClause(declared(["gh_read", "git_read"])),
+		"GitHub reads are gh_read, not a shell. Local git reads are git_read.",
+		"both declared: GitHub first, then git",
+	);
+	// Membership only: the loadout order cannot change the clause, so an
+	// unchanged loadout yields identical text and cannot churn the payload.
+	assert.equal(
+		readToolRoutingClause(declared(["codemode", "git_read", "gh_read"])),
+		readToolRoutingClause(declared(["gh_read", "git_read", "codemode"])),
+		"the clause depends on the reachable set, not its order",
+	);
+	assert.equal(
+		readToolRoutingClause(callable(["git_read", "gh_read"])),
+		readToolRoutingClause(callable(["gh_read", "git_read"])),
+		"callable order does not change the clause either",
+	);
+	assert.equal(readToolRoutingClause(declared(["read", "bash", "host_bash"])), "", "neither read tool: no clause");
+	assert.equal(readToolRoutingClause(undefined), "", "an absent loadout yields the empty string");
+	assert.equal(readToolRoutingClause(null), "", "a null loadout yields the empty string");
+	assert.equal(readToolRoutingClause({} as never), "", "a malformed loadout yields the empty string rather than throwing");
+	assert.equal(readToolRoutingClause({ declared: "gh_read", callable: [] } as never), "", "a non-array declared field is skipped, not thrown on");
+	assert.equal(readToolRoutingClause({ declared: [], callable: null } as never), "", "a null callable field is skipped, not thrown on");
+	assert.equal(readToolRoutingClause({ declared: [undefined as never], callable: [] } as never), "", "an undefined entry is skipped, not thrown on");
 });
 
 test("descriptions fall back to generic phrases before the runtime exists", () => {
@@ -279,4 +349,10 @@ test("boundary text never enumerates read roots", () => {
 	// Identical inputs are byte-identical, so a grant cannot churn the payload.
 	assert.equal(bashToolDescription("NATIVE", LIVE_PATHS), first);
 	assert.equal(workerToolDescription("python", LIVE_PATHS), workerToolDescription("python", LIVE_PATHS));
+	// A clause is data too: the same clause renders byte-identically every time.
+	const clause = readToolRoutingClause({ declared: [{ name: "gh_read" }, { name: "codemode" }], callable: [] });
+	assert.equal(
+		bashToolDescription("NATIVE", LIVE_PATHS, clause),
+		bashToolDescription("NATIVE", LIVE_PATHS, clause),
+	);
 });

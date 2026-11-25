@@ -31,9 +31,12 @@ interface Harness {
 	status: Map<string, string | undefined>;
 	commandHandlers: Map<string, (args: string, ctx: unknown) => Promise<void>>;
 	tools: Array<{ name: string; annotations?: Record<string, boolean> }>;
-	registeredTools: Map<string, { execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined>; description?: string; promptSnippet?: string; promptGuidelines?: readonly string[]; prepareLoadout?: () => { descriptions?: Record<string, string> } | undefined }>;
+	registeredTools: Map<string, { execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined>; description?: string; promptSnippet?: string; promptGuidelines?: readonly string[]; prepareLoadout?: (loadout?: HarnessLoadout) => { descriptions?: Record<string, string> } | undefined }>;
 	steering: Array<{ text: string; deliverAs?: string }>;
 }
+
+/** The structural loadout a request hands the guard loadout hook. */
+type HarnessLoadout = { declared?: readonly { name: string }[]; callable?: readonly { name: string }[] } | undefined;
 
 const harnesses: Harness[] = [];
 
@@ -56,7 +59,7 @@ function makeHarness(tools: Harness["tools"] = []): Harness {
 			(h.handlers[event] ??= []).push(handler);
 			return () => {};
 		},
-		registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined>; description?: string; promptSnippet?: string; promptGuidelines?: readonly string[]; prepareLoadout?: () => { descriptions?: Record<string, string> } | undefined }) => h.registeredTools.set(tool.name, tool),
+		registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any>; annotations?: Record<string, boolean | undefined>; description?: string; promptSnippet?: string; promptGuidelines?: readonly string[]; prepareLoadout?: (loadout?: HarnessLoadout) => { descriptions?: Record<string, string> } | undefined }) => h.registeredTools.set(tool.name, tool),
 		registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
 			h.commands.push({ name });
 			h.commandHandlers.set(name, options.handler);
@@ -693,7 +696,13 @@ test("registered executors share one loadout hook, distinct snippets, and the ro
 		assert.equal(hostBash.promptSnippet, "Run a shell command on the host (network, credentials, host paths outside the sandbox)");
 		for (const name of ["bash", "host_bash"]) {
 			const tool = h.registeredTools.get(name)!;
-			assert.equal(tool.promptGuidelines?.length, 2, name);
+			const guidelines = tool.promptGuidelines ?? [];
+			assert.ok(guidelines.length > 0, `${name}: guidelines exist`);
+			assert.equal(new Set(guidelines).size, guidelines.length, `${name}: no duplicate guidelines`);
+			assert.ok(guidelines.every((line) => line.trim().length > 0), `${name}: no empty guidelines`);
+			assert.ok(guidelines.some((line) => /Decide the shell tool before writing the command/.test(line)), `${name}: the shell-choice bullet`);
+			assert.ok(guidelines.some((line) => /use the `read` tool or `host_bash`/.test(line)), `${name}: the host-file bullet`);
+			assert.ok(guidelines.some((line) => /dedicated read tools, not the shell/.test(line)), `${name}: the read-tool routing bullet`);
 			assert.match(tool.promptGuidelines![0], /Decide the shell tool before writing the command/);
 			assert.match(tool.promptGuidelines![1], /use the `read` tool or `host_bash`/);
 		}
@@ -718,6 +727,24 @@ test("registered executors share one loadout hook, distinct snippets, and the ro
 		// A read grant cannot churn the payload: read roots stay a category.
 		assert.match(live.bash, /read roots you were granted/);
 		assert.doesNotMatch(live.bash, /\/secret-read-root/, "no read-root paths appear");
+		// The no-argument hook still carries no read-tool clause.
+		assert.doesNotMatch(live.bash, /gh_read|git_read/);
+		assert.doesNotMatch(live.host_bash, /gh_read|git_read/);
+		// Loadout threading: a request that declares the read tools and codemode
+		// gets the fan-out clause on both shells, and the workers never name them.
+		const names = (list: string[]) => list.map((name) => ({ name }));
+		const full = { declared: names(["read", "bash", "host_bash", "gh_read", "git_read", "codemode"]), callable: [] };
+		const fullDescriptions = bash.prepareLoadout!(full).descriptions!;
+		assert.match(fullDescriptions.bash, /GitHub reads are gh_read, not a shell: fan several reads out from one codemode script\./);
+		assert.match(fullDescriptions.host_bash, /GitHub reads are gh_read, not a shell: fan several reads out from one codemode script\./);
+		assert.match(fullDescriptions.bash, /Local git reads are git_read\./);
+		assert.doesNotMatch(fullDescriptions.python, /gh_read|git_read/);
+		assert.doesNotMatch(fullDescriptions.node, /gh_read|git_read/);
+		// Without the read tools, neither shell names one.
+		const bare = { declared: names(["read", "bash", "host_bash"]), callable: [] };
+		const bareDescriptions = bash.prepareLoadout!(bare).descriptions!;
+		assert.doesNotMatch(bareDescriptions.bash, /gh_read|git_read/);
+		assert.doesNotMatch(bareDescriptions.host_bash, /gh_read|git_read/);
 		await h.handlers.session_shutdown[0]({}, ctx);
 	});
 });

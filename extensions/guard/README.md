@@ -60,11 +60,14 @@ Registration details:
   `host_bash` descriptions state the same routing rules up front, including
   the filesystem boundary, the real workspace and session scratch paths, and
   the private sandbox `/tmp`; the two shells carry distinct tool-list
-  snippets and share two routing guidelines. The bash failure hint points at the
-  `request_read_access` tool for persistent read access: the tool opens the
-  guard read-grant dialog for an absolute path (the worker `permission_needed`
-  path shares the same dialog through the shared `requestReadGrant` helper),
-  so the hint no longer points at manual `readRoots` editing.
+  snippets and share the routing guidelines, including one that routes
+  GitHub and local git reads to the dedicated read tools rather than the
+  shell, plus a per-request clause naming the read tools that request can
+  reach. The bash failure hint points at the `request_read_access` tool for
+  persistent read access: the tool opens the guard read-grant dialog for an
+  absolute path (the worker `permission_needed` path shares the same dialog
+  through the shared `requestReadGrant` helper), so the hint no longer points
+  at manual `readRoots` editing.
 
 ### Execution queue and transitions
 
