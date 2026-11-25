@@ -688,6 +688,26 @@ test("gh_read guidance steers away from raw gh api and states the write boundary
 	assert.ok(has("codemode", "Promise.allSettled", "tools.gh_read"), "multi-endpoint fan-out guidance");
 	assert.ok(has("--paginate"), "fan-out guidance names the raw pipeline anti-pattern");
 	assert.ok(has("output_truncated", "incomplete UTF-8-safe prefix"), "display-clip guidance");
+
+	// The explicit-target sentences and the fan-out sentences are merged into
+	// one leading bullet, so no shape is described twice.
+	assert.ok(tool.promptGuidelines[0].includes("Do not shell out to raw `gh api`"), "the merged bullet leads");
+	assert.ok(tool.promptGuidelines[0].includes("fan out over the gh_read API operations from a codemode script"), "the merged bullet carries the fan-out sentences");
+	assert.equal(tool.promptGuidelines.filter((line) => line.includes("Do not shell out to raw `gh api`")).length, 1, "the explicit-target sentences are not duplicated");
+	assert.equal(tool.promptGuidelines.filter((line) => line.includes("Promise.allSettled")).length, 1, "the fan-out sentences are not duplicated");
+	assert.ok(!tool.promptGuidelines.some((line) => line.includes("do not fall back to raw `gh api`")), "the dropped prohibition appears nowhere");
+
+	// The recipes bullet keeps every recipe and gains the PR commit routes.
+	const recipes = tool.promptGuidelines.find((line) => line.startsWith("Shapes with no dedicated operation."));
+	assert.ok(recipes, "the recipes bullet keeps its opening");
+	assert.ok(recipes!.includes("--json commits"), "the PR commit-list route");
+	assert.ok(recipes!.includes("100 commits") && recipes!.includes("committed events"), "gh's commit cap and the timeline's committed events");
+	assert.ok(recipes!.includes("push, force-push, and review-request events") && recipes!.includes("`issue timeline`"), "the timeline-only events");
+	assert.ok(recipes!.includes("issues/{n}/events"), "the issues/{n}/events URL");
+	assert.ok(recipes!.includes("--name-only") && recipes!.includes("files,changedFiles"), "the earlier recipes are intact");
+
+	// The snippet advertises the one-codemode-script route for several reads.
+	assert.ok(tool.promptSnippet.includes("; several reads at once: call these operations from one codemode script"), "the snippet carries the codemode clause");
 });
 
 test("execute: rejected issue comments params fail closed with zero spawns", async () => {

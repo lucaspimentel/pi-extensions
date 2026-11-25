@@ -94,11 +94,23 @@ the main session. Deliberately not tied to any one agent; agents opt in via
 
 Purpose: steer agents from raw `gh api` and `gh pr-threads` shell calls to
 the operations above and to documented workarounds. Guidance only: no
-allowlist, schema, `description`, or `promptSnippet` change. It lives in the
-`promptGuidelines` array in `extensions/gh-read/index.ts`. One line steers a
-multi-PR read to `pr batch` instead of a `for` loop over `gh pr view` in
-`host_bash`, because guard treats any loop, conditional, or block as one
-command that always prompts.
+allowlist or schema change; it lives in the `promptGuidelines` array in
+`extensions/gh-read/index.ts`. One line steers a multi-PR read to `pr batch`
+instead of a `for` loop over `gh pr view` in `host_bash`, because guard
+treats any loop, conditional, or block as one command that always prompts.
+REVISED (2026-11-25): `promptSnippet` gained the one-codemode-script clause
+(`; several reads at once: call these operations from one codemode script`),
+so the earlier "no `description` or `promptSnippet` change" claim is
+falsified by this revision; `description` is still unchanged. This section
+covers the tool-side guidance only: the shell-text half of the same steering
+(the guard `bash`/`host_bash` descriptions, the read-tool routing bullet, and
+the per-request `readToolRoutingClause`) is recorded in
+`docs/guard-design.md`. The 2026-11-25 revision also merged the
+explicit-target bullet and the standalone multi-endpoint fan-out bullet into
+one bullet (explicit-target sentences first, fan-out sentences second) and
+made it the first element of `promptGuidelines`; the standalone copy was
+deleted, and the recipes bullet dropped its now-duplicated
+"; do not fall back to raw gh api" clause.
 
 Corpus (2026-10-29): all 1277 pi sessions, current session excluded; 1536
 `gh api` occurrences in total, 405 command lines in the 317 sessions where
@@ -143,9 +155,12 @@ Guidance added:
   `issues/{n}/comments` is `issue comments`, `issues/{n}/timeline` is
   `issue timeline`, `git/trees/HEAD` is `repo tree`, default branch is
   `repo metadata`, and the tool-authored GraphQL review-thread read is
-  `pr threads`), folded into the API-operations bullet.
-  Commits are deliberately not named: `commit checks` returns check runs, and
-  commit details are an open TODO (the 2026-11-03 refresh below measures 22
+  `pr threads`), folded into the API-operations bullet. REVISED
+  (2026-11-25): PR commit lists are now named, as the recipes bullet's
+  `pr view --json commits` route with gh's 100-commit cap and the timeline's
+  committed events as the fallback. A bare `commits/{ref}` read stays
+  deliberately unnamed: `commit checks` returns check runs, and commit
+  details remain an open TODO (the 2026-11-03 refresh below measures 22
   commit reads across 9 sessions).
 - A bullet for shapes with no dedicated operation: changed-file list
   (`pr diff --name-only`, or `pr view --json files,changedFiles` comparing
@@ -155,7 +170,13 @@ Guidance added:
   `source_complete` is the stop condition), a comment by id (parent number
   from `html_url`, then jq `select(.id == <id>)` on the parent listing), and
   resolved/outdated review-thread state pointing at `pr threads` (never
-  derive it from comment line fields).
+  derive it from comment line fields). The 2026-11-25 revision dropped the
+  duplicate "; do not fall back to raw gh api" prohibition that used to sit
+  in this bullet's opening sentence, which now ends at `operation.`, and
+  appended two routes: PR commits are `pr view` with `--json commits`, and
+  gh caps that list at 100 commits so a larger PR needs the timeline's
+  committed events; push, force-push, and review-request events appear only
+  in `issue timeline`, which also serves the `issues/{n}/events` URL.
 - A write-boundary bullet: `gh_read` never writes; posting replies,
   resolving threads, and submitting reviews need `host_bash`, which guard
   may prompt for depending on the profile. The 60+ review-reply POSTs mean
@@ -168,9 +189,17 @@ Guidance added:
   metadata, and continuation in force and avoids a host-shell prompt per
   pipeline. Verify with a corpus refresh (timeline and collector escapes
   compared by session start date), as in the 2026-11-03 refresh below.
+  REVISED (2026-11-25): this bullet is no longer standalone; its sentences
+  were merged after the explicit-target sentences into the leading
+  `promptGuidelines` bullet. A guard-side counterpart now routes GitHub reads
+  in the shell descriptions (`readToolRoutingClause` in
+  `extensions/guard/tools/shell.ts`); see `docs/guard-design.md`.
 
-Not covered by guidance: `search/issues`, `commits`, `branches`, and generic
-`graphql` reads other than the review-thread read. `gh pr-threads` is named
+Not covered by guidance: `search/issues`, `branches`, releases and tags,
+and generic `graphql` reads other than the review-thread read. PR commit
+lists are now covered (the recipes bullet's `pr view --json commits`, with
+gh's 100-commit cap and the timeline's committed events as the fallback),
+while a bare `commits/{ref}` read stays uncovered. `gh pr-threads` is named
 only here; the guidance now points at `pr threads` for the review-thread
 read. The issue/PR timeline is no longer uncovered: it is the
 `issue timeline` operation. The 2026-11-03 refresh below sizes what is left:
@@ -1615,7 +1644,12 @@ Settled in the grill-me review:
   `files,changedFiles`, `pull_request_review_id`, `html_url` plus
   `select(.id ==`, thread-state "do not derive it" together with the
   `pr threads` pointer, the `host_bash` write boundary, and the `codemode`
-  multi-endpoint fan-out guidance).
+  multi-endpoint fan-out guidance), and since 2026-11-25 also that the
+  merged explicit-target/fan-out bullet leads `promptGuidelines` and is not
+  duplicated, that the dropped duplicate prohibition appears nowhere, that
+  the recipes bullet names the PR commit routes and the `issues/{n}/events`
+  URL, and that the `promptSnippet` clause names the one-codemode-script
+  route.
 - Regression guard for the extraction: existing
   `tests/git-read-spawn.test.mts` must pass unmodified.
 
