@@ -237,19 +237,20 @@ export interface ReadToolLoadout {
 }
 
 /**
- * One loadout list, or an empty list when the field is absent or is not an
- * array. pi always passes arrays; this keeps the clause builder total for a
- * malformed one instead of letting a throw cost every description in the
- * request.
+ * Whether one loadout list carries a tool. pi always passes arrays; a missing or
+ * malformed field (absent, null, or not an array) carries nothing, which keeps
+ * the clause builder total instead of letting a throw cost every description in
+ * the request.
  */
-function loadoutNames(list: readonly { name: string }[] | null | undefined): readonly { name: string }[] {
-	return Array.isArray(list) ? list : [];
+function hasTool(list: readonly { name: string }[] | null | undefined, name: string): boolean {
+	return Array.isArray(list) && list.some((tool) => tool?.name === name);
 }
 
-function reachable(loadout: ReadToolLoadout | null | undefined, name: string): "declared" | "codemode" | null {
+/** Where this request can reach a tool: directly, from codemode only, or nowhere. */
+function toolRoute(loadout: ReadToolLoadout | null | undefined, name: string): "declared" | "codemode" | null {
 	if (loadout == null) return null;
-	if (loadoutNames(loadout.declared).some((tool) => tool?.name === name)) return "declared";
-	if (loadoutNames(loadout.callable).some((tool) => tool?.name === name)) return "codemode";
+	if (hasTool(loadout.declared, name)) return "declared";
+	if (hasTool(loadout.callable, name)) return "codemode";
 	return null;
 }
 
@@ -263,12 +264,12 @@ function reachable(loadout: ReadToolLoadout | null | undefined, name: string): "
  */
 export function readToolRoutingClause(loadout: ReadToolLoadout | null | undefined): string {
 	const parts: string[] = [];
-	const gh = reachable(loadout, "gh_read");
-	if (gh === "declared") parts.push(reachable(loadout, "codemode") === null
+	const gh = toolRoute(loadout, "gh_read");
+	if (gh === "declared") parts.push(toolRoute(loadout, "codemode") === null
 		? "GitHub reads are gh_read, not a shell."
 		: "GitHub reads are gh_read, not a shell: fan several reads out from one codemode script.");
 	else if (gh === "codemode") parts.push("GitHub reads are gh_read from one codemode script, not a shell.");
-	const git = reachable(loadout, "git_read");
+	const git = toolRoute(loadout, "git_read");
 	if (git === "declared") parts.push("Local git reads are git_read.");
 	else if (git === "codemode") parts.push("Local git reads are git_read from one codemode script.");
 	return parts.join(" ");
@@ -300,8 +301,8 @@ export const HOST_BASH_PROMPT_SNIPPET = "Run a shell command on the host (networ
  * leading or doubled space into the routing rule.
  */
 function renderReadToolClause(readToolClause?: string): string {
-	const clause = readToolClause?.trim() ?? "";
-	return clause === "" ? "" : ` ${clause}`;
+	const clause = readToolClause?.trim();
+	return clause ? ` ${clause}` : "";
 }
 
 /**
